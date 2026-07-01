@@ -50,6 +50,13 @@ function humanApproval(summary = "Approved in test") {
   return ["--actor-type", "human", "--approval-source", "explicit-user", "--summary", summary];
 }
 
+function delegatedAutomationApproval(
+  summary = "Antonio delegated approval for this assessment within read-only repo analysis and local output generation",
+  scope = "technical assessment workbook, read-only repo analysis",
+) {
+  return ["--actor-type", "agent", "--approval-source", "automation", "--scope", scope, "--summary", summary];
+}
+
 function story(project, id, extra = []) {
   mustRun([
     "story",
@@ -283,6 +290,130 @@ test("formal approvals require explicit source and summary or evidence", () => {
     /requires --summary or --approval-evidence/,
   );
   mustRun(["contract", "approve", "--root", project, "--id", "contract-approval-policy", ...humanApproval("Explicitly approved")]);
+});
+
+test("delegated automation approvals honor the user specified approval level", () => {
+  const project = tmpProject("delegated-approval");
+  initProject(project);
+  story(project, "ST-001", ["--contract", "contract-ST-001-implementation"]);
+  mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "implementation-summary",
+    "--id",
+    "implementation-summary-v1",
+    "--summary",
+    "Implementation summary template",
+  ]);
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
+      "--actor-type",
+      "agent",
+      "--approval-source",
+      "automation",
+    ],
+    /requires --summary or --approval-evidence/,
+  );
+  mustRun([
+    "output",
+    "template",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "implementation-summary-v1",
+    ...delegatedAutomationApproval(),
+  ]);
+  const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
+  const template = registry.templates.find((item) => item.id === "implementation-summary-v1");
+  assert.equal(template.approval_source, "automation");
+  assert.equal(template.explicit_user_confirmation, false);
+  assert.equal(template.approved_by.type, "agent");
+  assert.equal(template.approval_scope.delegated_approval, true);
+  assert.equal(template.approval_scope.approval_level, "technical assessment workbook, read-only repo analysis");
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-implementation",
+    "--context-summary",
+    "Implement under delegated approval scope.",
+    "--qa",
+    "Who delegated approvals?|Antonio",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustFail(
+    [
+      "contract",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "contract-ST-001-implementation",
+      "--actor-type",
+      "agent",
+      "--approval-source",
+      "automation",
+    ],
+    /requires --summary or --approval-evidence/,
+  );
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-001-implementation",
+    ...delegatedAutomationApproval(),
+  ]);
+  const contract = readJson(path.join(project, ".sdlc", "contracts", "contract-ST-001-implementation.json"));
+  const approval = contract.approvals.at(-1);
+  assert.equal(contract.status, "approved");
+  assert.equal(approval.approval_source, "automation");
+  assert.equal(approval.explicit_user_confirmation, false);
+  assert.equal(approval.approved_by.type, "agent");
+  assert.equal(approval.scope.delegated_approval, true);
+  assert.equal(approval.scope.approval_level, "technical assessment workbook, read-only repo analysis");
+
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
+  const started = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--json",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(started.status, "ready_to_execute");
+  assert.equal(started.execution_allowed, true);
+  assert.equal(started.contract_id, "contract-ST-001-implementation");
 });
 
 test("onboard existing project initializes KB and proposes approvable baseline", () => {
