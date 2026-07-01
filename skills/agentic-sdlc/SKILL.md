@@ -22,6 +22,18 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs init --root <target-project> --project-name "<name>"
    ```
 
+   For an existing repository with useful current code, docs, or configuration, prefer onboarding so the KB starts with an explicit proposed baseline instead of pretending the historical SDLC is known:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs onboard existing-project \
+     --root <target-project> \
+     --project-name "<name>" \
+     --document README.md \
+     --question "Which inferred facts are canonical?"
+   ```
+
+   Treat `.sdlc/baseline/<id>.json` as proposed until the user explicitly confirms what is canonical.
+
 3. When the user's request could map to different SDLC actions, normalize it into canonical route intent JSON and run `route decide`. Do not keyword-match the user's language. If confidence is low or the JSON is incomplete, ask for confirmation or missing context before acting:
 
    ```bash
@@ -53,7 +65,9 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs capability profile approve \
      --root <target-project> \
      --id CAP-PROFILE-ST-001 \
-     --actor-type human
+     --actor-type human \
+     --approval-source explicit-user \
+     --summary "<user-approved profile>"
 
    node <plugin-root>/bin/agentic-sdlc.mjs capability recommend \
      --root <target-project> \
@@ -63,6 +77,8 @@ Never store project contracts or project KB state inside the plugin installation
    ```
 
    Ask for approval before installing missing skills/plugins or using external, write, production, tenant, workspace, endpoint, or secret-bearing targets. Use `capability approve --approve-install` only when that installation approval was explicitly granted.
+
+   Formal SDLC approvals are not implied by a user asking the agent to implement or push. Before any `approve` command with `--actor-type human`, ask for explicit confirmation of the specific artifact and record it with `--approval-source explicit-user` plus `--summary` or `--approval-evidence`. Use `--approval-source bootstrap` only for migration/provisional records; bootstrap approvals do not satisfy strict gates by default.
 
 8. Decide the contract execution policy and capability policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model`, `--reasoning`, capability policies, capability bindings, or `--capability-recommendation` only when the user asks, the approved capability recommendation says so, or the project KB mandates them.
 9. Create or update a phase contract before doing phase work. Pass known context and approved capability recommendations into the contract:
@@ -88,7 +104,7 @@ Never store project contracts or project KB state inside the plugin installation
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output template propose --root <target-project> --type functional-analysis --summary "..."
-   node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human
+   node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "<user-approved template>"
    ```
 
 11. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
@@ -158,6 +174,7 @@ Never store project contracts or project KB state inside the plugin installation
 Before claiming the SDLC is complete or a story is ready to merge:
 
 - verify `.sdlc/project.json` exists in the target project;
+- verify existing-project baselines are approved only after explicit user/CI confirmation;
 - verify relevant contracts exist under `.sdlc/contracts/`;
 - verify durable outputs are linked in `.sdlc/output-contracts/registry.json` with approved templates;
 - verify approved breakdowns and dependency graph entries are satisfied when the story uses them;
@@ -165,5 +182,6 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify contract capability policies have required bindings or explicit open questions;
 - verify story work is under `.sdlc/stories/<story-id>/`;
 - verify decisions and evidence are captured in `.sdlc/traces/`;
+- verify approvals include `approval_source` and do not treat implementation permission as artifact approval;
 - run `gate check`;
 - report any errors or warnings instead of hiding them.

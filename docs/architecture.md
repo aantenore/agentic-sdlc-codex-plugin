@@ -11,6 +11,7 @@ Codex plugin
 
 Target project
      -> .sdlc/
+        -> baseline
         -> contracts
         -> capability-discovery
         -> output-contracts
@@ -40,6 +41,7 @@ flowchart TB
 
   subgraph Project["Target project"]
     KB[".sdlc source of truth"]
+    Baseline["Project baseline"]
     Capabilities["Capability discovery"]
     OutputRegistry["Output contracts registry"]
     Breakdown["Work breakdown agreements"]
@@ -53,12 +55,14 @@ flowchart TB
   Templates --> CLI
   Schemas --> CLI
   CLI --> KB
+  CLI --> Baseline
   CLI --> Capabilities
   CLI --> OutputRegistry
   CLI --> Breakdown
   CLI --> Dependencies
   CLI --> Traces
   KB --> Cache
+  Baseline --> Cache
   Capabilities --> Cache
   KB --> Indexes
   OutputRegistry --> Cache
@@ -75,6 +79,30 @@ The project knowledge base is dynamic and shared. It is created inside the targe
 The source of truth is text and JSON. Cache and search indexes are derived artifacts that can be rebuilt. Reports are durable evidence when they support a review, gate, or release decision.
 
 During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
+
+## Existing Project Baseline
+
+Existing repositories do not have a reliable SDLC history. The plugin creates a baseline of the observable current state instead of inventing past decisions.
+
+`onboard existing-project` initializes `.sdlc/` when needed, scans repo manifests and key files, imports user-provided documents as hashed evidence, and writes:
+
+- `.sdlc/baseline/<id>.json` as the machine-readable baseline proposal;
+- `.sdlc/baseline/<id>-current-state.md` as a readable review artifact.
+
+The baseline starts as `proposed`. It marks inferred facts as not approved and records open questions. Only a formal baseline approval can move it to canonical project context.
+
+```mermaid
+flowchart TD
+  Repo["Existing repo"] --> Onboard["onboard existing-project"]
+  Docs["User documents"] --> Onboard
+  Onboard --> BaselineProposal["Proposed baseline"]
+  BaselineProposal --> Review["Human review"]
+  Review --> Approval["baseline approve"]
+  Approval --> Canonical["Approved project baseline"]
+  Canonical --> Contracts["Future contracts"]
+  Canonical --> Capability["Capability profiles"]
+  Canonical --> Cache["Local cache"]
+```
 
 ## Intent Routing Layer
 
@@ -128,6 +156,31 @@ flowchart LR
   Outputs --> Gate["Gate check"]
   Trace --> Gate
   Contract --> Gate
+```
+
+## Approval Governance
+
+The approval model separates operational authorization from formal SDLC approval. A user saying "implement and push" lets the agent work, but it does not automatically approve a contract, output template, baseline, capability recommendation, dependency graph, or duplicate-output decision.
+
+Formal approvals store:
+
+- approver actor and type;
+- `approval_source` such as `explicit-user`, `ci`, `automation`, or `bootstrap`;
+- summary or immutable evidence;
+- approved content hash;
+- Git and Codex run metadata.
+
+For `approval_source: explicit-user`, the CLI requires a human actor plus summary or evidence. `bootstrap` is available for migrations, but is provisional and does not satisfy strict gates by default.
+
+```mermaid
+flowchart LR
+  WorkAuth["User asks agent to work"] --> Implementation["Agent may implement"]
+  WorkAuth -.-> FormalApproval["Formal approval"]
+  Artifact["Contract/template/baseline/etc."] --> ApprovalCommand["approve command"]
+  Human["Explicit user confirmation"] --> ApprovalCommand
+  Evidence["Summary or evidence"] --> ApprovalCommand
+  ApprovalCommand --> Hash["Approved content hash"]
+  Hash --> Gate["Strict gate"]
 ```
 
 ## Capability Discovery Layer

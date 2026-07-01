@@ -3,6 +3,7 @@
   "stateless_plugin": true,
   "source_of_truth": [
     "project.json",
+    "baseline/**/*",
     "contracts/**/*.json",
     "output-contracts/**/*",
     "requirements/**/*",
@@ -25,6 +26,7 @@
     "indexes/**/*"
   ],
   "directories": {
+    "baseline": "Existing-project current-state baselines, imported documents, inferred context, and formal approval records.",
     "contracts": "Phase and story contracts.",
     "output-contracts": "Approved output templates, artifact links, and user-approved structural decisions.",
     "requirements": "User, product, business, and non-functional requirements.",
@@ -50,6 +52,11 @@
     "default_mode_for_related_stories": "reuse+delta",
     "new_templates_require_user_approval": true,
     "duplicate_outputs_require_approved_decision": true
+  },
+  "approval_policy": {
+    "implementation_permission_is_not_formal_approval": true,
+    "explicit_user_approvals_require_summary_or_evidence": true,
+    "bootstrap_is_provisional": true
   },
   "cache_policy": {
     "cache_file": ".sdlc/cache/kb-cache.json",

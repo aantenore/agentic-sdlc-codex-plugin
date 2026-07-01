@@ -16,6 +16,34 @@ node bin/agentic-sdlc.mjs init --root <project> --project-name "Product Name"
 
 Creates `.sdlc/`, project metadata, KB directories, generated README, and default phase contracts.
 
+For an existing repository, initialize and propose a baseline in one step:
+
+```bash
+node bin/agentic-sdlc.mjs onboard existing-project \
+  --root <project> \
+  --project-name "Product Name" \
+  --document README.md \
+  --source docs \
+  --question "Which inferred facts are canonical?"
+```
+
+Review `.sdlc/baseline/BASELINE-INITIAL-current-state.md`, then approve only after explicit confirmation:
+
+```bash
+node bin/agentic-sdlc.mjs baseline approve \
+  --root <project> \
+  --id BASELINE-INITIAL \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Confirmed current-state baseline"
+```
+
+## Approval Governance
+
+Approval commands require a formal source. `--actor-type human` alone is not enough.
+
+Use `--approval-source explicit-user` when the user explicitly approves the specific artifact and include `--summary` or `--approval-evidence`. Use `--approval-source ci` for approved CI actors. Use `--approval-source bootstrap` only for provisional migration records; bootstrap approvals do not satisfy strict gates by default.
+
 ## Create Contract
 
 ```bash
@@ -90,9 +118,9 @@ One story should have one active claim. Release the claim before another chat cl
 node bin/agentic-sdlc.mjs work item create --root <project> --type epic --id EP-001 --title "Workflow epic" --requirement REQ-001
 node bin/agentic-sdlc.mjs work item create --root <project> --type task --id TASK-001 --title "Backend task" --story ST-001
 node bin/agentic-sdlc.mjs breakdown propose --root <project> --id BD-REQ-001 --requirement REQ-001 --item epic:EP-001 --item story:ST-001
-node bin/agentic-sdlc.mjs breakdown approve --root <project> --id BD-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs breakdown approve --root <project> --id BD-REQ-001 --actor-type human --approval-source explicit-user --summary "Approved breakdown"
 node bin/agentic-sdlc.mjs dependency propose --root <project> --id DEP-REQ-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
-node bin/agentic-sdlc.mjs dependency approve --root <project> --id DEP-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs dependency approve --root <project> --id DEP-REQ-001 --actor-type human --approval-source explicit-user --summary "Approved dependency graph"
 node bin/agentic-sdlc.mjs dependency status --root <project> --story ST-002
 node bin/agentic-sdlc.mjs story deps --root <project> --id ST-002
 ```
@@ -108,13 +136,13 @@ node bin/agentic-sdlc.mjs capability profile propose \
   --story ST-001 \
   --phase analysis \
   --context-file .sdlc/requirements/REQ-001.md
-node bin/agentic-sdlc.mjs capability profile approve --root <project> --id CAP-PROFILE-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability profile approve --root <project> --id CAP-PROFILE-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability profile"
 node bin/agentic-sdlc.mjs capability recommend \
   --root <project> \
   --id CAP-REC-ST-001 \
   --profile CAP-PROFILE-ST-001 \
   --available-capabilities-file .sdlc/decisions/available-capabilities.json
-node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability recommendation"
 node bin/agentic-sdlc.mjs capability status --root <project> --story ST-001 --json
 ```
 
@@ -123,7 +151,7 @@ Use profile records to capture project/story context, detected stack, constraint
 If a recommendation requires installing a missing skill/plugin/connector or using a new external/write/production target, approval is separate:
 
 ```bash
-node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human --approve-install
+node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human --approval-source explicit-user --summary "Approved install" --approve-install
 ```
 
 Without install approval, the recommendation can be stored but cannot be applied to a contract. Strict gates also fail when a contract references stale or modified capability recommendations.
@@ -200,7 +228,7 @@ With `--story`, the default scope is story-scoped, so unrelated story lanes do n
 
 ```bash
 node bin/agentic-sdlc.mjs output template propose --root <project> --type functional-analysis --summary "Standard functional analysis"
-node bin/agentic-sdlc.mjs output template approve --root <project> --id functional-analysis-v1 --actor-type human
+node bin/agentic-sdlc.mjs output template approve --root <project> --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "Approved output template"
 node bin/agentic-sdlc.mjs output resolve --root <project> --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs output link \
   --root <project> \
@@ -228,7 +256,9 @@ node bin/agentic-sdlc.mjs output link \
   --requirement REQ-001 \
   --decision-id DEC-output-override-001 \
   --rationale "User approved a separate artifact because the workflow diverges" \
-  --actor-type human
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approved separate artifact"
 ```
 
 ## Cache, Index, And Search
