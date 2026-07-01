@@ -78,6 +78,29 @@ function writeArtifact(project, relativePath, body = "# Artifact\n") {
   return relativePath;
 }
 
+function createApprovedStoryContract(project, id, phase = "design", artifactType = "functional-analysis") {
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    phase,
+    "--story",
+    id,
+    "--id",
+    `contract-${id}-${phase}`,
+    "--context-summary",
+    `Ready ${phase} contract`,
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    `${artifactType}:${artifactType}-v1:new`,
+    "--force",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", `contract-${id}-${phase}`, ...humanApproval("Approved contract")]);
+}
+
 function routeIntent(overrides = {}) {
   return JSON.stringify({
     requested_action: "intake_requirement",
@@ -105,8 +128,9 @@ function routeDecision(project, overrides = {}, command = ["route", "decide"]) {
 }
 
 function createStrictReadyStory(project, id, artifactType = "functional-analysis") {
-  story(project, id, ["--requirement", "REQ-001", "--contract", `contract-${id}-design`]);
+  story(project, id, ["--requirement", "REQ-001"]);
   createApprovedTemplate(project, artifactType);
+  createApprovedStoryContract(project, id, "design", artifactType);
   const artifact = writeArtifact(project, `.sdlc/requirements/${id}-${artifactType}.md`);
   mustRun([
     "output",
@@ -126,26 +150,6 @@ function createStrictReadyStory(project, id, artifactType = "functional-analysis
     "--requirement",
     "REQ-001",
   ]);
-  mustRun([
-    "contract",
-    "create",
-    "--root",
-    project,
-    "--phase",
-    "design",
-    "--story",
-    id,
-    "--id",
-    `contract-${id}-design`,
-    "--context-summary",
-    "Ready design contract",
-    "--qa",
-    "Who approves?|Owner",
-    "--output-ref",
-    `${artifactType}:${artifactType}-v1:new`,
-    "--force",
-  ]);
-  mustRun(["contract", "approve", "--root", project, "--id", `contract-${id}-design`, ...humanApproval("Approved contract")]);
 }
 
 test("--version is not shadowed by help and boolean --json does not consume query", () => {
@@ -303,6 +307,8 @@ test("output duplicate new is blocked before registry write without matching dec
   story(project, "ST-001", ["--requirement", "REQ-001"]);
   story(project, "ST-002", ["--requirement", "REQ-001"]);
   createApprovedTemplate(project);
+  createApprovedStoryContract(project, "ST-001");
+  createApprovedStoryContract(project, "ST-002");
   const first = writeArtifact(project, ".sdlc/requirements/ST-001-functional.md");
   const second = writeArtifact(project, ".sdlc/requirements/ST-002-functional.md");
   mustRun([
@@ -354,6 +360,8 @@ test("output override decision cannot be reused for a different link", () => {
   story(project, "ST-001", ["--requirement", "REQ-001"]);
   story(project, "ST-002", ["--requirement", "REQ-001"]);
   createApprovedTemplate(project);
+  createApprovedStoryContract(project, "ST-001");
+  createApprovedStoryContract(project, "ST-002");
   const first = writeArtifact(project, ".sdlc/requirements/ST-001.md");
   const second = writeArtifact(project, ".sdlc/requirements/ST-002.md");
   mustRun([
@@ -812,24 +820,6 @@ test("stale capability recommendation source fails strict gate", () => {
   createApprovedTemplate(project, "technical-analysis");
   const analysisArtifact = writeArtifact(project, ".sdlc/requirements/ST-001-technical-analysis.md", "# Technical Analysis\n");
   mustRun([
-    "output",
-    "link",
-    "--root",
-    project,
-    "--story",
-    "ST-001",
-    "--type",
-    "technical-analysis",
-    "--artifact",
-    analysisArtifact,
-    "--template",
-    "technical-analysis-v1",
-    "--mode",
-    "new",
-    "--requirement",
-    "REQ-001",
-  ]);
-  mustRun([
     "capability",
     "profile",
     "propose",
@@ -865,6 +855,24 @@ test("stale capability recommendation source fails strict gate", () => {
     "--force",
   ]);
   mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", ...humanApproval("Approved analysis contract")]);
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    analysisArtifact,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ]);
   fs.appendFileSync(path.join(project, source), "\nchanged\n");
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /changed after record creation/);
 });
@@ -1225,6 +1233,8 @@ test("story step completion requires linked outputs and prepares releasable hand
   const project = tmpProject("step-handoff");
   initProject(project);
   story(project, "ST-MISSING");
+  createApprovedTemplate(project);
+  createApprovedStoryContract(project, "ST-MISSING");
   mustFail(
     [
       "story",
@@ -1243,7 +1253,27 @@ test("story step completion requires linked outputs and prepares releasable hand
     /no linked functional-analysis output/,
   );
 
-  createStrictReadyStory(project, "ST-001");
+  story(project, "ST-001", ["--requirement", "REQ-001"]);
+  createApprovedStoryContract(project, "ST-001");
+  const artifact = writeArtifact(project, ".sdlc/requirements/ST-001-functional-analysis.md");
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "functional-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    "functional-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ]);
   mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "analysis-agent", "--branch", "feature/ST-001"]);
   const completed = JSON.parse(mustRun([
     "story",
@@ -1485,6 +1515,175 @@ test("contract create asks before missing guidance or story output agreement", (
     "--json",
   ]).stdout).contract;
   assert.equal(completeContract.output_contract_refs[0].template_id, "technical-analysis-v1");
+  const linkedStory = readJson(path.join(project, ".sdlc", "stories", "ST-001", "story.json"));
+  assert.equal(linkedStory.contract_id, "contract-ST-001-analysis");
+});
+
+test("contract create auto-links story contract and requires explicit replacement", () => {
+  const project = tmpProject("contract-story-link");
+  initProject(project);
+  story(project, "ST-LINK");
+  createApprovedTemplate(project, "technical-analysis");
+
+  const created = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-LINK",
+    "--id",
+    "contract-ST-LINK-analysis",
+    "--context-summary",
+    "Analysis contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--json",
+  ]).stdout);
+  assert.equal(created.story_link.status, "linked");
+  assert.equal(readJson(path.join(project, ".sdlc", "stories", "ST-LINK", "story.json")).contract_id, "contract-ST-LINK-analysis");
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-LINK",
+    "--id",
+    "contract-ST-LINK-analysis-v2",
+    "--context-summary",
+    "Replacement analysis contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+  ], /already references contract contract-ST-LINK-analysis/);
+
+  const replaced = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-LINK",
+    "--id",
+    "contract-ST-LINK-analysis-v2",
+    "--context-summary",
+    "Replacement analysis contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--replace-story-contract",
+    "--json",
+  ]).stdout);
+  assert.equal(replaced.story_link.status, "replaced");
+  assert.equal(readJson(path.join(project, ".sdlc", "stories", "ST-LINK", "story.json")).contract_id, "contract-ST-LINK-analysis-v2");
+});
+
+test("phase outputs and story step completion require approved story contracts", () => {
+  const project = tmpProject("phase-output-contract-gate");
+  initProject(project);
+  story(project, "ST-001");
+  createApprovedTemplate(project, "technical-analysis");
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+  ]);
+  const artifact = writeArtifact(project, ".sdlc/requirements/ST-001-technical-analysis.md", "# Technical Analysis\n");
+
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ], /output\.link is blocked[\s\S]*contract\.status is 'draft'/);
+
+  mustFail([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "technical-analysis",
+    "--type",
+    "technical-analysis",
+    "--summary",
+    "Attempted before approval",
+  ], /story\.complete-step is blocked[\s\S]*contract\.status is 'draft'/);
+
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", ...humanApproval("Approved analysis contract")]);
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ]);
+  const completed = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "technical-analysis",
+    "--type",
+    "technical-analysis",
+    "--summary",
+    "Technical analysis accepted",
+    "--json",
+  ]).stdout);
+  assert.equal(completed.step.status, "completed");
 });
 
 test("contract create requires agreed output templates and approval requests summarize pending user input", () => {
@@ -1598,7 +1797,7 @@ test("trace attribution separates executor requester and authorizer in report qu
   assert.equal(appended.event.request.summary, "Add requested_by and authorized_by audit fields");
   assert.equal(appended.event.request.thread_id, "THREAD-REQ-001");
 
-  mustRun([
+  const defaultActorTrace = JSON.parse(mustRun([
     "trace",
     "append",
     "--root",
@@ -1609,11 +1808,10 @@ test("trace attribution separates executor requester and authorizer in report qu
     "implementation",
     "--summary",
     "Implemented unrequested Codex task",
-    "--actor",
-    "codex",
-    "--actor-type",
-    "agent",
-  ]);
+    "--json",
+  ]).stdout);
+  assert.equal(defaultActorTrace.event.actor.id, "codex");
+  assert.equal(defaultActorTrace.event.actor.type, "agent");
 
   const requesterQuery = JSON.stringify({
     intent: "find_changes_requested_by_user",

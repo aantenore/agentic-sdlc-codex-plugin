@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.6";
+const VERSION = "0.4.7";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -15,6 +15,7 @@ const PROJECT_CONFIG_FILE_NAME = "config.json";
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const BOOLEAN_OPTIONS = new Set([
   "allow-incomplete-contract",
+  "allow-unapproved-contract-output",
   "allow-unapproved-output-ref",
   "apply",
   "approve-install",
@@ -25,6 +26,7 @@ const BOOLEAN_OPTIONS = new Set([
   "json",
   "preserve-status",
   "release-claim",
+  "replace-story-contract",
   "revise-contract",
   "strict",
   "version",
@@ -1722,6 +1724,68 @@ function inspectStoryContract(context, story) {
   };
 }
 
+function validateApprovedStoryContractForPhaseOutput(context, story, action, expectations = [], options = {}) {
+  if (options["allow-unapproved-contract-output"]) {
+    return null;
+  }
+  const storyId = normalizeId(story.id || options.story || options.id || "unknown");
+  const contractState = inspectStoryContract(context, story);
+  if (!contractState.exists) {
+    fail(
+      [
+        `${action} requires an approved story contract before producing or linking phase output for ${storyId}.`,
+        contractState.message,
+        `Run contract create/approve for story ${storyId}, then retry.`,
+        "Use --allow-unapproved-contract-output only for explicit migration or recovery of pre-existing artifacts.",
+      ].join("\n"),
+    );
+  }
+  const contract = contractState.contract;
+  const errors = [];
+  if (contract.status !== "approved") {
+    errors.push(`contract.status is '${contract.status || "unknown"}'`);
+  }
+  if (!hasFreshApprovedContractApproval(contract)) {
+    errors.push("contract approval is missing, stale, or lacks approved_content_hash");
+  }
+  for (const gap of collectContractReadinessGaps(context, contract)) {
+    errors.push(`contract readiness gap: ${gap.summary}`);
+  }
+
+  const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
+  for (const expectation of expectations) {
+    if (!expectation.artifact_type || refs.length === 0) {
+      continue;
+    }
+    const matchingRef = refs.find(
+      (ref) =>
+        ref.artifact_type === expectation.artifact_type &&
+        (!expectation.template_id || ref.template_id === expectation.template_id) &&
+        (!expectation.mode || ref.mode === expectation.mode),
+    );
+    if (!matchingRef) {
+      const expected = [
+        expectation.artifact_type,
+        expectation.template_id || "<any-template>",
+        expectation.mode || "<any-mode>",
+      ].join(":");
+      errors.push(`output ${expected} is not covered by approved contract output refs`);
+    }
+  }
+
+  if (errors.length > 0) {
+    fail(
+      [
+        `${action} is blocked because story ${storyId} contract ${story.contract_id} is not ready for phase output.`,
+        ...errors.map((error) => `- ${error}`),
+        "Ask the user to approve or revise the contract before producing, linking, or completing phase output.",
+        "Use --allow-unapproved-contract-output only for explicit migration or recovery of pre-existing artifacts.",
+      ].join("\n"),
+    );
+  }
+  return contract;
+}
+
 function addOutputRefChecks(context, decision, story, contract) {
   const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
   addRouteCheck(
@@ -2533,13 +2597,74 @@ function createContract(context, options) {
   });
   validateContractReadinessForCreate(context, contract, options);
   validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
+  const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
+  const linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
   output(
     options,
-    { status: "created", contract_path: contractPath, contract },
+    { status: "created", contract_path: contractPath, contract, story_link: linkedStory },
     [`Created contract ${id} for phase ${phase}`],
   );
+}
+
+function validateStoryContractLinkForCreate(context, storyId, contractId, options = {}) {
+  if (!storyId) {
+    return null;
+  }
+  const story = readStory(context, storyId);
+  if (!story) {
+    fail(`Story ${storyId} does not exist; create the story before creating story contract ${contractId}.`);
+  }
+  const currentContractId = story.contract_id ? normalizeId(String(story.contract_id)) : null;
+  if (currentContractId && currentContractId !== contractId && !options["replace-story-contract"]) {
+    fail(
+      [
+        `Story ${storyId} already references contract ${currentContractId}.`,
+        `Refusing to create story contract ${contractId} without updating the story link.`,
+        "Use --replace-story-contract only for explicit contract renegotiation or recovery.",
+      ].join("\n"),
+    );
+  }
+  return {
+    story_id: storyId,
+    current_contract_id: currentContractId,
+    should_link: currentContractId !== contractId,
+  };
+}
+
+function linkStoryToContractAfterCreate(context, storyLink, contract, contractPath) {
+  if (!storyLink || !storyLink.should_link) {
+    return storyLink ? { status: "already_linked", story_id: storyLink.story_id, contract_id: contract.id } : null;
+  }
+  const storyPath = path.join(context.sdlcRoot, "stories", storyLink.story_id, "story.json");
+  const story = readJson(storyPath);
+  story.contract_id = contract.id;
+  story.updated_at = now();
+  story.audit = {
+    ...(story.audit || {}),
+    updated_by: contract.audit?.updated_by || contract.audit?.created_by || null,
+    git: contract.audit?.git || buildGitMetadata(context.root),
+    run: contract.audit?.run || buildRunMetadata({}),
+  };
+  writeJsonFile(storyPath, story, { force: true });
+  appendTraceEvent(context, storyLink.story_id, {
+    type: "decision",
+    summary: `Linked story ${storyLink.story_id} to contract ${contract.id}`,
+    action: "contract.story-link",
+    actor: contract.audit?.updated_by || contract.audit?.created_by || null,
+    evidence: [toProjectPath(context, storyPath), toProjectPath(context, contractPath)],
+    related: [storyLink.story_id, contract.id],
+    git: contract.audit?.git,
+    run: contract.audit?.run,
+  });
+  return {
+    status: storyLink.current_contract_id ? "replaced" : "linked",
+    story_id: storyLink.story_id,
+    previous_contract_id: storyLink.current_contract_id,
+    contract_id: contract.id,
+    story_path: storyPath,
+  };
 }
 
 function validateContractReadinessForCreate(context, contract, options = {}) {
@@ -3397,24 +3522,30 @@ function stableJson(value) {
 }
 
 function buildActor(options = {}, root = process.cwd()) {
-  const explicitActor = getOptionString(options, "actor", "agent");
-  const envActor =
-    process.env.CODEX_AGENT_NAME ||
-    process.env.GITHUB_ACTOR ||
-    process.env.GIT_AUTHOR_NAME ||
-    process.env.USER ||
-    null;
-  const id = explicitActor || envActor || "unknown";
-  const actorType = normalizeActorType(getOptionString(options, "actor-type") || inferActorType(options, id));
+  const explicitActor = getOptionString(options, "actor");
+  const commandAgent = getOptionString(options, "agent");
+  const requestedActorType = getOptionString(options, "actor-type");
+  const explicitActorType = requestedActorType ? normalizeActorType(requestedActorType) : null;
+  const envAgent = process.env.CODEX_AGENT_NAME || null;
+  const envCiActor = process.env.CI ? process.env.GITHUB_ACTOR || "ci" : null;
+  const actorType = explicitActorType || inferActorType(options, explicitActor || commandAgent || envAgent || envCiActor || "codex");
+  const id =
+    explicitActor ||
+    commandAgent ||
+    (actorType === "human" ? defaultHumanActorId(root) : null) ||
+    (actorType === "ci" ? envCiActor : null) ||
+    envAgent ||
+    envCiActor ||
+    "codex";
+  const useHumanIdentity = ["human", "ci"].includes(actorType);
   const name =
     getOptionString(options, "actor-name") ||
-    process.env.GIT_AUTHOR_NAME ||
-    gitConfigValue(root, "user.name") ||
+    (actorType === "agent" && id === "codex" ? "Codex" : null) ||
+    (useHumanIdentity ? process.env.GIT_AUTHOR_NAME || gitConfigValue(root, "user.name") : null) ||
     null;
   const email =
     getOptionString(options, "actor-email") ||
-    process.env.GIT_AUTHOR_EMAIL ||
-    gitConfigValue(root, "user.email") ||
+    (useHumanIdentity ? process.env.GIT_AUTHOR_EMAIL || gitConfigValue(root, "user.email") : null) ||
     null;
 
   return {
@@ -3422,8 +3553,12 @@ function buildActor(options = {}, root = process.cwd()) {
     type: actorType,
     name,
     email,
-    source: explicitActor ? "cli" : "environment",
+    source: explicitActor || commandAgent ? "cli" : envAgent || envCiActor || useHumanIdentity ? "environment" : "default",
   };
+}
+
+function defaultHumanActorId(root) {
+  return process.env.CODEX_USER_ID || process.env.USER || process.env.GIT_AUTHOR_NAME || gitConfigValue(root, "user.name") || "human";
 }
 
 function buildActorFromPrefixedOptions(options = {}, prefix, root = process.cwd(), defaults = {}) {
@@ -5318,6 +5453,13 @@ function completeStoryStep(context, options) {
   const step = normalizeStoryStep(requireOption(options, "step"));
   const summary = getOptionString(options, "summary") || null;
   const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
+  validateApprovedStoryContractForPhaseOutput(
+    context,
+    story,
+    "story.complete-step",
+    outputTypes.map((artifactType) => ({ artifact_type: artifactType })),
+    options,
+  );
   const artifactEvidence = buildCanonicalEvidence(context, normalizeListOption(options.artifact), "Story step artifact");
   const extraEvidence = buildCanonicalEvidence(context, normalizeListOption(options.evidence), "Story step evidence");
   if (!summary && outputTypes.length === 0 && artifactEvidence.length === 0 && extraEvidence.length === 0) {
@@ -5906,6 +6048,13 @@ function linkOutputArtifact(context, options) {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const mode = normalizeOutputMode(requireOption(options, "mode"));
   const templateId = normalizeId(requireOption(options, "template"));
+  validateApprovedStoryContractForPhaseOutput(
+    context,
+    story,
+    "output.link",
+    [{ artifact_type: artifactType, template_id: templateId, mode }],
+    options,
+  );
   const registry = readOutputRegistry(context, { create: true, options, action: "output.link" });
   const template = findOutputTemplate(registry, templateId);
   if (!template) {
@@ -8571,14 +8720,20 @@ function validateProject(context, report) {
 function validateBaselines(context, report) {
   for (const baseline of readBaselines(context)) {
     const label = `baseline ${baseline.id || "unknown"}`;
+    const baselineStatus = String(baseline.status || "").toLowerCase();
     if (!baseline.id || !baseline.schema_version || !baseline.status || !baseline.kind) {
       report.errors.push(`${label} is missing id, schema_version, status, or kind`);
     }
     for (const issue of validateBaselineSourceHashes(context, baseline, label, { collectOnly: true })) {
-      const severity = ["approved", "provisionally_approved"].includes(baseline.status) && report.strict ? "errors" : "warnings";
+      const severity = ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
       report[severity].push(issue);
     }
-    if (baseline.status === "approved") {
+    if (report.strict && baselineStatus && baselineStatus !== "approved") {
+      report.errors.push(
+        `${label} is '${baseline.status}'; strict gate requires explicit baseline approval before phase work treats inferred project facts as canonical`,
+      );
+    }
+    if (baselineStatus === "approved") {
       const approval = latestApprovedRecordApproval(baseline);
       if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
         report.errors.push(`${label} approval must be attributed to a human or CI actor`);
@@ -8588,7 +8743,7 @@ function validateBaselines(context, report) {
         report.errors.push(`${label} approval is stale`);
       }
     }
-    if (baseline.status === "provisionally_approved" && report.strict) {
+    if (baselineStatus === "provisionally_approved" && report.strict) {
       report.errors.push(`${label} is provisionally approved; explicit user or CI approval is required for strict gate`);
     }
     report.checked.push(label);
@@ -9943,7 +10098,7 @@ Usage:
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
       [--output-ref artifact-type:template-id:mode]
-      [--allow-incomplete-contract]
+      [--allow-incomplete-contract] [--replace-story-contract]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
   agentic-sdlc contract approve --id contract-id
       --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
@@ -9952,6 +10107,7 @@ Usage:
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story complete-step --id ST-001 --step functional-analysis
       [--type artifact-type] [--artifact path] [--evidence path] [--release-claim]
+      [--allow-unapproved-contract-output]
   agentic-sdlc story prepare-handoff --id ST-001 --to-agent name
       [--artifact path] [--open-item text] [--release-claim]
   agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]
@@ -9993,6 +10149,7 @@ Usage:
   agentic-sdlc output link --story ST-001 --type artifact-type
       --artifact path --template template-id --mode reuse|delta|new
       [--base-artifact path] [--requirement REQ-001]
+      [--allow-unapproved-contract-output]
   agentic-sdlc output status --story ST-001 [--type artifact-type]
   agentic-sdlc route decide --intent-json json [--text raw] [--json]
   agentic-sdlc route --intent-file path [--text raw] [--json]
@@ -10074,6 +10231,9 @@ Contract context options:
   --allow-unapproved-output-ref
                          Migration/recovery override for draft or missing
                          output templates. Do not use for normal task work.
+  --replace-story-contract
+                         Explicit renegotiation/recovery override when a story
+                         already references a different contract.
 
 Contract execution policy options:
   --model model-id       Override the Codex model for agents using this contract.
@@ -10145,6 +10305,9 @@ Output consistency options:
   --requirement id       Requirement covered by this output. Repeatable.
   --decision-id id       Approved decision justifying a duplicate/new structure.
   --rationale text       Short rationale for the link.
+  --allow-unapproved-contract-output
+                         Migration/recovery override for linking or completing
+                         pre-existing artifacts before contract approval.
 
 Route options:
   --intent-json json     Canonical normalized route intent JSON.
