@@ -8,7 +8,8 @@
   },
   "scripts": {
     "check": "node --check bin/agentic-sdlc.mjs",
-    "smoke": "node bin/agentic-sdlc.mjs --help"
+    "smoke": "node bin/agentic-sdlc.mjs --help",
+    "test": "node --test test/*.mjs"
   },
   "keywords": [
     "codex",
