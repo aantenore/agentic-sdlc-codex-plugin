@@ -185,13 +185,15 @@ For technical analysis, the route layer also checks whether an approved capabili
 
 ## Task Front Door
 
-Use `task start` before Codex executes work for a user request. It wraps route decision plus contract readiness and returns one of three operational outcomes:
+Use `task start` before Codex executes work for a user request. When the user says to use Agentic SDLC for context, analysis, assessment, implementation, validation, or release work, Codex should first normalize the request into canonical intent JSON and call `task start`; it should not proceed from raw natural language. For example, an "initial technical assessment" should normalize to `technical_analysis` or one of its aliases with `artifact_type` `technical-analysis`.
+
+It wraps route decision plus contract readiness and returns one of three operational outcomes:
 
 - `ready_to_execute`: the request has canonical intent, an applicable approved contract, no contract readiness gaps, and any required start confirmation was supplied with `--confirm-start`.
 - `needs_user_input`: Codex must ask the user to normalize intent, create/approve/clarify a contract, or confirm the concrete task start.
 - `contract_revision_required`: the user explicitly requested `--revise-contract`, or the selected contract does not match the phase.
 
-`--confirm-start` is operational authorization only. It does not approve a contract; formal approvals still require `contract approve --approval-source explicit-user` with user-confirmed summary or evidence.
+`--confirm-start` is operational authorization only. It does not approve a contract; formal approvals still require `contract approve --approval-source explicit-user` with user-confirmed summary or evidence. User approval is scoped to the artifact or decision that was shown immediately before the answer; a generic "ok" cannot be reused for later templates, capability decisions, contracts, or start confirmations.
 
 ```bash
 node bin/agentic-sdlc.mjs task start --json --intent-json '{
@@ -218,7 +220,7 @@ node bin/agentic-sdlc.mjs onboard existing-project \
   --question "Which inferred facts are canonical?"
 ```
 
-This initializes `.sdlc/` when needed and writes `.sdlc/baseline/BASELINE-INITIAL.json` plus a readable current-state report. The baseline is `proposed` by default: detected stack, key files, documents, assumptions, and open questions are evidence, not confirmed truth. Approve it only after the user confirms what is canonical.
+This initializes `.sdlc/` when needed and writes `.sdlc/baseline/BASELINE-INITIAL.json` plus a readable current-state report. The baseline is `proposed` by default: detected stack, key files, documents, assumptions, and open questions are evidence, not confirmed truth. When asking for approval, summarize those contents in chat first; do not make the user open JSON or Markdown files just to understand what they are approving. Approve it only after the user confirms what is canonical.
 
 ## Approval Governance
 
@@ -252,7 +254,7 @@ Recommended workflow:
 
 Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If there is no approved output template for that type, propose one and stop for user agreement before creating a contract that references it. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts must include `--output-ref artifact-type:template-id:mode` by default; `contract create` rejects missing story output refs and refs to draft or missing templates unless an explicit migration/clarification override is used. `output link` requires the story contract to be approved and fresh. Strict gates require those refs to be satisfied by output links.
 
-Use `approval requests --story <id>` whenever a gate or route needs human input. It returns an `assistant_message` plus the pending baseline, output-template, contract clarification, contract approval, and output-link actions with a natural-language explanation: what to review, why it matters, what approval means, when to ask for changes, and the suggested command. The message source is stable English. When `assistant_message_presentation.translate_to_chat_language` is true, Codex should translate and contextualize it in the active chat language before showing it to the user, preserving IDs, paths, commands, status codes, and schema keys exactly. Agents must not collapse an approval request into a bare question: show the review items, delivery/presentation options, recommended delivery, and delivery question, including approval scope, sections, and template content for output-template approvals. Agents should stop until the user approves, answers, or requests changes.
+Use `approval requests --story <id>` whenever a gate or route needs human input. Proposal commands for baselines, capability profiles, capability recommendations, and output templates also return the same style of `assistant_message` for the newly proposed artifact. It returns an `assistant_message` plus the pending baseline, capability profile, capability recommendation, output-template, contract clarification, contract approval, and output-link actions with a natural-language explanation: what to review, why it matters, what approval means, whether more information is needed, and when to ask for changes. The message source is stable English. When `assistant_message_presentation.translate_to_chat_language` is true, Codex should translate and contextualize it in the active chat language before showing it to the user. The primary message must be understandable without SDLC vocabulary: explain baseline as trusted project context, capability profile as tools-and-permissions boundaries, capability recommendation as concrete tool choices, template as assessment or output format, and contract as the work brief. Preserve IDs, paths, commands, status codes, and schema keys only as technical detail when needed. Agents must not collapse an approval request into a bare question, a file link, or a list of artifact IDs: summarize the relevant baseline report, capability records, template, contract, and source-list contents directly in chat, then show paths only as evidence. Show what context will be used, what output structure is being agreed, what work is being authorized, how the result will be delivered, and what the user can answer naturally. Approval is scoped to exactly the item shown: after a user approves one item, newly proposed templates, capability profiles, recommendations, contracts, or start confirmations require a fresh summary and a fresh user answer. Agents should stop until the user approves, answers, or requests changes.
 
 Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth. `output resolve` verifies cached recommendations against canonical KB files and rejects tampered cache results.
 
