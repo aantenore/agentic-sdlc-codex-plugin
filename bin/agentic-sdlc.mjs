@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.2";
+const VERSION = "0.4.3";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
