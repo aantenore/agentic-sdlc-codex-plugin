@@ -1,0 +1,47 @@
+{
+  "story_id": "ST-HUMAN-CONSENT-GATES",
+  "agent": "codex",
+  "branch": "main",
+  "status": "released",
+  "claimed_at": "2026-07-01T12:50:32.518Z",
+  "expires_at": null,
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.5"
+    },
+    "released_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    }
+  },
+  "released_at": "2026-07-01T12:56:30.505Z",
+  "release_reason": "Implementation complete; strict gate awaits formal contract approval if required."
+}

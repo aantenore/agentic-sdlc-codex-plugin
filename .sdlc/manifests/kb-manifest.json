@@ -1,18 +1,89 @@
 {
   "kind": "kb_manifest",
   "schema_version": "0.1.0",
-  "generated_at": "2026-07-01T12:31:27.482Z",
+  "generated_at": "2026-07-01T13:14:56.539Z",
   "canonical_root": ".sdlc",
   "summary": {
-    "stories": 1,
-    "contracts": 7,
+    "stories": 4,
+    "contracts": 10,
     "output_templates": 1,
-    "output_links": 1,
-    "trace_events": 22,
+    "output_links": 4,
+    "trace_events": 44,
     "approvals": 3,
-    "source_files": 31
+    "source_files": 67
   },
   "stories": [
+    {
+      "id": "ST-AUDIT-ATTRIBUTION",
+      "title": "Track requester and authorizer attribution for agent-executed work",
+      "status": "draft",
+      "phase": "design",
+      "contract_id": "contract-ST-AUDIT-ATTRIBUTION-implementation",
+      "requirements": [],
+      "active_claim": null,
+      "completed_steps": [
+        {
+          "step": "implementation",
+          "completed_at": "2026-07-01T12:44:51.267Z",
+          "output_types": [
+            "implementation-summary"
+          ]
+        }
+      ],
+      "output_links": [
+        {
+          "id": "OUT-ST-AUDIT-ATTRIBUTION-implementation-summary-166f3257",
+          "artifact_type": "implementation-summary",
+          "artifact_path": ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md",
+          "mode": "new",
+          "template_id": "implementation-summary-v1"
+        }
+      ],
+      "last_trace": {
+        "id": "TR-20260701124747-f06a62",
+        "story_id": "ST-AUDIT-ATTRIBUTION",
+        "type": "sync",
+        "summary": "Story ST-AUDIT-ATTRIBUTION claim released",
+        "actor": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "requested_by": null,
+        "authorized_by": null,
+        "request": null,
+        "action": "story.release",
+        "evidence": [
+          ".sdlc/stories/ST-AUDIT-ATTRIBUTION/claim.json"
+        ],
+        "related": [
+          "ST-AUDIT-ATTRIBUTION"
+        ],
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.4"
+        },
+        "created_at": "2026-07-01T12:47:47.864Z"
+      }
+    },
     {
       "id": "ST-CAPABILITY-DISCOVERY",
       "title": "Add contextual capability discovery",
@@ -82,15 +153,183 @@
         },
         "created_at": "2026-07-01T11:26:44.278Z"
       }
+    },
+    {
+      "id": "ST-HUMAN-CONSENT-GATES",
+      "title": "Require human agreement before output templates, contracts, and phase work",
+      "status": "draft",
+      "phase": "design",
+      "contract_id": "contract-ST-HUMAN-CONSENT-GATES-implementation",
+      "requirements": [],
+      "active_claim": null,
+      "completed_steps": [
+        {
+          "step": "implementation",
+          "completed_at": "2026-07-01T13:03:59.405Z",
+          "output_types": [
+            "implementation-summary"
+          ]
+        }
+      ],
+      "output_links": [
+        {
+          "id": "OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f",
+          "artifact_type": "implementation-summary",
+          "artifact_path": ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+          "mode": "new",
+          "template_id": "implementation-summary-v1"
+        }
+      ],
+      "last_trace": {
+        "id": "TR-20260701130359-90044a",
+        "story_id": "ST-HUMAN-CONSENT-GATES",
+        "type": "gate",
+        "summary": "Implementation and validation evidence updated for contract readiness guardrails",
+        "actor": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "environment"
+        },
+        "requested_by": null,
+        "authorized_by": null,
+        "request": null,
+        "action": "story.complete-step",
+        "evidence": [
+          ".sdlc/stories/ST-HUMAN-CONSENT-GATES/steps/implementation.json",
+          ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+          ".sdlc/tests/TEST-0.4.5-human-consent-gates.json",
+          ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md"
+        ],
+        "related": [
+          "ST-HUMAN-CONSENT-GATES",
+          "implementation",
+          "OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f"
+        ],
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.5"
+        },
+        "created_at": "2026-07-01T13:03:59.406Z"
+      }
+    },
+    {
+      "id": "ST-TASK-FRONT-DOOR",
+      "title": "Add task start front-door before phase work",
+      "status": "draft",
+      "phase": "design",
+      "contract_id": "contract-ST-TASK-FRONT-DOOR-implementation",
+      "requirements": [],
+      "active_claim": null,
+      "completed_steps": [
+        {
+          "step": "implementation",
+          "completed_at": "2026-07-01T13:13:23.654Z",
+          "output_types": [
+            "implementation-summary"
+          ]
+        }
+      ],
+      "output_links": [
+        {
+          "id": "OUT-ST-TASK-FRONT-DOOR-implementation-summary-b179b9b7",
+          "artifact_type": "implementation-summary",
+          "artifact_path": ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+          "mode": "new",
+          "template_id": "implementation-summary-v1"
+        }
+      ],
+      "last_trace": {
+        "id": "TR-20260701131448-762b73",
+        "story_id": "ST-TASK-FRONT-DOOR",
+        "type": "sync",
+        "summary": "Story ST-TASK-FRONT-DOOR claim released",
+        "actor": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "requested_by": null,
+        "authorized_by": null,
+        "request": null,
+        "action": "story.release",
+        "evidence": [
+          ".sdlc/stories/ST-TASK-FRONT-DOOR/claim.json"
+        ],
+        "related": [
+          "ST-TASK-FRONT-DOOR"
+        ],
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.6"
+        },
+        "created_at": "2026-07-01T13:14:48.861Z"
+      }
     }
   ],
   "contracts": [
+    {
+      "id": "contract-ST-AUDIT-ATTRIBUTION-implementation",
+      "phase": "implementation",
+      "story_id": "ST-AUDIT-ATTRIBUTION",
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-ST-AUDIT-ATTRIBUTION-implementation.json"
+    },
     {
       "id": "contract-ST-CAPABILITY-DISCOVERY-implementation",
       "phase": "implementation",
       "story_id": "ST-CAPABILITY-DISCOVERY",
       "status": "approved",
       "path": ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json"
+    },
+    {
+      "id": "contract-ST-HUMAN-CONSENT-GATES-implementation",
+      "phase": "implementation",
+      "story_id": "ST-HUMAN-CONSENT-GATES",
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-ST-HUMAN-CONSENT-GATES-implementation.json"
+    },
+    {
+      "id": "contract-ST-TASK-FRONT-DOOR-implementation",
+      "phase": "implementation",
+      "story_id": "ST-TASK-FRONT-DOOR",
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-ST-TASK-FRONT-DOOR-implementation.json"
     },
     {
       "id": "contract-analysis-v1",
@@ -156,42 +395,81 @@
         "requirements": [
           "REQ-CAPABILITY-DISCOVERY"
         ]
+      },
+      {
+        "id": "OUT-ST-AUDIT-ATTRIBUTION-implementation-summary-166f3257",
+        "story_id": "ST-AUDIT-ATTRIBUTION",
+        "artifact_type": "implementation-summary",
+        "artifact_path": ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md",
+        "template_id": "implementation-summary-v1",
+        "mode": "new",
+        "requirements": [
+          "REQ-AUDIT-ATTRIBUTION"
+        ]
+      },
+      {
+        "id": "OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f",
+        "story_id": "ST-HUMAN-CONSENT-GATES",
+        "artifact_type": "implementation-summary",
+        "artifact_path": ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+        "template_id": "implementation-summary-v1",
+        "mode": "new",
+        "requirements": [
+          "REQ-HUMAN-CONSENT-GATES"
+        ]
+      },
+      {
+        "id": "OUT-ST-TASK-FRONT-DOOR-implementation-summary-b179b9b7",
+        "story_id": "ST-TASK-FRONT-DOOR",
+        "artifact_type": "implementation-summary",
+        "artifact_path": ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+        "template_id": "implementation-summary-v1",
+        "mode": "new",
+        "requirements": [
+          "REQ-TASK-FRONT-DOOR"
+        ]
       }
     ]
   },
   "activity": {
-    "event_count": 22,
-    "story_count": 1,
+    "event_count": 44,
+    "story_count": 4,
     "by_type": {
-      "claim": 2,
-      "decision": 5,
-      "gate": 4,
-      "test": 6,
-      "implementation": 5
+      "claim": 5,
+      "implementation": 9,
+      "test": 10,
+      "decision": 9,
+      "gate": 8,
+      "sync": 3
     },
     "by_action": {
-      "story.claim": 2,
+      "story.claim": 5,
+      "implementation": 9,
+      "test": 10,
+      "output.link": 5,
+      "story.complete-step": 4,
+      "story.release": 3,
       "capability.profile.propose": 1,
       "capability.profile.approve": 1,
       "capability.recommend": 1,
       "capability.approve": 1,
       "contract.approve": 1,
-      "test": 6,
-      "output.link": 1,
       "output.template.propose": 1,
       "output.template.approve": 1,
-      "baseline.propose": 1,
-      "implementation": 5
+      "baseline.propose": 1
     },
     "by_story": {
+      "ST-AUDIT-ATTRIBUTION": 6,
       "ST-CAPABILITY-DISCOVERY": 9,
+      "ST-HUMAN-CONSENT-GATES": 10,
+      "ST-TASK-FRONT-DOOR": 6,
       "project": 13
     },
     "by_actor": {
-      "codex": 13,
-      "antonioantenore": 9
+      "codex": 31,
+      "antonioantenore": 13
     },
-    "first_event_at": "2026-07-01T11:13:08.919Z",
+    "first_event_at": "2026-07-01T12:40:05.107Z",
     "last_event_at": "2026-07-01T12:31:23.646Z"
   },
   "approvals": [
@@ -246,7 +524,10 @@
     ".sdlc/baseline/BASELINE-PLUGIN-CURRENT.json",
     ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json",
     ".sdlc/capability-discovery/recommendations/CAP-REC-ST-CAPABILITY-DISCOVERY.json",
+    ".sdlc/contracts/contract-ST-AUDIT-ATTRIBUTION-implementation.json",
     ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json",
+    ".sdlc/contracts/contract-ST-HUMAN-CONSENT-GATES-implementation.json",
+    ".sdlc/contracts/contract-ST-TASK-FRONT-DOOR-implementation.json",
     ".sdlc/contracts/contract-analysis-v1.json",
     ".sdlc/contracts/contract-design-v1.json",
     ".sdlc/contracts/contract-discovery-v1.json",
@@ -258,20 +539,53 @@
     ".sdlc/output-contracts/registry.json",
     ".sdlc/output-contracts/templates/implementation-summary-v1.md",
     ".sdlc/project.json",
+    ".sdlc/reports/ST-AUDIT-ATTRIBUTION-gate-report-nonstrict.json",
+    ".sdlc/reports/ST-AUDIT-ATTRIBUTION-gate-report.json",
     ".sdlc/reports/ST-CAPABILITY-DISCOVERY-gate-report.json",
+    ".sdlc/reports/ST-HUMAN-CONSENT-GATES-gate-report-nonstrict.json",
+    ".sdlc/reports/ST-HUMAN-CONSENT-GATES-gate-report.json",
+    ".sdlc/reports/ST-TASK-FRONT-DOOR-gate-report-nonstrict.json",
+    ".sdlc/reports/ST-TASK-FRONT-DOOR-gate-report.json",
     ".sdlc/reports/activity-0.4.0.md",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/claim.json",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/implementation-log.md",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/plan.md",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/steps/history.jsonl",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/steps/implementation.json",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/story.json",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/claim.json",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/implementation-log.md",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/plan.md",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/story.json",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/claim.json",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/implementation-log.md",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/plan.md",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/steps/history.jsonl",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/steps/implementation.json",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/story.json",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/claim.json",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/implementation-log.md",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/plan.md",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/steps/history.jsonl",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/steps/implementation.json",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/story.json",
     ".sdlc/tests/ST-CAPABILITY-DISCOVERY-test-run.json",
     ".sdlc/tests/TEST-0.4.0-local.json",
     ".sdlc/tests/TEST-0.4.1-report-query.json",
     ".sdlc/tests/TEST-0.4.2-portable-plugin.json",
     ".sdlc/tests/TEST-0.4.3-install-docs.json",
+    ".sdlc/tests/TEST-0.4.4-audit-attribution.json",
+    ".sdlc/tests/TEST-0.4.5-human-consent-gates.json",
+    ".sdlc/tests/TEST-0.4.6-task-front-door.json",
     ".sdlc/tests/approval-baseline-governance-test-run.json",
+    ".sdlc/traces/ST-AUDIT-ATTRIBUTION.jsonl",
     ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl",
+    ".sdlc/traces/ST-HUMAN-CONSENT-GATES.jsonl",
+    ".sdlc/traces/ST-TASK-FRONT-DOOR.jsonl",
     ".sdlc/traces/project.jsonl"
   ],
   "source_hashes": {
@@ -279,7 +593,10 @@
     ".sdlc/baseline/BASELINE-PLUGIN-CURRENT.json": "4c64d514e4732bfa5a0f59fcabeee45855fa4e90604ad2bd1fdeec0acf13c902",
     ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json": "891062fa9b1fe83b8a78c7a43922e827d3a5813591aacb14c89db3706661ece0",
     ".sdlc/capability-discovery/recommendations/CAP-REC-ST-CAPABILITY-DISCOVERY.json": "0b988dcfb586cd3682c048106807b6535c846ad4761a656bca914d8cb322b8d5",
+    ".sdlc/contracts/contract-ST-AUDIT-ATTRIBUTION-implementation.json": "9b48401c49e395e84808a9a9d4f2ca598e191c939c43538994e549cd539b4201",
     ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json": "87bf9af7e6f4fa52235268d05329e803de4005c9de1e9d74225beaf163431920",
+    ".sdlc/contracts/contract-ST-HUMAN-CONSENT-GATES-implementation.json": "753f501ef2435af0777f64cc1a974de13a8de5287e65b902c22d143d92a61f54",
+    ".sdlc/contracts/contract-ST-TASK-FRONT-DOOR-implementation.json": "014ff631aa00fd20a013a647dc334478f04f1dc6dcf4ef4ead9d36fbcd71e7d7",
     ".sdlc/contracts/contract-analysis-v1.json": "f1d834818ee34f2a8e430f8ade65c4cecef094e99912fadc84f979867f351a9b",
     ".sdlc/contracts/contract-design-v1.json": "ae3fba3e441d55f88eec247b2ba99b5b6fe6415f7c2dfbfe7a3612dbb84968b8",
     ".sdlc/contracts/contract-discovery-v1.json": "6fa61e90594633b8b60594eef9547a8d1ac7d074f2c5252a681678589572bac4",
@@ -288,23 +605,56 @@
     ".sdlc/contracts/contract-validation-v1.json": "da08556359bc0acb8a5e9c734a79be1c88d74a2f4ede6b3571ac1a043c640fb9",
     ".sdlc/decisions/available-capabilities.json": "ae53bbd87ede83b91cfed5f49465dd70bbfdc2f1665e15e5731b96996c100dc4",
     ".sdlc/dependencies/graph.json": "39143e7483b341727b197118610d7cafc5b64346dec9bf029471f2b982b8784e",
-    ".sdlc/output-contracts/registry.json": "899a3f72ee98fa77e93f46df89e1c5a57a9e5e9aaf0feb433c2fded8a96c0a6f",
+    ".sdlc/output-contracts/registry.json": "cbfbbbffba9f5df580b8cbf47733f72a6e6663f1da2235254a2a2a63aa9c3fb4",
     ".sdlc/output-contracts/templates/implementation-summary-v1.md": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
-    ".sdlc/project.json": "ba9fd93a54293fc48e0547aad1cf5e6ec49ee9d73dc5642a6f78dad13531280b",
+    ".sdlc/project.json": "3242f184e31836aa1b2a3d0e0fa1dd939dd8b77025e26f8de0a1ccf075774518",
+    ".sdlc/reports/ST-AUDIT-ATTRIBUTION-gate-report-nonstrict.json": "ba13f184cfa15cf8d8f50e4d961951bbffa2c3b0f9ca8488ae0aa27856b3cea7",
+    ".sdlc/reports/ST-AUDIT-ATTRIBUTION-gate-report.json": "fc459ee4527120e0821ead1c4645997b9800c22e2e6dae07ab23ee041ab98ebc",
     ".sdlc/reports/ST-CAPABILITY-DISCOVERY-gate-report.json": "86081524d5f25d2772eb09619eebd4b81682beff8be5c5eeb98b33d3f4868a0a",
+    ".sdlc/reports/ST-HUMAN-CONSENT-GATES-gate-report-nonstrict.json": "7d0851150f88a1a75e061d9672c8a8786213719315dfa37cfa6605c12a14a0a3",
+    ".sdlc/reports/ST-HUMAN-CONSENT-GATES-gate-report.json": "1b0935f9e20c95884b5896a8c5ab0616e5a5cedb4732f3b270b6385d421eb789",
+    ".sdlc/reports/ST-TASK-FRONT-DOOR-gate-report-nonstrict.json": "26a9d1b613489170654f095dd92471160a28d93ca120538cb15bdd56b71247c2",
+    ".sdlc/reports/ST-TASK-FRONT-DOOR-gate-report.json": "8c846a4a9789689bb6ae3ea5371663e0cdc788169aa24ceee2f6bd1bd3ec571d",
     ".sdlc/reports/activity-0.4.0.md": "9875ddb26e5a720e4ae81a9807150b6d410a07e453f5a2854160c6f46ea75f5c",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/claim.json": "ec5d238374925de50945a89bc21e73def9453164f7912703d64f28b6702958c4",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/implementation-log.md": "734916ea68f821a355c996eca4b0703753dcb2cf5c748bde13307dd238c3d480",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md": "fa0a64ba4a48b3fe9cd852da2192ea7e2d5227c990e74206fa692a57463d95a0",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/plan.md": "ed8435e99821bc56bf6f8fbc60c8bc9c772edf161c1be5177017110abf7e1975",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/steps/history.jsonl": "bc1a0e92c91021472a5fbd0a083a42d3321da773525d68b5f5d3a751534978ff",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/steps/implementation.json": "d8c15d9a03f9ff022f1ac5a9756f581e8b7f2ec55d3650f61dd35a7abdbe2221",
+    ".sdlc/stories/ST-AUDIT-ATTRIBUTION/story.json": "dc668255f397ccdb990eec5a23c974b0e49cf8836a0f0dc3a89e8809186a9da7",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/claim.json": "717bd434702177b6adc9a5178d69f525516110c673994a0b44f2f09d22b34b6f",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/implementation-log.md": "ef256a93fb85666e84fd2fa34234458afad6dc138d8445ea31ab9be65c1ef040",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md": "27eec4a379e9a4779450fe679bb95051307df3f98108b45620d83067d3611c4b",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/plan.md": "c06cd2f430c264c89b1fe8bd710bfd0617ba0322e66c1eee4fda5ce95b531f4c",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/story.json": "b63e034571d630bcce1447a8feab2f9783ee90f1e34dd27e4e8e59ef70ffd134",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/claim.json": "36422d48b753e57026608f87f30e61e701c40cff8c9036b0d75e7226b418cee2",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/implementation-log.md": "eb6958e28fa4b3e9a0969d713d454723f24f4d1e80658c8562dc1c2538e77e3f",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md": "d028d8f9cd5882e25bc841b3129512a90a079465db9bb9a66672ea99500efbfc",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/plan.md": "c1a30383df06f039f2267aea680cb1795f3301da556fcffe580dabb43f88a547",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/steps/history.jsonl": "35d84478449bf0bcb143222cc74cabe2023ac2012c142a351ad0e2c56a6e38d5",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/steps/implementation.json": "a4e551b9a905ed93679ddb1689f488ebf86993f8767fa2690382afcd6d5f7506",
+    ".sdlc/stories/ST-HUMAN-CONSENT-GATES/story.json": "0423217005ad5b113ce69da3b7095d098c5e5fdbf06cb3a8e1bc19d52f980e16",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/claim.json": "a208a6b9585b66b18410799244144aaf588ef5d4e18d5843b4f220262996a6de",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/implementation-log.md": "9a7d1c429dcae4f320e52603a06515126ec73cc8a17353fa7023daad0a8a8644",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md": "2bc7e3d21133afc2426b841ad41ae12c52d65554940eeeca4f57581f3bbe857f",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/plan.md": "ac8448980e63c699edd463d41952d1c995e861cb487e9ed9dc8c522034879b87",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/steps/history.jsonl": "4ed9fcd7a1c0e061735d80ef06e6e045589eb4bd54196106ffb27ac8dc51d950",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/steps/implementation.json": "51ed1debbd09bdba44b636027e9520ae062af310e6491d611748a97cd5be6e21",
+    ".sdlc/stories/ST-TASK-FRONT-DOOR/story.json": "4e4dd62dfb8370c1da4528b8d14c3344f93873296409c673e551e539e1da0ce1",
     ".sdlc/tests/ST-CAPABILITY-DISCOVERY-test-run.json": "4e333be407223f0714279803e85f84cfe1cb77d6add42c8b02c4010edd631e5a",
     ".sdlc/tests/TEST-0.4.0-local.json": "24bd774c7054b0700d672eef5c8d031b13803cfc5a5d1eaba0d06c2164a4ab4e",
     ".sdlc/tests/TEST-0.4.1-report-query.json": "3eb7ffeb54fa082f672eb51edf05dc4c757ec646d2a5b0f914d33518ebe17e05",
     ".sdlc/tests/TEST-0.4.2-portable-plugin.json": "938d43e25fed7e0765cbe0a6e3eec21d559063b8fd58c8733d1f604701ceaf5f",
     ".sdlc/tests/TEST-0.4.3-install-docs.json": "8f7112fbaee63682806038e7a1815e672429b4c77f51203e2ff51e3aec98c8bf",
+    ".sdlc/tests/TEST-0.4.4-audit-attribution.json": "f91f6bee6f1ae50fcb3c2f4925b17917785f2945ccc5e34592a373854108025b",
+    ".sdlc/tests/TEST-0.4.5-human-consent-gates.json": "95360777f74e5315ed5ae3db95dda4755038a313941d04eb1d8d89e5e9ea83f2",
+    ".sdlc/tests/TEST-0.4.6-task-front-door.json": "961ebce60fe5861551190d9f88b063c5ccf2eeb3dfb074974354020819906036",
     ".sdlc/tests/approval-baseline-governance-test-run.json": "6482ca1cd6692edc0145380fe0258203a4dd198f7fd44f3c451b636f51c8b52d",
+    ".sdlc/traces/ST-AUDIT-ATTRIBUTION.jsonl": "ca6b4b5d79fdee779cebc5322c825b868ea419ed4e81498c8892a8e5be8675ed",
     ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl": "5abfc9ab793619de5c22706bbf319e1cb55b282653b497a8cc7505f6c23e68a8",
+    ".sdlc/traces/ST-HUMAN-CONSENT-GATES.jsonl": "f23c48f9f76a7fab237becd24f4fc635f97310f707104801f345e90fbb995d9b",
+    ".sdlc/traces/ST-TASK-FRONT-DOOR.jsonl": "8fdef8c9787317627330936bd50e2d34ab7caed7efa13d8342b5fb0274098a70",
     ".sdlc/traces/project.jsonl": "f915d205b1d97f7d5a07a0cfc1947cb740500a5d47ada376d6d5d2b024e91faa"
   },
   "audit": {
@@ -318,7 +668,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "main",
-      "head_sha": "76087dcf6619e8a3ab6697ac541191f37a75367b",
+      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -330,10 +680,10 @@
     },
     "run": {
       "run_id": null,
-      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.4.3"
+      "version": "0.4.6"
     }
   }
 }

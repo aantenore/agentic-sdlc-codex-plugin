@@ -1,0 +1,57 @@
+{
+  "id": "TEST-0.4.5-human-consent-gates",
+  "summary": "Human agreement gates for missing output templates, contracts, and phase work in Agentic SDLC 0.4.5.",
+  "status": "passed",
+  "created_at": "2026-07-01T12:55:48Z",
+  "story_id": "ST-HUMAN-CONSENT-GATES",
+  "scope": [
+    "contract create output-ref preflight",
+    "contract create readiness preflight",
+    "approval requests command",
+    "gate report approval_requests payload",
+    "skill workflow stop-before-work guidance",
+    "documentation for user agreement before phase output"
+  ],
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "summary": "CLI syntax check passed."
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "48 tests passed."
+    },
+    {
+      "command": "node -e JSON.parse(...) for package, plugin manifest, project metadata, and schemas",
+      "status": "passed",
+      "summary": "Core JSON files parse."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help reports Agentic SDLC 0.4.5 and documents approval requests, incomplete-contract overrides, and output-ref guardrails."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "evidence": [
+    "bin/agentic-sdlc.mjs",
+    "schemas/gate-report.schema.json",
+    "test/cli.e2e.mjs",
+    "README.md",
+    "docs/agent-interactions.md",
+    "skills/agentic-sdlc/SKILL.md",
+    "skills/agentic-sdlc/references/commands.md",
+    "skills/agentic-sdlc/references/contract-generation.md",
+    "skills/agentic-sdlc/references/knowledge-base.md"
+  ],
+  "notes": [
+    "Agents may still propose draft templates or contracts, but must stop and ask for user agreement before producing phase outputs.",
+    "contract create rejects output refs to draft or missing templates by default.",
+    "contract create now rejects normal contracts without phase-guiding context, with unresolved open questions, or missing story output refs unless --allow-incomplete-contract is explicitly used for clarification, migration, or recovery."
+  ]
+}

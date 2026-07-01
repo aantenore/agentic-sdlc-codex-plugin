@@ -1,0 +1,62 @@
+{
+  "status": "failed",
+  "strict": true,
+  "scope": "story",
+  "story_id": "ST-AUDIT-ATTRIBUTION",
+  "checked_at": "2026-07-01T12:48:00.100Z",
+  "root": "/Users/antonioantenore/Documents/TravelOps",
+  "actor": {
+    "id": "antonioantenore",
+    "type": "human",
+    "name": "Antonio Antenore",
+    "email": "a.antenore@reply.it",
+    "source": "environment"
+  },
+  "git": {
+    "is_git_repo": true,
+    "branch": "main",
+    "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+    "is_dirty": true,
+    "user": {
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it"
+    },
+    "remotes": [
+      "origin"
+    ]
+  },
+  "run": {
+    "run_id": null,
+    "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+    "session_id": null,
+    "tool": "agentic-sdlc-cli",
+    "version": "0.4.4"
+  },
+  "errors": [
+    "contract contract-ST-AUDIT-ATTRIBUTION-implementation.json strict gate requires contract.status to be approved",
+    "contract contract-ST-AUDIT-ATTRIBUTION-implementation.json strict gate requires an approved human gate record",
+    "contract contract-ST-AUDIT-ATTRIBUTION-implementation.json approved human gate is stale or missing approved_content_hash; re-approve the contract"
+  ],
+  "warnings": [
+    "baseline BASELINE-PLUGIN-CURRENT source README.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/agent-interactions.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/architecture.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/kb-structure.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source package.json changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source skills/agentic-sdlc/SKILL.md changed after baseline proposal",
+    "Local SDLC cache is stale; run 'agentic-sdlc cache rebuild'",
+    "output template implementation-summary-v1 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source"
+  ],
+  "checked": [
+    "project",
+    "baseline BASELINE-PLUGIN-CURRENT",
+    "contract contract-ST-AUDIT-ATTRIBUTION-implementation.json",
+    "trace traces/ST-AUDIT-ATTRIBUTION.jsonl",
+    "story step ST-AUDIT-ATTRIBUTION/implementation",
+    "story ST-AUDIT-ATTRIBUTION",
+    "output template implementation-summary-v1",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625",
+    "output link OUT-ST-AUDIT-ATTRIBUTION-implementation-summary-166f3257"
+  ]
+}

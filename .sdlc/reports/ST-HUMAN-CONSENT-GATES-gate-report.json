@@ -1,0 +1,93 @@
+{
+  "status": "failed",
+  "strict": true,
+  "scope": "story",
+  "story_id": "ST-HUMAN-CONSENT-GATES",
+  "checked_at": "2026-07-01T13:04:05.445Z",
+  "root": "/Users/antonioantenore/Documents/TravelOps",
+  "actor": {
+    "id": "antonioantenore",
+    "type": "human",
+    "name": "Antonio Antenore",
+    "email": "a.antenore@reply.it",
+    "source": "environment"
+  },
+  "git": {
+    "is_git_repo": true,
+    "branch": "main",
+    "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+    "is_dirty": true,
+    "user": {
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it"
+    },
+    "remotes": [
+      "origin"
+    ]
+  },
+  "run": {
+    "run_id": null,
+    "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+    "session_id": null,
+    "tool": "agentic-sdlc-cli",
+    "version": "0.4.5"
+  },
+  "errors": [
+    "contract contract-ST-HUMAN-CONSENT-GATES-implementation.json strict gate requires contract.status to be approved",
+    "contract contract-ST-HUMAN-CONSENT-GATES-implementation.json strict gate requires an approved human gate record",
+    "contract contract-ST-HUMAN-CONSENT-GATES-implementation.json approved human gate is stale or missing approved_content_hash; re-approve the contract"
+  ],
+  "warnings": [
+    "baseline BASELINE-PLUGIN-CURRENT source README.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/agent-interactions.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/architecture.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source docs/kb-structure.md changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source package.json changed after baseline proposal",
+    "baseline BASELINE-PLUGIN-CURRENT source skills/agentic-sdlc/SKILL.md changed after baseline proposal",
+    "Local SDLC cache is stale; run 'agentic-sdlc cache rebuild'",
+    "output template implementation-summary-v1 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source"
+  ],
+  "checked": [
+    "project",
+    "baseline BASELINE-PLUGIN-CURRENT",
+    "contract contract-ST-HUMAN-CONSENT-GATES-implementation.json",
+    "trace traces/ST-HUMAN-CONSENT-GATES.jsonl",
+    "story step ST-HUMAN-CONSENT-GATES/implementation",
+    "story ST-HUMAN-CONSENT-GATES",
+    "output template implementation-summary-v1",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625",
+    "output link OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f"
+  ],
+  "approval_requests": [
+    {
+      "id": "approve-baseline-BASELINE-PLUGIN-CURRENT",
+      "type": "baseline_approval",
+      "status": "needs_explicit_user_approval",
+      "summary": "Approve or revise baseline BASELINE-PLUGIN-CURRENT before treating inferred project facts as canonical.",
+      "subject_id": "BASELINE-PLUGIN-CURRENT",
+      "subject_status": "proposed",
+      "sources": [
+        ".sdlc/baseline/BASELINE-PLUGIN-CURRENT.json",
+        ".sdlc/baseline/BASELINE-PLUGIN-CURRENT-current-state.md"
+      ],
+      "suggested_question": "Review baseline BASELINE-PLUGIN-CURRENT. Do you approve it as canonical, or should it be revised?",
+      "suggested_command": "agentic-sdlc baseline approve --id BASELINE-PLUGIN-CURRENT --actor-type human --approval-source explicit-user --summary \"<user-confirmed baseline>\""
+    },
+    {
+      "id": "approve-contract-contract-ST-HUMAN-CONSENT-GATES-implementation",
+      "type": "contract_approval",
+      "status": "needs_explicit_user_approval",
+      "summary": "Approve or revise implementation contract contract-ST-HUMAN-CONSENT-GATES-implementation before phase work proceeds.",
+      "subject_id": "contract-ST-HUMAN-CONSENT-GATES-implementation",
+      "subject_status": "draft",
+      "story_id": "ST-HUMAN-CONSENT-GATES",
+      "phase": "implementation",
+      "sources": [
+        ".sdlc/contracts/contract-ST-HUMAN-CONSENT-GATES-implementation.json"
+      ],
+      "suggested_question": "Review contract contract-ST-HUMAN-CONSENT-GATES-implementation. Do you approve this phase contract, or should it be changed?",
+      "suggested_command": "agentic-sdlc contract approve --id contract-ST-HUMAN-CONSENT-GATES-implementation --actor-type human --approval-source explicit-user --summary \"<user-approved contract>\""
+    }
+  ]
+}

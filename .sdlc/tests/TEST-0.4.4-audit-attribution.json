@@ -1,0 +1,56 @@
+{
+  "id": "TEST-0.4.4-audit-attribution",
+  "summary": "Executor, requester, and authorizer attribution validation for Agentic SDLC 0.4.4.",
+  "status": "passed",
+  "created_at": "2026-07-01T12:44:11Z",
+  "story_id": "ST-AUDIT-ATTRIBUTION",
+  "scope": [
+    "trace append requester and authorizer fields",
+    "sync/trace authority metadata helpers",
+    "report query executor, requester, and authorizer filters",
+    "trace and report query JSON schemas",
+    "documentation and skill guidance"
+  ],
+  "commands": [
+    {
+      "command": "node -e JSON.parse(...) for package, plugin manifest, trace schema, and report query schema",
+      "status": "passed",
+      "summary": "Core JSON files parse."
+    },
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "summary": "CLI syntax check passed."
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "46 tests passed."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help reports Agentic SDLC 0.4.4 and documents requester/authorizer options."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "evidence": [
+    "bin/agentic-sdlc.mjs",
+    "schemas/trace.schema.json",
+    "schemas/report-query.schema.json",
+    "test/cli.e2e.mjs",
+    "README.md",
+    "skills/agentic-sdlc/SKILL.md",
+    "skills/agentic-sdlc/references/commands.md",
+    "skills/agentic-sdlc/references/knowledge-base.md",
+    "docs/agent-interactions.md",
+    "docs/kb-structure.md"
+  ],
+  "notes": [
+    "Legacy trace events are not rewritten or backfilled with inferred requester data.",
+    "The legacy actor filter remains supported as executor attribution."
+  ]
+}

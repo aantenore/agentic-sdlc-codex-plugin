@@ -1,0 +1,69 @@
+{
+  "id": "STEP-ST-TASK-FRONT-DOOR-implementation-20260701131323",
+  "story_id": "ST-TASK-FRONT-DOOR",
+  "step": "implementation",
+  "status": "completed",
+  "phase": "implementation",
+  "summary": "Implementation and validation evidence recorded for task start front-door",
+  "output_types": [
+    "implementation-summary"
+  ],
+  "output_links": [
+    {
+      "id": "OUT-ST-TASK-FRONT-DOOR-implementation-summary-b179b9b7",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-TASK-FRONT-DOOR"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+      "sha256": "2bc7e3d21133afc2426b841ad41ae12c52d65554940eeeca4f57581f3bbe857f",
+      "hash_algorithm": "sha256:file:v1"
+    }
+  ],
+  "evidence": [
+    {
+      "path": ".sdlc/tests/TEST-0.4.6-task-front-door.json",
+      "sha256": "961ebce60fe5861551190d9f88b063c5ccf2eeb3dfb074974354020819906036",
+      "hash_algorithm": "sha256:file:v1"
+    }
+  ],
+  "next_step": "validation",
+  "completed_at": "2026-07-01T13:13:23.654Z",
+  "audit": {
+    "completed_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.6"
+    }
+  }
+}

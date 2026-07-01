@@ -1,0 +1,69 @@
+{
+  "id": "STEP-ST-HUMAN-CONSENT-GATES-implementation-20260701130359",
+  "story_id": "ST-HUMAN-CONSENT-GATES",
+  "step": "implementation",
+  "status": "completed",
+  "phase": "implementation",
+  "summary": "Implementation and validation evidence updated for contract readiness guardrails",
+  "output_types": [
+    "implementation-summary"
+  ],
+  "output_links": [
+    {
+      "id": "OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-HUMAN-CONSENT-GATES"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+      "sha256": "d028d8f9cd5882e25bc841b3129512a90a079465db9bb9a66672ea99500efbfc",
+      "hash_algorithm": "sha256:file:v1"
+    }
+  ],
+  "evidence": [
+    {
+      "path": ".sdlc/tests/TEST-0.4.5-human-consent-gates.json",
+      "sha256": "95360777f74e5315ed5ae3db95dda4755038a313941d04eb1d8d89e5e9ea83f2",
+      "hash_algorithm": "sha256:file:v1"
+    }
+  ],
+  "next_step": "validation",
+  "completed_at": "2026-07-01T13:03:59.405Z",
+  "audit": {
+    "completed_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.5"
+    }
+  }
+}

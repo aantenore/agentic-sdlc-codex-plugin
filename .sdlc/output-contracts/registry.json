@@ -122,6 +122,171 @@
           "version": "0.2.0"
         }
       }
+    },
+    {
+      "id": "OUT-ST-AUDIT-ATTRIBUTION-implementation-summary-166f3257",
+      "story_id": "ST-AUDIT-ATTRIBUTION",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-AUDIT-ATTRIBUTION"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "source_paths": [
+        ".sdlc/stories/ST-AUDIT-ATTRIBUTION/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "fa0a64ba4a48b3fe9cd852da2192ea7e2d5227c990e74206fa692a57463d95a0",
+        "base_artifact_sha256": null,
+        "template_sha256": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-01T12:44:42.744Z",
+      "updated_at": "2026-07-01T12:44:42.744Z",
+      "audit": {
+        "linked_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.4"
+        }
+      }
+    },
+    {
+      "id": "OUT-ST-HUMAN-CONSENT-GATES-implementation-summary-eb953c7f",
+      "story_id": "ST-HUMAN-CONSENT-GATES",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-HUMAN-CONSENT-GATES"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "source_paths": [
+        ".sdlc/stories/ST-HUMAN-CONSENT-GATES/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "d028d8f9cd5882e25bc841b3129512a90a079465db9bb9a66672ea99500efbfc",
+        "base_artifact_sha256": null,
+        "template_sha256": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-01T12:56:17.948Z",
+      "updated_at": "2026-07-01T13:03:41.607Z",
+      "audit": {
+        "linked_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "environment"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.5"
+        }
+      }
+    },
+    {
+      "id": "OUT-ST-TASK-FRONT-DOOR-implementation-summary-b179b9b7",
+      "story_id": "ST-TASK-FRONT-DOOR",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-TASK-FRONT-DOOR"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "source_paths": [
+        ".sdlc/stories/ST-TASK-FRONT-DOOR/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "2bc7e3d21133afc2426b841ad41ae12c52d65554940eeeca4f57581f3bbe857f",
+        "base_artifact_sha256": null,
+        "template_sha256": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-01T13:13:10.697Z",
+      "updated_at": "2026-07-01T13:13:10.697Z",
+      "audit": {
+        "linked_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "environment"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.6"
+        }
+      }
     }
   ],
   "decisions": [
@@ -168,7 +333,7 @@
     }
   ],
   "created_at": "2026-07-01T11:12:46.834Z",
-  "updated_at": "2026-07-01T11:26:44.277Z",
+  "updated_at": "2026-07-01T13:13:10.697Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -178,16 +343,16 @@
       "source": "cli"
     },
     "updated_by": {
-      "id": "codex",
-      "type": "agent",
+      "id": "antonioantenore",
+      "type": "human",
       "name": "Antonio Antenore",
       "email": "a.antenore@reply.it",
-      "source": "cli"
+      "source": "environment"
     },
     "git": {
       "is_git_repo": true,
       "branch": "main",
-      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -199,10 +364,10 @@
     },
     "run": {
       "run_id": null,
-      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.2.0"
+      "version": "0.4.6"
     }
   }
 }

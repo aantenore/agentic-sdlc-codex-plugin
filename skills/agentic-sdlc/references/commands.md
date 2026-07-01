@@ -47,10 +47,13 @@ Use `--approval-source explicit-user` when the user explicitly approves the spec
 ## Create Contract
 
 ```bash
-node bin/agentic-sdlc.mjs contract create --root <project> --phase design
+node bin/agentic-sdlc.mjs contract create \
+  --root <project> \
+  --phase design \
+  --context-summary "Design the approved workflow into story-scoped delivery units."
 ```
 
-Creates a contract from `templates/sdlc-config.json`.
+Creates a contract from `templates/sdlc-config.json`. Normal contract creation requires enough agreed context to guide the phase. If the context, output format, or phase-driving decisions are missing, ask the user first.
 
 Project-specific context can be attached while creating a contract:
 
@@ -61,10 +64,12 @@ node bin/agentic-sdlc.mjs contract create \
   --context-file .sdlc/requirements/REQ-001.md \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
-  --question "Which external provider is authoritative for MVP?" \
+  --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
   --constraint "Provider-specific logic must stay behind an adapter" \
   --output-ref functional-analysis:functional-analysis-v1:new
 ```
+
+Use `--allow-incomplete-contract` only to persist an explicit clarification, migration, or recovery draft. It is not approval to start phase work.
 
 By default, the contract execution policy inherits the main Codex thread model and reasoning level. Override them only when needed:
 
@@ -174,6 +179,7 @@ Use `status` before opening another Codex chat. Use `plan` to find available sto
 ```bash
 node bin/agentic-sdlc.mjs route decide --root <project> --json --intent-json '<canonical-route-intent-json>'
 node bin/agentic-sdlc.mjs route --root <project> --json --intent-file .sdlc/requests/ST-001-route-intent.json
+node bin/agentic-sdlc.mjs task start --root <project> --json --intent-json '<canonical-route-intent-json>'
 ```
 
 The route command is deterministic. Codex or another LLM must first normalize the user's request into `schemas/route-intent.schema.json`; the CLI does not classify raw natural language. `--text` can be provided for audit/debug context, but it is ignored for routing. Intent files cannot live under `.sdlc/cache/` or `.sdlc/indexes/`.
@@ -195,6 +201,8 @@ Minimum canonical intent:
 
 The decision output contains the selected route, confidence result, deterministic checks, blocking reasons, questions for the user, and suggested next CLI commands. Low confidence, missing context, phase skips, implementation starts, new templates, duplicate outputs, and missing capability profiles for technical analysis require confirmation or clarification according to `routing_policy`.
 
+Use `task start` as the operational front door before Codex performs phase work. It runs route decision, finds the applicable story or phase contract, blocks missing/incomplete/unapproved/stale contracts, and returns `ready_to_execute` only when execution is allowed. `--confirm-start` confirms the concrete start of work, but it does not count as formal contract approval. `--revise-contract` deliberately stops for contract revision even when a usable contract exists.
+
 ## Handoff And Locks
 
 ```bash
@@ -211,6 +219,7 @@ Use phase locks for shared phase artifacts, not for normal story-scoped work. A 
 
 ```bash
 node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --summary "Unit tests passed" --evidence .sdlc/tests/ST-001-test-run.json --actor codex --actor-type agent
+node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type implementation --summary "Codex implemented a requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --authorized-by antonioantenore --authorized-by-type human --request-summary "Implement the requested feature"
 ```
 
 Valid trace types: `assumption`, `decision`, `gate`, `claim`, `handoff`, `implementation`, `lock`, `release`, `risk`, `sync`, `test`.
@@ -290,15 +299,18 @@ If a cached output resolution differs from canonical KB files, the CLI rejects i
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view business --out .sdlc/reports/activity.md
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view dev --json
 node bin/agentic-sdlc.mjs report activity --root <project> --since 12h --view agent-verbose --story ST-001
+node bin/agentic-sdlc.mjs approval requests --root <project> --story ST-001 --json
 node bin/agentic-sdlc.mjs report query --root <project> --text "dimmi tutte le modifiche fatte da me" --json
 node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical-report-query-json>' --json
 ```
 
 Activity reports reconstruct what happened from canonical trace files only. Business view focuses on decisions, validation, risk, handoffs, implementation, and release. Dev view includes evidence, branch/SHA, related IDs, and source lines. Agent-verbose view includes raw trace, git, and run metadata for audit.
 
+Use `approval requests` before continuing when a baseline, output template, contract clarification, contract approval, or canonical output link needs human agreement. The command is intentionally summary-first: agents should present the request list to the user and stop until the user approves, answers, or asks for changes.
+
 Use `report query` for broader natural-language history questions. Codex or another LLM should normalize the user request into `schemas/report-query.schema.json`; the CLI then filters canonical KB records deterministically. Supported subjects are `activity`, `stories`, `story_steps`, `outputs`, `contracts`, `handoffs`, `work_items`, `approvals`, `tests`, and `all`.
 
-Example normalized query for "tutte le modifiche fatte da me":
+Example normalized query for "tutte le modifiche eseguite da me":
 
 ```json
 {
@@ -307,6 +319,21 @@ Example normalized query for "tutte le modifiche fatte da me":
   "subjects": ["activity", "stories", "outputs", "contracts", "approvals"],
   "filters": {
     "actor": ["<current-user-id-or-email>"]
+  },
+  "sort": "created_at_desc"
+}
+```
+
+Example normalized query for "tutte le modifiche fatte da Codex su mia richiesta":
+
+```json
+{
+  "intent": "find_changes_requested_by_user",
+  "confidence": 0.95,
+  "subjects": ["activity"],
+  "filters": {
+    "executor": ["codex"],
+    "requester": ["<current-user-id-or-email>"]
   },
   "sort": "created_at_desc"
 }

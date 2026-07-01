@@ -664,6 +664,7 @@ test("capability profiles and recommendations can be approved and applied to con
   initProject(project);
   fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
   story(project, "ST-001");
+  createApprovedTemplate(project, "technical-analysis");
   mustRun([
     "capability",
     "profile",
@@ -723,6 +724,8 @@ test("capability profiles and recommendations can be approved and applied to con
     "contract-ST-001-analysis",
     "--context-summary",
     "Analyze with approved capability discovery.",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
     "--capability-recommendation",
     "CAP-REC-ST-001",
     "--json",
@@ -737,6 +740,7 @@ test("install-required capability recommendation blocks strict gate without inst
   const project = tmpProject("capability-install");
   initProject(project);
   story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
+  createApprovedTemplate(project, "technical-analysis");
   mustRun(["capability", "profile", "propose", "--root", project, "--id", "CAP-PROFILE-ST-001", "--story", "ST-001"]);
   mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   mustRun([
@@ -773,6 +777,8 @@ test("install-required capability recommendation blocks strict gate without inst
     "contract-ST-001-analysis",
     "--context-summary",
     "Analyze with missing install approval.",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
     "--capability-recommendation",
     "CAP-REC-INSTALL",
   ], /without install approval/);
@@ -790,6 +796,8 @@ test("install-required capability recommendation blocks strict gate without inst
     "contract-ST-001-analysis",
     "--context-summary",
     "Analyze with install-approved capability.",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
     "--capability-recommendation",
     "CAP-REC-INSTALL",
     "--force",
@@ -801,6 +809,26 @@ test("stale capability recommendation source fails strict gate", () => {
   initProject(project);
   story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
   const source = writeArtifact(project, ".sdlc/requirements/REQ-001.md", "# Requirement\n");
+  createApprovedTemplate(project, "technical-analysis");
+  const analysisArtifact = writeArtifact(project, ".sdlc/requirements/ST-001-technical-analysis.md", "# Technical Analysis\n");
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    analysisArtifact,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ]);
   mustRun([
     "capability",
     "profile",
@@ -830,6 +858,8 @@ test("stale capability recommendation source fails strict gate", () => {
     "contract-ST-001-analysis",
     "--context-summary",
     "Analyze with approved recommendation.",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
     "--capability-recommendation",
     "CAP-REC-ST-001",
     "--force",
@@ -1009,6 +1039,113 @@ test("route alias with raw text only asks for canonical normalization", () => {
   assert.equal(decision.status, "needs_normalization");
   assert.ok(decision.blocking_reasons.includes("needs_normalization"));
   assert.equal(decision.deterministic_checks.some((check) => check.check === "raw_text" && check.status === "ignored"), true);
+});
+
+test("task start is the SDLC front door before phase work", () => {
+  const rawProject = tmpProject("task-start-raw");
+  initProject(rawProject);
+  const raw = JSON.parse(mustRun(["task", "start", "--root", rawProject, "--json", "--text", "Implement ST-001"]).stdout);
+  assert.equal(raw.status, "needs_normalization");
+  assert.equal(raw.execution_allowed, false);
+  assert.ok(raw.blocking_reasons.includes("needs_normalization"));
+
+  const missingProject = tmpProject("task-start-missing-contract");
+  initProject(missingProject);
+  story(missingProject, "ST-001");
+  const missing = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    missingProject,
+    "--json",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+  ]).stdout);
+  assert.equal(missing.status, "needs_user_input");
+  assert.equal(missing.execution_allowed, false);
+  assert.equal(missing.contract_action, "create_or_revise_contract");
+  assert.ok(missing.blocking_reasons.includes("contract_negotiation_required"));
+  assert.ok(missing.questions.some((question) => question.includes("No approved implementation contract")));
+
+  const readyProject = tmpProject("task-start-ready");
+  initProject(readyProject);
+  story(readyProject, "ST-001", ["--contract", "contract-ST-001-implementation"]);
+  createApprovedTemplate(readyProject, "implementation-summary");
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    readyProject,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-implementation",
+    "--context-summary",
+    "Implement the approved story under the agreed contract.",
+    "--qa",
+    "Who confirms start?|Human user",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustRun(["contract", "approve", "--root", readyProject, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
+  const storyPath = path.join(readyProject, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
+
+  const intent = routeIntent({
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-001" }],
+    proposed_phase: "implementation",
+  });
+  const unconfirmed = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--intent-json",
+    intent,
+  ]).stdout);
+  assert.equal(unconfirmed.status, "needs_user_input");
+  assert.equal(unconfirmed.execution_allowed, false);
+  assert.equal(unconfirmed.contract_action, "confirm_start");
+  assert.ok(unconfirmed.blocking_reasons.includes("route_requires_confirmation"));
+  assert.equal(unconfirmed.contract.approved, true);
+
+  const confirmed = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--intent-json",
+    intent,
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(confirmed.status, "ready_to_execute");
+  assert.equal(confirmed.execution_allowed, true);
+  assert.equal(confirmed.contract_id, "contract-ST-001-implementation");
+
+  const revision = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--intent-json",
+    intent,
+    "--confirm-start",
+    "--revise-contract",
+  ]).stdout);
+  assert.equal(revision.status, "contract_revision_required");
+  assert.equal(revision.execution_allowed, false);
+  assert.equal(revision.contract_action, "revise_contract");
 });
 
 test("route decide rejects canonical intent files from derived cache directories", () => {
@@ -1273,6 +1410,244 @@ test("report query filters canonical records by actor and source", () => {
   fs.mkdirSync(path.dirname(queryPath), { recursive: true });
   fs.writeFileSync(queryPath, query);
   mustFail(["report", "query", "--root", project, "--query-file", ".sdlc/cache/report-query.json"], /derived artifacts/);
+});
+
+test("contract create asks before missing guidance or story output agreement", () => {
+  const project = tmpProject("contract-readiness");
+  initProject(project);
+  story(project, "ST-001");
+  createApprovedTemplate(project, "technical-analysis");
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+  ], /missing project-specific context/i);
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract",
+  ], /missing agreed story output format/i);
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract",
+    "--question",
+    "Which output detail level should be used?",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+  ], /open question/i);
+
+  const completeContract = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract",
+    "--qa",
+    "Which output detail level should be used?|Architecture-level detail",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--json",
+  ]).stdout).contract;
+  assert.equal(completeContract.output_contract_refs[0].template_id, "technical-analysis-v1");
+});
+
+test("contract create requires agreed output templates and approval requests summarize pending user input", () => {
+  const project = tmpProject("human-consent-gates");
+  initProject(project);
+  story(project, "ST-001");
+  mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "technical-analysis",
+    "--id",
+    "technical-analysis-v1",
+    "--summary",
+    "Technical analysis format",
+  ]);
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+  ], /output refs require approved output templates/i);
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract awaiting agreement",
+    "--allow-incomplete-contract",
+  ]);
+
+  const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
+  assert.equal(requests.status, "needs_user_input");
+  assert.ok(requests.requests.some((request) => request.type === "output_template_approval" && request.subject_id === "technical-analysis-v1"));
+  assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-001-analysis"));
+  assert.ok(requests.requests.some((request) => request.type === "contract_approval" && request.subject_id === "contract-ST-001-analysis"));
+  assert.ok(requests.requests.every((request) => request.suggested_question));
+
+  const gate = JSON.parse(mustRun([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
+});
+
+test("trace attribution separates executor requester and authorizer in report queries", () => {
+  const project = tmpProject("trace-authority-attribution");
+  initProject(project);
+  story(project, "ST-001");
+  const appended = JSON.parse(mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "implementation",
+    "--summary",
+    "Implemented Codex-executed requester attribution",
+    "--actor",
+    "codex",
+    "--actor-type",
+    "agent",
+    "--requested-by",
+    "antonio",
+    "--requested-by-type",
+    "human",
+    "--requested-by-name",
+    "Antonio Antenore",
+    "--authorized-by",
+    "antonio",
+    "--authorized-by-type",
+    "human",
+    "--request-summary",
+    "Add requested_by and authorized_by audit fields",
+    "--thread-id",
+    "THREAD-REQ-001",
+    "--json",
+  ]).stdout);
+  assert.equal(appended.event.actor.id, "codex");
+  assert.equal(appended.event.requested_by.id, "antonio");
+  assert.equal(appended.event.authorized_by.id, "antonio");
+  assert.equal(appended.event.request.summary, "Add requested_by and authorized_by audit fields");
+  assert.equal(appended.event.request.thread_id, "THREAD-REQ-001");
+
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "implementation",
+    "--summary",
+    "Implemented unrequested Codex task",
+    "--actor",
+    "codex",
+    "--actor-type",
+    "agent",
+  ]);
+
+  const requesterQuery = JSON.stringify({
+    intent: "find_changes_requested_by_user",
+    confidence: 0.96,
+    subjects: ["activity"],
+    filters: { requester: ["antonio"] },
+    sort: "created_at_desc",
+  });
+  const requesterReport = JSON.parse(mustRun(["report", "query", "--root", project, "--query-json", requesterQuery, "--json"]).stdout);
+  assert.equal(requesterReport.summary.result_count, 1);
+  assert.equal(requesterReport.results[0].summary, "Implemented Codex-executed requester attribution");
+  assert.equal(requesterReport.results[0].actor.id, "codex");
+  assert.equal(requesterReport.results[0].requested_by.id, "antonio");
+  assert.equal(requesterReport.summary.by_requester.antonio, 1);
+
+  const executorQuery = JSON.stringify({
+    intent: "find_changes_executed_by_agent",
+    confidence: 0.96,
+    subjects: ["activity"],
+    filters: { executor: ["codex"] },
+    sort: "created_at_desc",
+  });
+  const executorReport = JSON.parse(mustRun(["report", "query", "--root", project, "--query-json", executorQuery, "--json"]).stdout);
+  assert.equal(executorReport.summary.result_count, 2);
+
+  const authorizerQuery = JSON.stringify({
+    intent: "find_changes_authorized_by_user",
+    confidence: 0.96,
+    subjects: ["activity"],
+    filters: { authorizer: ["antonio"] },
+    sort: "created_at_desc",
+  });
+  const authorizerReport = JSON.parse(mustRun(["report", "query", "--root", project, "--query-json", authorizerQuery, "--json"]).stdout);
+  assert.equal(authorizerReport.summary.result_count, 1);
 });
 
 test("report query finds new functional stories from canonical story records", () => {

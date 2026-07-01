@@ -1,0 +1,55 @@
+{
+  "id": "TEST-0.4.6-task-front-door",
+  "summary": "Task front-door validation for Agentic SDLC 0.4.6.",
+  "status": "passed",
+  "created_at": "2026-07-01T13:12:49Z",
+  "story_id": "ST-TASK-FRONT-DOOR",
+  "scope": [
+    "task start command",
+    "canonical intent normalization guard",
+    "applicable contract discovery",
+    "contract missing/incomplete/unapproved/revision blocking",
+    "operational start confirmation",
+    "approval freshness hash derived-field exclusion"
+  ],
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "summary": "CLI syntax check passed."
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "49 tests passed."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help reports Agentic SDLC 0.4.6 and task start options."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "summary": "No whitespace errors."
+    },
+    {
+      "command": "node -e JSON.parse(...) for package, plugin manifest, project metadata, schemas",
+      "status": "passed",
+      "summary": "Core JSON files parse."
+    }
+  ],
+  "evidence": [
+    "bin/agentic-sdlc.mjs",
+    "test/cli.e2e.mjs",
+    "README.md",
+    "docs/agent-interactions.md",
+    "skills/agentic-sdlc/SKILL.md",
+    "skills/agentic-sdlc/references/commands.md"
+  ],
+  "notes": [
+    "task start does not classify natural language by keyword; Codex must pass canonical route intent JSON.",
+    "--confirm-start is operational authorization only and does not satisfy formal SDLC contract approval.",
+    "--revise-contract forces a stop for contract negotiation."
+  ]
+}
