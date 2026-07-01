@@ -51,6 +51,94 @@
       }
     },
     "actor": {
+      "$ref": "#/$defs/actor"
+    },
+    "requested_by": {
+      "$ref": "#/$defs/actor"
+    },
+    "authorized_by": {
+      "$ref": "#/$defs/actor"
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "action": {
+      "type": "string"
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "created_at": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "actor": {
       "oneOf": [
         {
           "type": "string"
@@ -93,41 +181,6 @@
           "additionalProperties": true
         }
       ]
-    },
-    "action": {
-      "type": "string"
-    },
-    "git": {
-      "type": "object",
-      "properties": {
-        "event": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "branch": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "head_sha": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "additionalProperties": true
-    },
-    "run": {
-      "type": "object",
-      "additionalProperties": true
-    },
-    "created_at": {
-      "type": "string"
     }
-  },
-  "additionalProperties": true
+  }
 }

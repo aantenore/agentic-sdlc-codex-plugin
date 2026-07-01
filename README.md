@@ -127,7 +127,7 @@ The CLI has no runtime dependencies beyond Node.js.
 node bin/agentic-sdlc.mjs init --project-name "My Product"
 node bin/agentic-sdlc.mjs onboard existing-project --project-name "Legacy Product" --document README.md
 node bin/agentic-sdlc.mjs baseline approve --id BASELINE-INITIAL --actor-type human --approval-source explicit-user --summary "Confirmed current baseline"
-node bin/agentic-sdlc.mjs contract create --phase discovery
+node bin/agentic-sdlc.mjs contract create --phase discovery --context-summary "Discover the validated product problem and user constraints"
 node bin/agentic-sdlc.mjs story create --id ST-001 --title "Implement a business workflow"
 node bin/agentic-sdlc.mjs work item create --type epic --id EP-001 --title "Business workflow"
 node bin/agentic-sdlc.mjs breakdown propose --id BD-REQ-001 --requirement REQ-001 --item story:ST-001
@@ -139,16 +139,19 @@ node bin/agentic-sdlc.mjs capability profile approve --id CAP-PROFILE-ST-001 --a
 node bin/agentic-sdlc.mjs capability recommend --id CAP-REC-ST-001 --profile CAP-PROFILE-ST-001 --available-capabilities-file .sdlc/decisions/available-capabilities.json
 node bin/agentic-sdlc.mjs capability approve --id CAP-REC-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability recommendation"
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
+node bin/agentic-sdlc.mjs approval requests --story ST-001
 node bin/agentic-sdlc.mjs story complete-step --id ST-001 --step functional-analysis --type functional-analysis --summary "Functional review complete"
 node bin/agentic-sdlc.mjs story prepare-handoff --id ST-001 --to-agent implementation-agent --release-claim --summary "Ready for implementation"
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
 node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "Approved output template"
 node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
+node bin/agentic-sdlc.mjs trace append --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "Add the requested workflow"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
 node bin/agentic-sdlc.mjs report activity --since 3d --view business --out .sdlc/reports/activity.md
 node bin/agentic-sdlc.mjs report query --text "dimmi tutte le modifiche fatte da me" --json
 node bin/agentic-sdlc.mjs report query --query-json '{"subjects":["stories"],"time":{"since":"10d","until":"now"},"filters":{"text":["functional"]}}'
+node bin/agentic-sdlc.mjs task start --intent-json '{"requested_action":"implement_story","confidence":0.95,"referenced_entities":[{"type":"story","id":"ST-001"}],"provided_artifacts":[],"missing_context":[],"proposed_phase":"implementation","artifact_type":null,"skip_phases":[]}'
 node bin/agentic-sdlc.mjs gate check --story ST-001 --out .sdlc/reports/ST-001-gate-report.json
 node bin/agentic-sdlc.mjs orchestrate status
 node bin/agentic-sdlc.mjs manifest rebuild
@@ -179,6 +182,29 @@ node bin/agentic-sdlc.mjs route decide --json --intent-json '{
 Raw text passed with `--text` is treated only as untrusted context. The CLI never keyword-matches natural language; low confidence, missing context, phase skips, new templates, duplicate outputs, and implementation starts are routed to confirmation or clarification.
 
 For technical analysis, the route layer also checks whether an approved capability profile exists. If it does not, the returned next commands point to `capability profile propose` before contract creation, so architecture decisions can use project-specific evidence and approved skill/MCP/tool choices.
+
+## Task Front Door
+
+Use `task start` before Codex executes work for a user request. It wraps route decision plus contract readiness and returns one of three operational outcomes:
+
+- `ready_to_execute`: the request has canonical intent, an applicable approved contract, no contract readiness gaps, and any required start confirmation was supplied with `--confirm-start`.
+- `needs_user_input`: Codex must ask the user to normalize intent, create/approve/clarify a contract, or confirm the concrete task start.
+- `contract_revision_required`: the user explicitly requested `--revise-contract`, or the selected contract does not match the phase.
+
+`--confirm-start` is operational authorization only. It does not approve a contract; formal approvals still require `contract approve --approval-source explicit-user` with user-confirmed summary or evidence.
+
+```bash
+node bin/agentic-sdlc.mjs task start --json --intent-json '{
+  "requested_action": "implement_story",
+  "confidence": 0.95,
+  "referenced_entities": [{"type": "story", "id": "ST-001"}],
+  "provided_artifacts": [],
+  "missing_context": [],
+  "proposed_phase": "implementation",
+  "artifact_type": null,
+  "skip_phases": []
+}'
+```
 
 ## Existing Project Onboarding
 
@@ -224,7 +250,9 @@ Recommended workflow:
 8. Run `gate check --story <id> --strict` before review or merge.
 9. Release claims and locks when work is done.
 
-Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts should include `--output-ref artifact-type:template-id:mode`; strict gates require those refs to be satisfied by output links.
+Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If there is no approved output template for that type, propose one and stop for user agreement before creating a contract that references it. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts must include `--output-ref artifact-type:template-id:mode` by default; `contract create` rejects missing story output refs and refs to draft or missing templates unless an explicit migration/clarification override is used. Strict gates require those refs to be satisfied by output links.
+
+Use `approval requests --story <id>` whenever a gate or route needs human input. It returns the pending baseline, output-template, contract clarification, contract approval, and output-link actions with a summary and suggested command. Agents should show this summary to the user and stop until the user approves, answers, or requests changes.
 
 Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth. `output resolve` verifies cached recommendations against canonical KB files and rejects tampered cache results.
 
@@ -255,6 +283,13 @@ node bin/agentic-sdlc.mjs report query --query-json '{
   "intent": "find_changes_by_actor",
   "subjects": ["activity", "stories", "outputs", "contracts", "approvals"],
   "filters": {"actor": ["antonio"]},
+  "sort": "created_at_desc"
+}'
+
+node bin/agentic-sdlc.mjs report query --query-json '{
+  "intent": "find_changes_requested_by_user",
+  "subjects": ["activity"],
+  "filters": {"requester": ["antonioantenore"]},
   "sort": "created_at_desc"
 }'
 
@@ -300,17 +335,19 @@ node bin/agentic-sdlc.mjs contract create \
   --context-file .sdlc/requirements/REQ-001.md \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
-  --question "Which external provider is authoritative for MVP?" \
+  --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
   --constraint "Provider-specific logic must stay behind an adapter"
 ```
 
 The resulting contract stores project identity, context source references, answered/open questions, assumptions, and constraints under `contextualization`.
+If a question is still open, ask the user before normal contract creation. `--allow-incomplete-contract` is only for explicit clarification, migration, or recovery drafts and must not be used to start phase work.
 
 Contracts also carry an `execution_policy`. By default, generated contracts tell spawned Codex agents to inherit the model and reasoning level from the main Codex thread. Override them only when a phase needs a different execution profile:
 
 ```bash
 node bin/agentic-sdlc.mjs contract create \
   --phase implementation \
+  --context-summary "Implement the approved story under the current architecture constraints." \
   --model codex-model-id \
   --reasoning high \
   --execution-note "Use higher reasoning for risky architecture changes"
@@ -342,6 +379,7 @@ node bin/agentic-sdlc.mjs contract create \
   --phase analysis \
   --story ST-001 \
   --context-summary "Technical analysis for the approved workflow." \
+  --output-ref technical-analysis:technical-analysis-v1:new \
   --capability-recommendation CAP-REC-ST-001
 ```
 

@@ -34,14 +34,16 @@ Never store project contracts or project KB state inside the plugin installation
 
    Treat `.sdlc/baseline/<id>.json` as proposed until the user explicitly confirms what is canonical.
 
-3. When the user's request could map to different SDLC actions, normalize it into canonical route intent JSON and run `route decide`. Do not keyword-match the user's language. If confidence is low or the JSON is incomplete, ask for confirmation or missing context before acting:
+3. When the user's request could map to different SDLC actions, normalize it into canonical route intent JSON and run `task start` before executing any phase work. Do not keyword-match the user's language. `task start` wraps route decision plus contract readiness: proceed only when it returns `ready_to_execute`. If it returns `needs_user_input`, `needs_normalization`, or `contract_revision_required`, ask the user and stop:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs route decide \
+   node <plugin-root>/bin/agentic-sdlc.mjs task start \
      --root <target-project> \
      --intent-json '<canonical-route-intent-json>' \
      --json
    ```
+
+   Use `--confirm-start` only after the user explicitly confirms the concrete task start. This is operational authorization, not formal SDLC approval.
 
 4. Select the SDLC phase: `discovery`, `analysis`, `design`, `implementation`, `validation`, or `release`.
 5. When a requirement needs decomposition, propose a work breakdown and dependency graph, then ask the user to approve or correct it before treating it as canonical:
@@ -51,7 +53,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs dependency propose --root <target-project> --id DEP-REQ-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
    ```
 
-6. Before creating a contract, gather project-specific context from `.sdlc/`, user-provided files, repository files, or direct user answers. If critical context is missing, ask concise questions instead of inventing details.
+6. Before creating a contract, gather project-specific context from `.sdlc/`, user-provided files, repository files, or direct user answers. If critical context, output format, acceptance criteria, or a phase-guiding decision is missing, ask concise questions and stop instead of inventing details or creating a vague contract. Use `--allow-incomplete-contract` only for explicit clarification, migration, or recovery drafts, never to start phase work.
 7. Before technical analysis or a contract that depends on project-specific tooling, profile the project/story and propose capability recommendations. Do not keyword-match the user's language. Use repo files, `.sdlc/`, user files, or canonical JSON normalized by Codex:
 
    ```bash
@@ -81,7 +83,15 @@ Never store project contracts or project KB state inside the plugin installation
    Formal SDLC approvals are not implied by a user asking the agent to implement or push. Before any `approve` command with `--actor-type human`, ask for explicit confirmation of the specific artifact and record it with `--approval-source explicit-user` plus `--summary` or `--approval-evidence`. Use `--approval-source bootstrap` only for migration/provisional records; bootstrap approvals do not satisfy strict gates by default.
 
 8. Decide the contract execution policy and capability policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model`, `--reasoning`, capability policies, capability bindings, or `--capability-recommendation` only when the user asks, the approved capability recommendation says so, or the project KB mandates them.
-9. Create or update a phase contract before doing phase work. Pass known context and approved capability recommendations into the contract:
+9. Before creating a phase/story contract that will produce a durable output, resolve the output type. If there is no approved output template for that step/type, propose the template, summarize it to the user, and stop. Do not create a contract that references a draft template and do not produce the phase output until the user agrees the format:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
+   node <plugin-root>/bin/agentic-sdlc.mjs output template propose --root <target-project> --type functional-analysis --summary "..."
+   node <plugin-root>/bin/agentic-sdlc.mjs approval requests --root <target-project> --story ST-001
+   ```
+
+10. Create or update a phase contract before doing phase work. Normal contract creation must include enough agreed context to guide the phase, zero unresolved open questions, and `--output-ref` for story contracts that produce durable outputs. Creating a draft contract is a proposal, not approval to proceed. After creating or finding an unapproved contract, summarize it to the user through `approval requests` and stop until the user explicitly approves or requests changes. Do not produce technical/functional analysis, implementation outputs, tests, or release evidence for that phase before the contract is approved:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs contract create \
@@ -92,9 +102,10 @@ Never store project contracts or project KB state inside the plugin installation
      --qa "Who is the target user?|Back-office operators" \
      --capability-recommendation CAP-REC-ST-001 \
      --output-ref functional-analysis:functional-analysis-v1:new
+   node <plugin-root>/bin/agentic-sdlc.mjs approval requests --root <target-project> --story ST-001
    ```
 
-10. Before creating a durable output artifact, resolve the project-wide output contract:
+11. Before creating a durable output artifact, resolve the project-wide output contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
@@ -107,7 +118,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "<user-approved template>"
    ```
 
-11. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
+12. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -120,28 +131,31 @@ Never store project contracts or project KB state inside the plugin installation
      --requirement REQ-001
    ```
 
-12. For implementation work or parallel worker work, inspect the current orchestration state before editing:
+13. For implementation work or parallel worker work, inspect the current orchestration state before editing:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs orchestrate status --root <target-project> --json
    ```
 
-13. Create and claim a story before editing code. Include actor/run/thread attribution when available:
+14. Create and claim a story before editing code. Include actor/run/thread attribution when available:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..."
    node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-14. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
+15. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
+   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "User-requested change"
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type test --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-15. When a phase lane is complete, record the step with hashed evidence. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
+   Keep `actor` as the executor. When an agent acts because a human or another system requested it, record `requested_by`; when execution was explicitly authorized, record `authorized_by`. This lets reports answer both "what did Codex execute?" and "what was done on Antonio's request?" without rewriting attribution.
+
+16. When a phase lane is complete, record the step with hashed evidence. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story complete-step \
@@ -152,7 +166,7 @@ Never store project contracts or project KB state inside the plugin installation
      --summary "Functional analysis accepted for implementation"
    ```
 
-16. Use `story prepare-handoff` when passing work between chats, machines, or phases. Use `--release-claim` only when the next agent should be able to claim the story after pulling the shared KB:
+17. Use `story prepare-handoff` when passing work between chats, machines, or phases. Use `--release-claim` only when the next agent should be able to claim the story after pulling the shared KB:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story prepare-handoff \
@@ -165,15 +179,15 @@ Never store project contracts or project KB state inside the plugin installation
 
    Close the handoff when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
 
-17. Run a strict gate check before closing a phase or merging implementation work:
+18. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
    ```
 
-18. Release claims and locks when work is complete or handed off.
+19. Release claims and locks when work is complete or handed off.
 
-19. Rebuild/search the local cache and KB index when context retrieval is needed. For large KBs, rebuild the shared manifest and use non-destructive trace compaction before relying on long raw trace history:
+20. Rebuild/search the local cache and KB index when context retrieval is needed. For large KBs, rebuild the shared manifest and use non-destructive trace compaction before relying on long raw trace history:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs manifest rebuild --root <target-project>
@@ -184,7 +198,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs kb search --root <target-project> "query"
    ```
 
-20. Use activity reports or report queries when the user asks what happened, who changed something, which stories were created, which outputs changed, or similar history questions. For raw natural language, normalize the request into canonical report query JSON first; do not keyword-match the user's language in the CLI. Reports must cite canonical source files and must not infer unstored history:
+21. Use activity reports or report queries when the user asks what happened, who changed something, which stories were created, which outputs changed, or similar history questions. For raw natural language, normalize the request into canonical report query JSON first; do not keyword-match the user's language in the CLI. Reports must cite canonical source files and must not infer unstored history:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs report activity --root <target-project> --since 3d --view business --out .sdlc/reports/activity.md

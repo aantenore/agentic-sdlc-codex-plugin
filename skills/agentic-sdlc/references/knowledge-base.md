@@ -86,7 +86,9 @@ Before producing a durable output, inspect `.sdlc/output-contracts/registry.json
 
 - Use an approved template for the artifact type.
 - Prefer reuse plus delta when another story already covers the same requirement.
-- Ask the user before proposing a new template, changing structure, or creating a duplicate new artifact.
+- Ask the user before approving a new template, changing structure, or creating a duplicate new artifact.
+- If no approved template exists for the step/type, propose the template and stop; do not create a contract that references the draft template and do not produce the phase output.
+- If a story has no approved contract, create or update the draft contract and stop for user agreement before producing phase work.
 - Link the final artifact with `output link` so future agents can discover it.
 
 ## Cache Policy
@@ -115,7 +117,10 @@ Use `manifest rebuild` for a compact shared map of stories, contracts, outputs, 
 
 Claims, traces, handoffs, approvals, locks, and sync events should record:
 
-- actor id and type;
+- actor id and type for the executor;
+- `requested_by` when an action was requested by a different human, agent, CI actor, or system;
+- `authorized_by` when execution was explicitly authorized by a different human or CI actor;
+- request metadata such as summary, thread, run, session, or external request id when available;
 - Codex thread/run/session when available;
 - Git branch and head SHA;
 - event timestamp;
