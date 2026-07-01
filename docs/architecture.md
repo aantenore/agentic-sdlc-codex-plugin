@@ -63,6 +63,8 @@ The project knowledge base is dynamic and shared. It is created inside the targe
 
 The source of truth is text and JSON. Cache and search indexes are derived artifacts that can be rebuilt. Reports are durable evidence when they support a review, gate, or release decision.
 
+During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
+
 ## Contract Model
 
 Every SDLC phase is governed by a contract. A contract defines:
@@ -79,6 +81,8 @@ Every SDLC phase is governed by a contract. A contract defines:
 - operational metrics.
 
 This keeps agent work bounded and reviewable.
+
+Story-specific contracts can also declare `output_contract_refs`. In strict mode, each declared output ref must be satisfied by a linked artifact in `.sdlc/output-contracts/registry.json`. Contract approvals store a stable hash of the approved contract content; changing the contract after approval requires a new approval.
 
 ```mermaid
 flowchart LR
@@ -109,6 +113,8 @@ Phase and story contracts define what work must happen. Output contracts define 
 
 Before creating a functional analysis, technical analysis, test plan, or similar artifact, an agent resolves the output type for the story. If a related story already covers the same requirement, the default recommendation is `reuse_delta`: reuse the approved base artifact and create only a targeted delta. A new template or incompatible output structure requires explicit user approval before it becomes canonical.
 
+Template approvals store the approved template hash. Output links store fingerprints for the artifact, base artifact, and template. Override decisions are bound to a specific link subject, so the same decision id cannot be reused for a different duplicate output. Registry mutations are serialized with a local lock file to avoid lost updates when multiple chats work in one workspace.
+
 ```mermaid
 flowchart TB
   Story["Story"] --> Requirements["Linked requirements"]
@@ -129,7 +135,7 @@ flowchart TB
 
 `.sdlc/cache/` contains regenerable lookup data such as full-text entries, story-requirement graphs, artifact fingerprints, template resolution, compact KB summaries, dependency graphs, and output resolution results.
 
-Cache entries carry `source_paths`, `source_hashes`, `generated_at`, and `schema_version`. A hash mismatch marks the cache stale. Stale or missing cache is a warning because the CLI can fall back to canonical KB files. A canonical artifact under `.sdlc/cache/` or `.sdlc/indexes/` is a strict gate error because derived files cannot become source of truth.
+Cache entries carry `source_paths`, `source_hashes`, `generated_at`, and `schema_version`. A hash mismatch marks the cache stale. Stale or missing cache is a warning because the CLI can fall back to canonical KB files. A canonical artifact under `.sdlc/cache/` or `.sdlc/indexes/` is a strict gate error because derived files cannot become source of truth. Cached output resolutions are compared with canonical KB resolution before use; if they differ, the CLI asks for `cache rebuild` instead of trusting the cache.
 
 ```mermaid
 flowchart LR
@@ -162,7 +168,7 @@ For phase-by-phase examples, see [Agent Interactions](agent-interactions.md).
 
 ## Gate Model
 
-Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, unapproved output templates, unjustified duplicate outputs, stale cache warnings, and release evidence gaps.
+Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, invalid statuses or expiry dates, unapproved or changed output templates, unjustified duplicate outputs, stale cache warnings, and test/release evidence gaps. Use `gate check --out <path>` to persist JSON or Markdown reports under `.sdlc/reports/`.
 
 ```mermaid
 flowchart TB

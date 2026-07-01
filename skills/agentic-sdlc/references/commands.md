@@ -34,7 +34,8 @@ node bin/agentic-sdlc.mjs contract create \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
   --question "Which external provider is authoritative for MVP?" \
-  --constraint "Provider-specific logic must stay behind an adapter"
+  --constraint "Provider-specific logic must stay behind an adapter" \
+  --output-ref functional-analysis:functional-analysis-v1:new
 ```
 
 By default, the contract execution policy inherits the main Codex thread model and reasoning level. Override them only when needed:
@@ -58,7 +59,7 @@ node bin/agentic-sdlc.mjs story claim --root <project> --id ST-001 --agent codex
 node bin/agentic-sdlc.mjs story release --root <project> --id ST-001 --agent codex --reason "Work handed off"
 ```
 
-One story should have one active claim. Release the claim before another chat claims the same story, or use `--force` only after human coordination.
+One story should have one active claim. Release the claim before another chat claims the same story, or use `--force` only after human coordination. The CLI serializes local claim changes and strict gates enforce the configured branch pattern.
 
 ## Orchestrate Parallel Work
 
@@ -73,16 +74,17 @@ Use `status` before opening another Codex chat. Use `plan` to find available sto
 
 ```bash
 node bin/agentic-sdlc.mjs story handoff --root <project> --id ST-001 --to-agent implementation-agent --artifact .sdlc/requirements/functional-analysis.md
+node bin/agentic-sdlc.mjs story handoff close --root <project> --id HND-ST-001-20260701123000 --status closed
 node bin/agentic-sdlc.mjs phase lock --root <project> --phase analysis --reason "Updating shared analysis artifact"
 node bin/agentic-sdlc.mjs phase release --root <project> --id LOCK-analysis-20260701123000 --reason "Shared artifact stable"
 ```
 
-Use phase locks for shared phase artifacts, not for normal story-scoped work.
+Use phase locks for shared phase artifacts, not for normal story-scoped work. A second active lock for the same phase/scope is rejected unless `--force` is used after coordination.
 
 ## Append Trace
 
 ```bash
-node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --summary "Unit tests passed" --actor codex --actor-type agent
+node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --summary "Unit tests passed" --evidence .sdlc/tests/ST-001-test-run.json --actor codex --actor-type agent
 ```
 
 Valid trace types: `assumption`, `decision`, `gate`, `claim`, `handoff`, `implementation`, `lock`, `release`, `risk`, `sync`, `test`.
@@ -96,10 +98,10 @@ node bin/agentic-sdlc.mjs sync record --root <project> --story ST-001 --event pu
 ## Gate Check
 
 ```bash
-node bin/agentic-sdlc.mjs gate check --root <project> --story ST-001 --strict
+node bin/agentic-sdlc.mjs gate check --root <project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
 ```
 
-With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Returns non-zero when blocking errors are found.
+With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Returns non-zero when blocking errors are found. Use `--out` to persist JSON or Markdown gate evidence.
 
 ## Output Consistency
 
@@ -118,7 +120,7 @@ node bin/agentic-sdlc.mjs output link \
 node bin/agentic-sdlc.mjs output status --root <project> --story ST-001
 ```
 
-`output resolve` checks the approved template registry and related story links. If another story already covers the same requirement, the expected result is reuse plus delta. `output link` records the final user-agreed artifact, approved template, and mode. Strict gates fail when linked outputs use unapproved templates, create unjustified duplicates, or point to cache/index files.
+`output resolve` checks the approved template registry and related story links. If another story already covers the same requirement, the expected result is reuse plus delta. `output link` records the final user-agreed artifact, approved template, mode, requirements, and content fingerprints. Strict gates fail when linked outputs use unapproved or changed templates, create unjustified duplicates, omit requirements, point to cache/index files, or drift after linking.
 
 When a duplicate new output or structure override is intentionally approved, run `output link` with `--decision-id` and `--rationale` as a human or CI actor. The CLI records the approved decision in the registry:
 
@@ -147,3 +149,4 @@ node bin/agentic-sdlc.mjs kb search --root <project> "business workflow"
 ```
 
 Cache and indexes are local derived artifacts. They can accelerate context retrieval and output resolution, but canonical requirements, approvals, decisions, tests, traces, and outputs must stay in source-of-truth `.sdlc/` folders.
+If a cached output resolution differs from canonical KB files, the CLI rejects it and asks for `cache rebuild`.

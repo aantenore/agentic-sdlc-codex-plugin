@@ -458,7 +458,7 @@ node bin/agentic-sdlc.mjs cache rebuild --root <target-project>
 node bin/agentic-sdlc.mjs cache status --root <target-project>
 ```
 
-The cache may contain full-text lookup entries, story-requirement graphs, artifact fingerprints, template resolution, compact summaries, dependency graphs, and previous `output resolve` results. Each cache build records source hashes so a changed requirement, story, output registry, or trace makes the cache stale. Stale cache is a warning; using cache or index files as canonical output evidence is a strict gate error.
+The cache may contain full-text lookup entries, story-requirement graphs, artifact fingerprints, template resolution, compact summaries, dependency graphs, and previous `output resolve` results. Each cache build records source hashes so a changed requirement, story, output registry, or trace makes the cache stale. Stale cache is a warning; using cache or index files as canonical output evidence is a strict gate error. Cached output resolution is verified against canonical KB files before use, so a cache entry cannot override the registry or story files by itself.
 
 ## `indexes/`
 
@@ -478,7 +478,7 @@ node bin/agentic-sdlc.mjs index rebuild --root <target-project>
 
 ## `reports/`
 
-Gate, audit, or quality reports. Reports are durable review evidence and should be committed when they support a gate or release decision. Temporary report scratch files can use `.tmp` and stay ignored.
+Gate, audit, or quality reports. Reports are durable review evidence and should be committed when they support a gate or release decision. Generate gate reports with `gate check --out .sdlc/reports/<name>.json` or `.md`. Temporary report scratch files can use `.tmp` and stay ignored.
 
 ## Merge Strategy
 

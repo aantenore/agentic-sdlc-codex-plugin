@@ -83,7 +83,7 @@ node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --
 node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
-node bin/agentic-sdlc.mjs gate check --story ST-001
+node bin/agentic-sdlc.mjs gate check --story ST-001 --out .sdlc/reports/ST-001-gate-report.json
 node bin/agentic-sdlc.mjs orchestrate status
 node bin/agentic-sdlc.mjs cache rebuild
 node bin/agentic-sdlc.mjs index rebuild
@@ -99,14 +99,14 @@ Recommended workflow:
 1. Run `orchestrate status` or `orchestrate plan` to see available lanes.
 2. Claim one story per worker chat with `story claim`.
 3. Work on the claimed branch and append decisions/evidence through `trace append`.
-4. Use `story handoff` when passing work from analysis to implementation or validation.
+4. Use `story handoff` when passing work from analysis to implementation or validation, then `story handoff close` when the receiving lane accepts it.
 5. Use `sync record --event push` after pushing or merging so other chats know what changed.
 6. Run `gate check --story <id> --strict` before review or merge.
 7. Release claims and locks when work is done.
 
-Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision.
+Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts should include `--output-ref artifact-type:template-id:mode`; strict gates require those refs to be satisfied by output links.
 
-Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth.
+Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth. `output resolve` verifies cached recommendations against canonical KB files and rejects tampered cache results.
 
 ## Parallel Orchestration
 
@@ -126,6 +126,8 @@ For shared phase artifacts, use phase locks:
 node bin/agentic-sdlc.mjs phase lock --phase analysis --reason "Updating shared functional analysis"
 node bin/agentic-sdlc.mjs phase release --id LOCK-analysis-20260701123000 --reason "Analysis artifact handed off"
 ```
+
+The CLI rejects a second active lock for the same phase/scope and uses local lock files to serialize claim, phase-lock, and output-registry mutations inside one workspace.
 
 ## Contextual Contract Generation
 

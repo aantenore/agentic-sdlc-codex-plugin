@@ -33,7 +33,8 @@ Never store project contracts or project KB state inside the plugin installation
      --phase <phase> \
      --context-file .sdlc/requirements/REQ-001.md \
      --context-summary "Project-specific summary" \
-     --qa "Who is the target user?|Back-office operators"
+     --qa "Who is the target user?|Back-office operators" \
+     --output-ref functional-analysis:functional-analysis-v1:new
    ```
 
 7. Before creating a durable output artifact, resolve the project-wide output contract:
@@ -49,7 +50,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human
    ```
 
-8. Link every durable output back to story, requirement, approved template, and mode:
+8. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -75,19 +76,20 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-11. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, and release evidence as traces:
+11. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
+   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type test --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-12. Use `story handoff` when passing work between chats or phases. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+12. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
 
 13. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict
+   node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
    ```
 
 14. Release claims and locks when work is complete or handed off.
