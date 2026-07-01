@@ -2,6 +2,10 @@
   "id": "contract-<phase>-v1",
   "schema_version": "0.1.0",
   "sdlc_version": "0.1.0",
+  "project": {
+    "project_id": "<project-id>",
+    "project_name": "<project-name>"
+  },
   "phase": "<discovery|analysis|design|implementation|validation|release>",
   "story_id": null,
   "status": "draft",
@@ -29,6 +33,31 @@
   "metrics": [
     "phase_specific_metric"
   ],
+  "contextualization": {
+    "summary": "Project-specific context used to build this contract.",
+    "context_sources": [
+      {
+        "path": ".sdlc/requirements/REQ-001.md",
+        "sha256": "<content-hash>",
+        "size_bytes": 0,
+        "excerpt": "Short source excerpt."
+      }
+    ],
+    "questions": [
+      {
+        "question": "What must be clarified before executing this phase?",
+        "answer": null,
+        "status": "open"
+      }
+    ],
+    "constraints": [
+      "Project-specific constraint"
+    ],
+    "assumptions": [
+      "Project-specific assumption"
+    ],
+    "open_questions": 1
+  },
   "approvals": [],
   "created_at": "<iso-8601>",
   "updated_at": "<iso-8601>"

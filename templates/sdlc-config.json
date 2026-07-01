@@ -29,6 +29,34 @@
     "validation",
     "release"
   ],
+  "contract_generation": {
+    "principle": "Contract templates are generic. Generated contracts must be contextualized for the target project by inspecting project KB artifacts, reading user-provided files, and asking questions when critical context is missing.",
+    "context_sources": [
+      ".sdlc/project.json",
+      ".sdlc/requirements/",
+      ".sdlc/stories/",
+      ".sdlc/decisions/",
+      ".sdlc/risks/",
+      "user-provided files"
+    ],
+    "ask_when_missing": [
+      "project objective",
+      "target users or stakeholders",
+      "constraints and non-functional requirements",
+      "phase-specific inputs",
+      "acceptance criteria",
+      "required integrations",
+      "approval boundaries"
+    ],
+    "required_contract_context": [
+      "project",
+      "contextualization.summary",
+      "contextualization.context_sources",
+      "contextualization.questions",
+      "contextualization.constraints",
+      "contextualization.assumptions"
+    ]
+  },
   "phases": {
     "discovery": {
       "purpose": "Understand the problem, target users, market context, constraints, and value hypothesis before solution design.",
@@ -288,6 +316,7 @@
   "gate_policy": {
     "contract_required_fields": [
       "id",
+      "project",
       "phase",
       "purpose",
       "owner_agent",
@@ -296,7 +325,8 @@
       "validation",
       "allowed_tools",
       "kb_writes",
-      "human_gate"
+      "human_gate",
+      "contextualization"
     ],
     "story_required_fields": [
       "id",

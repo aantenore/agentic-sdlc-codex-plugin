@@ -2,6 +2,8 @@
 
 Agentic SDLC uses a Git-first project knowledge base. The plugin is stateless; the KB is created inside each target project.
 
+The sample records below use TravelOps as an example product. The structure is generic and should be reused for any project.
+
 ```text
 <target-project>/
   .sdlc/
@@ -38,8 +40,8 @@ Example:
 
 ```json
 {
-  "project_id": "example-product",
-  "project_name": "Example Product",
+  "project_id": "travelops",
+  "project_name": "TravelOps",
   "schema_version": "0.1.0",
   "sdlc_version": "0.1.0",
   "knowledge_base": {
@@ -66,6 +68,44 @@ Examples:
 ```
 
 Contracts are generated from `templates/sdlc-config.json` and follow the shape documented in `templates/contract-template.json`.
+
+Every generated contract is bound to the current project and records contextualization data:
+
+```json
+{
+  "id": "contract-ST-001-analysis",
+  "project": {
+    "project_id": "travelops",
+    "project_name": "TravelOps"
+  },
+  "phase": "analysis",
+  "contextualization": {
+    "summary": "Analyze the TravelOps MVP around disruption-aware travel replanning.",
+    "context_sources": [
+      {
+        "path": ".sdlc/requirements/REQ-001.md",
+        "sha256": "content-hash",
+        "size_bytes": 1200,
+        "excerpt": "Problem statement and constraints..."
+      }
+    ],
+    "questions": [
+      {
+        "question": "Which weather provider is authoritative for MVP?",
+        "answer": null,
+        "status": "open"
+      }
+    ],
+    "constraints": [
+      "Provider-specific logic must stay behind an adapter"
+    ],
+    "assumptions": [
+      "Weather provider sandbox access is available"
+    ],
+    "open_questions": 1
+  }
+}
+```
 
 ## `requirements/`
 
@@ -101,12 +141,12 @@ Example:
 ```json
 {
   "id": "ST-001",
-  "title": "Let users manage notification preferences",
+  "title": "Replan a trekking activity when rain is forecast",
   "status": "draft",
   "phase": "implementation",
   "contract_id": "contract-ST-001-implementation",
   "acceptance_criteria": [
-    "Given a user disables email notifications, the system does not send non-critical email updates."
+    "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
   ]
 }
 ```
@@ -130,13 +170,13 @@ Recommended naming:
 
 ```text
 .sdlc/decisions/ADR-0001-problem-framing.md
-.sdlc/decisions/ADR-0002-notification-channel-strategy.md
+.sdlc/decisions/ADR-0002-weather-provider-strategy.md
 ```
 
 Recommended content:
 
 ```text
-# ADR-0002 Notification Channel Strategy
+# ADR-0002 Weather Provider Strategy
 
 Status: Accepted
 Context: ...
@@ -153,8 +193,8 @@ Explicit assumptions that need validation or later review.
 Examples:
 
 ```text
-.sdlc/assumptions/ASM-001-provider-retry-policy.md
-.sdlc/assumptions/ASM-002-user-consent-state.md
+.sdlc/assumptions/ASM-001-weather-refresh-rate.md
+.sdlc/assumptions/ASM-002-user-location-permission.md
 ```
 
 ## `risks/`
@@ -164,8 +204,8 @@ Delivery, product, technical, operational, or compliance risks.
 Examples:
 
 ```text
-.sdlc/risks/RISK-001-provider-cost.md
-.sdlc/risks/RISK-002-email-provider-availability.md
+.sdlc/risks/RISK-001-map-api-cost.md
+.sdlc/risks/RISK-002-weather-api-availability.md
 ```
 
 ## `tests/`
@@ -199,7 +239,7 @@ Example event:
   "id": "TR-20260701084828-7514f5",
   "story_id": "ST-001",
   "type": "decision",
-  "summary": "Use a provider adapter for notification delivery",
+  "summary": "Use weather events as replanning triggers",
   "actor": "codex",
   "evidence": [],
   "related": ["ADR-0002", "REQ-003"],

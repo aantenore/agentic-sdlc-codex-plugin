@@ -6,6 +6,7 @@
   "required": [
     "id",
     "schema_version",
+    "project",
     "phase",
     "purpose",
     "owner_agent",
@@ -14,7 +15,8 @@
     "validation",
     "allowed_tools",
     "kb_writes",
-    "human_gate"
+    "human_gate",
+    "contextualization"
   ],
   "properties": {
     "id": {
@@ -22,6 +24,21 @@
     },
     "schema_version": {
       "type": "string"
+    },
+    "project": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "project_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
     },
     "phase": {
       "enum": [
@@ -71,6 +88,33 @@
     },
     "human_gate": {
       "type": "boolean"
+    },
+    "contextualization": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_sources": {
+          "type": "array"
+        },
+        "questions": {
+          "type": "array"
+        },
+        "constraints": {
+          "type": "array"
+        },
+        "assumptions": {
+          "type": "array"
+        },
+        "open_questions": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true
