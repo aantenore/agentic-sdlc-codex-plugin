@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/output-contract-registry.schema.json",
+  "title": "Agentic SDLC Output Contract Registry",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "policy",
+    "templates",
+    "links",
+    "decisions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string"
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "$ref": "output-template.schema.json"
+      }
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "$ref": "output-link.schema.json"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audit": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

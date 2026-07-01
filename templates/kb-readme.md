@@ -9,24 +9,48 @@ It is intentionally stored in the project repository so people and agents can co
 - Keep durable knowledge in `.sdlc/`, not only in chat history.
 - Work in story-scoped folders when possible.
 - Append trace events instead of rewriting history.
+- Record actor, run, thread, branch, and head SHA metadata on claims, traces, handoffs, approvals, locks, and sync events.
+- Run `agentic-sdlc orchestrate status` before starting work in another chat.
+- Run `agentic-sdlc sync record --event push` after pushing a branch.
+- Release story claims and phase locks when work is done or handed off.
 - Link requirements, stories, decisions, tests, and release evidence.
+- Resolve story outputs through `.sdlc/output-contracts/registry.json` before generating new durable artifacts.
+- Reuse approved artifacts and create only deltas when related stories cover the same requirement.
+- Ask for user approval before introducing a new output template or changing an approved output structure.
 - Run `agentic-sdlc gate check` before merging implementation work.
-- Rebuild indexes when search quality matters; indexes are derived artifacts.
+- Rebuild cache and indexes when retrieval speed matters; cache and indexes are derived artifacts, not sources of truth.
 
 ## Directory Map
 
 ```text
 contracts/      Phase contracts and story-specific contracts
+output-contracts/ Approved output templates, artifact links, and structure decisions
 requirements/   Product requirements and constraints
 stories/        Story workspaces, claims, plans, and evidence
+orchestration/  Parent-chat orchestration snapshots
+locks/          Phase and shared-artifact locks
+handoffs/       Story handoff records between agents and chats
 decisions/      Architecture and product decision records
 assumptions/    Explicit assumptions and their review status
 risks/          Delivery, technical, product, and operational risks
 tests/          Test plans, test evidence, and coverage notes
 traces/         Append-only event logs
 releases/       Release notes, rollout evidence, feedback loops
+cache/          Local regenerable lookup cache
 indexes/        Regenerable search indexes
 reports/        Generated gate and audit reports
+```
+
+```mermaid
+flowchart TB
+  Contract["Contract"] --> Agent["Agent work"]
+  OutputRegistry["Output registry"] --> Agent
+  Agent --> Artifact["Canonical artifact"]
+  Agent --> Trace["Trace evidence"]
+  Artifact --> Gate["gate check"]
+  Trace --> Gate
+  Artifact --> Cache["cache and indexes"]
+  Cache -.-> Agent
 ```
 
 ## Human Governance

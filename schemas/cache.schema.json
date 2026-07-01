@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/cache.schema.json",
+  "title": "Agentic SDLC Local Cache",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "source_paths",
+    "source_hashes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "root": {
+      "type": "string"
+    },
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "full_text_index": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source_paths",
+          "source_hashes",
+          "generated_at",
+          "schema_version"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "story_requirement_graph": {
+      "type": "array"
+    },
+    "artifact_fingerprints": {
+      "type": "array"
+    },
+    "template_resolution": {
+      "type": "object"
+    },
+    "kb_summaries": {
+      "type": "array"
+    },
+    "dependency_graph": {
+      "type": "object"
+    },
+    "output_resolutions": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

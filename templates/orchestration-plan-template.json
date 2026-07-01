@@ -1,0 +1,14 @@
+{
+  "checked_at": "<iso-8601>",
+  "summary": {
+    "total": 0,
+    "available": 0,
+    "claimed": 0,
+    "blocked": 0,
+    "stale": 0,
+    "active_locks": 0
+  },
+  "stories": [],
+  "locks": [],
+  "handoffs": []
+}

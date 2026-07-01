@@ -17,6 +17,13 @@
   "outputs": [
     "Required output artifact"
   ],
+  "output_contract_refs": [
+    {
+      "artifact_type": "functional-analysis",
+      "template_id": "<approved-template-id>",
+      "mode": "reuse|delta|new"
+    }
+  ],
   "validation": [
     "Observable validation criterion"
   ],
@@ -72,5 +79,41 @@
   },
   "approvals": [],
   "created_at": "<iso-8601>",
-  "updated_at": "<iso-8601>"
+  "updated_at": "<iso-8601>",
+  "audit": {
+    "created_by": {
+      "id": "<human-or-agent-id>",
+      "type": "human",
+      "name": "<display-name>",
+      "email": "<email-or-null>",
+      "source": "cli"
+    },
+    "updated_by": {
+      "id": "<human-or-agent-id>",
+      "type": "human",
+      "name": "<display-name>",
+      "email": "<email-or-null>",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "<branch>",
+      "head_sha": "<sha>",
+      "is_dirty": false,
+      "user": {
+        "name": "<git-user-name>",
+        "email": "<git-user-email>"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": "<run-id-or-null>",
+      "thread_id": "<codex-thread-id-or-null>",
+      "session_id": "<session-id-or-null>",
+      "tool": "agentic-sdlc-cli",
+      "version": "0.1.0"
+    }
+  }
 }

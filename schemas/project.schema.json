@@ -24,7 +24,67 @@
       "type": "string"
     },
     "knowledge_base": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "storage": {
+          "type": "string"
+        },
+        "canonical_path": {
+          "type": "string"
+        },
+        "stateless_plugin": {
+          "type": "boolean"
+        },
+        "concurrency_model": {
+          "type": "string"
+        },
+        "source_of_truth": {
+          "type": [
+            "string",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "derived_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output_contracts_registry": {
+          "type": "string",
+          "default": ".sdlc/output-contracts/registry.json"
+        },
+        "cache_policy_path": {
+          "type": "string",
+          "default": ".sdlc/cache/kb-cache.json"
+        }
+      },
+      "additionalProperties": true
+    },
+    "audit": {
+      "type": "object",
+      "properties": {
+        "created_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "updated_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

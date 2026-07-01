@@ -9,9 +9,23 @@ Define the concrete outcome for this story.
 - In scope:
 - Out of scope:
 
+## Assignment
+
+- Claim:
+- Agent or owner:
+- Branch:
+- Dependencies:
+
 ## Implementation Approach
 
 Describe the intended implementation path before making changes.
+
+## Sync And Handoff
+
+- Sync events to record:
+- Handoff target:
+- Handoff artifacts:
+- Open items:
 
 ## Validation
 

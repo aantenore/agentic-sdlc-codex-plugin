@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1.0",
+  "generated_at": "<iso-8601>",
+  "root": "<project-root>",
+  "source_paths": [],
+  "source_hashes": {},
+  "full_text_index": [],
+  "story_requirement_graph": [],
+  "artifact_fingerprints": [],
+  "template_resolution": {},
+  "kb_summaries": [],
+  "dependency_graph": {
+    "nodes": [],
+    "edges": []
+  },
+  "output_resolutions": {}
+}
