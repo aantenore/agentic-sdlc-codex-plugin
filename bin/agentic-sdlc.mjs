@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.8";
+const VERSION = "0.4.9";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -900,6 +900,7 @@ function dedupeTaskStartDecision(decision) {
   decision.questions = Array.from(new Set(decision.questions));
   decision.next_commands = Array.from(new Set(decision.next_commands));
   decision.assistant_message = renderTaskStartAssistantMessage(decision);
+  attachAssistantMessagePresentation(decision);
   return decision;
 }
 
@@ -2414,6 +2415,7 @@ function showApprovalRequests(context, options) {
       status: requests.length ? "needs_user_input" : "clear",
       generated_at: now(),
       assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
       requests,
       source_paths: Array.from(new Set(requests.flatMap((request) => request.sources || []))).sort(),
     },
@@ -2449,6 +2451,34 @@ function renderApprovalRequestsAssistantMessage(requests) {
     '- "change the contract: I also want X"',
     '- "I do not approve yet; first clarify Y"',
   ].join("\n");
+}
+
+function assistantMessagePresentationFields() {
+  return {
+    assistant_message_source_language: "en",
+    assistant_message_presentation: {
+      translate_to_chat_language: true,
+      contextualize_for_user: true,
+      presenter: "codex",
+      preserve_literals: [
+        "artifact IDs",
+        "story IDs",
+        "contract IDs",
+        "template IDs",
+        "file paths",
+        "CLI commands",
+        "status codes",
+        "schema keys",
+      ],
+      instruction:
+        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly.",
+    },
+  };
+}
+
+function attachAssistantMessagePresentation(payload) {
+  Object.assign(payload, assistantMessagePresentationFields());
+  return payload;
 }
 
 function collectBaselineApprovalRequests(context) {
@@ -8493,6 +8523,7 @@ function gateCheck(context, options) {
     storyId: scope === "story" ? storyId : null,
   });
   report.assistant_message = renderApprovalRequestsAssistantMessage(report.approval_requests);
+  attachAssistantMessagePresentation(report);
 
   if (report.errors.length > 0) {
     report.status = "failed";
@@ -8506,6 +8537,8 @@ function gateCheck(context, options) {
     options,
     report,
     [
+      report.assistant_message || null,
+      "",
       `Gate ${report.status}`,
       `Checked: ${report.checked.length}`,
       `Errors: ${report.errors.length}`,
@@ -8514,7 +8547,7 @@ function gateCheck(context, options) {
       ...report.errors.map((item) => `ERROR ${item}`),
       ...report.warnings.map((item) => `WARN ${item}`),
       ...report.approval_requests.flatMap((item, index) => formatHumanApprovalRequest(item, index + 1).map((line) => `ASK ${line}`)),
-    ],
+    ].filter((line) => line !== null && line !== undefined),
   );
 }
 

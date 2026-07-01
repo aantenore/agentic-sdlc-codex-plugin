@@ -1102,6 +1102,9 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(missing.contract_action, "create_or_revise_contract");
   assert.ok(missing.blocking_reasons.includes("contract_negotiation_required"));
   assert.ok(missing.questions.some((question) => question.includes("No approved implementation contract")));
+  assert.equal(missing.assistant_message_source_language, "en");
+  assert.equal(missing.assistant_message_presentation.translate_to_chat_language, true);
+  assert.match(missing.assistant_message_presentation.instruction, /active chat language/);
 
   const readyProject = tmpProject("task-start-ready");
   initProject(readyProject);
@@ -1775,6 +1778,11 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(requests.requests.every((request) => Array.isArray(request.review_items) && request.review_items.length > 0));
   assert.ok(requests.requests.some((request) => request.type === "contract_approval" && /Context:/.test(request.review_items.join(" "))));
 
+  assert.equal(requests.assistant_message_source_language, "en");
+  assert.equal(requests.assistant_message_presentation.translate_to_chat_language, true);
+  assert.equal(requests.assistant_message_presentation.presenter, "codex");
+  assert.ok(requests.assistant_message_presentation.preserve_literals.includes("CLI commands"));
+
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
   assert.match(plainRequests, /I am stopping here/);
   assert.match(plainRequests, /What to review/);
@@ -1791,6 +1799,8 @@ test("contract create requires agreed output templates and approval requests sum
     "--json",
   ]).stdout);
   assert.match(gate.assistant_message, /You do not need to know SDLC internals/);
+  assert.equal(gate.assistant_message_source_language, "en");
+  assert.equal(gate.assistant_message_presentation.translate_to_chat_language, true);
   assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
 });
 
