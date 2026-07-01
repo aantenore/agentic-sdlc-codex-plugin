@@ -1,6 +1,6 @@
-# TravelOps SDLC Codex Plugin
+# Agentic SDLC Codex Plugin
 
-TravelOps SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven, agent-legible operating system.
+Agentic SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven, agent-legible operating system.
 
 The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The CLI creates a shared `.sdlc/` knowledge base inside the target project, so teams and agents can work in parallel through Git branches and pull requests.
 
@@ -20,7 +20,7 @@ Import this repository as a Codex plugin. The plugin root is the repository root
 After import, invoke the skill with:
 
 ```text
-Use $travelops-sdlc to initialize this project.
+Use $agentic-sdlc to initialize this project.
 ```
 
 ## CLI Usage
@@ -28,14 +28,14 @@ Use $travelops-sdlc to initialize this project.
 The CLI has no runtime dependencies beyond Node.js.
 
 ```bash
-node bin/travelops-sdlc.mjs init --project-name "My Product"
-node bin/travelops-sdlc.mjs contract create --phase discovery
-node bin/travelops-sdlc.mjs story create --id ST-001 --title "Plan realistic travel itinerary"
-node bin/travelops-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
-node bin/travelops-sdlc.mjs trace append --story ST-001 --type decision --summary "Use weather as a replanning trigger"
-node bin/travelops-sdlc.mjs gate check --story ST-001
-node bin/travelops-sdlc.mjs index rebuild
-node bin/travelops-sdlc.mjs kb search "weather replanning"
+node bin/agentic-sdlc.mjs init --project-name "My Product"
+node bin/agentic-sdlc.mjs contract create --phase discovery
+node bin/agentic-sdlc.mjs story create --id ST-001 --title "Let users manage notification preferences"
+node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
+node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Use an adapter for notification delivery providers"
+node bin/agentic-sdlc.mjs gate check --story ST-001
+node bin/agentic-sdlc.mjs index rebuild
+node bin/agentic-sdlc.mjs kb search "notification preferences"
 ```
 
 ## Collaboration Model
@@ -65,8 +65,8 @@ Detailed examples are available in:
 
 ```text
 .codex-plugin/plugin.json      Codex plugin manifest
-skills/travelops-sdlc/         Codex skill and references
-bin/travelops-sdlc.mjs         Cross-platform CLI
+skills/agentic-sdlc/         Codex skill and references
+bin/agentic-sdlc.mjs         Cross-platform CLI
 templates/sdlc-config.json     Configurable SDLC phase contracts and policies
 templates/kb-readme.md         Generated project KB guide
 schemas/                       JSON schemas for SDLC artifacts

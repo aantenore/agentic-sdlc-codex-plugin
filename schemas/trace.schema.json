@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/travelops-sdlc-codex-plugin/schemas/trace.schema.json",
-  "title": "TravelOps SDLC Trace Event",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/trace.schema.json",
+  "title": "Agentic SDLC Trace Event",
   "type": "object",
   "required": [
     "id",
