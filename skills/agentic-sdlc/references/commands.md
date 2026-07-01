@@ -51,6 +51,18 @@ node bin/agentic-sdlc.mjs contract create \
 
 Supported default reasoning levels are `inherit`, `minimal`, `low`, `medium`, and `high`. Teams can change the allowed levels in `templates/sdlc-config.json`.
 
+Capability policy and bindings can be attached while creating a contract:
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --root <project> \
+  --phase implementation \
+  --capability-policy-json '{"mcp":{"required":["repo"],"allowed":[],"forbidden":[]},"skills":{"required":["agentic-sdlc"],"allowed":[],"forbidden":[]},"tools":{"required":[],"allowed":["test-runner"],"forbidden":[]},"approval_required_for":["production_write"]}' \
+  --capability-binding-json '{"type":"mcp","name":"repo","binding_id":"repo-main","target":{"repo":"local"},"permissions":["read"]}'
+```
+
+Binding files must be canonical project files, never `.sdlc/cache/` or `.sdlc/indexes/`.
+
 ## Create And Claim Story
 
 ```bash
@@ -60,6 +72,21 @@ node bin/agentic-sdlc.mjs story release --root <project> --id ST-001 --agent cod
 ```
 
 One story should have one active claim. Release the claim before another chat claims the same story, or use `--force` only after human coordination. The CLI serializes local claim changes and strict gates enforce the configured branch pattern.
+
+## Work Breakdown And Dependencies
+
+```bash
+node bin/agentic-sdlc.mjs work item create --root <project> --type epic --id EP-001 --title "Workflow epic" --requirement REQ-001
+node bin/agentic-sdlc.mjs work item create --root <project> --type task --id TASK-001 --title "Backend task" --story ST-001
+node bin/agentic-sdlc.mjs breakdown propose --root <project> --id BD-REQ-001 --requirement REQ-001 --item epic:EP-001 --item story:ST-001
+node bin/agentic-sdlc.mjs breakdown approve --root <project> --id BD-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs dependency propose --root <project> --id DEP-REQ-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
+node bin/agentic-sdlc.mjs dependency approve --root <project> --id DEP-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs dependency status --root <project> --story ST-002
+node bin/agentic-sdlc.mjs story deps --root <project> --id ST-002
+```
+
+Breakdowns and dependencies are proposed first, then approved by human or CI before they become canonical. Hard dependency scopes block orchestration and strict gates; soft dependencies remain visible as warnings. When upstream artifacts change, record a `dependency.revalidate` trace on downstream stories after review.
 
 ## Orchestrate Parallel Work
 

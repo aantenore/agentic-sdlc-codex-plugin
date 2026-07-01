@@ -12,6 +12,9 @@ The sample records below use neutral placeholders. The structure is generic and 
     contracts/
     output-contracts/
     requirements/
+    work-items/
+    work-breakdown/
+    dependencies/
     stories/
     orchestration/
     locks/
@@ -43,6 +46,9 @@ flowchart TB
   Source --> Contracts["contracts"]
   Source --> OutputContracts["output-contracts"]
   Source --> Requirements["requirements"]
+  Source --> WorkItems["work-items"]
+  Source --> Breakdown["work-breakdown"]
+  Source --> Dependencies["dependencies"]
   Source --> Stories["stories"]
   Source --> Decisions["decisions"]
   Source --> Tests["tests"]
@@ -52,6 +58,9 @@ flowchart TB
   Contracts --> Cache["cache"]
   OutputContracts --> Cache
   Requirements --> Cache
+  WorkItems --> Cache
+  Breakdown --> Cache
+  Dependencies --> Cache
   Stories --> Cache
   Decisions --> Cache
   Tests --> Cache
@@ -158,6 +167,23 @@ Every generated contract is bound to the current project and records contextuali
   }
 }
 ```
+
+Contracts may also include `capability_policy` and `capability_bindings` so the user and agent agree which skills, MCPs, tools, concrete targets, permissions, and approval-required actions are allowed for the step.
+
+## `work-items/`, `work-breakdown/`, And `dependencies/`
+
+These directories keep planning structure inside the project KB, independent of Jira or any external tracker.
+
+Examples:
+
+```text
+.sdlc/work-items/epics/EP-001.json
+.sdlc/work-items/tasks/TASK-001.json
+.sdlc/work-breakdown/BD-REQ-001.json
+.sdlc/dependencies/graph.json
+```
+
+Breakdowns and dependency proposals are proposed by agents and approved by a human or CI actor before they become authoritative. Strict gates enforce approved breakdown freshness and blocking dependencies for story delivery.
 
 ## `output-contracts/`
 
