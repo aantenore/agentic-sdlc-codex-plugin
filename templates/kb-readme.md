@@ -26,6 +26,7 @@ It is intentionally stored in the project repository so people and agents can co
 - Record completed phase lanes with `story complete-step` before handing off work.
 - Use `story prepare-handoff --release-claim` to let another chat or machine continue from the KB.
 - Use `report activity` for recent-history questions; reports must cite trace source files.
+- Use `report query` for natural-language history filters after Codex normalizes them to canonical query JSON.
 - Use `manifest rebuild`, `trace compact`, and plan-first `archive closed` as the KB grows.
 - Run `agentic-sdlc gate check` before merging implementation work.
 - Rebuild cache and indexes when retrieval speed matters; cache and indexes are derived artifacts, not sources of truth.

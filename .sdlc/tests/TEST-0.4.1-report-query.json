@@ -1,0 +1,40 @@
+{
+  "id": "TEST-0.4.1-report-query",
+  "kind": "test_evidence",
+  "summary": "Local validation for canonical report query support and natural-language normalization guardrails.",
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "tests": 45
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed"
+    },
+    {
+      "command": "node JSON parse check for schemas, templates, plugin, and .sdlc records",
+      "status": "passed"
+    },
+    {
+      "command": "validate_plugin.py .",
+      "status": "passed"
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "created_at": "2026-07-01T00:00:00.000Z",
+  "notes": [
+    "Report query tests cover raw natural language normalization guidance, actor-scoped activity filtering, derived query-file rejection, and new functional story queries."
+  ]
+}

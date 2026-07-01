@@ -17,7 +17,7 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - Append-only trace logs for decisions, tests, implementation events, gate reviews, and release notes.
 - Parallel orchestration commands for multi-chat work, story claims, handoffs, locks, and sync/push attribution.
 - Story step completion and handoff packages so functional, technical, implementation, validation, and release lanes can pass work between chats or machines.
-- Activity reports that reconstruct what happened from canonical KB traces with business, developer, or agent-verbose views.
+- Activity and query reports that reconstruct what happened from canonical KB records with business, developer, agent-verbose, or structured natural-language-normalized filters.
 - Output consistency registry for approved artifact templates, story-artifact links, and reuse/delta decisions.
 - KB manifests, trace compaction, archive plans, and local regenerable cache for faster lookup without treating cache as source of truth.
 - Language-agnostic request routing: Codex normalizes user intent to canonical JSON, then the CLI deterministically decides the SDLC route from project state and policy.
@@ -112,6 +112,8 @@ node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analys
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
 node bin/agentic-sdlc.mjs report activity --since 3d --view business --out .sdlc/reports/activity.md
+node bin/agentic-sdlc.mjs report query --text "dimmi tutte le modifiche fatte da me" --json
+node bin/agentic-sdlc.mjs report query --query-json '{"subjects":["stories"],"time":{"since":"10d","until":"now"},"filters":{"text":["functional"]}}'
 node bin/agentic-sdlc.mjs gate check --story ST-001 --out .sdlc/reports/ST-001-gate-report.json
 node bin/agentic-sdlc.mjs orchestrate status
 node bin/agentic-sdlc.mjs manifest rebuild
@@ -208,6 +210,27 @@ flowchart LR
 ```
 
 `report activity` answers questions such as "what happened in the last 3 days?" from canonical trace files. The business view groups decisions, validation, risks, handoffs, and releases; the developer view includes evidence, related IDs, branch and SHA; the agent-verbose view includes raw trace/run metadata. Every item includes source file and line.
+
+For broader natural-language filtering, use `report query`. The CLI intentionally does not keyword-match raw natural language. Codex or another LLM normalizes the request into canonical query JSON, then the CLI filters deterministic records from `.sdlc/`: activity, stories, story steps, outputs, contracts, handoffs, work items, approvals, and tests. Without `--query-json` or `--query-file`, `report query --text "<request>"` returns the expected query shape and examples.
+
+Examples of normalized requests:
+
+```bash
+node bin/agentic-sdlc.mjs report query --query-json '{
+  "intent": "find_changes_by_actor",
+  "subjects": ["activity", "stories", "outputs", "contracts", "approvals"],
+  "filters": {"actor": ["antonio"]},
+  "sort": "created_at_desc"
+}'
+
+node bin/agentic-sdlc.mjs report query --query-json '{
+  "intent": "find_new_functional_stories",
+  "subjects": ["stories"],
+  "time": {"since": "10d", "until": "now", "field": "created_at"},
+  "filters": {"text": ["functional"]},
+  "sort": "created_at_desc"
+}'
+```
 
 For large KBs, `manifest rebuild` writes `.sdlc/manifests/kb-manifest.json` as a compact shared map of stories, contracts, output links, approvals, and activity. `trace compact` writes non-destructive summaries under `.sdlc/traces/compactions/`; original JSONL traces remain canonical. `archive closed` creates an archive plan for old reports and compactions and only moves files when `--apply` is explicitly passed.
 
