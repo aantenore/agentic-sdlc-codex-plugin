@@ -32,9 +32,16 @@ Never store project contracts or project KB state inside the plugin installation
    ```
 
 4. Select the SDLC phase: `discovery`, `analysis`, `design`, `implementation`, `validation`, or `release`.
-5. Before creating a contract, gather project-specific context from `.sdlc/`, user-provided files, repository files, or direct user answers. If critical context is missing, ask concise questions instead of inventing details.
-6. Decide the contract execution policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model` or `--reasoning` only when the user asks for a different Codex execution profile or the project KB already mandates one.
-7. Create or update a phase contract before doing phase work. Pass known context into the contract:
+5. When a requirement needs decomposition, propose a work breakdown and dependency graph, then ask the user to approve or correct it before treating it as canonical:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs breakdown propose --root <target-project> --id BD-REQ-001 --requirement REQ-001 --item story:ST-001
+   node <plugin-root>/bin/agentic-sdlc.mjs dependency propose --root <target-project> --id DEP-REQ-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
+   ```
+
+6. Before creating a contract, gather project-specific context from `.sdlc/`, user-provided files, repository files, or direct user answers. If critical context is missing, ask concise questions instead of inventing details.
+7. Decide the contract execution policy and capability policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model`, `--reasoning`, capability policies, or capability bindings only when the user asks or the project KB mandates them.
+8. Create or update a phase contract before doing phase work. Pass known context into the contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs contract create \
@@ -46,7 +53,7 @@ Never store project contracts or project KB state inside the plugin installation
      --output-ref functional-analysis:functional-analysis-v1:new
    ```
 
-8. Before creating a durable output artifact, resolve the project-wide output contract:
+9. Before creating a durable output artifact, resolve the project-wide output contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
@@ -59,7 +66,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human
    ```
 
-9. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
+10. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -72,20 +79,20 @@ Never store project contracts or project KB state inside the plugin installation
      --requirement REQ-001
    ```
 
-10. For implementation work or parallel worker work, inspect the current orchestration state before editing:
+11. For implementation work or parallel worker work, inspect the current orchestration state before editing:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs orchestrate status --root <target-project> --json
    ```
 
-11. Create and claim a story before editing code. Include actor/run/thread attribution when available:
+12. Create and claim a story before editing code. Include actor/run/thread attribution when available:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..."
    node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-12. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
+13. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
@@ -93,17 +100,17 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-13. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+14. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
 
-14. Run a strict gate check before closing a phase or merging implementation work:
+15. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
    ```
 
-15. Release claims and locks when work is complete or handed off.
+16. Release claims and locks when work is complete or handed off.
 
-16. Rebuild/search the local cache and KB index when context retrieval is needed:
+17. Rebuild/search the local cache and KB index when context retrieval is needed:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs cache rebuild --root <target-project>
@@ -128,6 +135,8 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify `.sdlc/project.json` exists in the target project;
 - verify relevant contracts exist under `.sdlc/contracts/`;
 - verify durable outputs are linked in `.sdlc/output-contracts/registry.json` with approved templates;
+- verify approved breakdowns and dependency graph entries are satisfied when the story uses them;
+- verify contract capability policies have required bindings or explicit open questions;
 - verify story work is under `.sdlc/stories/<story-id>/`;
 - verify decisions and evidence are captured in `.sdlc/traces/`;
 - run `gate check`;

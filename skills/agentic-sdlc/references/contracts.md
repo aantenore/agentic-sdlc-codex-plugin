@@ -19,6 +19,8 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `kb_writes`: Knowledge base sections that must be updated.
 - `human_gate`: Whether human approval is required.
 - `execution_policy`: Codex runtime policy for model and reasoning inheritance or override.
+- `capability_policy`: Skills, MCPs, tools, and approval-required actions agreed for the step.
+- `capability_bindings`: Concrete project-local targets and permissions for required MCP/tool usage.
 - `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
 - `audit`: Actor, Git, and run metadata for contract creation and updates.
 - `approvals`: Human or CI gate decisions. The latest approved decision controls strict gate status only while its content hash still matches the contract.
@@ -45,6 +47,10 @@ Use `execution_policy` to make agent execution settings explicit:
 ```
 
 `inherit` means spawned agents should reuse the main Codex thread settings. Use `override` only when the user or project KB has selected a specific Codex model or reasoning level for the contract.
+
+## Capability Policy
+
+Use `capability_policy` and `capability_bindings` when a step needs specific skills, MCPs, tools, endpoints, repositories, environments, or permissions. Required MCP/tool capabilities must have a binding or an explicit open contract question. Do not store external tracker mappings as source of truth; keep the authoritative contract data in `.sdlc/`.
 
 ## Phase Contracts Vs Output Contracts
 
@@ -81,6 +87,7 @@ Reject or revise a contract when:
 - outputs are not testable;
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
+- required capabilities have no binding and no open question;
 - execution policy overrides are present without rationale or user/project backing;
 - linked output artifacts do not use approved output templates;
 - duplicate outputs are created without an approved decision;
