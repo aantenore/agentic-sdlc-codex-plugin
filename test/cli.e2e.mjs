@@ -74,6 +74,32 @@ function writeArtifact(project, relativePath, body = "# Artifact\n") {
   return relativePath;
 }
 
+function routeIntent(overrides = {}) {
+  return JSON.stringify({
+    requested_action: "intake_requirement",
+    confidence: 0.95,
+    referenced_entities: [],
+    provided_artifacts: [],
+    missing_context: [],
+    proposed_phase: null,
+    artifact_type: null,
+    skip_phases: [],
+    ...overrides,
+  });
+}
+
+function routeDecision(project, overrides = {}, command = ["route", "decide"]) {
+  const result = mustRun([
+    ...command,
+    "--root",
+    project,
+    "--json",
+    "--intent-json",
+    routeIntent(overrides),
+  ]);
+  return JSON.parse(result.stdout);
+}
+
 function createStrictReadyStory(project, id, artifactType = "functional-analysis") {
   story(project, id, ["--requirement", "REQ-001", "--contract", `contract-${id}-design`]);
   createApprovedTemplate(project, artifactType);
@@ -401,6 +427,109 @@ test("phase locks reject concurrent active locks on the same scope", () => {
   initProject(project);
   mustRun(["phase", "lock", "--root", project, "--phase", "analysis", "--scope", "shared"]);
   mustFail(["phase", "lock", "--root", project, "--phase", "analysis", "--scope", "shared"], /already has active lock/);
+});
+
+test("route decide returns init_project when canonical intent arrives before KB initialization", () => {
+  const project = tmpProject("route-no-kb");
+  const decision = routeDecision(project);
+  assert.equal(decision.route, "init_project");
+  assert.equal(decision.requires_confirmation, false);
+  assert.ok(decision.next_commands.some((command) => command.includes("agentic-sdlc init")));
+});
+
+test("route decide does not inherit risky action confirmation before KB initialization", () => {
+  const project = tmpProject("route-no-kb-implement");
+  const decision = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-001" }],
+  });
+  assert.equal(decision.route, "init_project");
+  assert.equal(decision.requires_confirmation, false);
+  assert.ok(decision.next_commands.some((command) => command.includes("agentic-sdlc init")));
+});
+
+test("route alias with raw text only asks for canonical normalization", () => {
+  const project = tmpProject("route-raw-text");
+  initProject(project);
+  const result = mustRun(["route", "--root", project, "--json", "--text", "Implement ST-001"]);
+  const decision = JSON.parse(result.stdout);
+  assert.equal(decision.route, "ask_clarification");
+  assert.equal(decision.status, "needs_normalization");
+  assert.ok(decision.blocking_reasons.includes("needs_normalization"));
+  assert.equal(decision.deterministic_checks.some((check) => check.check === "raw_text" && check.status === "ignored"), true);
+});
+
+test("route decide rejects canonical intent files from derived cache directories", () => {
+  const project = tmpProject("route-cache-intent");
+  initProject(project);
+  const intentPath = path.join(project, ".sdlc", "cache", "route-intent.json");
+  fs.mkdirSync(path.dirname(intentPath), { recursive: true });
+  fs.writeFileSync(intentPath, routeIntent());
+  const result = mustRun(["route", "decide", "--root", project, "--json", "--intent-file", ".sdlc/cache/route-intent.json"]);
+  const decision = JSON.parse(result.stdout);
+  assert.equal(decision.route, "ask_clarification");
+  assert.ok(decision.blocking_reasons.includes("invalid_intent_json"));
+  assert.equal(
+    decision.deterministic_checks.some(
+      (check) => check.check === "canonical_intent" && String(check.details).includes("derived artifacts"),
+    ),
+    true,
+  );
+});
+
+test("route decide sends ready implementation story to claim_and_implement with confirmation", () => {
+  const project = tmpProject("route-implement");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
+
+  const decision = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-001" }],
+  });
+  assert.equal(decision.route, "claim_and_implement");
+  assert.equal(decision.requires_confirmation, true);
+  assert.ok(decision.next_commands.some((command) => command.includes("story claim --id ST-001")));
+});
+
+test("route decide asks to create a missing story before implementation", () => {
+  const project = tmpProject("route-missing-story");
+  initProject(project);
+  const decision = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-404" }],
+  });
+  assert.equal(decision.route, "ask_clarification");
+  assert.ok(decision.blocking_reasons.includes("story_not_found"));
+  assert.ok(decision.next_commands.some((command) => command.includes("story create --id ST-404")));
+});
+
+test("route decide confirms phase skip for functional analysis", () => {
+  const project = tmpProject("route-skip");
+  initProject(project);
+  const decision = routeDecision(project, {
+    requested_action: "functional_analysis",
+    proposed_phase: "analysis",
+    artifact_type: "functional-analysis",
+    skip_phases: ["discovery"],
+  });
+  assert.equal(decision.route, "confirm_phase_skip");
+  assert.equal(decision.requires_confirmation, true);
+  assert.ok(decision.next_commands.some((command) => command.includes("Approved phase skip: discovery")));
+});
+
+test("route decide asks when canonical confidence is low", () => {
+  const project = tmpProject("route-low-confidence");
+  initProject(project);
+  const decision = routeDecision(project, {
+    requested_action: "intake_requirement",
+    confidence: 0.2,
+  });
+  assert.equal(decision.route, "ask_clarification");
+  assert.equal(decision.status, "low_confidence");
+  assert.ok(decision.blocking_reasons.includes("low_confidence"));
 });
 
 test("schemas and JSON templates parse", () => {
