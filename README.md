@@ -16,8 +16,10 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - Approved dependency graphs that control orchestration, stale downstream work, and strict gates.
 - Append-only trace logs for decisions, tests, implementation events, gate reviews, and release notes.
 - Parallel orchestration commands for multi-chat work, story claims, handoffs, locks, and sync/push attribution.
+- Story step completion and handoff packages so functional, technical, implementation, validation, and release lanes can pass work between chats or machines.
+- Activity reports that reconstruct what happened from canonical KB traces with business, developer, or agent-verbose views.
 - Output consistency registry for approved artifact templates, story-artifact links, and reuse/delta decisions.
-- Local regenerable cache for faster KB lookup, dependency graphs, artifact fingerprints, and output resolution.
+- KB manifests, trace compaction, archive plans, and local regenerable cache for faster lookup without treating cache as source of truth.
 - Language-agnostic request routing: Codex normalizes user intent to canonical JSON, then the CLI deterministically decides the SDLC route from project state and policy.
 - Formal approval governance that separates implementation permission from approved SDLC artifacts.
 - Gate checks that validate contract completeness, story readiness, and traceability.
@@ -102,13 +104,19 @@ node bin/agentic-sdlc.mjs capability profile approve --id CAP-PROFILE-ST-001 --a
 node bin/agentic-sdlc.mjs capability recommend --id CAP-REC-ST-001 --profile CAP-PROFILE-ST-001 --available-capabilities-file .sdlc/decisions/available-capabilities.json
 node bin/agentic-sdlc.mjs capability approve --id CAP-REC-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability recommendation"
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
+node bin/agentic-sdlc.mjs story complete-step --id ST-001 --step functional-analysis --type functional-analysis --summary "Functional review complete"
+node bin/agentic-sdlc.mjs story prepare-handoff --id ST-001 --to-agent implementation-agent --release-claim --summary "Ready for implementation"
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
 node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "Approved output template"
 node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
+node bin/agentic-sdlc.mjs report activity --since 3d --view business --out .sdlc/reports/activity.md
 node bin/agentic-sdlc.mjs gate check --story ST-001 --out .sdlc/reports/ST-001-gate-report.json
 node bin/agentic-sdlc.mjs orchestrate status
+node bin/agentic-sdlc.mjs manifest rebuild
+node bin/agentic-sdlc.mjs trace compact --story ST-001
+node bin/agentic-sdlc.mjs archive closed --before 90d
 node bin/agentic-sdlc.mjs cache rebuild
 node bin/agentic-sdlc.mjs index rebuild
 node bin/agentic-sdlc.mjs kb search "business workflow"
@@ -172,14 +180,36 @@ Recommended workflow:
 1. Run `orchestrate status` or `orchestrate plan` to see available lanes.
 2. Claim one story per worker chat with `story claim`.
 3. Work on the claimed branch and append decisions/evidence through `trace append`.
-4. Use `story handoff` when passing work from analysis to implementation or validation, then `story handoff close` when the receiving lane accepts it.
-5. Use `sync record --event push` after pushing or merging so other chats know what changed.
-6. Run `gate check --story <id> --strict` before review or merge.
-7. Release claims and locks when work is done.
+4. Use `story complete-step` to mark functional, technical, implementation, validation, or release work as complete with hashed evidence.
+5. Use `story prepare-handoff --release-claim` when passing work from analysis to implementation or validation, then `story handoff close` when the receiving lane accepts it.
+6. Use `sync record --event push` after pushing or merging so other chats know what changed.
+7. Run `report activity --since 3d --view dev|business|agent-verbose` to reconstruct recent work from the KB.
+8. Run `gate check --story <id> --strict` before review or merge.
+9. Release claims and locks when work is done.
 
 Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts should include `--output-ref artifact-type:template-id:mode`; strict gates require those refs to be satisfied by output links.
 
 Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth. `output resolve` verifies cached recommendations against canonical KB files and rejects tampered cache results.
+
+## Activity, Handoff, And KB Scale
+
+`story complete-step` creates a story-local completion record under `.sdlc/stories/<story-id>/steps/`, appends a `story.complete-step` trace, and verifies linked output artifacts when `--type` is supplied. `story prepare-handoff` writes a handoff package with the story state, claim, completed steps, output links, dependencies, handoffs, and recent traces, then can release the active claim so another chat or machine can continue.
+
+```mermaid
+flowchart LR
+  Analysis["Functional or technical lane"] --> Complete["story complete-step"]
+  Complete --> StepRecord["steps/<step>.json"]
+  Complete --> Trace["story.complete-step trace"]
+  StepRecord --> Handoff["story prepare-handoff"]
+  Trace --> Handoff
+  Handoff --> Package["handoff package"]
+  Handoff --> Release["optional claim release"]
+  Package --> NextAgent["Next agent or developer"]
+```
+
+`report activity` answers questions such as "what happened in the last 3 days?" from canonical trace files. The business view groups decisions, validation, risks, handoffs, and releases; the developer view includes evidence, related IDs, branch and SHA; the agent-verbose view includes raw trace/run metadata. Every item includes source file and line.
+
+For large KBs, `manifest rebuild` writes `.sdlc/manifests/kb-manifest.json` as a compact shared map of stories, contracts, output links, approvals, and activity. `trace compact` writes non-destructive summaries under `.sdlc/traces/compactions/`; original JSONL traces remain canonical. `archive closed` creates an archive plan for old reports and compactions and only moves files when `--apply` is explicitly passed.
 
 ## Parallel Orchestration
 

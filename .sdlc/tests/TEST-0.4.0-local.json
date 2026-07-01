@@ -1,0 +1,41 @@
+{
+  "id": "TEST-0.4.0-local",
+  "kind": "test_evidence",
+  "summary": "Local validation for Agentic SDLC 0.4.0 activity, handoff, manifest, compaction, and archive features.",
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "tests": 42
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed"
+    },
+    {
+      "command": "node JSON parse check for schemas, templates, plugin, and .sdlc records",
+      "status": "passed"
+    },
+    {
+      "command": "validate_plugin.py .",
+      "status": "passed"
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "created_at": "2026-07-01T00:00:00.000Z",
+  "notes": [
+    "Evidence file records local command outcomes from this implementation session.",
+    "Validation commands passed locally before commit."
+  ]
+}

@@ -141,23 +141,53 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-15. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+15. When a phase lane is complete, record the step with hashed evidence. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
 
-16. Run a strict gate check before closing a phase or merging implementation work:
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs story complete-step \
+     --root <target-project> \
+     --id ST-001 \
+     --step functional-analysis \
+     --type functional-analysis \
+     --summary "Functional analysis accepted for implementation"
+   ```
+
+16. Use `story prepare-handoff` when passing work between chats, machines, or phases. Use `--release-claim` only when the next agent should be able to claim the story after pulling the shared KB:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs story prepare-handoff \
+     --root <target-project> \
+     --id ST-001 \
+     --to-agent implementation-agent \
+     --release-claim \
+     --summary "Ready for implementation"
+   ```
+
+   Close the handoff when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+
+17. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
    ```
 
-17. Release claims and locks when work is complete or handed off.
+18. Release claims and locks when work is complete or handed off.
 
-18. Rebuild/search the local cache and KB index when context retrieval is needed:
+19. Rebuild/search the local cache and KB index when context retrieval is needed. For large KBs, rebuild the shared manifest and use non-destructive trace compaction before relying on long raw trace history:
 
    ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs manifest rebuild --root <target-project>
+   node <plugin-root>/bin/agentic-sdlc.mjs trace compact --root <target-project> --story ST-001
    node <plugin-root>/bin/agentic-sdlc.mjs cache rebuild --root <target-project>
    node <plugin-root>/bin/agentic-sdlc.mjs cache status --root <target-project>
    node <plugin-root>/bin/agentic-sdlc.mjs index rebuild --root <target-project>
    node <plugin-root>/bin/agentic-sdlc.mjs kb search --root <target-project> "query"
+   ```
+
+20. Use activity reports when the user asks what happened in a recent period. Reports must cite trace source files and must not infer unstored history:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs report activity --root <target-project> --since 3d --view business --out .sdlc/reports/activity.md
    ```
 
 ## References
@@ -182,6 +212,8 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify contract capability policies have required bindings or explicit open questions;
 - verify story work is under `.sdlc/stories/<story-id>/`;
 - verify decisions and evidence are captured in `.sdlc/traces/`;
+- verify completed story lanes have step records under `.sdlc/stories/<story-id>/steps/` when work is handed off;
+- verify activity reports, manifests, and trace compactions cite canonical source paths and do not use cache/index as evidence;
 - verify approvals include `approval_source` and do not treat implementation permission as artifact approval;
 - run `gate check`;
 - report any errors or warnings instead of hiding them.

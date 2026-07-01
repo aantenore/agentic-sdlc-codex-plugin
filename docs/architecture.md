@@ -26,6 +26,8 @@ Target project
      -> traces
      -> tests
      -> releases
+     -> manifests
+     -> archive
      -> cache
      -> indexes
 ```
@@ -47,6 +49,8 @@ flowchart TB
     Breakdown["Work breakdown agreements"]
     Dependencies["Dependency graph"]
     Traces["Append-only traces"]
+    Manifests["KB manifests"]
+    Archive["Archive plans"]
     Cache["Local cache"]
     Indexes["Search indexes"]
   end
@@ -61,11 +65,14 @@ flowchart TB
   CLI --> Breakdown
   CLI --> Dependencies
   CLI --> Traces
+  CLI --> Manifests
+  CLI --> Archive
   KB --> Cache
   Baseline --> Cache
   Capabilities --> Cache
   KB --> Indexes
   OutputRegistry --> Cache
+  Manifests --> Cache
   Cache -.-> CLI
   Indexes -.-> CLI
 ```
@@ -77,6 +84,21 @@ The plugin is static and reusable. It contains the SDLC process, CLI, schemas, a
 The project knowledge base is dynamic and shared. It is created inside the target repository so it can be reviewed, branched, merged, and audited with normal Git workflows.
 
 The source of truth is text and JSON. Cache and search indexes are derived artifacts that can be rebuilt. Reports are durable evidence when they support a review, gate, or release decision.
+
+The scale layer is source-backed and explicit. `report activity` reads trace JSONL and reports source file/line for each statement. `manifest rebuild` creates a shared compact KB map from canonical files. `trace compact` creates additive summaries while retaining raw traces. `archive closed` is plan-first and only moves old reports or compactions with explicit `--apply`.
+
+```mermaid
+flowchart LR
+  TraceJSONL["Trace JSONL"] --> Activity["Activity report"]
+  TraceJSONL --> Compaction["Trace compaction"]
+  KBFiles["Stories, contracts, outputs, approvals"] --> Manifest["KB manifest"]
+  Activity --> Reports["reports"]
+  Compaction --> Archive["archive closed"]
+  Reports --> Archive
+  Manifest --> Cache["cache/index acceleration"]
+  Cache -.-> Agent["Agent context"]
+  Manifest --> Agent
+```
 
 During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
 

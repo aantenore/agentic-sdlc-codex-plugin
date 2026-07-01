@@ -107,10 +107,14 @@ node bin/agentic-sdlc.mjs contract create \
 ```bash
 node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement a business workflow"
 node bin/agentic-sdlc.mjs story claim --root <project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <codex-thread-id>
+node bin/agentic-sdlc.mjs story complete-step --root <project> --id ST-001 --step functional-analysis --type functional-analysis --summary "Functional review complete"
+node bin/agentic-sdlc.mjs story prepare-handoff --root <project> --id ST-001 --to-agent implementation-agent --release-claim --summary "Ready for implementation"
 node bin/agentic-sdlc.mjs story release --root <project> --id ST-001 --agent codex --reason "Work handed off"
 ```
 
 One story should have one active claim. Release the claim before another chat claims the same story, or use `--force` only after human coordination. The CLI serializes local claim changes and strict gates enforce the configured branch pattern.
+
+`story complete-step` records a completed SDLC lane under `.sdlc/stories/<story-id>/steps/`, appends a trace, and validates linked output artifacts when `--type` is provided. `story prepare-handoff` creates a story handoff package containing story state, claim, completed steps, output links, dependency status, open handoffs, and recent traces. Use `--release-claim` when the receiving chat or developer should be able to claim the story after pulling the KB.
 
 ## Work Breakdown And Dependencies
 
@@ -195,6 +199,7 @@ The decision output contains the selected route, confidence result, deterministi
 
 ```bash
 node bin/agentic-sdlc.mjs story handoff --root <project> --id ST-001 --to-agent implementation-agent --artifact .sdlc/requirements/functional-analysis.md
+node bin/agentic-sdlc.mjs story prepare-handoff --root <project> --id ST-001 --to-agent implementation-agent --release-claim
 node bin/agentic-sdlc.mjs story handoff close --root <project> --id HND-ST-001-20260701123000 --status closed
 node bin/agentic-sdlc.mjs phase lock --root <project> --phase analysis --reason "Updating shared analysis artifact"
 node bin/agentic-sdlc.mjs phase release --root <project> --id LOCK-analysis-20260701123000 --reason "Shared artifact stable"
@@ -267,9 +272,24 @@ node bin/agentic-sdlc.mjs output link \
 node bin/agentic-sdlc.mjs cache rebuild --root <project>
 node bin/agentic-sdlc.mjs cache status --root <project>
 node bin/agentic-sdlc.mjs cache clear --root <project>
+node bin/agentic-sdlc.mjs manifest rebuild --root <project>
+node bin/agentic-sdlc.mjs trace compact --root <project> --story ST-001
+node bin/agentic-sdlc.mjs archive closed --root <project> --before 90d
 node bin/agentic-sdlc.mjs index rebuild --root <project>
 node bin/agentic-sdlc.mjs kb search --root <project> "business workflow"
 ```
 
 Cache and indexes are local derived artifacts. They can accelerate context retrieval and output resolution, but canonical requirements, approvals, decisions, tests, traces, and outputs must stay in source-of-truth `.sdlc/` folders.
 If a cached output resolution differs from canonical KB files, the CLI rejects it and asks for `cache rebuild`.
+
+`manifest rebuild` creates a compact, shared KB map under `.sdlc/manifests/`. `trace compact` creates non-destructive summaries under `.sdlc/traces/compactions/`; original JSONL traces remain canonical. `archive closed` writes an archive plan for old reports and compactions and moves files only with `--apply`.
+
+## Activity Reports
+
+```bash
+node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view business --out .sdlc/reports/activity.md
+node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view dev --json
+node bin/agentic-sdlc.mjs report activity --root <project> --since 12h --view agent-verbose --story ST-001
+```
+
+Activity reports reconstruct what happened from canonical trace files only. Business view focuses on decisions, validation, risk, handoffs, implementation, and release. Dev view includes evidence, branch/SHA, related IDs, and source lines. Agent-verbose view includes raw trace, git, and run metadata for audit.

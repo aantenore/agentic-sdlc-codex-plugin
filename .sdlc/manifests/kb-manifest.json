@@ -1,0 +1,333 @@
+{
+  "kind": "kb_manifest",
+  "schema_version": "0.1.0",
+  "generated_at": "2026-07-01T12:09:09.347Z",
+  "canonical_root": ".sdlc",
+  "summary": {
+    "stories": 1,
+    "contracts": 7,
+    "output_templates": 1,
+    "output_links": 1,
+    "trace_events": 16,
+    "approvals": 3,
+    "source_files": 28
+  },
+  "stories": [
+    {
+      "id": "ST-CAPABILITY-DISCOVERY",
+      "title": "Add contextual capability discovery",
+      "status": "implementation",
+      "phase": "implementation",
+      "contract_id": "contract-ST-CAPABILITY-DISCOVERY-implementation",
+      "requirements": [
+        "REQ-CAPABILITY-DISCOVERY"
+      ],
+      "active_claim": {
+        "agent": "codex",
+        "branch": "feature/ST-CAPABILITY-DISCOVERY",
+        "expires_at": null
+      },
+      "completed_steps": [],
+      "output_links": [
+        {
+          "id": "OUT-ST-CAPABILITY-DISCOVERY-implementation-summary-093c1de9",
+          "artifact_type": "implementation-summary",
+          "artifact_path": ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+          "mode": "new",
+          "template_id": "implementation-summary-v1"
+        }
+      ],
+      "last_trace": {
+        "id": "TR-20260701112644-d56243",
+        "story_id": "ST-CAPABILITY-DISCOVERY",
+        "type": "decision",
+        "summary": "Linked implementation-summary output .sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md as new",
+        "actor": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "action": "output.link",
+        "evidence": [
+          ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+          ".sdlc/output-contracts/registry.json"
+        ],
+        "related": [
+          "ST-CAPABILITY-DISCOVERY",
+          "implementation-summary",
+          "implementation-summary-v1",
+          "OUT-ST-CAPABILITY-DISCOVERY-implementation-summary-093c1de9"
+        ],
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.2.0"
+        },
+        "created_at": "2026-07-01T11:26:44.278Z"
+      }
+    }
+  ],
+  "contracts": [
+    {
+      "id": "contract-ST-CAPABILITY-DISCOVERY-implementation",
+      "phase": "implementation",
+      "story_id": "ST-CAPABILITY-DISCOVERY",
+      "status": "approved",
+      "path": ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json"
+    },
+    {
+      "id": "contract-analysis-v1",
+      "phase": "analysis",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-analysis-v1.json"
+    },
+    {
+      "id": "contract-design-v1",
+      "phase": "design",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-design-v1.json"
+    },
+    {
+      "id": "contract-discovery-v1",
+      "phase": "discovery",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-discovery-v1.json"
+    },
+    {
+      "id": "contract-implementation-v1",
+      "phase": "implementation",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-implementation-v1.json"
+    },
+    {
+      "id": "contract-release-v1",
+      "phase": "release",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-release-v1.json"
+    },
+    {
+      "id": "contract-validation-v1",
+      "phase": "validation",
+      "story_id": null,
+      "status": "draft",
+      "path": ".sdlc/contracts/contract-validation-v1.json"
+    }
+  ],
+  "output_contracts": {
+    "templates": [
+      {
+        "id": "implementation-summary-v1",
+        "type": "implementation-summary",
+        "status": "approved",
+        "path": ".sdlc/output-contracts/templates/implementation-summary-v1.md",
+        "approved_at": "2026-07-01T11:26:25.050Z"
+      }
+    ],
+    "links": [
+      {
+        "id": "OUT-ST-CAPABILITY-DISCOVERY-implementation-summary-093c1de9",
+        "story_id": "ST-CAPABILITY-DISCOVERY",
+        "artifact_type": "implementation-summary",
+        "artifact_path": ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+        "template_id": "implementation-summary-v1",
+        "mode": "new",
+        "requirements": [
+          "REQ-CAPABILITY-DISCOVERY"
+        ]
+      }
+    ]
+  },
+  "activity": {
+    "event_count": 16,
+    "story_count": 1,
+    "by_type": {
+      "claim": 2,
+      "decision": 5,
+      "gate": 4,
+      "test": 3,
+      "implementation": 2
+    },
+    "by_action": {
+      "story.claim": 2,
+      "capability.profile.propose": 1,
+      "capability.profile.approve": 1,
+      "capability.recommend": 1,
+      "capability.approve": 1,
+      "contract.approve": 1,
+      "test": 3,
+      "output.link": 1,
+      "output.template.propose": 1,
+      "output.template.approve": 1,
+      "baseline.propose": 1,
+      "implementation": 2
+    },
+    "by_story": {
+      "ST-CAPABILITY-DISCOVERY": 9,
+      "project": 7
+    },
+    "by_actor": {
+      "codex": 9,
+      "antonioantenore": 7
+    },
+    "first_event_at": "2026-07-01T11:13:08.919Z",
+    "last_event_at": "2026-07-01T12:06:12.012Z"
+  },
+  "approvals": [
+    {
+      "subject_id": "CAP-PROFILE-ST-CAPABILITY-DISCOVERY",
+      "subject_path": ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json",
+      "approval_id": "APR-20260701112512-dfd35f",
+      "status": "approved",
+      "approval_source": null,
+      "actor": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "created_at": "2026-07-01T11:25:12.726Z"
+    },
+    {
+      "subject_id": "CAP-REC-ST-CAPABILITY-DISCOVERY",
+      "subject_path": ".sdlc/capability-discovery/recommendations/CAP-REC-ST-CAPABILITY-DISCOVERY.json",
+      "approval_id": "APR-20260701112525-a50937",
+      "status": "approved",
+      "approval_source": null,
+      "actor": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "created_at": "2026-07-01T11:25:25.621Z"
+    },
+    {
+      "subject_id": "contract-ST-CAPABILITY-DISCOVERY-implementation",
+      "subject_path": ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json",
+      "approval_id": "APR-20260701112533-0b2ed7",
+      "status": "approved",
+      "approval_source": null,
+      "actor": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "created_at": "2026-07-01T11:25:33.158Z"
+    }
+  ],
+  "source_paths": [
+    ".sdlc/baseline/BASELINE-PLUGIN-CURRENT-current-state.md",
+    ".sdlc/baseline/BASELINE-PLUGIN-CURRENT.json",
+    ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json",
+    ".sdlc/capability-discovery/recommendations/CAP-REC-ST-CAPABILITY-DISCOVERY.json",
+    ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json",
+    ".sdlc/contracts/contract-analysis-v1.json",
+    ".sdlc/contracts/contract-design-v1.json",
+    ".sdlc/contracts/contract-discovery-v1.json",
+    ".sdlc/contracts/contract-implementation-v1.json",
+    ".sdlc/contracts/contract-release-v1.json",
+    ".sdlc/contracts/contract-validation-v1.json",
+    ".sdlc/decisions/available-capabilities.json",
+    ".sdlc/dependencies/graph.json",
+    ".sdlc/output-contracts/registry.json",
+    ".sdlc/output-contracts/templates/implementation-summary-v1.md",
+    ".sdlc/project.json",
+    ".sdlc/reports/ST-CAPABILITY-DISCOVERY-gate-report.json",
+    ".sdlc/reports/activity-0.4.0.md",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/claim.json",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/implementation-log.md",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/plan.md",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/story.json",
+    ".sdlc/tests/ST-CAPABILITY-DISCOVERY-test-run.json",
+    ".sdlc/tests/TEST-0.4.0-local.json",
+    ".sdlc/tests/approval-baseline-governance-test-run.json",
+    ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl",
+    ".sdlc/traces/project.jsonl"
+  ],
+  "source_hashes": {
+    ".sdlc/baseline/BASELINE-PLUGIN-CURRENT-current-state.md": "326a1df4b9889c0bddc4daec3a9d6d20c3114346a3dbea7cc61d0cea0052a5d4",
+    ".sdlc/baseline/BASELINE-PLUGIN-CURRENT.json": "4c64d514e4732bfa5a0f59fcabeee45855fa4e90604ad2bd1fdeec0acf13c902",
+    ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json": "891062fa9b1fe83b8a78c7a43922e827d3a5813591aacb14c89db3706661ece0",
+    ".sdlc/capability-discovery/recommendations/CAP-REC-ST-CAPABILITY-DISCOVERY.json": "0b988dcfb586cd3682c048106807b6535c846ad4761a656bca914d8cb322b8d5",
+    ".sdlc/contracts/contract-ST-CAPABILITY-DISCOVERY-implementation.json": "87bf9af7e6f4fa52235268d05329e803de4005c9de1e9d74225beaf163431920",
+    ".sdlc/contracts/contract-analysis-v1.json": "f1d834818ee34f2a8e430f8ade65c4cecef094e99912fadc84f979867f351a9b",
+    ".sdlc/contracts/contract-design-v1.json": "ae3fba3e441d55f88eec247b2ba99b5b6fe6415f7c2dfbfe7a3612dbb84968b8",
+    ".sdlc/contracts/contract-discovery-v1.json": "6fa61e90594633b8b60594eef9547a8d1ac7d074f2c5252a681678589572bac4",
+    ".sdlc/contracts/contract-implementation-v1.json": "697ee290063a9f3c85e222e7f301002ed5e08ba6b2ca0640ee3410a9c6c55e58",
+    ".sdlc/contracts/contract-release-v1.json": "066d8651a5d20aec996171a8ef85ed2f6c548cc9847ffe7125000e2ec9a14400",
+    ".sdlc/contracts/contract-validation-v1.json": "da08556359bc0acb8a5e9c734a79be1c88d74a2f4ede6b3571ac1a043c640fb9",
+    ".sdlc/decisions/available-capabilities.json": "ae53bbd87ede83b91cfed5f49465dd70bbfdc2f1665e15e5731b96996c100dc4",
+    ".sdlc/dependencies/graph.json": "39143e7483b341727b197118610d7cafc5b64346dec9bf029471f2b982b8784e",
+    ".sdlc/output-contracts/registry.json": "899a3f72ee98fa77e93f46df89e1c5a57a9e5e9aaf0feb433c2fded8a96c0a6f",
+    ".sdlc/output-contracts/templates/implementation-summary-v1.md": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+    ".sdlc/project.json": "5a17a34a94cddd706feec34e44eea6221e317f797c3e1245cd3202b4f18c48c9",
+    ".sdlc/reports/ST-CAPABILITY-DISCOVERY-gate-report.json": "86081524d5f25d2772eb09619eebd4b81682beff8be5c5eeb98b33d3f4868a0a",
+    ".sdlc/reports/activity-0.4.0.md": "9875ddb26e5a720e4ae81a9807150b6d410a07e453f5a2854160c6f46ea75f5c",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/claim.json": "717bd434702177b6adc9a5178d69f525516110c673994a0b44f2f09d22b34b6f",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/implementation-log.md": "ef256a93fb85666e84fd2fa34234458afad6dc138d8445ea31ab9be65c1ef040",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md": "27eec4a379e9a4779450fe679bb95051307df3f98108b45620d83067d3611c4b",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/plan.md": "c06cd2f430c264c89b1fe8bd710bfd0617ba0322e66c1eee4fda5ce95b531f4c",
+    ".sdlc/stories/ST-CAPABILITY-DISCOVERY/story.json": "b63e034571d630bcce1447a8feab2f9783ee90f1e34dd27e4e8e59ef70ffd134",
+    ".sdlc/tests/ST-CAPABILITY-DISCOVERY-test-run.json": "4e333be407223f0714279803e85f84cfe1cb77d6add42c8b02c4010edd631e5a",
+    ".sdlc/tests/TEST-0.4.0-local.json": "24bd774c7054b0700d672eef5c8d031b13803cfc5a5d1eaba0d06c2164a4ab4e",
+    ".sdlc/tests/approval-baseline-governance-test-run.json": "6482ca1cd6692edc0145380fe0258203a4dd198f7fd44f3c451b636f51c8b52d",
+    ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl": "5abfc9ab793619de5c22706bbf319e1cb55b282653b497a8cc7505f6c23e68a8",
+    ".sdlc/traces/project.jsonl": "f86b014fa5bf6bf5566da55c1e1704b7d75aa011b485baae7cd12f79adaa6f60"
+  },
+  "audit": {
+    "generated_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "6cbc02b62ca41821aa51475b47e355ac0a913409",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.0"
+    }
+  }
+}

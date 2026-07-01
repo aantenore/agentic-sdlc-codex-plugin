@@ -42,6 +42,36 @@ sequenceDiagram
   Gate-->>Human: Pass, warning, or repair needed
 ```
 
+When a lane is complete, the agent records the step before handing work to another lane:
+
+```bash
+node bin/agentic-sdlc.mjs story complete-step \
+  --id ST-001 \
+  --step functional-analysis \
+  --type functional-analysis \
+  --summary "Functional analysis accepted for implementation"
+
+node bin/agentic-sdlc.mjs story prepare-handoff \
+  --id ST-001 \
+  --to-agent implementation-agent \
+  --release-claim \
+  --summary "Ready for implementation"
+```
+
+```mermaid
+sequenceDiagram
+  participant Analyst as Analysis chat
+  participant KB as Shared KB
+  participant Dev as Implementation chat
+
+  Analyst->>KB: output link functional-analysis
+  Analyst->>KB: story complete-step
+  Analyst->>KB: story prepare-handoff --release-claim
+  Dev->>KB: pull and read handoff package
+  Dev->>KB: story claim
+  Dev->>KB: implementation traces and tests
+```
+
 The operating model is not "agents freely coding." It is bounded execution:
 
 - contracts define the work;
@@ -52,6 +82,15 @@ The operating model is not "agents freely coding." It is bounded execution:
 - traces explain what happened;
 - gates catch missing evidence;
 - humans approve important transitions.
+
+Activity reports reconstruct the real timeline from trace files:
+
+```bash
+node bin/agentic-sdlc.mjs report activity --since 3d --view business
+node bin/agentic-sdlc.mjs report activity --since 3d --view dev --story ST-001
+```
+
+Each report item cites the trace file and line that produced it. If a decision, test, push, or handoff was not recorded in the KB, the report will not invent it.
 
 ## Request Router Behavior
 

@@ -19,6 +19,8 @@
     "tests",
     "traces",
     "releases",
+    "manifests",
+    "archive",
     "cache",
     "indexes",
     "reports"
@@ -354,6 +356,8 @@
       "locks",
       "orchestration",
       "releases",
+      "manifests",
+      "archive",
       "reports"
     ],
     "required_entry_metadata": [

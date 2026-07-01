@@ -1084,6 +1084,184 @@ test("route decide asks when canonical confidence is low", () => {
   assert.ok(decision.blocking_reasons.includes("low_confidence"));
 });
 
+test("story step completion requires linked outputs and prepares releasable handoff packages", () => {
+  const project = tmpProject("step-handoff");
+  initProject(project);
+  story(project, "ST-MISSING");
+  mustFail(
+    [
+      "story",
+      "complete-step",
+      "--root",
+      project,
+      "--id",
+      "ST-MISSING",
+      "--step",
+      "functional-analysis",
+      "--type",
+      "functional-analysis",
+      "--summary",
+      "Trying to close without output link",
+    ],
+    /no linked functional-analysis output/,
+  );
+
+  createStrictReadyStory(project, "ST-001");
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "analysis-agent", "--branch", "feature/ST-001"]);
+  const completed = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "functional-analysis",
+    "--type",
+    "functional-analysis",
+    "--summary",
+    "Functional analysis accepted for implementation",
+    "--json",
+  ]).stdout);
+  assert.equal(completed.step.status, "completed");
+  assert.equal(completed.step.output_links.length, 1);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-001", "steps", "functional-analysis.json")), true);
+
+  const handoff = JSON.parse(mustRun([
+    "story",
+    "prepare-handoff",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--to-agent",
+    "implementation-agent",
+    "--summary",
+    "Ready for implementation",
+    "--release-claim",
+    "--json",
+  ]).stdout);
+  assert.equal(handoff.status, "prepared");
+  assert.equal(handoff.release.claim.status, "released");
+  assert.equal(fs.existsSync(handoff.package_path), true);
+  assert.ok(handoff.handoff.required_artifacts.some((artifact) => artifact.endsWith("-package.json")));
+});
+
+test("activity reports summarize only canonical trace events inside the selected window", () => {
+  const project = tmpProject("activity-report");
+  initProject(project);
+  story(project, "ST-001");
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "decision",
+    "--summary",
+    "Recent product decision",
+    "--actor",
+    "codex",
+  ]);
+  fs.appendFileSync(path.join(project, ".sdlc", "traces", "ST-001.jsonl"), `${JSON.stringify({
+    id: "TR-OLD",
+    story_id: "ST-001",
+    type: "decision",
+    summary: "Old decision outside window",
+    actor: { id: "codex", type: "agent" },
+    action: "decision",
+    evidence: [],
+    related: [],
+    git: {},
+    run: {},
+    created_at: "2000-01-01T00:00:00.000Z",
+  })}\n`);
+  const report = JSON.parse(mustRun([
+    "report",
+    "activity",
+    "--root",
+    project,
+    "--since",
+    "3d",
+    "--view",
+    "dev",
+    "--json",
+  ]).stdout);
+  assert.equal(report.summary.event_count, 1);
+  assert.equal(report.items[0].summary, "Recent product decision");
+  assert.equal(report.items[0].sources[0].path, ".sdlc/traces/ST-001.jsonl");
+
+  mustRun([
+    "report",
+    "activity",
+    "--root",
+    project,
+    "--since",
+    "3d",
+    "--view",
+    "business",
+    "--out",
+    ".sdlc/reports/activity.md",
+  ]);
+  assert.match(fs.readFileSync(path.join(project, ".sdlc", "reports", "activity.md"), "utf8"), /Recent product decision/);
+});
+
+test("manifests, trace compaction, and archive plans scale the KB without using cache as truth", () => {
+  const project = tmpProject("kb-scale");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "implementation",
+    "--summary",
+    "Implemented a small change",
+  ]);
+
+  const manifestResult = JSON.parse(mustRun(["manifest", "rebuild", "--root", project, "--json"]).stdout);
+  assert.equal(manifestResult.status, "rebuilt");
+  const manifest = readJson(path.join(project, ".sdlc", "manifests", "kb-manifest.json"));
+  assert.equal(manifest.summary.stories, 1);
+  assert.equal(manifest.source_paths.some((sourcePath) => sourcePath.startsWith(".sdlc/cache/")), false);
+
+  mustRun(["cache", "rebuild", "--root", project]);
+  const cache = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));
+  assert.equal(cache.source_paths.includes(".sdlc/manifests/kb-manifest.json"), true);
+
+  const compacted = JSON.parse(mustRun([
+    "trace",
+    "compact",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  assert.equal(compacted.status, "compacted");
+  assert.equal(fs.existsSync(compacted.compaction_path), true);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "traces", "ST-001.jsonl")), true);
+
+  const archivePlan = JSON.parse(mustRun([
+    "archive",
+    "closed",
+    "--root",
+    project,
+    "--before",
+    "now",
+    "--json",
+  ]).stdout);
+  assert.equal(archivePlan.status, "planned");
+  assert.ok(archivePlan.plan.candidates.some((candidate) => candidate.reason === "trace-compaction"));
+  assert.equal(fs.existsSync(archivePlan.plan_path), true);
+});
+
 test("schemas and JSON templates parse", () => {
   for (const directory of ["schemas", "templates"]) {
     for (const entry of fs.readdirSync(path.join(repoRoot, directory))) {
