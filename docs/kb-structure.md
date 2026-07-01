@@ -2,7 +2,7 @@
 
 Agentic SDLC uses a Git-first project knowledge base. The plugin is stateless; the KB is created inside each target project.
 
-The sample records below use TravelOps as an example product. The structure is generic and should be reused for any project.
+The sample records below use neutral placeholders. The structure is generic and should be reused for any project.
 
 ```text
 <target-project>/
@@ -10,14 +10,19 @@ The sample records below use TravelOps as an example product. The structure is g
     project.json
     README.md
     contracts/
+    output-contracts/
     requirements/
     stories/
+    orchestration/
+    locks/
+    handoffs/
     decisions/
     assumptions/
     risks/
     tests/
     traces/
     releases/
+    cache/
     indexes/
     reports/
 ```
@@ -30,7 +35,38 @@ The source of truth is the human-readable and machine-readable files under `.sdl
 - Markdown for narrative requirements, decisions, risks, plans, reports, and release notes.
 - JSONL for append-only trace logs.
 
-Indexes and reports are derived artifacts. They can be rebuilt from source files.
+Cache and indexes are derived artifacts. They can be rebuilt from source files and must not be used as canonical requirements, approvals, decisions, or output artifacts. Reports are durable evidence when they support a gate or release decision.
+
+```mermaid
+flowchart TB
+  Source["Source of truth"]
+  Source --> Contracts["contracts"]
+  Source --> OutputContracts["output-contracts"]
+  Source --> Requirements["requirements"]
+  Source --> Stories["stories"]
+  Source --> Decisions["decisions"]
+  Source --> Tests["tests"]
+  Source --> Traces["traces"]
+  Source --> Reports["reports as evidence"]
+
+  Contracts --> Cache["cache"]
+  OutputContracts --> Cache
+  Requirements --> Cache
+  Stories --> Cache
+  Decisions --> Cache
+  Tests --> Cache
+  Traces --> Cache
+
+  Contracts --> Indexes["indexes"]
+  Requirements --> Indexes
+  Stories --> Indexes
+  Traces --> Indexes
+
+  Cache -.-> FastLookup["fast lookup"]
+  Indexes -.-> Search["search"]
+  FastLookup -.-> Gate["strict gate"]
+  Search -.-> Gate
+```
 
 ## `project.json`
 
@@ -40,8 +76,8 @@ Example:
 
 ```json
 {
-  "project_id": "travelops",
-  "project_name": "TravelOps",
+  "project_id": "my-product",
+  "project_name": "My Product",
   "schema_version": "0.1.0",
   "sdlc_version": "0.1.0",
   "knowledge_base": {
@@ -50,7 +86,9 @@ Example:
     "stateless_plugin": true,
     "concurrency_model": "story-scoped workspaces with append-only traces",
     "source_of_truth": "JSON and Markdown files under .sdlc",
-    "derived_artifacts": ["indexes", "reports"]
+    "derived_artifacts": ["cache", "indexes"],
+    "output_contracts_registry": ".sdlc/output-contracts/registry.json",
+    "cache_policy_path": ".sdlc/cache/kb-cache.json"
   }
 }
 ```
@@ -75,8 +113,8 @@ Every generated contract is bound to the current project and records contextuali
 {
   "id": "contract-ST-001-analysis",
   "project": {
-    "project_id": "travelops",
-    "project_name": "TravelOps"
+    "project_id": "my-product",
+    "project_name": "My Product"
   },
   "phase": "analysis",
   "execution_policy": {
@@ -94,7 +132,7 @@ Every generated contract is bound to the current project and records contextuali
     ]
   },
   "contextualization": {
-    "summary": "Analyze the TravelOps MVP around disruption-aware travel replanning.",
+    "summary": "Analyze the MVP around the approved business workflow.",
     "context_sources": [
       {
         "path": ".sdlc/requirements/REQ-001.md",
@@ -105,7 +143,7 @@ Every generated contract is bound to the current project and records contextuali
     ],
     "questions": [
       {
-        "question": "Which weather provider is authoritative for MVP?",
+        "question": "Which external provider is authoritative for MVP?",
         "answer": null,
         "status": "open"
       }
@@ -114,11 +152,94 @@ Every generated contract is bound to the current project and records contextuali
       "Provider-specific logic must stay behind an adapter"
     ],
     "assumptions": [
-      "Weather provider sandbox access is available"
+      "External provider sandbox access is available"
     ],
     "open_questions": 1
   }
 }
+```
+
+## `output-contracts/`
+
+Project-wide registry for approved output templates and artifact reuse decisions.
+
+Example:
+
+```text
+.sdlc/output-contracts/registry.json
+.sdlc/output-contracts/templates/functional-analysis-v1.md
+.sdlc/output-contracts/decisions/
+```
+
+The registry stores templates, links, and structural decisions:
+
+```json
+{
+  "schema_version": "0.1.0",
+  "project_id": "my-product",
+  "policy": {
+    "template_registry_scope": "project",
+    "default_related_story_mode": "reuse+delta",
+    "cache_is_source_of_truth": false
+  },
+  "templates": [
+    {
+      "id": "functional-analysis-v1",
+      "type": "functional-analysis",
+      "status": "approved",
+      "path": ".sdlc/output-contracts/templates/functional-analysis-v1.md"
+    }
+  ],
+  "links": [
+    {
+      "id": "OUT-ST-001-functional-analysis",
+      "story_id": "ST-001",
+      "artifact_type": "functional-analysis",
+      "artifact_path": ".sdlc/requirements/functional-analysis.md",
+      "template_id": "functional-analysis-v1",
+      "mode": "new",
+      "requirements": ["REQ-001"]
+    }
+  ],
+  "decisions": []
+}
+```
+
+Agents must resolve the output contract before generating a durable artifact:
+
+```bash
+node bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
+```
+
+For related stories, the default is to reuse the existing base artifact and link a delta:
+
+```bash
+node bin/agentic-sdlc.mjs output link \
+  --root <target-project> \
+  --story ST-002 \
+  --type functional-analysis \
+  --artifact .sdlc/requirements/ST-002-functional-analysis-delta.md \
+  --template functional-analysis-v1 \
+  --mode delta \
+  --base-artifact .sdlc/requirements/functional-analysis.md \
+  --requirement REQ-001
+```
+
+```mermaid
+flowchart LR
+  Story["Story"] --> Link["Output link"]
+  Requirement["Requirement"] --> Link
+  Artifact["Canonical artifact"] --> Link
+  Template["Approved template"] --> Link
+  BaseArtifact["Base artifact"] --> Link
+  Decision["Approved decision"] --> Link
+
+  Link --> Registry["registry.json"]
+  Registry --> Resolve["output resolve"]
+  Resolve --> Agent["Agent recommendation"]
+
+  BaseArtifact -.-> Link
+  Decision -.-> Link
 ```
 
 ## `requirements/`
@@ -155,12 +276,12 @@ Example:
 ```json
 {
   "id": "ST-001",
-  "title": "Replan a trekking activity when rain is forecast",
+  "title": "Implement a business workflow",
   "status": "draft",
   "phase": "implementation",
   "contract_id": "contract-ST-001-implementation",
   "acceptance_criteria": [
-    "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
+    "Given the approved trigger, the system proposes the expected alternative workflow."
   ]
 }
 ```
@@ -172,9 +293,35 @@ Example:
   "story_id": "ST-001",
   "agent": "codex",
   "branch": "feature/ST-001",
-  "status": "active"
+  "status": "active",
+  "claimed_at": "2026-07-01T08:48:28.935Z",
+  "audit": {
+    "claimed_by": {
+      "id": "codex",
+      "type": "agent"
+    },
+    "git": {
+      "branch": "feature/ST-001",
+      "head_sha": "..."
+    },
+    "run": {
+      "thread_id": "codex-thread-id"
+    }
+  }
 }
 ```
+
+## `orchestration/`
+
+Parent-chat orchestration snapshots and plans. These records are useful when one Codex chat coordinates multiple worker chats.
+
+## `locks/`
+
+Phase or shared-artifact locks. Use these only for global artifacts that cannot be edited safely by several story lanes at the same time.
+
+## `handoffs/`
+
+Story handoff records between phases, agents, or chats. A handoff should identify the source actor, target agent, required artifacts, and open items.
 
 ## `decisions/`
 
@@ -184,13 +331,13 @@ Recommended naming:
 
 ```text
 .sdlc/decisions/ADR-0001-problem-framing.md
-.sdlc/decisions/ADR-0002-weather-provider-strategy.md
+.sdlc/decisions/ADR-0002-provider-strategy.md
 ```
 
 Recommended content:
 
 ```text
-# ADR-0002 Weather Provider Strategy
+# ADR-0002 Provider Strategy
 
 Status: Accepted
 Context: ...
@@ -207,8 +354,8 @@ Explicit assumptions that need validation or later review.
 Examples:
 
 ```text
-.sdlc/assumptions/ASM-001-weather-refresh-rate.md
-.sdlc/assumptions/ASM-002-user-location-permission.md
+.sdlc/assumptions/ASM-001-provider-refresh-rate.md
+.sdlc/assumptions/ASM-002-user-permission.md
 ```
 
 ## `risks/`
@@ -218,8 +365,8 @@ Delivery, product, technical, operational, or compliance risks.
 Examples:
 
 ```text
-.sdlc/risks/RISK-001-map-api-cost.md
-.sdlc/risks/RISK-002-weather-api-availability.md
+.sdlc/risks/RISK-001-provider-api-cost.md
+.sdlc/risks/RISK-002-provider-api-availability.md
 ```
 
 ## `tests/`
@@ -253,10 +400,23 @@ Example event:
   "id": "TR-20260701084828-7514f5",
   "story_id": "ST-001",
   "type": "decision",
-  "summary": "Use weather events as replanning triggers",
-  "actor": "codex",
+  "summary": "Use domain events as workflow triggers",
+  "actor": {
+    "id": "codex",
+    "type": "agent",
+    "source": "cli"
+  },
+  "action": "decision",
   "evidence": [],
   "related": ["ADR-0002", "REQ-003"],
+  "git": {
+    "branch": "feature/ST-001",
+    "head_sha": "..."
+  },
+  "run": {
+    "thread_id": "codex-thread-id",
+    "tool": "agentic-sdlc-cli"
+  },
   "created_at": "2026-07-01T08:48:28.935Z"
 }
 ```
@@ -264,8 +424,10 @@ Example event:
 Valid trace types:
 
 ```text
-assumption, decision, gate, implementation, release, risk, test
+assumption, decision, gate, claim, handoff, implementation, lock, release, risk, sync, test
 ```
+
+Use `sync` traces for push, pull, merge, rebase, branch, and PR events so parallel chats can see what moved in Git.
 
 ## `releases/`
 
@@ -278,6 +440,25 @@ Examples:
 .sdlc/releases/observability-plan.md
 .sdlc/releases/feedback-loop.md
 ```
+
+## `cache/`
+
+Local, regenerable optimization data.
+
+Example:
+
+```text
+.sdlc/cache/kb-cache.json
+```
+
+Rebuild and inspect with:
+
+```bash
+node bin/agentic-sdlc.mjs cache rebuild --root <target-project>
+node bin/agentic-sdlc.mjs cache status --root <target-project>
+```
+
+The cache may contain full-text lookup entries, story-requirement graphs, artifact fingerprints, template resolution, compact summaries, dependency graphs, and previous `output resolve` results. Each cache build records source hashes so a changed requirement, story, output registry, or trace makes the cache stale. Stale cache is a warning; using cache or index files as canonical output evidence is a strict gate error.
 
 ## `indexes/`
 
@@ -297,7 +478,7 @@ node bin/agentic-sdlc.mjs index rebuild --root <target-project>
 
 ## `reports/`
 
-Generated gate, audit, or quality reports. Reports are useful review artifacts but should be reproducible from source KB files.
+Gate, audit, or quality reports. Reports are durable review evidence and should be committed when they support a gate or release decision. Temporary report scratch files can use `.tmp` and stay ignored.
 
 ## Merge Strategy
 
