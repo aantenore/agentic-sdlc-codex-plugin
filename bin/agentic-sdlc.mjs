@@ -3,20 +3,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const VERSION = "0.1.0";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
+const CACHE_FILE_NAME = "kb-cache.json";
+const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 
 const TRACE_TYPES = new Set([
   "assumption",
   "decision",
   "gate",
+  "claim",
+  "handoff",
   "implementation",
+  "lock",
   "release",
   "risk",
+  "sync",
   "test",
 ]);
 
@@ -43,6 +50,10 @@ function main() {
       createContract(context, parsed.options);
       return;
     }
+    if (command === "contract" && subcommand === "approve") {
+      approveContract(context, parsed.options);
+      return;
+    }
     if (command === "story" && subcommand === "create") {
       createStory(context, parsed.options);
       return;
@@ -51,8 +62,60 @@ function main() {
       claimStory(context, parsed.options);
       return;
     }
+    if (command === "story" && subcommand === "release") {
+      releaseStoryClaim(context, parsed.options);
+      return;
+    }
+    if (command === "story" && subcommand === "handoff") {
+      createStoryHandoff(context, parsed.options);
+      return;
+    }
+    if (command === "phase" && subcommand === "lock") {
+      lockPhase(context, parsed.options);
+      return;
+    }
+    if (command === "phase" && subcommand === "release") {
+      releasePhaseLock(context, parsed.options);
+      return;
+    }
     if (command === "trace" && subcommand === "append") {
       appendTrace(context, parsed.options);
+      return;
+    }
+    if (command === "sync" && subcommand === "record") {
+      recordSyncEvent(context, parsed.options);
+      return;
+    }
+    if (command === "output" && subcommand === "template" && rest[0] === "propose") {
+      proposeOutputTemplate(context, parsed.options);
+      return;
+    }
+    if (command === "output" && subcommand === "template" && rest[0] === "approve") {
+      approveOutputTemplate(context, parsed.options);
+      return;
+    }
+    if (command === "output" && subcommand === "resolve") {
+      resolveOutput(context, parsed.options);
+      return;
+    }
+    if (command === "output" && subcommand === "link") {
+      linkOutputArtifact(context, parsed.options);
+      return;
+    }
+    if (command === "output" && subcommand === "status") {
+      showOutputStatus(context, parsed.options);
+      return;
+    }
+    if (command === "cache" && subcommand === "rebuild") {
+      rebuildCache(context, parsed.options);
+      return;
+    }
+    if (command === "cache" && subcommand === "status") {
+      showCacheStatus(context, parsed.options);
+      return;
+    }
+    if (command === "cache" && subcommand === "clear") {
+      clearCache(context, parsed.options);
       return;
     }
     if (command === "index" && subcommand === "rebuild") {
@@ -65,6 +128,14 @@ function main() {
     }
     if (command === "gate" && subcommand === "check") {
       gateCheck(context, parsed.options);
+      return;
+    }
+    if (command === "orchestrate" && subcommand === "status") {
+      showOrchestrationStatus(context, parsed.options);
+      return;
+    }
+    if (command === "orchestrate" && subcommand === "plan") {
+      showOrchestrationPlan(context, parsed.options);
       return;
     }
     if (command === "status") {
@@ -149,6 +220,7 @@ function initProject(context, options) {
   const projectName = String(options["project-name"] || path.basename(context.root));
   const projectId = String(options["project-id"] || slugify(projectName));
   const force = Boolean(options.force);
+  const attribution = buildAttribution(context, options, "project.init");
 
   ensureDir(context.sdlcRoot);
   for (const directory of context.config.kb_directories) {
@@ -168,9 +240,17 @@ function initProject(context, options) {
       stateless_plugin: true,
       concurrency_model: "story-scoped workspaces with append-only traces",
       source_of_truth: "JSON and Markdown files under .sdlc",
-      derived_artifacts: ["indexes", "reports"],
+      derived_artifacts: ["cache", "indexes"],
+      output_contracts_registry: `${SDLC_DIR}/output-contracts/registry.json`,
+      cache_policy_path: `${SDLC_DIR}/cache/${CACHE_FILE_NAME}`,
     },
     phase_order: context.config.phase_order,
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
   };
   writeJsonFile(projectPath, project, { force });
 
@@ -182,17 +262,23 @@ function initProject(context, options) {
     { force },
   );
 
-  writeTextFile(
-    path.join(context.sdlcRoot, ".gitignore"),
-    ["indexes/*.json", "reports/*.tmp", ""].join("\n"),
-    { force: false },
-  );
+  writeTextFile(path.join(context.sdlcRoot, ".gitignore"), ["cache/**/*", "indexes/*.json", "reports/*.tmp", ""].join("\n"), {
+    force,
+  });
+
+  initializeOutputContracts(context, {
+    force,
+    attribution,
+    project_id: projectId,
+  });
 
   const createdContracts = [];
   for (const phase of context.config.phase_order) {
     const contract = buildContract(context, phase, {
       id: `contract-${phase}-v1`,
       status: "draft",
+      audit_options: options,
+      audit_action: "contract.bootstrap",
     });
     const contractPath = path.join(context.sdlcRoot, "contracts", `${contract.id}.json`);
     if (!fs.existsSync(contractPath) || force) {
@@ -225,7 +311,7 @@ function createContract(context, options) {
     fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
   }
   const storyId = options.story ? normalizeId(String(options.story)) : null;
-  const id = String(
+  const id = normalizeId(
     options.id || (storyId ? `contract-${storyId}-${phase}` : `contract-${phase}-${shortDate()}`),
   );
   const contract = buildContract(context, phase, {
@@ -248,6 +334,8 @@ function createContract(context, options) {
     model: options.model,
     reasoning: options.reasoning,
     execution_notes: normalizeRawListOption(options["execution-note"]),
+    audit_options: options,
+    audit_action: "contract.create",
   });
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
@@ -255,6 +343,62 @@ function createContract(context, options) {
     options,
     { status: "created", contract_path: contractPath, contract },
     [`Created contract ${id} for phase ${phase}`],
+  );
+}
+
+function approveContract(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
+  if (!fs.existsSync(contractPath)) {
+    fail(`Contract ${id} does not exist`);
+  }
+  const contract = readJson(contractPath);
+  const attribution = buildAttribution(context, options, "contract.approve");
+  const approvalStatus = normalizeApprovalStatus(options.status || "approved");
+  if (contract.human_gate === true && !["human", "ci"].includes(attribution.actor.type)) {
+    fail("Human-gated contracts require --actor-type human or an approved CI actor.");
+  }
+  const approval = {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    contract_id: id,
+    status: approvalStatus,
+    summary: options.summary ? String(options.summary) : null,
+    scope: String(options.scope || "contract"),
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+  contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
+  contract.approvals.push(approval);
+  if (approval.status === "approved" && !options["preserve-status"]) {
+    contract.status = "approved";
+  } else if (["changes_requested", "rejected"].includes(approval.status) && !options["preserve-status"]) {
+    contract.status = approval.status;
+  }
+  contract.updated_at = now();
+  contract.audit = {
+    ...(contract.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(contractPath, contract, { force: true });
+  appendTraceEvent(context, contract.story_id || null, {
+    type: "gate",
+    summary: approval.summary || `Contract ${id} ${approval.status}`,
+    action: "contract.approve",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, contractPath)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(
+    options,
+    { status: approval.status, contract_path: contractPath, approval, contract },
+    [`Recorded ${approval.status} approval for contract ${id}`],
   );
 }
 
@@ -266,6 +410,11 @@ function buildContract(context, phase, overrides = {}) {
   const project = readProjectSafe(context);
   const contextSources = buildContextSources(context, overrides.context_files || []);
   const questions = buildQuestionRecords(overrides.questions || [], overrides.qa || []);
+  const attribution = buildAttribution(
+    context,
+    overrides.audit_options || {},
+    overrides.audit_action || "contract.create",
+  );
   return {
     id: overrides.id,
     schema_version: context.config.schema_version,
@@ -300,6 +449,12 @@ function buildContract(context, phase, overrides = {}) {
     approvals: [],
     created_at: now(),
     updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
   };
 }
 
@@ -350,6 +505,137 @@ function buildExecutionPolicySelection(rawValue, valueKey, options = {}) {
   };
 }
 
+function buildAttribution(context, options = {}, action = "unknown") {
+  return {
+    action,
+    actor: buildActor(options, context.root),
+    git: buildGitMetadata(context.root),
+    run: buildRunMetadata(options),
+    recorded_at: now(),
+  };
+}
+
+function buildActor(options = {}, root = process.cwd()) {
+  const explicitActor = getOptionString(options, "actor", "agent");
+  const envActor =
+    process.env.CODEX_AGENT_NAME ||
+    process.env.GITHUB_ACTOR ||
+    process.env.GIT_AUTHOR_NAME ||
+    process.env.USER ||
+    null;
+  const id = explicitActor || envActor || "unknown";
+  const actorType = normalizeActorType(getOptionString(options, "actor-type") || inferActorType(options, id));
+  const name =
+    getOptionString(options, "actor-name") ||
+    process.env.GIT_AUTHOR_NAME ||
+    gitConfigValue(root, "user.name") ||
+    null;
+  const email =
+    getOptionString(options, "actor-email") ||
+    process.env.GIT_AUTHOR_EMAIL ||
+    gitConfigValue(root, "user.email") ||
+    null;
+
+  return {
+    id,
+    type: actorType,
+    name,
+    email,
+    source: explicitActor ? "cli" : "environment",
+  };
+}
+
+function inferActorType(options = {}, actorId = "") {
+  if (options.agent || process.env.CODEX_AGENT_NAME || String(actorId).toLowerCase().includes("codex")) {
+    return "agent";
+  }
+  if (process.env.GITHUB_ACTOR || process.env.CI) {
+    return "ci";
+  }
+  if (process.env.USER) {
+    return "human";
+  }
+  return "unknown";
+}
+
+function normalizeActorType(value) {
+  const normalized = String(value || "unknown").trim().toLowerCase();
+  const allowed = ["human", "agent", "system", "ci", "unknown"];
+  if (!allowed.includes(normalized)) {
+    fail(`Unknown --actor-type '${value}'. Valid values: ${allowed.join(", ")}`);
+  }
+  return normalized;
+}
+
+function buildGitMetadata(root) {
+  const isGitRepo = execGit(root, ["rev-parse", "--is-inside-work-tree"]) === "true";
+  if (!isGitRepo) {
+    return {
+      is_git_repo: false,
+      branch: null,
+      head_sha: null,
+      is_dirty: null,
+      user: {
+        name: null,
+        email: null,
+      },
+      remotes: [],
+    };
+  }
+
+  const status = execGit(root, ["status", "--porcelain"]) || "";
+  return {
+    is_git_repo: true,
+    branch: execGit(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    head_sha: execGit(root, ["rev-parse", "HEAD"]),
+    is_dirty: status.length > 0,
+    user: {
+      name: gitConfigValue(root, "user.name"),
+      email: gitConfigValue(root, "user.email"),
+    },
+    remotes: (execGit(root, ["remote"]) || "")
+      .split(/\r?\n/)
+      .map((remote) => remote.trim())
+      .filter(Boolean),
+  };
+}
+
+function buildRunMetadata(options = {}) {
+  return {
+    run_id: getOptionString(options, "run-id") || process.env.CODEX_RUN_ID || null,
+    thread_id: getOptionString(options, "thread-id") || process.env.CODEX_THREAD_ID || null,
+    session_id: getOptionString(options, "session-id") || process.env.CODEX_SESSION_ID || null,
+    tool: "agentic-sdlc-cli",
+    version: VERSION,
+  };
+}
+
+function getOptionString(options = {}, ...keys) {
+  for (const key of keys) {
+    if (options[key] !== undefined) {
+      return normalizeScalarOption(options[key], key);
+    }
+  }
+  return null;
+}
+
+function gitConfigValue(root, key) {
+  return execGit(root, ["config", "--get", key]);
+}
+
+function execGit(root, args) {
+  try {
+    return childProcess
+      .execFileSync("git", ["-C", root, ...args], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+      .trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function readProjectSafe(context) {
   const projectPath = path.join(context.sdlcRoot, "project.json");
   if (!fs.existsSync(projectPath)) {
@@ -361,6 +647,9 @@ function readProjectSafe(context) {
 function buildContextSources(context, contextFiles) {
   return contextFiles.map((rawPath) => {
     const resolved = path.resolve(context.root, rawPath);
+    if (!isInsidePath(context.root, resolved)) {
+      fail(`Context file must stay inside the target project root: ${rawPath}`);
+    }
     if (!fs.existsSync(resolved)) {
       fail(`Context file does not exist: ${rawPath}`);
     }
@@ -418,6 +707,7 @@ function createStory(context, options) {
   ensureDir(storyDir);
 
   const acceptanceCriteria = normalizeListOption(options.acceptance);
+  const attribution = buildAttribution(context, options, "story.create");
   const story = {
     id,
     title,
@@ -433,6 +723,12 @@ function createStory(context, options) {
     },
     created_at: now(),
     updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
   };
 
   writeJsonFile(path.join(storyDir, "story.json"), story, { force: Boolean(options.force) });
@@ -470,11 +766,12 @@ function claimStory(context, options) {
   const claimPath = path.join(storyDir, "claim.json");
   if (fs.existsSync(claimPath) && !options.force) {
     const existing = readJson(claimPath);
-    if (existing.status === "active" && existing.agent !== agent) {
-      fail(`Story ${id} is already claimed by ${existing.agent}. Use --force only after coordination.`);
+    if (existing.status === "active") {
+      fail(`Story ${id} already has an active claim by ${existing.agent}. Release it first or use --force after coordination.`);
     }
   }
 
+  const attribution = buildAttribution(context, options, "story.claim");
   const claim = {
     story_id: id,
     agent: String(agent),
@@ -483,9 +780,171 @@ function claimStory(context, options) {
     claimed_at: now(),
     expires_at: options["expires-at"] ? String(options["expires-at"]) : null,
     notes: options.notes ? String(options.notes) : null,
+    audit: {
+      claimed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
   };
   writeJsonFile(claimPath, claim, { force: true });
+  appendTraceEvent(context, id, {
+    type: "claim",
+    summary: `Story ${id} claimed by ${agent}`,
+    action: "story.claim",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, claimPath)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
   output(options, { status: "claimed", claim_path: claimPath, claim }, [`Claimed story ${id} for ${agent}`]);
+}
+
+function releaseStoryClaim(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const storyDir = path.join(context.sdlcRoot, "stories", id);
+  const claimPath = path.join(storyDir, "claim.json");
+  if (!fs.existsSync(claimPath)) {
+    fail(`Story ${id} has no claim to release`);
+  }
+  const claim = readJson(claimPath);
+  const requestedAgent = options.agent ? String(options.agent) : null;
+  if (requestedAgent && claim.agent !== requestedAgent && !options.force) {
+    fail(`Story ${id} is claimed by ${claim.agent}, not ${requestedAgent}. Use --force only after coordination.`);
+  }
+  const attribution = buildAttribution(context, options, "story.release");
+  claim.status = String(options.status || "released");
+  claim.released_at = now();
+  claim.release_reason = options.reason ? String(options.reason) : null;
+  claim.audit = {
+    ...(claim.audit || {}),
+    released_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(claimPath, claim, { force: true });
+  appendTraceEvent(context, id, {
+    type: "sync",
+    summary: `Story ${id} claim ${claim.status}`,
+    action: "story.release",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, claimPath)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "released", claim_path: claimPath, claim }, [`Released claim for story ${id}`]);
+}
+
+function createStoryHandoff(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "id"));
+  const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
+  if (!fs.existsSync(storyPath)) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const toAgent = requireOption(options, "to-agent");
+  const attribution = buildAttribution(context, options, "story.handoff");
+  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${compactTimestamp()}`));
+  const handoffPath = path.join(context.sdlcRoot, "handoffs", `${handoffId}.json`);
+  const handoff = {
+    id: handoffId,
+    story_id: storyId,
+    from_actor: attribution.actor,
+    to_agent: String(toAgent),
+    status: String(options.status || "open"),
+    summary: options.summary ? String(options.summary) : null,
+    required_artifacts: normalizeListOption(options.artifact),
+    open_items: normalizeListOption(options["open-item"]),
+    created_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  writeJsonFile(handoffPath, handoff, { force: Boolean(options.force) });
+  appendTraceEvent(context, storyId, {
+    type: "handoff",
+    summary: handoff.summary || `Story ${storyId} handed off to ${toAgent}`,
+    action: "story.handoff",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, handoffPath)],
+    related: [storyId, handoffId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "created", handoff_path: handoffPath, handoff }, [`Created handoff ${handoffId}`]);
+}
+
+function lockPhase(context, options) {
+  ensureInitialized(context);
+  const phase = String(requireOption(options, "phase"));
+  if (!context.config.phases[phase]) {
+    fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
+  }
+  const attribution = buildAttribution(context, options, "phase.lock");
+  const lockId = normalizeId(String(options.id || `LOCK-${phase}-${compactTimestamp()}`));
+  const lockPath = path.join(context.sdlcRoot, "locks", `${lockId}.json`);
+  const lock = {
+    id: lockId,
+    phase,
+    scope: String(options.scope || phase),
+    status: "active",
+    reason: options.reason ? String(options.reason) : null,
+    expires_at: options["expires-at"] ? String(options["expires-at"]) : null,
+    created_at: now(),
+    audit: {
+      locked_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  writeJsonFile(lockPath, lock, { force: Boolean(options.force) });
+  appendTraceEvent(context, null, {
+    type: "lock",
+    summary: `Phase ${phase} locked: ${lock.reason || lock.scope}`,
+    action: "phase.lock",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, lockPath)],
+    related: [phase, lockId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "locked", lock_path: lockPath, lock }, [`Locked phase ${phase} with ${lockId}`]);
+}
+
+function releasePhaseLock(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const lockPath = path.join(context.sdlcRoot, "locks", `${id}.json`);
+  if (!fs.existsSync(lockPath)) {
+    fail(`Phase lock ${id} does not exist`);
+  }
+  const lock = readJson(lockPath);
+  const attribution = buildAttribution(context, options, "phase.release");
+  lock.status = String(options.status || "released");
+  lock.released_at = now();
+  lock.release_reason = options.reason ? String(options.reason) : null;
+  lock.audit = {
+    ...(lock.audit || {}),
+    released_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(lockPath, lock, { force: true });
+  appendTraceEvent(context, null, {
+    type: "lock",
+    summary: `Phase lock ${id} ${lock.status}`,
+    action: "phase.release",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, lockPath)],
+    related: [lock.phase, id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: lock.status, lock_path: lockPath, lock }, [`Released phase lock ${id}`]);
 }
 
 function appendTrace(context, options) {
@@ -498,18 +957,1035 @@ function appendTrace(context, options) {
   const storyId = options.story ? normalizeId(String(options.story)) : null;
   const traceFile = storyId ? `${storyId}.jsonl` : "project.jsonl";
   const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const attribution = buildAttribution(context, options, `trace.${type}`);
+  const gitEvent = options["git-event"] ? normalizeGitEvent(options["git-event"]) : null;
   const event = {
     id: `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
     story_id: storyId,
     type,
     summary,
-    actor: String(options.actor || options.agent || process.env.USER || "unknown"),
+    actor: attribution.actor,
+    action: normalizeScalarOption(options.action, "action") || type,
     evidence: normalizeListOption(options.evidence),
     related: normalizeListOption(options.related),
+    git: {
+      ...attribution.git,
+      event: gitEvent,
+    },
+    run: attribution.run,
     created_at: now(),
   };
   appendJsonLine(tracePath, event);
   output(options, { status: "appended", trace_path: tracePath, event }, [`Appended ${type} trace ${event.id}`]);
+}
+
+function recordSyncEvent(context, options) {
+  ensureInitialized(context);
+  const event = normalizeGitEvent(requireOption(options, "event"));
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const attribution = buildAttribution(context, options, `sync.${event}`);
+  const summary = options.summary ? String(options.summary) : `Recorded git ${event}`;
+  const traceEvent = appendTraceEvent(context, storyId, {
+    type: "sync",
+    summary,
+    action: `sync.${event}`,
+    actor: attribution.actor,
+    evidence: normalizeListOption(options.evidence),
+    related: normalizeListOption(options.related),
+    git: {
+      ...attribution.git,
+      event,
+      remote: getOptionString(options, "remote") || null,
+      upstream: execGit(context.root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]),
+      before_sha: getOptionString(options, "before-sha") || null,
+      after_sha: getOptionString(options, "after-sha") || attribution.git.head_sha,
+      pr_url: getOptionString(options, "pr-url") || null,
+    },
+    run: attribution.run,
+  });
+  output(options, { status: "recorded", event: traceEvent }, [`Recorded sync ${event}`]);
+}
+
+function initializeOutputContracts(context, options = {}) {
+  const root = outputContractsRoot(context);
+  ensureDir(root);
+  ensureDir(path.join(root, "templates"));
+  ensureDir(path.join(root, "decisions"));
+
+  const registryPath = outputRegistryPath(context);
+  if (fs.existsSync(registryPath) && !options.force) {
+    return readJson(registryPath);
+  }
+
+  const project = readProjectSafe(context);
+  const attribution = options.attribution || buildAttribution(context, {}, "output.registry.init");
+  const registry = {
+    schema_version: context.config.schema_version,
+    project_id: options.project_id || project?.project_id || null,
+    status: "active",
+    policy: {
+      template_registry_scope: "project",
+      default_related_story_mode: "reuse+delta",
+      approvals_required_for_new_templates: true,
+      cache_is_source_of_truth: false,
+    },
+    templates: [],
+    links: [],
+    decisions: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  writeJsonFile(registryPath, registry, { force: Boolean(options.force) });
+  return registry;
+}
+
+function proposeOutputTemplate(context, options) {
+  ensureInitialized(context);
+  const artifactType = normalizeArtifactType(requireOption(options, "type"));
+  const id = normalizeId(options.id || `${artifactType}-v1`);
+  const registry = readOutputRegistry(context, { create: true, options, action: "output.template.propose" });
+  if (findOutputTemplate(registry, id) && !options.force) {
+    fail(`Output template ${id} already exists. Use --force to replace its proposal metadata.`);
+  }
+
+  const attribution = buildAttribution(context, options, "output.template.propose");
+  const content = buildOutputTemplateContent(context, options, artifactType, id);
+  const templatePath = path.join(outputContractsRoot(context), "templates", `${id}.md`);
+  writeTextFile(templatePath, content.text, { force: Boolean(options.force) });
+
+  const relativeTemplatePath = toProjectPath(context, templatePath);
+  const templateRecord = {
+    id,
+    type: artifactType,
+    status: "draft",
+    path: relativeTemplatePath,
+    summary: getOptionString(options, "summary") || null,
+    source_paths: content.source_paths,
+    proposed_at: now(),
+    approved_at: null,
+    approved_by: null,
+    audit: {
+      proposed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+
+  upsertById(registry.templates, templateRecord);
+  registry.updated_at = now();
+  registry.audit = {
+    ...(registry.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeOutputRegistry(context, registry);
+  appendTraceEvent(context, null, {
+    type: "decision",
+    summary: `Proposed output template ${id} for ${artifactType}`,
+    action: "output.template.propose",
+    actor: attribution.actor,
+    evidence: [relativeTemplatePath, toProjectPath(context, outputRegistryPath(context))],
+    related: [id, artifactType],
+    git: attribution.git,
+    run: attribution.run,
+  });
+
+  output(
+    options,
+    { status: "proposed", template_path: templatePath, template: templateRecord },
+    [
+      `Proposed output template ${id} for ${artifactType}`,
+      `Approve it with: agentic-sdlc output template approve --id ${id}`,
+    ],
+  );
+}
+
+function approveOutputTemplate(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const registry = readOutputRegistry(context, { create: true, options, action: "output.template.approve" });
+  const template = findOutputTemplate(registry, id);
+  if (!template) {
+    fail(`Output template ${id} does not exist`);
+  }
+
+  const attribution = buildAttribution(context, options, "output.template.approve");
+  if (!["human", "ci"].includes(attribution.actor.type)) {
+    fail("Output template approval requires --actor-type human or an approved CI actor.");
+  }
+
+  const decisionId = normalizeId(String(options["decision-id"] || `DEC-output-template-${id}-${compactTimestamp()}`));
+  template.status = "approved";
+  template.approved_at = now();
+  template.approved_by = attribution.actor;
+  template.approval_summary = getOptionString(options, "summary") || template.approval_summary || null;
+  template.audit = {
+    ...(template.audit || {}),
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+
+  const decision = {
+    id: decisionId,
+    type: "template_approved",
+    template_id: id,
+    artifact_type: template.type,
+    summary: template.approval_summary,
+    status: "approved",
+    created_at: now(),
+    audit: {
+      decided_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  upsertById(registry.decisions, decision);
+  registry.updated_at = now();
+  registry.audit = {
+    ...(registry.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeOutputRegistry(context, registry);
+  appendTraceEvent(context, null, {
+    type: "gate",
+    summary: `Approved output template ${id}`,
+    action: "output.template.approve",
+    actor: attribution.actor,
+    evidence: [template.path, toProjectPath(context, outputRegistryPath(context))],
+    related: [id, decisionId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+
+  output(options, { status: "approved", template, decision }, [`Approved output template ${id}`]);
+}
+
+function resolveOutput(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "story"));
+  const artifactType = normalizeArtifactType(requireOption(options, "type"));
+  const explicitRequirements = normalizeListOption(options.requirement);
+  const cacheStatus = getCacheStatus(context);
+  let resolution;
+
+  if (explicitRequirements.length === 0 && cacheStatus.valid && cacheStatus.cache?.output_resolutions) {
+    resolution = cacheStatus.cache.output_resolutions[outputResolutionKey(storyId, artifactType)] || null;
+    if (resolution) {
+      resolution = { ...resolution, cache_used: true };
+    }
+  }
+
+  if (!resolution) {
+    resolution = buildOutputResolution(context, storyId, artifactType, {
+      requirements: explicitRequirements,
+      cache_used: false,
+    });
+  }
+
+  output(
+    options,
+    resolution,
+    [
+      `Output resolution for ${storyId}/${artifactType}: ${resolution.recommendation}`,
+      resolution.template_id ? `Template: ${resolution.template_id}` : "Template: missing approved template",
+      resolution.base_artifact ? `Base artifact: ${resolution.base_artifact}` : "Base artifact: none",
+      resolution.next_action,
+    ].filter(Boolean),
+  );
+}
+
+function linkOutputArtifact(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "story"));
+  const story = readStory(context, storyId);
+  if (!story) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const artifactType = normalizeArtifactType(requireOption(options, "type"));
+  const mode = normalizeOutputMode(requireOption(options, "mode"));
+  const templateId = normalizeId(requireOption(options, "template"));
+  const registry = readOutputRegistry(context, { create: true, options, action: "output.link" });
+  const template = findOutputTemplate(registry, templateId);
+  if (!template) {
+    fail(`Output template ${templateId} does not exist`);
+  }
+  if (template.type !== artifactType) {
+    fail(`Output template ${templateId} is for '${template.type}', not '${artifactType}'`);
+  }
+  if (template.status !== "approved") {
+    fail(`Output template ${templateId} is '${template.status}'. Approve it before linking output artifacts.`);
+  }
+
+  const artifactPath = resolveProjectFilePath(context, requireOption(options, "artifact"), {
+    mustExist: true,
+    fileOnly: true,
+  });
+  assertNotDerivedArtifact(context, artifactPath, "Output artifact");
+
+  const baseArtifact = options["base-artifact"]
+    ? resolveProjectFilePath(context, options["base-artifact"], { mustExist: true, fileOnly: true })
+    : null;
+  if (mode === "delta" && !baseArtifact) {
+    fail("Mode 'delta' requires --base-artifact.");
+  }
+  if (baseArtifact) {
+    assertNotDerivedArtifact(context, baseArtifact, "Base artifact");
+  }
+
+  const requirements = normalizeListOption(options.requirement);
+  const storyRequirements = Array.isArray(story.links?.requirements) ? story.links.requirements : [];
+  const linkedRequirements = requirements.length > 0 ? requirements : storyRequirements;
+  const relativeArtifactPath = toProjectPath(context, artifactPath);
+  const relativeBaseArtifact = baseArtifact ? toProjectPath(context, baseArtifact) : null;
+  const attribution = buildAttribution(context, options, "output.link");
+  const decisionId = getOptionString(options, "decision-id");
+  if (decisionId && !hasApprovedOutputDecision(registry.decisions || [], decisionId)) {
+    if (!["human", "ci"].includes(attribution.actor.type)) {
+      fail("Creating an output override decision requires --actor-type human or an approved CI actor.");
+    }
+    const decision = {
+      id: normalizeId(decisionId),
+      type: "output_link_override",
+      story_id: storyId,
+      artifact_type: artifactType,
+      status: "approved",
+      summary: getOptionString(options, "rationale") || `Approved output override for ${storyId}/${artifactType}`,
+      created_at: now(),
+      audit: {
+        decided_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+    upsertById(registry.decisions, decision);
+  }
+  const id = normalizeId(
+    options.id || `OUT-${storyId}-${artifactType}-${shortHash(`${relativeArtifactPath}:${mode}`)}`,
+  );
+  const existing = registry.links.find((link) => link.id === id);
+  const link = {
+    id,
+    story_id: storyId,
+    artifact_type: artifactType,
+    artifact_path: relativeArtifactPath,
+    template_id: templateId,
+    mode,
+    base_artifact: relativeBaseArtifact,
+    requirements: linkedRequirements,
+    decision_id: decisionId ? normalizeId(decisionId) : null,
+    rationale: getOptionString(options, "rationale") || null,
+    source_paths: [relativeArtifactPath, relativeBaseArtifact, template.path].filter(Boolean),
+    created_at: existing?.created_at || now(),
+    updated_at: now(),
+    audit: {
+      ...(existing?.audit || {}),
+      linked_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+
+  upsertById(registry.links, link);
+  registry.updated_at = now();
+  registry.audit = {
+    ...(registry.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeOutputRegistry(context, registry);
+  appendTraceEvent(context, storyId, {
+    type: "decision",
+    summary: `Linked ${artifactType} output ${relativeArtifactPath} as ${mode}`,
+    action: "output.link",
+    actor: attribution.actor,
+    evidence: [relativeArtifactPath, toProjectPath(context, outputRegistryPath(context))],
+    related: [storyId, artifactType, templateId, id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+
+  const duplicateHints = findRelatedOutputLinks(registry, link).filter((related) => related.id !== id);
+  output(
+    options,
+    { status: "linked", link, related_outputs: duplicateHints },
+    [
+      `Linked ${artifactType} output for ${storyId} as ${mode}`,
+      duplicateHints.length > 0
+        ? `Related outputs found: ${duplicateHints.map((item) => `${item.story_id}:${item.artifact_path}`).join(", ")}`
+        : "No related outputs found",
+    ],
+  );
+}
+
+function showOutputStatus(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "story"));
+  if (!readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const types = outputStatusTypes(context, registry, options);
+  const links = registry ? registry.links.filter((link) => link.story_id === storyId) : [];
+  const resolutions = types.map((type) => buildOutputResolution(context, storyId, type, { registry }));
+
+  output(
+    options,
+    { story_id: storyId, links, resolutions },
+    [
+      `Output status for ${storyId}`,
+      ...links.map((link) => `${link.artifact_type}: ${link.mode} ${link.artifact_path} (${link.template_id})`),
+      ...resolutions.map((resolution) => `${resolution.artifact_type}: ${resolution.recommendation}`),
+    ],
+  );
+}
+
+function rebuildCache(context, options) {
+  ensureInitialized(context);
+  const cache = buildCache(context);
+  const cachePath = path.join(context.sdlcRoot, "cache", CACHE_FILE_NAME);
+  writeJsonFile(cachePath, cache, { force: true });
+  output(
+    options,
+    { status: "rebuilt", cache_path: cachePath, entries: cache.full_text_index.length },
+    [`Rebuilt local SDLC cache with ${cache.full_text_index.length} indexed entries`],
+  );
+}
+
+function showCacheStatus(context, options) {
+  ensureInitialized(context);
+  const status = getCacheStatus(context);
+  output(
+    options,
+    status,
+    [
+      status.exists ? `Cache: ${status.valid ? "valid" : "stale"}` : "Cache: missing",
+      `Path: ${status.cache_path}`,
+      `Changed: ${status.changed.length}`,
+      `Missing: ${status.missing.length}`,
+      `Added: ${status.added.length}`,
+      status.valid ? "No rebuild required" : "Run: agentic-sdlc cache rebuild",
+    ],
+  );
+}
+
+function clearCache(context, options) {
+  ensureInitialized(context);
+  const cacheRoot = path.join(context.sdlcRoot, "cache");
+  fs.rmSync(cacheRoot, { recursive: true, force: true });
+  ensureDir(cacheRoot);
+  output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
+}
+
+function buildOutputTemplateContent(context, options, artifactType, id) {
+  const from = getOptionString(options, "from");
+  if (from) {
+    const sourcePath = resolveProjectFilePath(context, from, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, sourcePath, "Template source");
+    return {
+      text: fs.readFileSync(sourcePath, "utf8"),
+      source_paths: [toProjectPath(context, sourcePath)],
+    };
+  }
+
+  const body = getOptionString(options, "body");
+  if (body) {
+    return {
+      text: `${body.trim()}\n`,
+      source_paths: [],
+    };
+  }
+
+  const summary = getOptionString(options, "summary") || `Project-approved structure for ${artifactType} outputs.`;
+  return {
+    text: [
+      `# ${id}`,
+      "",
+      "## Purpose",
+      summary,
+      "",
+      "## Context",
+      "- Linked story",
+      "- Linked requirement or source artifact",
+      "- Reused base artifact when this output is a delta",
+      "",
+      "## Output",
+      "- Canonical content agreed with the user",
+      "- Explicit delta from the base artifact when applicable",
+      "",
+      "## Validation",
+      "- Acceptance criteria or gate evidence",
+      "- Open questions and follow-up decisions",
+      "",
+    ].join("\n"),
+    source_paths: [],
+  };
+}
+
+function buildOutputResolution(context, storyId, artifactType, options = {}) {
+  const story = readStory(context, storyId);
+  if (!story) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const registry = options.registry || readOutputRegistry(context, { missingOk: true });
+  const storyRequirements = Array.isArray(story.links?.requirements) ? story.links.requirements : [];
+  const requirements = options.requirements?.length > 0 ? options.requirements : storyRequirements;
+  const templates = registry ? registry.templates.filter((template) => template.type === artifactType) : [];
+  const approvedTemplates = templates.filter((template) => template.status === "approved");
+  const existingLinks = registry
+    ? registry.links.filter((link) => link.story_id === storyId && link.artifact_type === artifactType)
+    : [];
+  const relatedLinks = registry
+    ? registry.links.filter(
+        (link) =>
+          link.story_id !== storyId &&
+          link.artifact_type === artifactType &&
+          overlaps(link.requirements || [], requirements),
+      )
+    : [];
+  const preferredRelated = relatedLinks[0] || null;
+  const preferredTemplate = approvedTemplates.find((template) => template.id === preferredRelated?.template_id) || approvedTemplates[0] || null;
+  let recommendation = "template_required";
+  let nextAction = `Propose and approve a template: agentic-sdlc output template propose --type ${artifactType}`;
+  let baseArtifact = null;
+
+  if (existingLinks.length > 0) {
+    recommendation = "linked";
+    nextAction = "No new artifact is required unless the user agrees on a delta or structure change.";
+    baseArtifact = existingLinks[0].base_artifact || existingLinks[0].artifact_path || null;
+  } else if (preferredRelated) {
+    recommendation = "reuse_delta";
+    baseArtifact = preferredRelated.artifact_path;
+    nextAction = [
+      `Reuse ${preferredRelated.artifact_path} and create only a delta if needed.`,
+      `Link it with: agentic-sdlc output link --story ${storyId} --type ${artifactType}`,
+      `--artifact <delta-path> --template ${preferredRelated.template_id} --mode delta --base-artifact ${preferredRelated.artifact_path}`,
+    ].join(" ");
+  } else if (preferredTemplate) {
+    recommendation = "new";
+    nextAction = [
+      "No related approved artifact was found.",
+      `Create the artifact with template ${preferredTemplate.id}, then link it with mode new.`,
+    ].join(" ");
+  }
+
+  return {
+    story_id: storyId,
+    artifact_type: artifactType,
+    requirements,
+    recommendation,
+    template_id: preferredTemplate?.id || existingLinks[0]?.template_id || null,
+    approved_templates: approvedTemplates.map((template) => template.id),
+    existing_links: existingLinks,
+    related_links: relatedLinks,
+    base_artifact: baseArtifact,
+    cache_used: Boolean(options.cache_used),
+    next_action: nextAction,
+  };
+}
+
+function buildCache(context) {
+  const generatedAt = now();
+  const sourceFiles = collectKnowledgeSourceFiles(context);
+  const sourceHashes = {};
+  const fullTextIndex = [];
+  for (const filePath of sourceFiles) {
+    const relativePath = toProjectPath(context, filePath);
+    const raw = fs.readFileSync(filePath, "utf8");
+    const sourceHash = hashBuffer(Buffer.from(raw, "utf8"));
+    sourceHashes[relativePath] = sourceHash;
+    fullTextIndex.push({
+      path: relativePath,
+      title: inferTitle(filePath, raw),
+      extension: path.extname(filePath),
+      size_bytes: Buffer.byteLength(raw),
+      snippet: normalizeText(raw).slice(0, 240),
+      search_text: normalizeText(raw),
+      source_paths: [relativePath],
+      source_hashes: {
+        [relativePath]: sourceHash,
+      },
+      generated_at: generatedAt,
+      schema_version: context.config.schema_version,
+    });
+  }
+
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const stories = readAllStories(context);
+  const templateResolution = buildTemplateResolution(registry);
+  const storyRequirementGraph = buildStoryRequirementGraph(stories);
+  const dependencyGraph = buildStoryDependencyGraph(stories);
+  const artifactFingerprints = buildArtifactFingerprints(context, registry);
+  const outputResolutions = {};
+  const artifactTypes = collectOutputArtifactTypes(context, registry);
+  for (const story of stories) {
+    for (const artifactType of artifactTypes) {
+      outputResolutions[outputResolutionKey(story.id, artifactType)] = buildOutputResolution(context, story.id, artifactType, {
+        registry,
+        cache_used: false,
+      });
+    }
+  }
+
+  return {
+    schema_version: context.config.schema_version,
+    generated_at: generatedAt,
+    root: context.root,
+    source_paths: Object.keys(sourceHashes).sort(),
+    source_hashes: sourceHashes,
+    full_text_index: fullTextIndex,
+    story_requirement_graph: storyRequirementGraph,
+    artifact_fingerprints: artifactFingerprints,
+    template_resolution: templateResolution,
+    kb_summaries: fullTextIndex.map((entry) => ({
+      path: entry.path,
+      title: entry.title,
+      snippet: entry.snippet,
+    })),
+    dependency_graph: dependencyGraph,
+    output_resolutions: outputResolutions,
+  };
+}
+
+function getCacheStatus(context) {
+  const cachePath = path.join(context.sdlcRoot, "cache", CACHE_FILE_NAME);
+  const exists = fs.existsSync(cachePath);
+  if (!exists) {
+    return {
+      exists: false,
+      valid: false,
+      stale: true,
+      cache_path: cachePath,
+      changed: [],
+      missing: [],
+      added: [],
+      schema_mismatch: false,
+      cache: null,
+    };
+  }
+
+  let cache;
+  try {
+    cache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+  } catch (error) {
+    return {
+      exists: true,
+      valid: false,
+      stale: true,
+      cache_path: cachePath,
+      changed: [],
+      missing: [],
+      added: [],
+      schema_mismatch: false,
+      parse_error: error.message,
+      generated_at: null,
+      cache: null,
+    };
+  }
+  const currentSourceFiles = collectKnowledgeSourceFiles(context);
+  const currentHashes = {};
+  for (const filePath of currentSourceFiles) {
+    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
+  }
+  const cachedHashes = cache.source_hashes || {};
+  const currentPaths = new Set(Object.keys(currentHashes));
+  const cachedPaths = new Set(Object.keys(cachedHashes));
+  const changed = [];
+  const missing = [];
+  const added = [];
+
+  for (const cachedPath of cachedPaths) {
+    if (!currentPaths.has(cachedPath)) {
+      missing.push(cachedPath);
+    } else if (cachedHashes[cachedPath] !== currentHashes[cachedPath]) {
+      changed.push(cachedPath);
+    }
+  }
+  for (const currentPath of currentPaths) {
+    if (!cachedPaths.has(currentPath)) {
+      added.push(currentPath);
+    }
+  }
+  const schemaMismatch = cache.schema_version !== context.config.schema_version;
+  const valid = changed.length === 0 && missing.length === 0 && added.length === 0 && !schemaMismatch;
+  return {
+    exists: true,
+    valid,
+    stale: !valid,
+    cache_path: cachePath,
+    changed,
+    missing,
+    added,
+    schema_mismatch: schemaMismatch,
+    generated_at: cache.generated_at || null,
+    cache,
+  };
+}
+
+function outputContractsRoot(context) {
+  return path.join(context.sdlcRoot, "output-contracts");
+}
+
+function outputRegistryPath(context) {
+  return path.join(outputContractsRoot(context), "registry.json");
+}
+
+function readOutputRegistry(context, options = {}) {
+  const registryPath = outputRegistryPath(context);
+  if (!fs.existsSync(registryPath)) {
+    if (options.create) {
+      return initializeOutputContracts(context, {
+        force: false,
+        attribution: buildAttribution(context, options.options || {}, options.action || "output.registry.init"),
+      });
+    }
+    if (options.missingOk) {
+      return null;
+    }
+    fail("Output registry does not exist. Run 'agentic-sdlc init' or create it with output template propose.");
+  }
+  const registry = readJson(registryPath);
+  registry.templates = Array.isArray(registry.templates) ? registry.templates : [];
+  registry.links = Array.isArray(registry.links) ? registry.links : [];
+  registry.decisions = Array.isArray(registry.decisions) ? registry.decisions : [];
+  return registry;
+}
+
+function writeOutputRegistry(context, registry) {
+  writeJsonFile(outputRegistryPath(context), registry, { force: true });
+}
+
+function findOutputTemplate(registry, id) {
+  return (registry.templates || []).find((template) => template.id === id) || null;
+}
+
+function normalizeArtifactType(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(normalized)) {
+    fail(`Invalid artifact type '${value}'. Use lowercase letters, numbers, dots, underscores, and hyphens.`);
+  }
+  return normalized;
+}
+
+function normalizeOutputMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!OUTPUT_LINK_MODES.has(normalized)) {
+    fail(`Invalid output mode '${value}'. Valid modes: ${Array.from(OUTPUT_LINK_MODES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function resolveProjectFilePath(context, rawPath, options = {}) {
+  const value = String(rawPath || "").trim();
+  if (!value) {
+    fail("Path value cannot be empty");
+  }
+  const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(context.root, value);
+  assertPathInsideRoot(context, resolved, value);
+  if (options.mustExist && !fs.existsSync(resolved)) {
+    fail(`Path does not exist: ${value}`);
+  }
+  if (fs.existsSync(resolved)) {
+    const realRoot = fs.realpathSync.native(context.root);
+    const realResolved = fs.realpathSync.native(resolved);
+    if (!isInsidePath(realRoot, realResolved)) {
+      fail(`Path resolves outside the target project root: ${value}`);
+    }
+    const stat = fs.statSync(resolved);
+    if (options.fileOnly && !stat.isFile()) {
+      fail(`Path is not a file: ${value}`);
+    }
+    if (options.directoryOnly && !stat.isDirectory()) {
+      fail(`Path is not a directory: ${value}`);
+    }
+  }
+  return resolved;
+}
+
+function assertPathInsideRoot(context, resolvedPath, label) {
+  if (!isInsidePath(context.root, resolvedPath)) {
+    fail(`Path must stay inside the target project root: ${label}`);
+  }
+}
+
+function toProjectPath(context, filePath) {
+  return path.relative(context.root, path.resolve(filePath)).split(path.sep).join("/");
+}
+
+function isDerivedArtifactPath(context, filePath) {
+  const relative = path.relative(context.sdlcRoot, path.resolve(filePath));
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return false;
+  }
+  const first = relative.split(path.sep)[0];
+  const derived = new Set(context.config.cache_policy?.derived_directories || ["cache", "indexes"]);
+  return derived.has(first);
+}
+
+function assertNotDerivedArtifact(context, filePath, label) {
+  if (isDerivedArtifactPath(context, filePath)) {
+    fail(`${label} cannot be under .sdlc/cache or .sdlc/indexes because those directories are derived artifacts.`);
+  }
+}
+
+function upsertById(items, item) {
+  const index = items.findIndex((candidate) => candidate.id === item.id);
+  if (index >= 0) {
+    items[index] = item;
+  } else {
+    items.push(item);
+  }
+}
+
+function outputStatusTypes(context, registry, options = {}) {
+  const explicitTypes = normalizeListOption(options.type).map(normalizeArtifactType);
+  if (explicitTypes.length > 0) {
+    return explicitTypes;
+  }
+  return collectOutputArtifactTypes(context, registry);
+}
+
+function collectOutputArtifactTypes(context, registry) {
+  const types = new Set();
+  for (const type of context.config.output_consistency_policy?.artifact_types || []) {
+    types.add(normalizeArtifactType(type));
+  }
+  if (registry) {
+    for (const template of registry.templates || []) {
+      if (template.type) {
+        types.add(normalizeArtifactType(template.type));
+      }
+    }
+    for (const link of registry.links || []) {
+      if (link.artifact_type) {
+        types.add(normalizeArtifactType(link.artifact_type));
+      }
+    }
+  }
+  return Array.from(types).sort();
+}
+
+function outputResolutionKey(storyId, artifactType) {
+  return `${storyId}::${artifactType}`;
+}
+
+function collectKnowledgeSourceFiles(context) {
+  const sourceDirs = context.config.cache_policy?.source_of_truth_dirs || [
+    "contracts",
+    "requirements",
+    "stories",
+    "decisions",
+    "tests",
+    "traces",
+    "handoffs",
+    "output-contracts",
+    "assumptions",
+    "risks",
+    "locks",
+    "orchestration",
+    "releases",
+    "reports",
+  ];
+  const files = [];
+  const rootFiles = [path.join(context.sdlcRoot, "project.json")].filter((filePath) => fs.existsSync(filePath));
+  files.push(...rootFiles);
+  for (const directory of sourceDirs) {
+    const dirPath = path.join(context.sdlcRoot, directory);
+    if (!fs.existsSync(dirPath)) {
+      continue;
+    }
+    for (const filePath of walkFiles(dirPath)) {
+      if (shouldIndexFile(context, filePath)) {
+        files.push(filePath);
+      }
+    }
+  }
+  return Array.from(new Set(files)).sort((a, b) => a.localeCompare(b));
+}
+
+function shouldIndexFile(context, filePath) {
+  if (isDerivedArtifactPath(context, filePath)) {
+    return false;
+  }
+  const extension = path.extname(filePath);
+  return context.config.indexable_extensions.includes(extension);
+}
+
+function readAllStories(context) {
+  const storiesRoot = path.join(context.sdlcRoot, "stories");
+  return safeReadDir(storiesRoot)
+    .map((entry) => {
+      const storyPath = path.join(storiesRoot, entry, "story.json");
+      return fs.existsSync(storyPath) ? readJson(storyPath) : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+function buildTemplateResolution(registry) {
+  const result = {};
+  for (const template of registry?.templates || []) {
+    const type = template.type || "unknown";
+    result[type] = result[type] || {
+      approved_template_ids: [],
+      draft_template_ids: [],
+      default_template_id: null,
+    };
+    if (template.status === "approved") {
+      result[type].approved_template_ids.push(template.id);
+      result[type].default_template_id = result[type].default_template_id || template.id;
+    } else {
+      result[type].draft_template_ids.push(template.id);
+    }
+  }
+  return result;
+}
+
+function buildStoryRequirementGraph(stories) {
+  return stories.map((story) => ({
+    story_id: story.id,
+    requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
+  }));
+}
+
+function buildStoryDependencyGraph(stories) {
+  const nodes = stories.map((story) => story.id);
+  const edges = [];
+  for (let left = 0; left < stories.length; left += 1) {
+    for (let right = left + 1; right < stories.length; right += 1) {
+      const leftReqs = stories[left].links?.requirements || [];
+      const rightReqs = stories[right].links?.requirements || [];
+      const shared = leftReqs.filter((requirement) => rightReqs.includes(requirement));
+      if (shared.length > 0) {
+        edges.push({
+          from: stories[left].id,
+          to: stories[right].id,
+          reason: "shared_requirements",
+          requirements: shared,
+        });
+      }
+    }
+  }
+  return { nodes, edges };
+}
+
+function buildArtifactFingerprints(context, registry) {
+  const paths = new Set();
+  for (const template of registry?.templates || []) {
+    if (template.path) {
+      paths.add(template.path);
+    }
+  }
+  for (const link of registry?.links || []) {
+    if (link.artifact_path) {
+      paths.add(link.artifact_path);
+    }
+    if (link.base_artifact) {
+      paths.add(link.base_artifact);
+    }
+  }
+  return Array.from(paths)
+    .sort()
+    .map((relativePath) => {
+      const filePath = resolveProjectFilePath(context, relativePath, { mustExist: false });
+      return {
+        path: relativePath,
+        exists: fs.existsSync(filePath),
+        sha256: fs.existsSync(filePath) ? hashFile(filePath) : null,
+        size_bytes: fs.existsSync(filePath) ? fs.statSync(filePath).size : null,
+      };
+    });
+}
+
+function findRelatedOutputLinks(registry, link) {
+  const requirements = link.requirements || [];
+  return (registry.links || []).filter((candidate) => {
+    if (candidate.id === link.id || candidate.artifact_type !== link.artifact_type) {
+      return false;
+    }
+    if (overlaps(candidate.requirements || [], requirements)) {
+      return true;
+    }
+    if (link.base_artifact && candidate.artifact_path === link.base_artifact) {
+      return true;
+    }
+    return candidate.artifact_path && candidate.artifact_path === link.artifact_path;
+  });
+}
+
+function overlaps(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || right.length === 0) {
+    return false;
+  }
+  const rightSet = new Set(right);
+  return left.some((item) => rightSet.has(item));
+}
+
+function hasApprovedOutputDecision(decisions, decisionId) {
+  if (!decisionId) {
+    return false;
+  }
+  return decisions.some((decision) => decision.id === decisionId && decision.status === "approved");
+}
+
+function findUnlinkedStoryOutputCandidates(context, storyId) {
+  const storyDir = path.join(context.sdlcRoot, "stories", storyId);
+  const outputsDir = path.join(storyDir, "outputs");
+  if (!fs.existsSync(outputsDir)) {
+    return [];
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const linked = new Set((registry?.links || []).filter((link) => link.story_id === storyId).map((link) => link.artifact_path));
+  return walkFiles(outputsDir)
+    .filter((filePath) => shouldIndexFile(context, filePath))
+    .map((filePath) => toProjectPath(context, filePath))
+    .filter((relativePath) => !linked.has(relativePath));
+}
+
+function shortHash(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 8);
+}
+
+function hashFile(filePath) {
+  return hashBuffer(fs.readFileSync(filePath));
+}
+
+function hashBuffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function appendTraceEvent(context, storyId, event) {
+  const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
+  const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const traceEvent = {
+    id: event.id || `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    story_id: normalizedStoryId,
+    type: event.type,
+    summary: event.summary,
+    actor: event.actor,
+    action: event.action || event.type,
+    evidence: event.evidence || [],
+    related: event.related || [],
+    git: event.git || buildGitMetadata(context.root),
+    run: event.run || buildRunMetadata({}),
+    created_at: event.created_at || now(),
+  };
+  appendJsonLine(tracePath, traceEvent);
+  return traceEvent;
 }
 
 function rebuildIndex(context, options) {
@@ -553,6 +2029,7 @@ function gateCheck(context, options) {
   ensureInitialized(context);
   const report = {
     status: "passed",
+    strict: Boolean(options.strict),
     checked_at: now(),
     root: context.root,
     errors: [],
@@ -560,12 +2037,28 @@ function gateCheck(context, options) {
     checked: [],
   };
 
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const scope = String(options.scope || (storyId ? "story" : "all"));
+  if (!["story", "all"].includes(scope)) {
+    fail("Gate scope must be 'story' or 'all'.");
+  }
+  if (scope === "story" && !storyId) {
+    fail("Gate scope 'story' requires --story.");
+  }
   validateProject(context, report);
-  validateContracts(context, report);
+  validateLocks(context, report);
 
-  if (options.story) {
-    validateStory(context, normalizeId(String(options.story)), report);
+  if (storyId && scope === "story") {
+    const story = readStory(context, storyId);
+    if (story?.contract_id) {
+      validateContracts(context, report, new Set([story.contract_id]));
+    }
+    validateTraces(context, report, storyId);
+    validateStory(context, storyId, report);
+    validateOutputContracts(context, report, storyId);
   } else {
+    validateContracts(context, report);
+    validateTraces(context, report);
     const storiesRoot = path.join(context.sdlcRoot, "stories");
     for (const entry of safeReadDir(storiesRoot)) {
       const storyJson = path.join(storiesRoot, entry, "story.json");
@@ -573,6 +2066,7 @@ function gateCheck(context, options) {
         validateStory(context, entry, report);
       }
     }
+    validateOutputContracts(context, report);
   }
 
   if (report.errors.length > 0) {
@@ -594,6 +2088,11 @@ function gateCheck(context, options) {
   );
 }
 
+function readStory(context, storyId) {
+  const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
+  return fs.existsSync(storyPath) ? readJson(storyPath) : null;
+}
+
 function showStatus(context, options) {
   ensureInitialized(context);
   const counts = {};
@@ -610,6 +2109,155 @@ function showStatus(context, options) {
       ...Object.entries(counts).map(([key, value]) => `${key}: ${value}`),
     ],
   );
+}
+
+function showOrchestrationStatus(context, options) {
+  ensureInitialized(context);
+  const snapshot = buildOrchestrationSnapshot(context);
+  output(
+    options,
+    snapshot,
+    [
+      `Stories: ${snapshot.summary.total}`,
+      `Available: ${snapshot.summary.available}`,
+      `Claimed: ${snapshot.summary.claimed}`,
+      `Blocked: ${snapshot.summary.blocked}`,
+      `Stale: ${snapshot.summary.stale}`,
+      `Active locks: ${snapshot.summary.active_locks}`,
+      ...snapshot.stories.map((story) => {
+        const owner = story.claim?.agent ? ` by ${story.claim.agent}` : "";
+        const branch = story.claim?.branch ? ` on ${story.claim.branch}` : "";
+        return `${story.id}: ${story.orchestration_state}${owner}${branch} (${story.phase})`;
+      }),
+    ],
+  );
+}
+
+function showOrchestrationPlan(context, options) {
+  ensureInitialized(context);
+  const snapshot = buildOrchestrationSnapshot(context);
+  const limit = Number(options.limit || 20);
+  const candidates = snapshot.stories
+    .filter((story) => story.orchestration_state === "available")
+    .slice(0, limit)
+    .map((story) => ({
+      story_id: story.id,
+      title: story.title,
+      phase: story.phase,
+      suggested_branch: `feature/${story.id}`,
+      suggested_claim: `agentic-sdlc story claim --id ${story.id} --agent <agent> --branch feature/${story.id}`,
+    }));
+  output(
+    options,
+    { ...snapshot, candidates },
+    candidates.length
+      ? [
+          `Available work lanes: ${candidates.length}`,
+          ...candidates.map((item) => `${item.story_id}: ${item.title} (${item.phase}) -> ${item.suggested_branch}`),
+        ]
+      : ["No available story lanes. Check blocked, claimed, or stale stories with 'orchestrate status --json'."],
+  );
+}
+
+function buildOrchestrationSnapshot(context) {
+  const storiesRoot = path.join(context.sdlcRoot, "stories");
+  const stories = safeReadDir(storiesRoot)
+    .map((entry) => {
+      const storyPath = path.join(storiesRoot, entry, "story.json");
+      if (!fs.existsSync(storyPath)) {
+        return null;
+      }
+      const story = readJson(storyPath);
+      const claimPath = path.join(storiesRoot, entry, "claim.json");
+      const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
+      const lastTrace = readLastTraceEvent(context, entry);
+      return {
+        id: story.id || entry,
+        title: story.title || entry,
+        status: story.status || "unknown",
+        phase: story.phase || "unknown",
+        contract_id: story.contract_id || null,
+        claim,
+        last_trace: lastTrace,
+        orchestration_state: inferStoryOrchestrationState(context, story, claim),
+        blockers: inferStoryBlockers(context, story, claim),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.id.localeCompare(b.id));
+
+  const summary = {
+    total: stories.length,
+    available: stories.filter((story) => story.orchestration_state === "available").length,
+    claimed: stories.filter((story) => story.orchestration_state === "claimed").length,
+    blocked: stories.filter((story) => story.orchestration_state === "blocked").length,
+    stale: stories.filter((story) => story.orchestration_state === "stale").length,
+    active_locks: readActiveLocks(context).length,
+  };
+
+  return {
+    checked_at: now(),
+    root: context.root,
+    summary,
+    stories,
+    locks: readLocks(context),
+    handoffs: readHandoffs(context),
+  };
+}
+
+function inferStoryOrchestrationState(context, story, claim) {
+  if (claim && claim.status === "active") {
+    return isExpired(claim.expires_at) ? "stale" : "claimed";
+  }
+  return inferStoryBlockers(context, story, claim).length > 0 ? "blocked" : "available";
+}
+
+function inferStoryBlockers(context, story, claim) {
+  const blockers = [];
+  if (!Array.isArray(story.acceptance_criteria) || story.acceptance_criteria.length === 0) {
+    blockers.push("missing acceptance criteria");
+  }
+  if (story.contract_id) {
+    const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
+    if (!fs.existsSync(contractPath)) {
+      blockers.push(`missing contract ${story.contract_id}`);
+    }
+  }
+  if (claim && claim.status === "active" && isExpired(claim.expires_at)) {
+    blockers.push("active claim is expired");
+  }
+  return blockers;
+}
+
+function readLastTraceEvent(context, storyId) {
+  const events = readTraceEvents(context, storyId).filter((event) => event.type !== "invalid");
+  return events.length ? events[events.length - 1] : null;
+}
+
+function readLocks(context) {
+  const locksRoot = path.join(context.sdlcRoot, "locks");
+  return safeReadDir(locksRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(locksRoot, name)));
+}
+
+function readActiveLocks(context) {
+  return readLocks(context).filter((lock) => lock.status === "active" && !isExpired(lock.expires_at));
+}
+
+function readHandoffs(context) {
+  const handoffsRoot = path.join(context.sdlcRoot, "handoffs");
+  return safeReadDir(handoffsRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(handoffsRoot, name)));
+}
+
+function isExpired(value) {
+  if (!value) {
+    return false;
+  }
+  const timestamp = Date.parse(String(value));
+  return Number.isFinite(timestamp) && timestamp < Date.now();
 }
 
 function validateProject(context, report) {
@@ -630,9 +2278,163 @@ function validateProject(context, report) {
   report.checked.push("project");
 }
 
-function validateContracts(context, report) {
+function validateLocks(context, report) {
+  for (const lock of readLocks(context)) {
+    const label = `lock ${lock.id || "unknown"}`;
+    if (!lock.id || !lock.phase || !lock.status) {
+      report.errors.push(`${label} is missing id, phase, or status`);
+    }
+    if (lock.status === "active" && isExpired(lock.expires_at)) {
+      const severity = report.strict ? "errors" : "warnings";
+      report[severity].push(`${label} expired at ${lock.expires_at}`);
+    } else if (lock.status === "active") {
+      report.warnings.push(`${label} is active for phase ${lock.phase}`);
+    }
+    report.checked.push(label);
+  }
+}
+
+function validateOutputContracts(context, report, storyId = null) {
+  const registryPath = outputRegistryPath(context);
+  const cacheStatus = getCacheStatus(context);
+  if (!cacheStatus.exists) {
+    report.warnings.push("Local SDLC cache is missing; run 'agentic-sdlc cache rebuild' for faster output resolution");
+  } else if (!cacheStatus.valid) {
+    report.warnings.push("Local SDLC cache is stale; run 'agentic-sdlc cache rebuild'");
+  }
+
+  if (!fs.existsSync(registryPath)) {
+    const severity = report.strict ? "errors" : "warnings";
+    report[severity].push("Missing .sdlc/output-contracts/registry.json");
+    return;
+  }
+
+  const registry = readOutputRegistry(context);
+  const templates = Array.isArray(registry.templates) ? registry.templates : [];
+  const links = Array.isArray(registry.links) ? registry.links : [];
+  const decisions = Array.isArray(registry.decisions) ? registry.decisions : [];
+  const linksToValidate = storyId ? links.filter((link) => link.story_id === storyId) : links;
+  const templateById = new Map(templates.map((template) => [template.id, template]));
+
+  if (!registry.schema_version) {
+    report.errors.push("Output registry is missing schema_version");
+  }
+  if (!Array.isArray(registry.templates)) {
+    report.errors.push("Output registry templates must be an array");
+  }
+  if (!Array.isArray(registry.links)) {
+    report.errors.push("Output registry links must be an array");
+  }
+
+  for (const template of templates) {
+    const label = `output template ${template.id || "unknown"}`;
+    if (!template.id || !template.type || !template.status || !template.path) {
+      report.errors.push(`${label} is missing id, type, status, or path`);
+      continue;
+    }
+    const templatePath = resolveProjectFilePath(context, template.path, { mustExist: false });
+    if (!fs.existsSync(templatePath)) {
+      report.errors.push(`${label} references missing file ${template.path}`);
+    }
+    if (isDerivedArtifactPath(context, templatePath)) {
+      report.errors.push(`${label} cannot live under cache or indexes`);
+    }
+    if (Array.isArray(template.source_paths)) {
+      for (const sourcePath of template.source_paths) {
+        const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+        if (isDerivedArtifactPath(context, resolved)) {
+          report.errors.push(`${label} uses derived cache/index source ${sourcePath}`);
+        }
+      }
+    }
+    report.checked.push(label);
+  }
+
+  for (const link of linksToValidate) {
+    const label = `output link ${link.id || `${link.story_id || "unknown"}:${link.artifact_type || "unknown"}`}`;
+    validateOutputLink(context, report, registry, templateById, decisions, link, label);
+    report.checked.push(label);
+  }
+
+  if (storyId) {
+    for (const candidate of findUnlinkedStoryOutputCandidates(context, storyId)) {
+      const severity = report.strict ? "errors" : "warnings";
+      report[severity].push(`Story ${storyId} output candidate ${candidate} is not linked in output-contracts registry`);
+    }
+  }
+}
+
+function validateOutputLink(context, report, registry, templateById, decisions, link, label) {
+  for (const field of ["id", "story_id", "artifact_type", "artifact_path", "template_id", "mode"]) {
+    if (!link[field]) {
+      report.errors.push(`${label} is missing ${field}`);
+    }
+  }
+  if (!OUTPUT_LINK_MODES.has(link.mode)) {
+    report.errors.push(`${label} has invalid mode '${link.mode}'`);
+  }
+  if (link.story_id && !readStory(context, link.story_id)) {
+    report.errors.push(`${label} references missing story ${link.story_id}`);
+  }
+
+  const template = templateById.get(link.template_id);
+  if (!template) {
+    report.errors.push(`${label} references missing template ${link.template_id}`);
+  } else {
+    if (template.type !== link.artifact_type) {
+      report.errors.push(`${label} template ${link.template_id} type '${template.type}' does not match '${link.artifact_type}'`);
+    }
+    if (template.status !== "approved") {
+      const severity = report.strict ? "errors" : "warnings";
+      report[severity].push(`${label} template ${link.template_id} is not approved`);
+    }
+  }
+
+  if (link.artifact_path) {
+    const artifactPath = resolveProjectFilePath(context, link.artifact_path, { mustExist: false });
+    if (!fs.existsSync(artifactPath)) {
+      report.errors.push(`${label} references missing artifact ${link.artifact_path}`);
+    }
+    if (isDerivedArtifactPath(context, artifactPath)) {
+      report.errors.push(`${label} uses derived cache/index artifact ${link.artifact_path} as canonical output`);
+    }
+  }
+
+  if (link.mode === "delta") {
+    if (!link.base_artifact) {
+      report.errors.push(`${label} mode delta requires base_artifact`);
+    } else {
+      const basePath = resolveProjectFilePath(context, link.base_artifact, { mustExist: false });
+      if (!fs.existsSync(basePath)) {
+        report.errors.push(`${label} references missing base artifact ${link.base_artifact}`);
+      }
+      if (isDerivedArtifactPath(context, basePath)) {
+        report.errors.push(`${label} uses derived cache/index base artifact ${link.base_artifact}`);
+      }
+    }
+  }
+
+  const duplicateLinks = findRelatedOutputLinks(registry, link).filter((related) => related.id !== link.id);
+  if (link.mode === "new" && duplicateLinks.length > 0 && !hasApprovedOutputDecision(decisions, link.decision_id)) {
+    const related = duplicateLinks.map((item) => `${item.story_id}:${item.artifact_path}`).join(", ");
+    const severity = report.strict ? "errors" : "warnings";
+    report[severity].push(
+      `${label} creates a new ${link.artifact_type} for requirements already covered by ${related}; use reuse/delta or record an approved decision`,
+    );
+  }
+}
+
+function validateContracts(context, report, contractIds = null) {
   const contractsRoot = path.join(context.sdlcRoot, "contracts");
-  const files = safeReadDir(contractsRoot).filter((name) => name.endsWith(".json"));
+  const files = safeReadDir(contractsRoot).filter((name) => {
+    if (!name.endsWith(".json")) {
+      return false;
+    }
+    if (!contractIds) {
+      return true;
+    }
+    return contractIds.has(path.basename(name, ".json"));
+  });
   if (files.length === 0) {
     report.errors.push("No contracts found under .sdlc/contracts");
     return;
@@ -658,10 +2460,31 @@ function validateContracts(context, report) {
     }
     if (!contract.contextualization || typeof contract.contextualization !== "object") {
       report.errors.push(`${label} must include contextualization metadata`);
+    } else if (report.strict) {
+      if (!contract.contextualization.summary) {
+        report.errors.push(`${label} strict gate requires contextualization.summary`);
+      }
+      if (Number(contract.contextualization.open_questions || 0) > 0) {
+        report.errors.push(`${label} strict gate blocks open contract questions`);
+      }
+    }
+    if (report.strict && contract.human_gate === true && !hasApprovedContractApproval(contract)) {
+      report.errors.push(`${label} strict gate requires an approved human gate record`);
     }
     validateExecutionPolicy(context, contract, label, report);
     report.checked.push(label);
   }
+}
+
+function hasApprovedContractApproval(contract) {
+  if (!Array.isArray(contract.approvals) || contract.approvals.length === 0) {
+    return false;
+  }
+  const latest = [...contract.approvals]
+    .filter((approval) => approval && approval.status)
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .at(-1);
+  return latest?.status === "approved";
 }
 
 function validateExecutionPolicy(context, contract, label, report) {
@@ -701,6 +2524,59 @@ function validateExecutionPolicySelection(selection, name, valueKey, label, repo
   }
 }
 
+function validateTraces(context, report, storyId = null) {
+  const tracesRoot = path.join(context.sdlcRoot, "traces");
+  const files = storyId
+    ? [path.join(tracesRoot, `${storyId}.jsonl`)].filter((filePath) => fs.existsSync(filePath))
+    : walkFiles(tracesRoot).filter((filePath) => filePath.endsWith(".jsonl"));
+  const requireActor = context.config.trace_policy?.require_actor !== false;
+  for (const filePath of files) {
+    const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
+    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (!line.trim()) {
+        return;
+      }
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        report.errors.push(`${label}:${index + 1} is not valid JSON`);
+        return;
+      }
+      if (!TRACE_TYPES.has(event.type)) {
+        report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
+      }
+      if (!event.summary || typeof event.summary !== "string") {
+        report.errors.push(`${label}:${index + 1} is missing summary`);
+      }
+      if (!event.created_at || typeof event.created_at !== "string") {
+        report.errors.push(`${label}:${index + 1} is missing created_at`);
+      }
+      if (requireActor && !hasTraceActor(event)) {
+        report.errors.push(`${label}:${index + 1} is missing actor attribution`);
+      }
+      if (!event.action || typeof event.action !== "string") {
+        report.errors.push(`${label}:${index + 1} is missing action`);
+      }
+      if (!event.git || typeof event.git !== "object") {
+        report.errors.push(`${label}:${index + 1} is missing git metadata`);
+      }
+      if (!event.run || typeof event.run !== "object") {
+        report.errors.push(`${label}:${index + 1} is missing run metadata`);
+      }
+    });
+    report.checked.push(label);
+  }
+}
+
+function hasTraceActor(event) {
+  if (typeof event.actor === "string") {
+    return event.actor.trim().length > 0;
+  }
+  return Boolean(event.actor && typeof event.actor === "object" && String(event.actor.id || "").trim());
+}
+
 function validateStory(context, storyId, report) {
   const storyDir = path.join(context.sdlcRoot, "stories", storyId);
   const storyPath = path.join(storyDir, "story.json");
@@ -725,6 +2601,9 @@ function validateStory(context, storyId, report) {
     const claimPath = path.join(storyDir, "claim.json");
     if (!fs.existsSync(claimPath)) {
       report.errors.push(`Story ${storyId} requires an active claim before implementation`);
+    } else {
+      const claim = readJson(claimPath);
+      validateClaim(context, storyId, claim, report);
     }
   }
   if (story.contract_id) {
@@ -743,6 +2622,33 @@ function validateStory(context, storyId, report) {
     report.errors.push(`Story ${storyId} is in release but has no release trace`);
   }
   report.checked.push(`story ${storyId}`);
+}
+
+function validateClaim(context, storyId, claim, report) {
+  if (claim.story_id !== storyId) {
+    report.errors.push(`Story ${storyId} claim.story_id must match story id`);
+  }
+  if (claim.status !== "active") {
+    report.errors.push(`Story ${storyId} requires an active claim, found '${claim.status}'`);
+  }
+  if (!claim.agent) {
+    report.errors.push(`Story ${storyId} active claim is missing agent`);
+  }
+  if (!claim.branch) {
+    report.errors.push(`Story ${storyId} active claim is missing branch`);
+  } else {
+    const expectedBranch = String(context.config.parallel_work?.branch_pattern || "feature/<story-id>").replace("<story-id>", storyId);
+    if (claim.branch !== expectedBranch) {
+      report.warnings.push(`Story ${storyId} claim branch '${claim.branch}' does not match expected '${expectedBranch}'`);
+    }
+  }
+  if (isExpired(claim.expires_at)) {
+    report.errors.push(`Story ${storyId} active claim expired at ${claim.expires_at}`);
+  }
+  const actor = claim.audit?.claimed_by;
+  if (!actor || !actor.id) {
+    report.warnings.push(`Story ${storyId} claim has no audit.claimed_by actor`);
+  }
 }
 
 function readTraceEvents(context, storyId) {
@@ -766,15 +2672,11 @@ function readTraceEvents(context, storyId) {
 function buildIndex(context) {
   const entries = [];
   for (const filePath of walkFiles(context.sdlcRoot)) {
+    if (!shouldIndexFile(context, filePath)) {
+      continue;
+    }
     const relativePath = path.relative(context.root, filePath);
-    const sdlcRelative = path.relative(context.sdlcRoot, filePath);
-    if (sdlcRelative.startsWith(`indexes${path.sep}`)) {
-      continue;
-    }
     const extension = path.extname(filePath);
-    if (!context.config.indexable_extensions.includes(extension)) {
-      continue;
-    }
     const raw = fs.readFileSync(filePath, "utf8");
     const text = normalizeText(raw);
     entries.push({
@@ -861,10 +2763,21 @@ function writeJsonFile(filePath, value, options = {}) {
 
 function writeTextFile(filePath, content, options = {}) {
   if (fs.existsSync(filePath) && !options.force) {
-    return false;
+    const existing = fs.readFileSync(filePath, "utf8");
+    if (existing === content) {
+      return false;
+    }
+    fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
   }
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, content);
+  try {
+    fs.writeFileSync(filePath, content, { flag: options.force ? "w" : "wx" });
+  } catch (error) {
+    if (error && error.code === "EEXIST") {
+      fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
+    }
+    throw error;
+  }
   return true;
 }
 
@@ -888,7 +2801,10 @@ function walkFiles(startDir) {
   const results = [];
   for (const entry of safeReadDir(startDir)) {
     const fullPath = path.join(startDir, entry);
-    const stat = fs.statSync(fullPath);
+    const stat = fs.lstatSync(fullPath);
+    if (stat.isSymbolicLink()) {
+      continue;
+    }
     if (stat.isDirectory()) {
       results.push(...walkFiles(fullPath));
     } else if (stat.isFile()) {
@@ -958,8 +2874,35 @@ function normalizeReasoningLevels(value) {
   return levels.map((level) => String(level).trim().toLowerCase()).filter(Boolean);
 }
 
+function normalizeApprovalStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = ["approved", "changes_requested", "rejected"];
+  if (!allowed.includes(normalized)) {
+    fail(`Unknown approval status '${value}'. Valid values: ${allowed.join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeGitEvent(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = ["push", "commit", "merge", "pull", "rebase", "branch", "handoff", "pr"];
+  if (!allowed.includes(normalized)) {
+    fail(`Unknown git event '${value}'. Valid values: ${allowed.join(", ")}`);
+  }
+  return normalized;
+}
+
 function normalizeId(value) {
-  return String(value).trim().replace(/\s+/g, "-");
+  const normalized = String(value).trim().replace(/\s+/g, "-");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
+    fail(`Invalid id '${value}'. Use only letters, numbers, dots, underscores, and hyphens; do not use path separators.`);
+  }
+  return normalized;
+}
+
+function isInsidePath(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function slugify(value) {
@@ -1014,10 +2957,30 @@ Usage:
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
+  agentic-sdlc contract approve --id contract-id [--summary text]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
+  agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
+  agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]
+  agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
+  agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
-  agentic-sdlc gate check [--story ST-001] [--json]
+      [--actor id] [--git-event push|commit|merge|pull|rebase]
+  agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
+  agentic-sdlc output template propose --type artifact-type [--id id]
+      [--from path | --body text] [--summary text]
+  agentic-sdlc output template approve --id template-id [--summary text]
+  agentic-sdlc output resolve --story ST-001 --type artifact-type
+  agentic-sdlc output link --story ST-001 --type artifact-type
+      --artifact path --template template-id --mode reuse|delta|new
+      [--base-artifact path] [--requirement REQ-001]
+  agentic-sdlc output status --story ST-001 [--type artifact-type]
+  agentic-sdlc cache rebuild
+  agentic-sdlc cache status
+  agentic-sdlc cache clear
+  agentic-sdlc orchestrate status [--json]
+  agentic-sdlc orchestrate plan [--limit n] [--json]
+  agentic-sdlc gate check [--story ST-001] [--scope story|all] [--strict] [--json]
   agentic-sdlc index rebuild
   agentic-sdlc kb search <query>
   agentic-sdlc status
@@ -1027,6 +2990,15 @@ Global options:
   --template-dir path    Template directory. Defaults to this plugin's templates.
   --json                 Print JSON output where supported.
   --force                Overwrite generated files where supported.
+
+Attribution options:
+  --actor id             Human, agent, or CI identity responsible for the action.
+  --actor-type type      human, agent, system, ci, or unknown.
+  --actor-name name      Display name for the actor.
+  --actor-email email    Email for the actor when appropriate.
+  --run-id id            External run identifier, if available.
+  --thread-id id         Codex thread identifier, if available.
+  --session-id id        Codex or CI session identifier, if available.
 
 Contract context options:
   --context-file path    Attach a target-project file as contract context.
@@ -1048,6 +3020,35 @@ Contract execution policy options:
                          Built-in levels: inherit, minimal, low, medium, high.
   --execution-note text  Record a note about model or reasoning selection.
                          Repeatable.
+
+Trace options:
+  --git-event event      Classify a sync trace as push, commit, merge, pull,
+                         rebase, branch, or another project Git event.
+  --event event          For sync record: push, commit, merge, pull, rebase,
+                         branch, handoff, or pr.
+  --remote name          Remote used for a sync event.
+  --before-sha sha       SHA before a sync event when known.
+  --after-sha sha        SHA after a sync event when known.
+  --pr-url url           Pull request URL for pr/merge sync events.
+
+Output consistency options:
+  --type artifact-type   Output artifact class, for example functional-analysis.
+  --from path            Use an existing project file as a proposed template body.
+  --body text            Inline proposed template body.
+  --artifact path        Canonical output artifact path. Must not be cache/index.
+  --template id          Approved output template id.
+  --mode mode            reuse, delta, or new.
+  --base-artifact path   Required when --mode delta.
+  --requirement id       Requirement covered by this output. Repeatable.
+  --decision-id id       Approved decision justifying a duplicate/new structure.
+  --rationale text       Short rationale for the link.
+
+Gate options:
+  --scope story|all      With --story, defaults to story-scoped validation.
+  --strict               Enforce phase-exit/merge rules: approved human gates,
+                         no blocking open questions, active claims,
+                         attributed traces, approved output templates, and
+                         no canonical outputs under cache/indexes.
 
 Principle:
   The plugin is stateless. Contracts, traces, and KB artifacts are written only

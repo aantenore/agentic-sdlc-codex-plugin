@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "strict": false,
+  "checked_at": "<iso-8601>",
+  "root": "<target-project>",
+  "errors": [],
+  "warnings": [],
+  "checked": []
+}

@@ -1,0 +1,24 @@
+{
+  "id": "HND-ST-001-<timestamp>",
+  "story_id": "ST-001",
+  "from_actor": {
+    "id": "<actor-id>",
+    "type": "agent",
+    "name": null,
+    "email": null,
+    "source": "cli"
+  },
+  "to_agent": "implementation-agent",
+  "status": "open",
+  "summary": "Functional analysis complete and ready for implementation.",
+  "required_artifacts": [
+    ".sdlc/requirements/functional-analysis.md"
+  ],
+  "open_items": [],
+  "created_at": "<iso-8601>",
+  "audit": {
+    "created_by": {},
+    "git": {},
+    "run": {}
+  }
+}

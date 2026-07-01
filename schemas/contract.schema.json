@@ -69,6 +69,33 @@
         "type": "string"
       }
     },
+    "output_contract_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "artifact_type",
+          "template_id",
+          "mode"
+        ],
+        "properties": {
+          "artifact_type": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "reuse",
+              "delta",
+              "new"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "validation": {
       "type": "array",
       "items": {
@@ -178,6 +205,28 @@
         },
         "open_questions": {
           "type": "number"
+        }
+      },
+      "additionalProperties": true
+    },
+    "audit": {
+      "type": "object",
+      "properties": {
+        "created_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "updated_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": true
         }
       },
       "additionalProperties": true
