@@ -109,6 +109,127 @@
       "Link every durable output to story, requirement, artifact path, template id, and reuse mode."
     ]
   },
+  "routing_policy": {
+    "principle": "The route router is language-agnostic. It consumes canonical intent JSON normalized by an LLM or Codex and never classifies raw text with linguistic keywords.",
+    "canonical_intent_schema": "schemas/route-intent.schema.json",
+    "routes": [
+      "init_project",
+      "ask_clarification",
+      "intake_requirement",
+      "classify_artifact",
+      "decompose_stories",
+      "create_contract",
+      "confirm_phase_skip",
+      "claim_and_implement",
+      "validate_story",
+      "release_story"
+    ],
+    "confidence": {
+      "auto_route_min": 0.85,
+      "confirm_min": 0.6,
+      "ask_below": 0.45,
+      "always_confirm": [
+        "skip_phase",
+        "create_story",
+        "start_implementation",
+        "create_canonical_artifact",
+        "new_output_template",
+        "duplicate_output"
+      ]
+    },
+    "entity_types": {
+      "story": [
+        "story"
+      ],
+      "contract": [
+        "contract"
+      ],
+      "requirement": [
+        "requirement"
+      ],
+      "template": [
+        "template",
+        "output_template"
+      ]
+    },
+    "canonical_actions": {
+      "initialize_project": {
+        "route": "init_project"
+      },
+      "init_project": {
+        "route": "init_project"
+      },
+      "intake_requirement": {
+        "route": "intake_requirement"
+      },
+      "classify_artifact": {
+        "route": "classify_artifact",
+        "requires_artifact_type": true
+      },
+      "decompose_stories": {
+        "route": "decompose_stories",
+        "confirmation_key": "create_story"
+      },
+      "create_story": {
+        "route": "decompose_stories",
+        "confirmation_key": "create_story"
+      },
+      "create_contract": {
+        "route": "create_contract"
+      },
+      "implement_story": {
+        "route": "claim_and_implement",
+        "confirmation_key": "start_implementation",
+        "requires_story": true,
+        "requires_contract": true
+      },
+      "start_implementation": {
+        "route": "claim_and_implement",
+        "confirmation_key": "start_implementation",
+        "requires_story": true,
+        "requires_contract": true
+      },
+      "validate_story": {
+        "route": "validate_story",
+        "requires_story": true
+      },
+      "release_story": {
+        "route": "release_story",
+        "requires_story": true
+      },
+      "skip_phase": {
+        "route": "confirm_phase_skip",
+        "confirmation_key": "skip_phase"
+      },
+      "functional_analysis": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "functional-analysis",
+        "requires_artifact_type": true
+      },
+      "technical_analysis": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "create_canonical_artifact": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "requires_artifact_type": true
+      },
+      "new_output_template": {
+        "route": "classify_artifact",
+        "confirmation_key": "new_output_template",
+        "requires_artifact_type": true
+      },
+      "duplicate_output": {
+        "route": "classify_artifact",
+        "confirmation_key": "duplicate_output",
+        "requires_artifact_type": true
+      }
+    }
+  },
   "cache_policy": {
     "principle": "Cache and index files are local, derived, and regenerable optimizations. They can accelerate lookup and context assembly, but they must never be used as the canonical source for approvals, requirements, decisions, or story outputs.",
     "cache_path": ".sdlc/cache/kb-cache.json",
