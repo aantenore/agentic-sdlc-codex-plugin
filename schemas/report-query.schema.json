@@ -55,6 +55,30 @@
         "actor": {
           "$ref": "#/$defs/stringList"
         },
+        "executor": {
+          "$ref": "#/$defs/stringList"
+        },
+        "executed_by": {
+          "$ref": "#/$defs/stringList"
+        },
+        "requester": {
+          "$ref": "#/$defs/stringList"
+        },
+        "requested_by": {
+          "$ref": "#/$defs/stringList"
+        },
+        "requestedBy": {
+          "$ref": "#/$defs/stringList"
+        },
+        "authorizer": {
+          "$ref": "#/$defs/stringList"
+        },
+        "authorized_by": {
+          "$ref": "#/$defs/stringList"
+        },
+        "authorizedBy": {
+          "$ref": "#/$defs/stringList"
+        },
         "story_id": {
           "$ref": "#/$defs/stringList"
         },

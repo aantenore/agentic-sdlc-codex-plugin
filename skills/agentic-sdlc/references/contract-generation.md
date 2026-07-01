@@ -7,8 +7,8 @@ The contract-building behavior must be domain-agnostic. Do not hardcode a produc
 1. Read `.sdlc/project.json`.
 2. Search the project KB for relevant requirements, stories, decisions, assumptions, risks, tests, traces, and output contracts.
 3. Inspect user-provided files or repository files that the user names.
-4. Ask the user concise questions only for missing critical inputs.
-5. Generate or update the contract with the gathered context recorded in `contextualization`.
+4. Ask the user concise questions only for missing critical inputs, output format decisions, or approval boundaries.
+5. Generate or update the contract only after the critical answers are known, with the gathered context recorded in `contextualization`.
 
 ## Model And Reasoning Policy
 
@@ -47,7 +47,7 @@ Avoid generic brainstorming questions when the KB already contains enough eviden
 
 ## CLI Pattern
 
-Use `--context-file` for authoritative files, `--qa` for answered questions, and `--question` for open questions that must remain visible.
+Use `--context-file` for authoritative files and `--qa` for answered questions. Ask the user before normal contract creation when questions are still open. Use `--question` with `--allow-incomplete-contract` only for an explicit clarification, migration, or recovery draft.
 
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs contract create \
@@ -56,7 +56,7 @@ node <plugin-root>/bin/agentic-sdlc.mjs contract create \
   --context-file .sdlc/requirements/REQ-001.md \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
-  --question "Which external provider is authoritative for MVP?" \
+  --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
   --constraint "Must keep provider-specific logic behind an adapter" \
   --assumption "External provider sandbox access is available" \
   --reasoning high \

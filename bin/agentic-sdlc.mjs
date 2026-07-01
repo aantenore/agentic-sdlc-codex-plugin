@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.3";
+const VERSION = "0.4.6";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -14,14 +14,18 @@ const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const BOOLEAN_OPTIONS = new Set([
+  "allow-incomplete-contract",
+  "allow-unapproved-output-ref",
   "apply",
   "approve-install",
+  "confirm-start",
   "dry-run",
   "force",
   "help",
   "json",
   "preserve-status",
   "release-claim",
+  "revise-contract",
   "strict",
   "version",
 ]);
@@ -245,6 +249,14 @@ function main() {
     }
     if (command === "capability" && subcommand === "status") {
       showCapabilityStatus(context, parsed.options);
+      return;
+    }
+    if (command === "approval" && subcommand === "requests") {
+      showApprovalRequests(context, parsed.options);
+      return;
+    }
+    if (command === "task" && subcommand === "start") {
+      startTask(context, parsed.options);
       return;
     }
     if (command === "handoff" && subcommand === "close") {
@@ -557,6 +569,365 @@ function validateApprovalPolicy(policy) {
 function decideRoute(context, options) {
   const decision = buildRouteDecision(context, options);
   output(options, decision, formatRouteDecision(decision));
+}
+
+function startTask(context, options) {
+  const decision = buildTaskStartDecision(context, options);
+  output(options, decision, formatTaskStartDecision(decision));
+}
+
+function buildTaskStartDecision(context, options) {
+  const routeDecision = buildRouteDecision(context, options);
+  const policy = getRoutingPolicy(context);
+  const storyId = routeDecision.intent ? routeStoryId(routeDecision.intent, policy) : null;
+  const phase = inferTaskPhase(routeDecision, options);
+  const explicitContractId = getOptionString(options, "contract-id") ||
+    (routeDecision.intent ? routeEntityId(routeDecision.intent, policy, "contract") : null);
+  const result = {
+    kind: "task_start",
+    schema_version: context.config.schema_version || context.templateConfig.schema_version,
+    sdlc_version: VERSION,
+    generated_at: now(),
+    root: context.root,
+    status: "needs_user_input",
+    execution_allowed: false,
+    route: routeDecision.route,
+    phase,
+    story_id: storyId,
+    contract_id: explicitContractId || null,
+    contract_action: null,
+    requires_confirmation: routeDecision.requires_confirmation && !options["confirm-start"],
+    blocking_reasons: [],
+    questions: [],
+    deterministic_checks: [],
+    next_commands: [],
+    approval_requests: [],
+    route_decision: routeDecision,
+  };
+  pushAllUnique(result.blocking_reasons, routeDecision.blocking_reasons);
+  pushAllUnique(result.questions, routeDecision.questions);
+  pushAllUnique(result.next_commands, routeDecision.next_commands);
+
+  if (routeDecision.route === "ask_clarification" || routeDecision.status === "needs_normalization") {
+    result.status = routeDecision.status === "needs_normalization" ? "needs_normalization" : "needs_user_input";
+    result.contract_action = "normalize_request";
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (!isKbInitialized(context)) {
+    result.status = "needs_user_input";
+    result.contract_action = "initialize_sdlc";
+    pushAllUnique(result.blocking_reasons, ["kb_not_initialized"]);
+    pushAllUnique(result.questions, ["Initialize or onboard the project SDLC before starting task work."]);
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (routeDecision.route === "init_project" || routeDecision.route === "onboard_existing_project") {
+    result.status = "needs_user_input";
+    result.contract_action = routeDecision.route;
+    pushAllUnique(result.blocking_reasons, [`${routeDecision.route}_required`]);
+    pushAllUnique(result.questions, ["Complete the project baseline step before starting phase work."]);
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (routeDecision.route === "confirm_phase_skip") {
+    result.status = "needs_user_input";
+    result.contract_action = "confirm_phase_skip";
+    pushAllUnique(result.blocking_reasons, ["phase_skip_requires_confirmation"]);
+    pushAllUnique(result.questions, ["Confirm the requested phase skip explicitly before continuing."]);
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (routeDecision.route === "create_contract") {
+    result.status = "needs_user_input";
+    result.contract_action = "create_or_revise_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_negotiation_required"]);
+    pushAllUnique(result.questions, [contractNegotiationQuestion(phase, storyId)]);
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, explicitContractId));
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (!phase || !taskRouteRequiresContract(routeDecision.route)) {
+    return finalizeTaskStartExecution(result, routeDecision, options);
+  }
+
+  const contractState = findApplicableTaskContract(context, {
+    phase,
+    storyId,
+    contractId: explicitContractId,
+  });
+  result.contract_id = contractState.contract?.id || explicitContractId || null;
+  result.contract = contractState.contract
+    ? summarizeTaskContract(context, contractState.contract)
+    : null;
+  for (const check of contractState.checks) {
+    result.deterministic_checks.push(check);
+  }
+
+  if (!contractState.contract) {
+    result.status = "needs_user_input";
+    result.contract_action = "create_contract";
+    pushAllUnique(result.blocking_reasons, ["missing_contract"]);
+    pushAllUnique(result.questions, [contractNegotiationQuestion(phase, storyId)]);
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, explicitContractId));
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (options["revise-contract"]) {
+    result.status = "contract_revision_required";
+    result.contract_action = "revise_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_revision_requested"]);
+    pushAllUnique(result.questions, [`What should change in contract ${contractState.contract.id} before this task starts?`]);
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (contractState.phaseMismatch) {
+    result.status = "contract_revision_required";
+    result.contract_action = "revise_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_phase_mismatch"]);
+    pushAllUnique(result.questions, [
+      `Contract ${contractState.contract.id} is for ${contractState.contract.phase}; confirm whether to revise it or create a ${phase} contract.`,
+    ]);
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
+    return dedupeTaskStartDecision(result);
+  }
+
+  const gaps = collectContractReadinessGaps(context, contractState.contract);
+  if (gaps.length > 0) {
+    result.status = "needs_user_input";
+    result.contract_action = "clarify_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_incomplete"]);
+    pushAllUnique(result.questions, gaps.map((gap) => gap.question));
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (!isTaskContractApproved(contractState.contract)) {
+    result.status = "needs_user_input";
+    result.contract_action = "approve_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_not_approved"]);
+    pushAllUnique(result.questions, [
+      `Review contract ${contractState.contract.id}. Do you approve it for this ${phase} task, or should it be changed?`,
+    ]);
+    pushAllUnique(result.next_commands, [
+      `agentic-sdlc approval requests${storyId ? ` --story ${storyId}` : ""}`,
+    ]);
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  return finalizeTaskStartExecution(result, routeDecision, options);
+}
+
+function finalizeTaskStartExecution(result, routeDecision, options) {
+  if (routeDecision.requires_confirmation && !options["confirm-start"]) {
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = "confirm_start";
+    pushAllUnique(result.blocking_reasons, ["route_requires_confirmation"]);
+    pushAllUnique(result.questions, [
+      `Confirm task start for route ${routeDecision.route}${result.contract_id ? ` under contract ${result.contract_id}` : ""}.`,
+    ]);
+    return dedupeTaskStartDecision(result);
+  }
+  result.status = "ready_to_execute";
+  result.execution_allowed = true;
+  result.contract_action = "use_contract";
+  return dedupeTaskStartDecision(result);
+}
+
+function inferTaskPhase(routeDecision, options = {}) {
+  const explicitPhase = options.phase ? normalizeRoutePhase(options.phase) : null;
+  if (explicitPhase) {
+    return explicitPhase;
+  }
+  const intentPhase = routeDecision.intent?.proposed_phase || null;
+  if (intentPhase) {
+    return intentPhase;
+  }
+  switch (routeDecision.route) {
+    case "intake_requirement":
+      return "discovery";
+    case "decompose_stories":
+      return "design";
+    case "classify_artifact":
+    case "discover_capabilities":
+    case "technical_decision":
+      return "analysis";
+    case "claim_and_implement":
+      return "implementation";
+    case "validate_story":
+      return "validation";
+    case "release_story":
+      return "release";
+    default:
+      return null;
+  }
+}
+
+function taskRouteRequiresContract(route) {
+  return [
+    "intake_requirement",
+    "classify_artifact",
+    "decompose_stories",
+    "discover_capabilities",
+    "technical_decision",
+    "claim_and_implement",
+    "validate_story",
+    "release_story",
+  ].includes(route);
+}
+
+function findApplicableTaskContract(context, options = {}) {
+  const checks = [];
+  const phase = options.phase || null;
+  const storyId = options.storyId || null;
+  const contractId = options.contractId ? normalizeId(options.contractId) : null;
+  if (contractId) {
+    const explicit = readContractById(context, contractId);
+    checks.push({
+      check: "explicit_contract",
+      status: explicit ? "passed" : "failed",
+      details: explicit ? contractId : `Missing contract ${contractId}`,
+    });
+    return {
+      contract: explicit,
+      phaseMismatch: Boolean(explicit && phase && explicit.phase !== phase),
+      checks,
+    };
+  }
+
+  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"));
+  const storyContracts = storyId
+    ? contracts.filter((contract) => contract.story_id === storyId)
+    : [];
+  const storyPhaseContracts = storyContracts.filter((contract) => !phase || contract.phase === phase);
+  if (storyId) {
+    checks.push({
+      check: "story_phase_contract",
+      status: storyPhaseContracts.length > 0 ? "passed" : "failed",
+      details: storyPhaseContracts.length > 0 ? storyPhaseContracts.map((contract) => contract.id).join(", ") : `No ${phase || "phase"} contract bound to ${storyId}`,
+    });
+    if (storyPhaseContracts.length > 0) {
+      return {
+        contract: newestContract(storyPhaseContracts),
+        phaseMismatch: false,
+        checks,
+      };
+    }
+    const story = readStory(context, storyId);
+    const linkedContract = story?.contract_id ? readContractById(context, story.contract_id) : null;
+    checks.push({
+      check: "story_linked_contract",
+      status: linkedContract ? "passed" : "failed",
+      details: linkedContract ? story.contract_id : `Story ${storyId} has no existing contract for this task`,
+    });
+    return {
+      contract: linkedContract,
+      phaseMismatch: Boolean(linkedContract && phase && linkedContract.phase !== phase),
+      checks,
+    };
+  }
+
+  const phaseContracts = contracts.filter((contract) => !contract.story_id && (!phase || contract.phase === phase));
+  checks.push({
+    check: "phase_contract",
+    status: phaseContracts.length > 0 ? "passed" : "failed",
+    details: phaseContracts.length > 0 ? phaseContracts.map((contract) => contract.id).join(", ") : `No project-level ${phase || "phase"} contract`,
+  });
+  return {
+    contract: phaseContracts.length > 0 ? newestContract(phaseContracts) : null,
+    phaseMismatch: false,
+    checks,
+  };
+}
+
+function readContractById(context, id) {
+  const contractPath = path.join(context.sdlcRoot, "contracts", `${normalizeId(id)}.json`);
+  if (!fs.existsSync(contractPath)) {
+    return null;
+  }
+  const contract = readJson(contractPath);
+  contract.__path = contractPath;
+  contract.__relative_path = toProjectPath(context, contractPath);
+  return contract;
+}
+
+function newestContract(contracts) {
+  return [...contracts].sort((left, right) => String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || "")))[0] || null;
+}
+
+function summarizeTaskContract(context, contract) {
+  const gaps = collectContractReadinessGaps(context, contract);
+  return {
+    id: contract.id,
+    phase: contract.phase || null,
+    story_id: contract.story_id || null,
+    status: contract.status || null,
+    approved: isTaskContractApproved(contract),
+    readiness_gaps: gaps.map((gap) => gap.code),
+    path: contract.__relative_path || (contract.__path ? toProjectPath(context, contract.__path) : null),
+  };
+}
+
+function isTaskContractApproved(contract) {
+  return contract.status === "approved" && hasFreshApprovedContractApproval(contract);
+}
+
+function contractNegotiationQuestion(phase, storyId) {
+  const subject = storyId ? `story ${storyId}` : "this project";
+  const phaseLabel = phase || "the requested phase";
+  return `No approved ${phaseLabel} contract is ready for ${subject}. Confirm the expected output, boundaries, constraints, and approval rules before work starts.`;
+}
+
+function contractNegotiationCommands(phase, storyId, contractId = null, options = {}) {
+  const normalizedPhase = phase || "<phase>";
+  const id = contractId || (storyId ? `contract-${storyId}-${normalizedPhase}` : `contract-${normalizedPhase}-<id>`);
+  return [
+    `agentic-sdlc contract create --phase ${normalizedPhase}${storyId ? ` --story ${storyId}` : ""} --id ${id} --context-summary <summary> --qa "<question>|<answer>"${options.force ? " --force" : ""}`,
+    `agentic-sdlc approval requests${storyId ? ` --story ${storyId}` : ""}`,
+  ];
+}
+
+function dedupeTaskStartDecision(decision) {
+  decision.blocking_reasons = Array.from(new Set(decision.blocking_reasons));
+  decision.questions = Array.from(new Set(decision.questions));
+  decision.next_commands = Array.from(new Set(decision.next_commands));
+  return decision;
+}
+
+function formatTaskStartDecision(decision) {
+  const lines = [
+    `Task start: ${decision.status}`,
+    `Execution allowed: ${decision.execution_allowed ? "yes" : "no"}`,
+    `Route: ${decision.route}`,
+    `Phase: ${decision.phase || "n/a"}`,
+    `Story: ${decision.story_id || "n/a"}`,
+    `Contract: ${decision.contract_id || "n/a"}`,
+    `Contract action: ${decision.contract_action || "n/a"}`,
+  ];
+  lines.push(
+    decision.blocking_reasons.length
+      ? `Blocking reasons: ${decision.blocking_reasons.join(", ")}`
+      : "Blocking reasons: none",
+  );
+  if (decision.questions.length > 0) {
+    lines.push("Questions:");
+    lines.push(...decision.questions.map((question) => `- ${question}`));
+  }
+  if (decision.approval_requests.length > 0) {
+    lines.push("Human input requests:");
+    lines.push(...decision.approval_requests.map((request) => `- ${request.summary}`));
+  }
+  if (decision.next_commands.length > 0) {
+    lines.push("Next commands:");
+    lines.push(...decision.next_commands.map((command) => `- ${command}`));
+  }
+  return lines;
 }
 
 function buildRouteDecision(context, options) {
@@ -1064,8 +1435,10 @@ function decideCreateContractRoute(context, decision, policy, actionConfig, conf
       });
     }
     decision.next_commands.push(`agentic-sdlc contract create --phase ${phase} --story ${storyId} --id contract-${storyId}-${phase}`);
+    decision.next_commands.push(`agentic-sdlc approval requests --story ${storyId}`);
   } else {
     decision.next_commands.push(`agentic-sdlc contract create --phase ${phase} --context-summary <summary>`);
+    decision.next_commands.push("agentic-sdlc approval requests");
   }
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
@@ -1121,6 +1494,7 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
     decision.next_commands.push(
       `agentic-sdlc contract create --phase ${story.phase || "implementation"} --story ${storyId} --id contract-${storyId}-${story.phase || "implementation"}`,
     );
+    decision.next_commands.push(`agentic-sdlc approval requests --story ${storyId}`);
     return finalizeConcreteRoute(decision, policy, { confirmation_key: "create_contract" }, confidenceOutcome);
   }
 
@@ -1932,6 +2306,183 @@ function showBaselineStatus(context, options) {
   );
 }
 
+function showApprovalRequests(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const requests = collectApprovalRequests(context, { storyId });
+  output(
+    options,
+    {
+      kind: "approval_requests",
+      story_id: storyId,
+      status: requests.length ? "needs_user_input" : "clear",
+      generated_at: now(),
+      requests,
+      source_paths: Array.from(new Set(requests.flatMap((request) => request.sources || []))).sort(),
+    },
+    requests.length
+      ? [
+          `Human input required: ${requests.length}`,
+          ...requests.map((request) => `${request.id}: ${request.summary}`),
+        ]
+      : ["No pending approval or agreement requests."],
+  );
+}
+
+function collectApprovalRequests(context, options = {}) {
+  const storyId = options.storyId || null;
+  return [
+    ...collectBaselineApprovalRequests(context),
+    ...collectOutputTemplateApprovalRequests(context, storyId),
+    ...collectContractClarificationRequests(context, storyId),
+    ...collectContractApprovalRequests(context, storyId),
+    ...collectOutputLinkActionRequests(context, storyId),
+  ];
+}
+
+function collectBaselineApprovalRequests(context) {
+  return readBaselines(context)
+    .filter((baseline) => !["approved"].includes(String(baseline.status || "").toLowerCase()))
+    .map((baseline) => ({
+      id: `approve-baseline-${baseline.id}`,
+      type: "baseline_approval",
+      status: "needs_explicit_user_approval",
+      summary: `Approve or revise baseline ${baseline.id} before treating inferred project facts as canonical.`,
+      subject_id: baseline.id,
+      subject_status: baseline.status || null,
+      sources: [
+        `.sdlc/baseline/${baseline.id}.json`,
+        `.sdlc/baseline/${baseline.id}-current-state.md`,
+      ].filter((source) => fs.existsSync(path.join(context.root, source))),
+      suggested_question: `Review baseline ${baseline.id}. Do you approve it as canonical, or should it be revised?`,
+      suggested_command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`,
+    }));
+}
+
+function collectOutputTemplateApprovalRequests(context, storyId = null) {
+  const registry = readOutputRegistry(context, { missingOk: true });
+  if (!registry) {
+    return [];
+  }
+  const relevantTemplateIds = storyId ? collectStoryTemplateIds(context, storyId, registry) : null;
+  return (registry.templates || [])
+    .filter((template) => !relevantTemplateIds || relevantTemplateIds.has(template.id) || template.status !== "approved")
+    .filter((template) => template.status !== "approved")
+    .map((template) => ({
+      id: `approve-output-template-${template.id}`,
+      type: "output_template_approval",
+      status: "needs_explicit_user_approval",
+      summary: `Agree output format ${template.id} for ${template.type} before using it as a contract output.`,
+      subject_id: template.id,
+      subject_status: template.status || null,
+      artifact_type: template.type || null,
+      sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
+      suggested_question: `Do you approve output format ${template.id} for ${template.type}?`,
+      suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
+    }));
+}
+
+function collectContractApprovalRequests(context, storyId = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
+    .filter((contract) => !storyId || contract.story_id === storyId)
+    .filter((contract) => contract.human_gate === true && (contract.status !== "approved" || !hasFreshApprovedContractApproval(contract)))
+    .map((contract) => ({
+      id: `approve-contract-${contract.id}`,
+      type: "contract_approval",
+      status: "needs_explicit_user_approval",
+      summary: `Approve or revise ${contract.phase} contract ${contract.id} before phase work proceeds.`,
+      subject_id: contract.id,
+      subject_status: contract.status || null,
+      story_id: contract.story_id || null,
+      phase: contract.phase || null,
+      sources: [contract.__relative_path],
+      suggested_question: `Review contract ${contract.id}. Do you approve this phase contract, or should it be changed?`,
+      suggested_command: `agentic-sdlc contract approve --id ${contract.id} --actor-type human --approval-source explicit-user --summary "<user-approved contract>"`,
+    }));
+}
+
+function collectContractClarificationRequests(context, storyId = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
+    .filter((contract) => !storyId || contract.story_id === storyId)
+    .map((contract) => ({
+      contract,
+      gaps: collectContractReadinessGaps(context, contract),
+    }))
+    .filter((item) => item.gaps.length > 0)
+    .map(({ contract, gaps }) => ({
+      id: `clarify-contract-${contract.id}`,
+      type: "contract_clarification",
+      status: "needs_user_input",
+      summary: `Clarify contract ${contract.id} before approval: ${gaps.map((gap) => gap.summary).join("; ")}.`,
+      subject_id: contract.id,
+      subject_status: contract.status || null,
+      story_id: contract.story_id || null,
+      phase: contract.phase || null,
+      gaps: gaps.map((gap) => gap.code),
+      sources: [contract.__relative_path],
+      suggested_question: `Before approving ${contract.id}, please provide: ${gaps.map((gap) => gap.question).join(" ")}`,
+    }));
+}
+
+function collectOutputLinkActionRequests(context, storyId = null) {
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const links = registry?.links || [];
+  const requests = [];
+  for (const contract of collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))) {
+    if (storyId && contract.story_id !== storyId) {
+      continue;
+    }
+    for (const ref of contract.output_contract_refs || []) {
+      if (!ref.artifact_type || !ref.template_id || !ref.mode || !contract.story_id) {
+        continue;
+      }
+      const matchingLink = links.find(
+        (link) =>
+          link.story_id === contract.story_id &&
+          link.artifact_type === ref.artifact_type &&
+          link.template_id === ref.template_id &&
+          link.mode === ref.mode,
+      );
+      if (!matchingLink) {
+        requests.push({
+          id: `link-output-${contract.story_id}-${ref.artifact_type}`,
+          type: "output_link_required",
+          status: "needs_canonical_output_link",
+          summary: `Link the ${ref.artifact_type} artifact for ${contract.story_id} after the user has agreed the output and it exists.`,
+          subject_id: contract.id,
+          story_id: contract.story_id,
+          artifact_type: ref.artifact_type,
+          template_id: ref.template_id,
+          mode: ref.mode,
+          sources: [contract.__relative_path],
+          suggested_question: `Which ${ref.artifact_type} artifact should be canonical for ${contract.story_id}?`,
+          suggested_command: `agentic-sdlc output link --story ${contract.story_id} --type ${ref.artifact_type} --artifact <path> --template ${ref.template_id} --mode ${ref.mode} --requirement <REQ-ID>`,
+        });
+      }
+    }
+  }
+  return requests;
+}
+
+function collectStoryTemplateIds(context, storyId, registry = null) {
+  const ids = new Set();
+  for (const contract of collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))) {
+    if (contract.story_id === storyId) {
+      for (const ref of contract.output_contract_refs || []) {
+        if (ref.template_id) {
+          ids.add(ref.template_id);
+        }
+      }
+    }
+  }
+  for (const link of registry?.links || []) {
+    if (link.story_id === storyId && link.template_id) {
+      ids.add(link.template_id);
+    }
+  }
+  return ids;
+}
+
 function createContract(context, options) {
   ensureInitialized(context);
   const phase = requireOption(options, "phase");
@@ -1980,6 +2531,8 @@ function createContract(context, options) {
     audit_options: options,
     audit_action: "contract.create",
   });
+  validateContractReadinessForCreate(context, contract, options);
+  validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
   output(
@@ -1987,6 +2540,110 @@ function createContract(context, options) {
     { status: "created", contract_path: contractPath, contract },
     [`Created contract ${id} for phase ${phase}`],
   );
+}
+
+function validateContractReadinessForCreate(context, contract, options = {}) {
+  if (options["allow-incomplete-contract"]) {
+    return;
+  }
+  const gaps = collectContractReadinessGaps(context, contract);
+  if (gaps.length === 0) {
+    return;
+  }
+  const askTopics = normalizeListValue(context.config.contract_generation?.ask_when_missing, []);
+  fail(
+    [
+      "Contract creation requires enough agreed input to guide the phase.",
+      ...gaps.map((gap) => `- ${gap.summary}`),
+      "Ask the user for the missing information before creating the contract.",
+      storyOutputResolveHint(contract),
+      askTopics.length > 0 ? `Configured ask-when-missing topics: ${askTopics.join(", ")}.` : null,
+      "Use --allow-incomplete-contract only to persist an explicit clarification, migration, or recovery draft; do not use it to start phase work.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+}
+
+function collectContractReadinessGaps(context, contract) {
+  const contextualization = contract.contextualization || {};
+  const questions = Array.isArray(contextualization.questions) ? contextualization.questions : [];
+  const openQuestions = questions.filter((question) => question.status !== "answered");
+  const answeredQuestions = questions.filter((question) => question.status === "answered");
+  const contextSources = Array.isArray(contextualization.context_sources) ? contextualization.context_sources : [];
+  const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
+  const capabilityRefs = Array.isArray(contract.capability_recommendation_refs) ? contract.capability_recommendation_refs : [];
+  const hasContextAnchor =
+    Boolean(String(contextualization.summary || "").trim()) ||
+    contextSources.length > 0 ||
+    answeredQuestions.length > 0 ||
+    capabilityRefs.length > 0;
+  const gaps = [];
+  if (!hasContextAnchor) {
+    gaps.push({
+      code: "missing_context",
+      summary: "missing project-specific context (--context-summary, --context-file, --qa, or approved --capability-recommendation)",
+      question: "What project-specific context, source file, or answered question should guide this phase?",
+    });
+  }
+  if (openQuestions.length > 0) {
+    gaps.push({
+      code: "open_questions",
+      summary: `${openQuestions.length} open question${openQuestions.length === 1 ? "" : "s"} must be answered or explicitly moved into a clarification draft`,
+      question: `Please answer or revise: ${openQuestions.map((item) => item.question).join(" ")}`,
+    });
+  }
+  const template = context.config.phases[contract.phase] || {};
+  const phaseHasOutputs = Array.isArray(template.outputs) && template.outputs.length > 0;
+  const requiresOutputCoverage = context.config.gate_policy?.strict_mode?.requires_output_contract_coverage !== false;
+  if (contract.story_id && phaseHasOutputs && requiresOutputCoverage && refs.length === 0) {
+    gaps.push({
+      code: "missing_output_ref",
+      summary: "missing agreed story output format (--output-ref artifact-type:template-id:reuse|delta|new)",
+      question: "Which approved output template and reuse mode should this story contract use?",
+    });
+  }
+  return gaps;
+}
+
+function storyOutputResolveHint(contract) {
+  if (!contract.story_id) {
+    return null;
+  }
+  return `Resolve output first with: agentic-sdlc output resolve --story ${contract.story_id} --type <artifact-type>`;
+}
+
+function validateContractOutputRefsForCreate(context, rawRefs, options = {}) {
+  if (rawRefs.length === 0 || options["allow-unapproved-output-ref"]) {
+    return;
+  }
+  const refs = buildOutputContractRefs(rawRefs);
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
+  const errors = [];
+  for (const ref of refs) {
+    const template = templates.get(ref.template_id);
+    if (!template) {
+      errors.push(`${ref.artifact_type}:${ref.template_id}:${ref.mode} references missing output template ${ref.template_id}`);
+      continue;
+    }
+    if (template.type !== ref.artifact_type) {
+      errors.push(`${ref.artifact_type}:${ref.template_id}:${ref.mode} uses template type '${template.type}'`);
+    }
+    if (template.status !== "approved") {
+      errors.push(`${ref.artifact_type}:${ref.template_id}:${ref.mode} uses ${template.status || "unknown"} template ${ref.template_id}`);
+    }
+  }
+  if (errors.length > 0) {
+    fail(
+      [
+        "Contract output refs require approved output templates before contract creation.",
+        ...errors.map((error) => `- ${error}`),
+        "First agree the output format with the user, then run output template approve with --approval-source explicit-user.",
+        "Use --allow-unapproved-output-ref only for explicit migration or recovery work.",
+      ].join("\n"),
+    );
+  }
 }
 
 function approveContract(context, options) {
@@ -2707,7 +3364,17 @@ function stripApprovalVolatileFields(value) {
     return value;
   }
   const stripped = {};
-  const volatile = new Set(["approvals", "audit", "created_at", "updated_at", "approved_at", "approved_by", "status"]);
+  const volatile = new Set([
+    "__path",
+    "__relative_path",
+    "approvals",
+    "audit",
+    "created_at",
+    "updated_at",
+    "approved_at",
+    "approved_by",
+    "status",
+  ]);
   for (const key of Object.keys(value).sort()) {
     if (!volatile.has(key)) {
       stripped[key] = stripApprovalVolatileFields(value[key]);
@@ -2757,6 +3424,50 @@ function buildActor(options = {}, root = process.cwd()) {
     email,
     source: explicitActor ? "cli" : "environment",
   };
+}
+
+function buildActorFromPrefixedOptions(options = {}, prefix, root = process.cwd(), defaults = {}) {
+  const id = getOptionString(options, prefix);
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    type: normalizeActorType(getOptionString(options, `${prefix}-type`) || defaults.type || "unknown"),
+    name: getOptionString(options, `${prefix}-name`) || null,
+    email: getOptionString(options, `${prefix}-email`) || null,
+    source: getOptionString(options, `${prefix}-source`) || defaults.source || "cli",
+  };
+}
+
+function buildTraceAuthorityMetadata(context, options = {}, attribution = null) {
+  const activeAttribution = attribution || buildAttribution(context, options, "trace.attribution");
+  const requestedBy = buildActorFromPrefixedOptions(options, "requested-by", context.root, {
+    type: "human",
+    source: "cli",
+  });
+  const authorizedBy = buildActorFromPrefixedOptions(options, "authorized-by", context.root, {
+    type: "human",
+    source: "cli",
+  });
+  const request = buildTraceRequestMetadata(options, activeAttribution);
+  return {
+    ...(requestedBy ? { requested_by: requestedBy } : {}),
+    ...(authorizedBy ? { authorized_by: authorizedBy } : {}),
+    ...(request ? { request } : {}),
+  };
+}
+
+function buildTraceRequestMetadata(options = {}, attribution = null) {
+  const request = {
+    id: getOptionString(options, "request-id") || null,
+    summary: getOptionString(options, "request-summary") || null,
+    source: getOptionString(options, "request-source") || null,
+    thread_id: getOptionString(options, "request-thread-id") || attribution?.run?.thread_id || null,
+    run_id: getOptionString(options, "request-run-id") || attribution?.run?.run_id || null,
+    session_id: getOptionString(options, "request-session-id") || attribution?.run?.session_id || null,
+  };
+  return Object.values(request).some((value) => value !== null && value !== "") ? request : null;
 }
 
 function inferActorType(options = {}, actorId = "") {
@@ -4884,6 +5595,7 @@ function appendTrace(context, options) {
     type,
     summary,
     actor: attribution.actor,
+    ...buildTraceAuthorityMetadata(context, options, attribution),
     action: normalizeScalarOption(options.action, "action") || type,
     evidence: normalizeListOption(options.evidence),
     related: normalizeListOption(options.related),
@@ -4909,6 +5621,7 @@ function recordSyncEvent(context, options) {
     summary,
     action: `sync.${event}`,
     actor: attribution.actor,
+    ...buildTraceAuthorityMetadata(context, options, attribution),
     evidence: normalizeListOption(options.evidence),
     related: normalizeListOption(options.related),
     git: {
@@ -5494,6 +6207,9 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
       time: { since: "10d", until: "now", field: "created_at" },
       filters: {
         actor: ["actor-id-or-email"],
+        executor: ["agent-or-human-who-ran-the-action"],
+        requester: ["human-or-system-who-requested-the-action"],
+        authorizer: ["human-or-ci-who-authorized-the-action"],
         story_id: ["ST-001"],
         artifact_type: ["functional-analysis"],
         event_type: ["decision"],
@@ -5513,7 +6229,7 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
           intent: "find_changes",
           confidence: 0.9,
           subjects: ["activity", "stories", "outputs", "contracts", "approvals"],
-          filters: { actor: ["<current-user-id-or-email>"] },
+          filters: { requester: ["<current-user-id-or-email>"] },
           sort: "created_at_desc",
         },
       },
@@ -5555,6 +6271,14 @@ function buildReportQueryResult(context, rawQuery, options = {}) {
       result_count: filtered.length,
       by_kind: countBy(filtered, "kind"),
       by_actor: countBy(filtered, (record) => traceActorKey(record.actor)),
+      by_requester: countBy(
+        filtered.filter((record) => record.requested_by),
+        (record) => traceActorKey(record.requested_by),
+      ),
+      by_authorizer: countBy(
+        filtered.filter((record) => record.authorized_by),
+        (record) => traceActorKey(record.authorized_by),
+      ),
       by_story: countBy(filtered, (record) => record.story_id || "project"),
     },
     results: filtered,
@@ -5607,6 +6331,9 @@ function normalizeReportQuery(rawQuery, options = {}) {
 function normalizeReportQueryFilters(filters) {
   return {
     actor: normalizeStringArray(filters.actor),
+    executor: normalizeStringArray(filters.executor || filters.executed_by),
+    requester: normalizeStringArray(filters.requester || filters.requested_by || filters.requestedBy),
+    authorizer: normalizeStringArray(filters.authorizer || filters.authorized_by || filters.authorizedBy),
     story_id: normalizeStringArray(filters.story_id || filters.story),
     requirement: normalizeStringArray(filters.requirement || filters.requirements),
     artifact_type: normalizeStringArray(filters.artifact_type || filters.output_type),
@@ -5645,6 +6372,9 @@ function collectTraceQueryRecords(context) {
       created_at: event.created_at || null,
       updated_at: event.created_at || null,
       actor: event.actor || null,
+      requested_by: event.requested_by || null,
+      authorized_by: event.authorized_by || null,
+      request: event.request || null,
       action: event.action || event.type || null,
       event_type: event.type || null,
       story_id: event.story_id || null,
@@ -5670,6 +6400,9 @@ function collectStoryQueryRecords(context, registry = null) {
       created_at: story.created_at || null,
       updated_at: story.updated_at || story.created_at || null,
       actor: story.audit?.created_by || story.audit?.updated_by || null,
+      requested_by: null,
+      authorized_by: null,
+      request: null,
       action: "story.create",
       event_type: "story",
       story_id: story.id,
@@ -5696,6 +6429,9 @@ function collectStoryStepQueryRecords(context) {
         created_at: step.completed_at || null,
         updated_at: step.completed_at || null,
         actor: step.audit?.completed_by || null,
+        requested_by: null,
+        authorized_by: null,
+        request: null,
         action: "story.complete-step",
         event_type: "gate",
         story_id: story.id,
@@ -5722,6 +6458,9 @@ function collectOutputQueryRecords(context, registry = null) {
     created_at: template.proposed_at || template.created_at || null,
     updated_at: template.approved_at || template.proposed_at || null,
     actor: template.audit?.approved_by || template.audit?.proposed_by || template.approved_by || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: template.status === "approved" ? "output.template.approve" : "output.template.propose",
     event_type: "decision",
     story_id: null,
@@ -5740,6 +6479,9 @@ function collectOutputQueryRecords(context, registry = null) {
     created_at: link.created_at || null,
     updated_at: link.updated_at || link.created_at || null,
     actor: link.audit?.linked_by || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: "output.link",
     event_type: "decision",
     story_id: link.story_id || null,
@@ -5762,6 +6504,9 @@ function collectContractQueryRecords(context) {
     created_at: contract.created_at || null,
     updated_at: contract.updated_at || contract.created_at || null,
     actor: contract.audit?.created_by || contract.audit?.updated_by || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: "contract.create",
     event_type: "contract",
     story_id: contract.story_id || null,
@@ -5784,6 +6529,9 @@ function collectHandoffQueryRecords(context) {
     created_at: handoff.created_at || null,
     updated_at: handoff.closed_at || handoff.created_at || null,
     actor: handoff.from_actor || handoff.audit?.created_by || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: handoff.closed_at ? "handoff.close" : "story.handoff",
     event_type: "handoff",
     story_id: handoff.story_id || null,
@@ -5807,6 +6555,9 @@ function collectWorkItemQueryRecords(context) {
       created_at: item.created_at || null,
       updated_at: item.updated_at || item.created_at || null,
       actor: item.audit?.created_by || item.audit?.updated_by || null,
+      requested_by: null,
+      authorized_by: null,
+      request: null,
       action: "work.item.create",
       event_type: "work_item",
       story_id: item.story_id || item.story || null,
@@ -5829,6 +6580,9 @@ function collectApprovalQueryRecords(context) {
     created_at: approval.created_at || null,
     updated_at: approval.created_at || null,
     actor: approval.actor || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: "approve",
     event_type: "gate",
     story_id: null,
@@ -5850,6 +6604,9 @@ function collectTestQueryRecords(context) {
     created_at: testRecord.created_at || null,
     updated_at: testRecord.updated_at || testRecord.created_at || null,
     actor: testRecord.audit?.created_by || testRecord.audit?.updated_by || null,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
     action: "test.evidence",
     event_type: "test",
     story_id: testRecord.story_id || null,
@@ -5904,6 +6661,9 @@ function reportQueryFiltersMatch(record, query) {
   return (
     listFilterMatches(filters.kind, record.kind) &&
     actorFilterMatches(filters.actor, record.actor) &&
+    actorFilterMatches(filters.executor, record.actor) &&
+    actorFilterMatches(filters.requester, record.requested_by) &&
+    actorFilterMatches(filters.authorizer, record.authorized_by) &&
     listFilterMatches(filters.story_id, record.story_id) &&
     listFilterOverlaps(filters.requirement, record.requirements || []) &&
     listFilterOverlaps(filters.artifact_type, [record.artifact_type, ...(record.artifact_types || [])].filter(Boolean)) &&
@@ -5975,6 +6735,9 @@ function formatReportQueryRecord(record) {
     requirements: record.requirements || [],
     phase: record.phase,
     status: record.status,
+    requested_by: record.requested_by || null,
+    authorized_by: record.authorized_by || null,
+    request: record.request || null,
     sources: record.sources || [],
   };
 }
@@ -7257,6 +8020,9 @@ function appendTraceEvent(context, storyId, event) {
     type: event.type,
     summary: event.summary,
     actor: event.actor,
+    requested_by: event.requested_by || null,
+    authorized_by: event.authorized_by || null,
+    request: event.request || null,
     action: event.action || event.type,
     evidence: event.evidence || [],
     related: event.related || [],
@@ -7362,6 +8128,10 @@ function gateCheck(context, options) {
     validateOutputContracts(context, report);
   }
 
+  report.approval_requests = collectApprovalRequests(context, {
+    storyId: scope === "story" ? storyId : null,
+  });
+
   if (report.errors.length > 0) {
     report.status = "failed";
     process.exitCode = 1;
@@ -7378,8 +8148,10 @@ function gateCheck(context, options) {
       `Checked: ${report.checked.length}`,
       `Errors: ${report.errors.length}`,
       `Warnings: ${report.warnings.length}`,
+      `Human input requests: ${report.approval_requests.length}`,
       ...report.errors.map((item) => `ERROR ${item}`),
       ...report.warnings.map((item) => `WARN ${item}`),
+      ...report.approval_requests.map((item) => `ASK ${item.summary}`),
     ],
   );
 }
@@ -7416,6 +8188,11 @@ function renderGateReportMarkdown(report) {
     "",
     "## Warnings",
     ...(report.warnings.length ? report.warnings.map((item) => `- ${item}`) : ["- None"]),
+    "",
+    "## Human Input Requests",
+    ...(report.approval_requests?.length
+      ? report.approval_requests.map((item) => `- ${item.summary}`)
+      : ["- None"]),
     "",
     "## Checked",
     ...(report.checked.length ? report.checked.map((item) => `- ${item}`) : ["- None"]),
@@ -8497,6 +9274,12 @@ function validateTraces(context, report, storyId = null) {
       if (requireActor && !hasTraceActor(event)) {
         report.errors.push(`${label}:${index + 1} is missing actor attribution`);
       }
+      if (event.requested_by !== undefined && event.requested_by !== null && !hasActorAttribution(event.requested_by)) {
+        report.errors.push(`${label}:${index + 1} has invalid requested_by attribution`);
+      }
+      if (event.authorized_by !== undefined && event.authorized_by !== null && !hasActorAttribution(event.authorized_by)) {
+        report.errors.push(`${label}:${index + 1} has invalid authorized_by attribution`);
+      }
       if (!event.action || typeof event.action !== "string") {
         report.errors.push(`${label}:${index + 1} is missing action`);
       }
@@ -8531,10 +9314,14 @@ function validateTraceEvidence(context, report, event, label) {
 }
 
 function hasTraceActor(event) {
-  if (typeof event.actor === "string") {
-    return event.actor.trim().length > 0;
+  return hasActorAttribution(event.actor);
+}
+
+function hasActorAttribution(actor) {
+  if (typeof actor === "string") {
+    return actor.trim().length > 0;
   }
-  return Boolean(event.actor && typeof event.actor === "object" && String(event.actor.id || "").trim());
+  return Boolean(actor && typeof actor === "object" && String(actor.id || "").trim());
 }
 
 function validateStory(context, storyId, report) {
@@ -9156,6 +9943,7 @@ Usage:
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
       [--output-ref artifact-type:template-id:mode]
+      [--allow-incomplete-contract]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
   agentic-sdlc contract approve --id contract-id
       --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
@@ -9187,10 +9975,15 @@ Usage:
       [--available-capabilities-json json | --available-capabilities-file path]
   agentic-sdlc capability approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap [--approve-install]
   agentic-sdlc capability status [--story ST-001] [--profile profile-id] [--json]
+  agentic-sdlc approval requests [--story ST-001] [--json]
+  agentic-sdlc task start [--intent-json json | --intent-file path] [--text raw]
+      [--story ST-001] [--phase phase] [--contract-id id]
+      [--confirm-start] [--revise-contract] [--json]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
-      [--actor id] [--git-event push|commit|merge|pull|rebase]
+      [--actor id] [--requested-by id] [--authorized-by id]
+      [--request-summary text] [--git-event push|commit|merge|pull|rebase]
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
   agentic-sdlc output template propose --type artifact-type [--id id]
       [--from path | --body text] [--summary text]
@@ -9230,6 +10023,32 @@ Attribution options:
   --actor-type type      human, agent, system, ci, or unknown.
   --actor-name name      Display name for the actor.
   --actor-email email    Email for the actor when appropriate.
+  --requested-by id      Human, system, CI, or agent that requested the action.
+  --requested-by-type type
+                         Type for --requested-by. Defaults to human.
+  --requested-by-name name
+                         Display name for the requester.
+  --requested-by-email email
+                         Email for the requester when appropriate.
+  --requested-by-source source
+                         Source for requester attribution. Defaults to cli.
+  --authorized-by id     Human, CI, system, or agent that authorized the action.
+  --authorized-by-type type
+                         Type for --authorized-by. Defaults to human.
+  --authorized-by-name name
+                         Display name for the authorizer.
+  --authorized-by-email email
+                         Email for the authorizer when appropriate.
+  --authorized-by-source source
+                         Source for authorizer attribution. Defaults to cli.
+  --request-id id        External request, ticket, or conversation identifier.
+  --request-summary text Human-readable summary of the originating request.
+  --request-source source
+                         Source channel for the originating request.
+  --request-thread-id id Codex or external thread that carried the request.
+  --request-run-id id    External run identifier for the originating request.
+  --request-session-id id
+                         Session identifier for the originating request.
   --run-id id            External run identifier, if available.
   --thread-id id         Codex thread identifier, if available.
   --session-id id        Codex or CI session identifier, if available.
@@ -9248,6 +10067,13 @@ Contract context options:
   --kb-write text        Add a required KB write target.
   --output-ref ref       Link a contract to expected output coverage.
                          Format: artifact-type:template-id:reuse|delta|new.
+                         Referenced templates must be approved by default.
+  --allow-incomplete-contract
+                         Migration/recovery override for contracts that still
+                         need user clarification. Do not use to start phase work.
+  --allow-unapproved-output-ref
+                         Migration/recovery override for draft or missing
+                         output templates. Do not use for normal task work.
 
 Contract execution policy options:
   --model model-id       Override the Codex model for agents using this contract.
@@ -9281,6 +10107,14 @@ Approval governance options:
                          provide --summary or --approval-evidence.
                          Permission to implement or push is not formal SDLC
                          approval.
+
+Task front-door options:
+  --contract-id id       Force task start to evaluate a specific contract.
+  --confirm-start        Record that the human already confirmed this concrete
+                         task start. This is operational authorization only;
+                         it is not formal contract approval.
+  --revise-contract      Stop for contract revision even if an applicable
+                         contract exists.
 
 Baseline onboarding options:
   --document path        Import a project or user-provided document as baseline
@@ -9327,6 +10161,9 @@ Report query options:
                          Without --query-json/file, report query returns
                          a normalization request and examples.
   --limit n              Maximum query results, from 1 to 500.
+                         Query filters support actor/executor, requester,
+                         authorizer, story, requirement, artifact, action,
+                         event type, phase, status, path, and text.
 
 Capability discovery options:
   --profile-json json    Canonical capability profile JSON normalized by Codex.

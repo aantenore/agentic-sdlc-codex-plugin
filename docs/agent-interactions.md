@@ -103,10 +103,11 @@ flowchart LR
 
 ## Request Router Behavior
 
-When the user's request is ambiguous, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision:
+When the user's request is ambiguous, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision. Before phase work starts, use `task start` as the execution front door so contract readiness and human control are checked together:
 
 ```bash
 node bin/agentic-sdlc.mjs route decide --json --intent-json '<canonical-route-intent-json>'
+node bin/agentic-sdlc.mjs task start --json --intent-json '<canonical-route-intent-json>'
 ```
 
 ```mermaid
@@ -118,11 +119,13 @@ sequenceDiagram
 
   Human->>Agent: Request in any language
   Agent-->>Human: Ask only if context is missing or confidence is low
-  Agent->>Router: Canonical intent JSON
-  Router->>KB: Read project state and policies
-  Router-->>Agent: Route, checks, questions, next commands
-  Agent-->>Human: Confirm risky transitions when required
+  Agent->>Router: Canonical intent JSON via task start
+  Router->>KB: Read project state, contracts, and policies
+  Router-->>Agent: ready_to_execute or required user input
+  Agent-->>Human: Ask for contract creation, revision, approval, or start confirmation
 ```
+
+If `task start` does not return `ready_to_execute`, the agent stops. `--confirm-start` confirms the concrete execution start but does not approve or revise contracts.
 
 The router can distinguish intake, story decomposition, contract creation, implementation, validation, release, phase skip confirmation, or clarification from canonical fields and KB state. It never writes canonical artifacts and never treats `.sdlc/cache/` as the authority.
 
@@ -145,7 +148,7 @@ node bin/agentic-sdlc.mjs contract create \
   --context-file .sdlc/requirements/REQ-001.md \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
-  --question "Which external provider is authoritative for MVP?" \
+  --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
   --constraint "Provider-specific logic must stay behind an adapter" \
   --reasoning high \
   --execution-note "Higher reasoning requested for integration-risk analysis"
@@ -217,7 +220,7 @@ The Discovery Agent starts from an idea or product request.
 
 ```bash
 node bin/agentic-sdlc.mjs init --project-name "My Product"
-node bin/agentic-sdlc.mjs contract create --phase discovery
+node bin/agentic-sdlc.mjs contract create --phase discovery --context-summary "Discover the validated product problem and user constraints"
 ```
 
 Reads:
@@ -243,7 +246,11 @@ Trace example:
 ```bash
 node bin/agentic-sdlc.mjs trace append \
   --type decision \
-  --summary "Target the MVP on the approved business workflow instead of a generic process."
+  --summary "Target the MVP on the approved business workflow instead of a generic process." \
+  --actor codex \
+  --actor-type agent \
+  --requested-by antonioantenore \
+  --requested-by-type human
 ```
 
 Handoff to Analysis:
@@ -258,7 +265,7 @@ discarded options, and success metrics are now durable KB artifacts.
 The Analysis Agent turns discovery output into functional and technical boundaries.
 
 ```bash
-node bin/agentic-sdlc.mjs contract create --phase analysis
+node bin/agentic-sdlc.mjs contract create --phase analysis --context-summary "Analyze approved discovery outputs and known constraints"
 ```
 
 Reads:
@@ -299,7 +306,7 @@ Functional flows, edge cases, API/mock strategy, and integration risks.
 The Design Agent converts analysis into story workspaces and acceptance criteria.
 
 ```bash
-node bin/agentic-sdlc.mjs contract create --phase design
+node bin/agentic-sdlc.mjs contract create --phase design --context-summary "Design approved analysis outputs into story-scoped work"
 node bin/agentic-sdlc.mjs story create \
   --id ST-001 \
   --title "Implement the approved workflow trigger" \
