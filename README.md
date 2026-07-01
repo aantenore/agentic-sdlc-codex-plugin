@@ -52,6 +52,15 @@ Recommended workflow:
 
 Derived indexes under `.sdlc/indexes/` can be regenerated and do not need to be treated as the source of truth.
 
+## How Agents Interact
+
+The SDLC is designed as a handoff chain. Each phase agent reads the previous phase artifacts, works under a contract, writes evidence to the project KB, and leaves the next phase with structured inputs.
+
+Detailed examples are available in:
+
+- [Agent Interactions](docs/agent-interactions.md)
+- [Knowledge Base Structure](docs/kb-structure.md)
+
 ## Repository Layout
 
 ```text
@@ -62,4 +71,6 @@ templates/sdlc-config.json     Configurable SDLC phase contracts and policies
 templates/kb-readme.md         Generated project KB guide
 schemas/                       JSON schemas for SDLC artifacts
 docs/architecture.md           Implementation architecture
+docs/agent-interactions.md     Phase-by-phase agent examples
+docs/kb-structure.md           Detailed project KB structure
 ```
