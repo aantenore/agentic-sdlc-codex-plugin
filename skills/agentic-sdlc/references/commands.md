@@ -135,7 +135,7 @@ node bin/agentic-sdlc.mjs dependency status --root <project> --story ST-002
 node bin/agentic-sdlc.mjs story deps --root <project> --id ST-002
 ```
 
-Breakdowns and dependencies are proposed first, then approved by human or CI before they become canonical. Hard dependency scopes block orchestration and strict gates; soft dependencies remain visible as warnings. When upstream artifacts change, record a `dependency.revalidate` trace on downstream stories after review.
+Breakdowns and dependencies are proposed first, then approved by a human/CI actor or by delegated automation when the user explicitly gave a matching approval level. Hard dependency scopes block orchestration and strict gates; soft dependencies remain visible as warnings. When upstream artifacts change, record a `dependency.revalidate` trace on downstream stories after review.
 
 ## Capability Discovery
 

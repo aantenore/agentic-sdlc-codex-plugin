@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.18";
+const VERSION = "0.4.19";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -2418,7 +2418,7 @@ function approveBaseline(context, options) {
   const baseline = readJson(baselinePath);
   validateBaselineSourceHashes(context, baseline, `baseline ${id}`, { failOnStale: true });
   const attribution = buildAttribution(context, options, "baseline.approve");
-  requireHumanOrCiActor(attribution, "Approving a project baseline");
+  requireFormalApprovalActor(context, options, attribution, "Approving a project baseline");
   const approvalSource = normalizeApprovalSource(context, options, attribution, `baseline ${id}`, "approved");
   const canonicality = {
     ...(baseline.canonicality || {}),
@@ -3806,8 +3806,8 @@ function approveContract(context, options) {
   const contract = readJson(contractPath);
   const attribution = buildAttribution(context, options, "contract.approve");
   const approvalStatus = normalizeApprovalStatus(options.status || "approved");
-  if (contract.human_gate === true && !["human", "ci"].includes(attribution.actor.type)) {
-    fail("Human-gated contracts require --actor-type human or an approved CI actor.");
+  if (contract.human_gate === true) {
+    requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
   }
   const approval = buildApprovalRecord(context, options, attribution, {
     subject: contract,
@@ -4360,6 +4360,7 @@ function getApprovalPolicy(context) {
       "Implementation authorization is not formal SDLC approval. Formal approvals must record an explicit source, approver, summary or evidence, and immutable subject hash.",
     formal_approval_requires_explicit_source: policy.formal_approval_requires_explicit_source !== false,
     require_summary_or_evidence_for_explicit_user: policy.require_summary_or_evidence_for_explicit_user !== false,
+    require_summary_or_evidence_for_automation: policy.require_summary_or_evidence_for_automation !== false,
     allow_bootstrap_approvals_in_strict_gate: Boolean(policy.allow_bootstrap_approvals_in_strict_gate),
     legacy_approval_behavior: policy.legacy_approval_behavior || "error",
     accepted_sources: Array.isArray(policy.accepted_sources)
@@ -4373,7 +4374,7 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
   const evidence = buildApprovalEvidence(context, options);
   const summary = getOptionString(options, "summary") || null;
   const source = normalizeApprovalSource(context, options, attribution, settings.label || "approval", status);
-  const scope = settings.scope || defaultApprovalRecordScope(source, settings);
+  const scope = buildApprovalRecordScope(source, settings);
   validateApprovalSourceForActor(context, {
     source,
     status,
@@ -4402,18 +4403,50 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
   };
 }
 
-function defaultApprovalRecordScope(source, settings = {}) {
-  if (source !== "explicit-user") {
-    return settings.scope || undefined;
+function buildApprovalRecordScope(source, settings = {}) {
+  const baseScope = defaultApprovalRecordScope(source, settings);
+  const explicitScope = settings.scope;
+  if (!explicitScope) {
+    return baseScope;
   }
-  return {
-    principle: "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
-    subject_id: settings.subject_id || null,
-    subject_label: settings.label || "approval",
-    applies_only_to_presented_subject: true,
-    does_not_approve_future_artifacts: true,
-    requires_fresh_user_confirmation_for_new_artifacts: true,
-  };
+  if (source === "explicit-user" || source === "automation") {
+    if (explicitScope && typeof explicitScope === "object" && !Array.isArray(explicitScope)) {
+      return { ...baseScope, ...explicitScope };
+    }
+    return {
+      ...baseScope,
+      approval_level: String(explicitScope),
+    };
+  }
+  return explicitScope || baseScope;
+}
+
+function defaultApprovalRecordScope(source, settings = {}) {
+  if (source === "explicit-user") {
+    return {
+      principle: "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
+      subject_id: settings.subject_id || null,
+      subject_label: settings.label || "approval",
+      applies_only_to_presented_subject: true,
+      does_not_approve_future_artifacts: true,
+      requires_fresh_user_confirmation_for_new_artifacts: true,
+    };
+  }
+  if (source === "automation") {
+    return {
+      principle:
+        "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+      subject_id: settings.subject_id || null,
+      subject_label: settings.label || "approval",
+      delegated_approval: true,
+      applies_to_declared_approval_level: true,
+      must_stay_within_declared_scope: true,
+      requires_summary_or_evidence_of_delegation: true,
+      does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions: true,
+      ask_user_if_scope_changes: true,
+    };
+  }
+  return settings.scope || undefined;
 }
 
 function normalizeApprovalSource(context, options, attribution, label, status) {
@@ -4452,6 +4485,9 @@ function validateApprovalSourceForActor(context, approval) {
   if (approval.source === "ci" && approval.actor?.type !== "ci") {
     fail(`${approval.label} uses approval_source ci but actor type is '${approval.actor?.type || "unknown"}'.`);
   }
+  if (approval.source === "automation" && !["agent", "system", "ci"].includes(approval.actor?.type)) {
+    fail(`${approval.label} uses approval_source automation but actor type is '${approval.actor?.type || "unknown"}'.`);
+  }
   if (
     approval.source === "explicit-user" &&
     policy.require_summary_or_evidence_for_explicit_user &&
@@ -4462,6 +4498,14 @@ function validateApprovalSourceForActor(context, approval) {
   }
   if (approval.source === "bootstrap" && !approval.summary && approval.evidence.length === 0) {
     fail(`${approval.label} bootstrap approval requires --summary or --approval-evidence so future readers can distinguish migration from user consent.`);
+  }
+  if (
+    approval.source === "automation" &&
+    policy.require_summary_or_evidence_for_automation &&
+    !approval.summary &&
+    approval.evidence.length === 0
+  ) {
+    fail(`${approval.label} requires --summary or --approval-evidence when --approval-source automation is used, including the delegated approval level and scope.`);
   }
 }
 
@@ -4487,6 +4531,9 @@ function validateFormalApprovalRecord(context, report, approval, label, actor) {
   if (source === "ci" && actor?.type !== "ci") {
     report.errors.push(`${label} approval_source ci requires a CI approver`);
   }
+  if (source === "automation" && !["agent", "system", "ci"].includes(actor?.type)) {
+    report.errors.push(`${label} approval_source automation requires an agent, system, or CI approver`);
+  }
   if (
     report.strict &&
     source === "explicit-user" &&
@@ -4496,6 +4543,16 @@ function validateFormalApprovalRecord(context, report, approval, label, actor) {
     (!Array.isArray(approval.evidence || approval.approval_evidence) || (approval.evidence || approval.approval_evidence).length === 0)
   ) {
     report.errors.push(`${label} explicit-user approval requires summary or evidence`);
+  }
+  if (
+    report.strict &&
+    source === "automation" &&
+    policy.require_summary_or_evidence_for_automation &&
+    !approval.summary &&
+    !approval.approval_summary &&
+    (!Array.isArray(approval.evidence || approval.approval_evidence) || (approval.evidence || approval.approval_evidence).length === 0)
+  ) {
+    report.errors.push(`${label} automation approval requires summary or evidence describing the delegated approval level and scope`);
   }
 }
 
@@ -4990,7 +5047,7 @@ function approveBreakdown(context, options) {
   }
   const breakdown = readJson(breakdownPath);
   const attribution = buildAttribution(context, options, "breakdown.approve");
-  requireHumanOrCiActor(attribution, "Approving a work breakdown");
+  requireFormalApprovalActor(context, options, attribution, "Approving a work breakdown");
   const approval = buildApprovalRecord(context, options, attribution, {
     subject: breakdown,
     subject_id_field: "breakdown_id",
@@ -5070,7 +5127,7 @@ function approveDependencyGraph(context, options) {
   }
   const proposal = readJson(proposalPath);
   const attribution = buildAttribution(context, options, "dependency.approve");
-  requireHumanOrCiActor(attribution, "Approving dependency graph changes");
+  requireFormalApprovalActor(context, options, attribution, "Approving dependency graph changes");
   const approval = buildApprovalRecord(context, options, attribution, {
     subject: proposal,
     subject_id_field: "dependency_id",
@@ -5210,7 +5267,7 @@ function approveCapabilityProfile(context, options) {
   }
   const profile = readJson(profilePath);
   const attribution = buildAttribution(context, options, "capability.profile.approve");
-  requireHumanOrCiActor(attribution, "Approving a capability profile");
+  requireFormalApprovalActor(context, options, attribution, "Approving a capability profile");
   validateCapabilityRecordSourceHashes(context, profile, `capability profile ${id}`, { failOnStale: true });
   const approval = buildApprovalRecord(context, options, attribution, {
     subject: profile,
@@ -5337,7 +5394,7 @@ function approveCapabilityRecommendation(context, options) {
   }
   const recommendation = readJson(recommendationPath);
   const attribution = buildAttribution(context, options, "capability.approve");
-  requireHumanOrCiActor(attribution, "Approving a capability recommendation");
+  requireFormalApprovalActor(context, options, attribution, "Approving a capability recommendation");
   const profile = readCapabilityProfile(context, recommendation.profile_id);
   validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
   validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${id}`, { failOnStale: true });
@@ -6138,10 +6195,32 @@ function isApprovedRecordFresh(record) {
   return Boolean(latest?.approved_content_hash && latest.approved_content_hash === hashApprovalSubject(record));
 }
 
-function requireHumanOrCiActor(attribution, action) {
+function requireFormalApprovalActor(context, options, attribution, action) {
+  const source = getOptionString(options, "approval-source");
+  if (String(source || "").trim().toLowerCase() === "automation") {
+    if (!isAutomationApprovalActor(attribution.actor)) {
+      fail(`${action} with --approval-source automation requires --actor-type agent, system, or ci.`);
+    }
+    return;
+  }
   if (!["human", "ci"].includes(attribution.actor.type)) {
     fail(`${action} requires --actor-type human or an approved CI actor.`);
   }
+}
+
+function isAutomationApprovalActor(actor) {
+  return ["agent", "system", "ci"].includes(actor?.type);
+}
+
+function hasFormalApprovalAttribution(actor, source = null) {
+  if (source === "automation") {
+    return isAutomationApprovalActor(actor);
+  }
+  return ["human", "ci"].includes(actor?.type);
+}
+
+function formalApprovalActorDescription(source = null) {
+  return source === "automation" ? "agent/system/CI delegated automation" : "human/CI";
 }
 
 function readDependencyGraph(context, options = {}) {
@@ -6991,21 +7070,25 @@ function approveOutputTemplate(context, options) {
   }
 
   const attribution = buildAttribution(context, options, "output.template.approve");
-  if (!["human", "ci"].includes(attribution.actor.type)) {
-    fail("Output template approval requires --actor-type human or an approved CI actor.");
-  }
+  requireFormalApprovalActor(context, options, attribution, "Approving an output template");
 
   const decisionId = normalizeId(String(options["decision-id"] || `DEC-output-template-${id}-${compactTimestamp()}`));
   const templatePath = resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true });
   assertNotDerivedArtifact(context, templatePath, "Output template");
   const approvedContentHash = hashFile(templatePath);
   const approvalEvidence = buildApprovalEvidence(context, options);
-  const approvalSummary = getOptionString(options, "summary") || template.approval_summary || null;
+  const approvalSummaryOption = getOptionString(options, "summary") || null;
+  const approvalSummary = approvalSummaryOption || template.approval_summary || null;
   const approvalSource = normalizeApprovalSource(context, options, attribution, `output template ${id}`, "approved");
+  const approvalScope = buildApprovalRecordScope(approvalSource, {
+    subject_id: id,
+    label: `output template ${id}`,
+    scope: String(options.scope || "output_template"),
+  });
   validateApprovalSourceForActor(context, {
     source: approvalSource,
     status: "approved",
-    summary: approvalSummary,
+    summary: approvalSummaryOption,
     evidence: approvalEvidence,
     actor: attribution.actor,
     label: `output template ${id}`,
@@ -7018,6 +7101,7 @@ function approveOutputTemplate(context, options) {
   template.hash_algorithm = "sha256:file:v1";
   template.approval_evidence = approvalEvidence;
   template.approval_source = approvalSource;
+  template.approval_scope = approvalScope;
   template.explicit_user_confirmation = approvalSource === "explicit-user";
   template.provisional = approvalSource === "bootstrap";
   template.audit = {
@@ -7036,6 +7120,7 @@ function approveOutputTemplate(context, options) {
     status: "approved",
     evidence: template.approval_evidence,
     approval_source: approvalSource,
+    approval_scope: approvalScope,
     explicit_user_confirmation: approvalSource === "explicit-user",
     provisional: approvalSource === "bootstrap",
     approved_content_hash: approvedContentHash,
@@ -9852,8 +9937,8 @@ function validateBaselines(context, report) {
     }
     if (baselineStatus === "approved") {
       const approval = latestApprovedRecordApproval(baseline);
-      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
-        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      if (!approval || !hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
+        report.errors.push(`${label} approval must be attributed to ${formalApprovalActorDescription(approval?.approval_source)}`);
       }
       validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(baseline)) {
@@ -9879,8 +9964,8 @@ function validateDependencyProposals(context, report, storyId = null) {
     }
     if (proposal.status === "approved") {
       const approval = latestApprovedRecordApproval(proposal);
-      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
-        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      if (!approval || !hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
+        report.errors.push(`${label} approval must be attributed to ${formalApprovalActorDescription(approval?.approval_source)}`);
       }
       validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(proposal)) {
@@ -9999,8 +10084,8 @@ function validateOutputContracts(context, report, storyId = null) {
       report.errors.push(`${label} cannot live under cache or indexes`);
     }
     if (template.status === "approved") {
-      if (!template.approved_by || !["human", "ci"].includes(template.approved_by.type)) {
-        report.errors.push(`${label} approved template is missing human/CI approval attribution`);
+      if (!hasFormalApprovalAttribution(template.approved_by, template.approval_source)) {
+        report.errors.push(`${label} approved template is missing ${formalApprovalActorDescription(template.approval_source)} approval attribution`);
       }
       validateFormalApprovalRecord(
         context,
@@ -10059,8 +10144,8 @@ function validateOutputDecision(context, report, decision) {
   }
   if (decision.status === "approved") {
     const actor = decision.audit?.decided_by;
-    if (!actor || !["human", "ci"].includes(actor.type)) {
-      report.errors.push(`${label} approved decision is missing human/CI attribution`);
+    if (!hasFormalApprovalAttribution(actor, decision.approval_source)) {
+      report.errors.push(`${label} approved decision is missing ${formalApprovalActorDescription(decision.approval_source)} attribution`);
     }
     validateFormalApprovalRecord(context, report, decision, `${label} approval`, actor);
     for (const evidence of decision.evidence || []) {
@@ -10210,8 +10295,8 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
     }
     if (profile.status === "approved") {
       const approval = latestApprovedRecordApproval(profile);
-      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
-        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      if (!approval || !hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
+        report.errors.push(`${label} approval must be attributed to ${formalApprovalActorDescription(approval?.approval_source)}`);
       }
       validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(profile)) {
@@ -10238,8 +10323,8 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
     }
     if (recommendation.status === "approved") {
       const approval = latestApprovedRecordApproval(recommendation);
-      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
-        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      if (!approval || !hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
+        report.errors.push(`${label} approval must be attributed to ${formalApprovalActorDescription(approval?.approval_source)}`);
       }
       validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(recommendation)) {
@@ -10391,8 +10476,8 @@ function validateContractApprovals(context, report, contract, label) {
     const approvalLabel = `${label} approval ${approval.id || "unknown"}`;
     if (approval.status === "approved") {
       const actor = approval.approved_by;
-      if (!actor || !["human", "ci"].includes(actor.type)) {
-        report.errors.push(`${approvalLabel} is missing human/CI approval attribution`);
+      if (!hasFormalApprovalAttribution(actor, approval.approval_source)) {
+        report.errors.push(`${approvalLabel} is missing ${formalApprovalActorDescription(approval.approval_source)} approval attribution`);
       }
       validateFormalApprovalRecord(context, report, approval, approvalLabel, actor);
       for (const evidence of approval.evidence || []) {
@@ -11208,8 +11293,8 @@ Usage:
       [--source path] [--question text] [--summary text]
   agentic-sdlc baseline propose --id id [--document path] [--source path]
       [--question text] [--assumption text] [--summary text]
-  agentic-sdlc baseline approve --id id --actor-type human|ci
-      --approval-source explicit-user|ci|bootstrap [--summary text]
+  agentic-sdlc baseline approve --id id --actor-type human|ci|agent|system
+      --approval-source explicit-user|ci|automation|bootstrap [--summary text]
   agentic-sdlc baseline status [--id id]
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
       [--context-file path] [--context-summary text] [--question text]
@@ -11218,7 +11303,7 @@ Usage:
       [--allow-incomplete-contract] [--replace-story-contract]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
   agentic-sdlc contract approve --id contract-id
-      --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
+      --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
@@ -11235,18 +11320,18 @@ Usage:
   agentic-sdlc breakdown policy show
   agentic-sdlc breakdown policy set [--delivery-unit story] [--strict-gate-unit story]
   agentic-sdlc breakdown propose --id id --requirement REQ-001 --item story:ST-001
-  agentic-sdlc breakdown approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
+  agentic-sdlc breakdown approve --id id --actor-type human|ci|agent|system --approval-source explicit-user|ci|automation|bootstrap
   agentic-sdlc breakdown status [--requirement REQ-001]
   agentic-sdlc dependency propose --id id --edge from:to:type:blocks:required_state
-  agentic-sdlc dependency approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
+  agentic-sdlc dependency approve --id id --actor-type human|ci|agent|system --approval-source explicit-user|ci|automation|bootstrap
   agentic-sdlc dependency status [--story ST-001]
   agentic-sdlc capability profile propose --id id [--story ST-001] [--phase analysis]
       [--context-file path] [--profile-json json | --profile-file path]
-  agentic-sdlc capability profile approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
+  agentic-sdlc capability profile approve --id id --actor-type human|ci|agent|system --approval-source explicit-user|ci|automation|bootstrap
   agentic-sdlc capability recommend --id id --profile profile-id
       [--recommendation-json json | --recommendation-file path]
       [--available-capabilities-json json | --available-capabilities-file path]
-  agentic-sdlc capability approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap [--approve-install]
+  agentic-sdlc capability approve --id id --actor-type human|ci|agent|system --approval-source explicit-user|ci|automation|bootstrap [--approve-install]
   agentic-sdlc capability status [--story ST-001] [--profile profile-id] [--json]
   agentic-sdlc approval requests [--story ST-001] [--json]
   agentic-sdlc task start [--intent-json json | --intent-file path] [--text raw]
@@ -11261,7 +11346,7 @@ Usage:
   agentic-sdlc output template propose --type artifact-type [--id id]
       [--from path | --body text] [--summary text]
   agentic-sdlc output template approve --id template-id
-      --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
+      --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc output resolve --story ST-001 --type artifact-type
   agentic-sdlc output link --story ST-001 --type artifact-type
       --artifact path --template template-id --mode reuse|delta|new
@@ -11380,8 +11465,10 @@ Contract execution policy options:
 Approval governance options:
   --approval-source source
                          Formal approval source: explicit-user, ci,
-                         automation, or bootstrap. For explicit-user,
-                         provide --summary or --approval-evidence.
+                         automation, or bootstrap. For explicit-user and
+                         automation, provide --summary or --approval-evidence.
+                         Use automation only for a recorded delegated approval
+                         level or configured automation policy.
                          Permission to implement or push is not formal SDLC
                          approval.
 
