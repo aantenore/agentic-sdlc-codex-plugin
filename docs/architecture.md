@@ -13,6 +13,9 @@ Target project
   -> .sdlc/
      -> contracts
      -> output-contracts
+     -> work-items
+     -> work-breakdown
+     -> dependencies
      -> stories
      -> orchestration
      -> locks
@@ -37,6 +40,8 @@ flowchart TB
   subgraph Project["Target project"]
     KB[".sdlc source of truth"]
     OutputRegistry["Output contracts registry"]
+    Breakdown["Work breakdown agreements"]
+    Dependencies["Dependency graph"]
     Traces["Append-only traces"]
     Cache["Local cache"]
     Indexes["Search indexes"]
@@ -47,6 +52,8 @@ flowchart TB
   Schemas --> CLI
   CLI --> KB
   CLI --> OutputRegistry
+  CLI --> Breakdown
+  CLI --> Dependencies
   CLI --> Traces
   KB --> Cache
   KB --> Indexes
@@ -101,6 +108,8 @@ This keeps agent work bounded and reviewable.
 
 Story-specific contracts can also declare `output_contract_refs`. In strict mode, each declared output ref must be satisfied by a linked artifact in `.sdlc/output-contracts/registry.json`. Contract approvals store a stable hash of the approved contract content; changing the contract after approval requires a new approval.
 
+Contracts can declare `capability_policy` and `capability_bindings` to record agreed skills, MCPs, tools, concrete targets, permissions, and actions that require approval. Strict gates reject invalid policies and required MCP/tool capabilities that have neither a binding nor an explicit open contract question.
+
 ```mermaid
 flowchart LR
   UserInput["User input and files"] --> ContractBuilder["Contract builder"]
@@ -115,6 +124,23 @@ flowchart LR
   Outputs --> Gate["Gate check"]
   Trace --> Gate
   Contract --> Gate
+```
+
+## Work Breakdown And Dependencies
+
+Work breakdown is internal to `.sdlc/`. Epics and tasks can be stored under `.sdlc/work-items/`, while approved decomposition choices live under `.sdlc/work-breakdown/`. Story remains the default delivery and strict-gate unit.
+
+Dependencies are proposed first and become canonical only after approval into `.sdlc/dependencies/graph.json`. Orchestration uses hard dependencies to block unavailable stories and soft dependencies as context warnings. If an upstream linked artifact changes, downstream stories become stale until they record a `dependency.revalidate` trace.
+
+```mermaid
+flowchart LR
+  Requirement["Requirement"] --> Breakdown["Approved breakdown"]
+  Breakdown --> Epic["Epic"]
+  Breakdown --> Story["Story"]
+  Breakdown --> Task["Task"]
+  Story --> DependencyGraph["Approved dependency graph"]
+  DependencyGraph --> Orchestrator["orchestrate plan"]
+  DependencyGraph --> Gate["gate check --strict"]
 ```
 
 ## Output Consistency Layer

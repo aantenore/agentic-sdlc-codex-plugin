@@ -9,6 +9,9 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - Phase contracts for Discovery, Analysis, Design, Implementation, Validation, and Release.
 - A Git-first knowledge base for requirements, stories, decisions, assumptions, risks, tests, traces, and releases.
 - Story-scoped workspaces so multiple agents can work in parallel without overwriting each other.
+- Work breakdown agreements for project-local epics, stories, tasks, and approved decomposition choices.
+- Contract capability policies for agreed skills, MCPs, tools, bindings, permissions, and approval boundaries.
+- Approved dependency graphs that control orchestration, stale downstream work, and strict gates.
 - Append-only trace logs for decisions, tests, implementation events, gate reviews, and release notes.
 - Parallel orchestration commands for multi-chat work, story claims, handoffs, locks, and sync/push attribution.
 - Output consistency registry for approved artifact templates, story-artifact links, and reuse/delta decisions.
@@ -78,6 +81,11 @@ The CLI has no runtime dependencies beyond Node.js.
 node bin/agentic-sdlc.mjs init --project-name "My Product"
 node bin/agentic-sdlc.mjs contract create --phase discovery
 node bin/agentic-sdlc.mjs story create --id ST-001 --title "Implement a business workflow"
+node bin/agentic-sdlc.mjs work item create --type epic --id EP-001 --title "Business workflow"
+node bin/agentic-sdlc.mjs breakdown propose --id BD-REQ-001 --requirement REQ-001 --item story:ST-001
+node bin/agentic-sdlc.mjs breakdown approve --id BD-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs dependency propose --id DEP-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
+node bin/agentic-sdlc.mjs dependency approve --id DEP-001 --actor-type human
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
 node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human
@@ -176,6 +184,8 @@ node bin/agentic-sdlc.mjs contract create \
 ```
 
 Model identifiers are stored as free-form Codex model IDs so the plugin does not need hardcoded model catalogs. Reasoning levels are configurable in `templates/sdlc-config.json`.
+
+Contracts can also carry a `capability_policy` and `capability_bindings`. Use these to agree which skills, MCPs, tools, concrete targets, permissions, and approval-required actions are allowed for the step. Required MCP/tool capabilities must either have a binding or remain as explicit open questions before strict gates pass.
 
 ## How Agents Interact
 

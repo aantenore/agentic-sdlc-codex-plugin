@@ -14,6 +14,9 @@ It is intentionally stored in the project repository so people and agents can co
 - Run `agentic-sdlc sync record --event push` after pushing a branch.
 - Release story claims and phase locks when work is done or handed off.
 - Link requirements, stories, decisions, tests, and release evidence.
+- Keep epics, tasks, work breakdown agreements, and dependency graphs in `.sdlc/`.
+- Approve work breakdown and dependency graph proposals before using them as delivery constraints.
+- Record `dependency.revalidate` traces when downstream work is rechecked after upstream artifact changes.
 - Resolve story outputs through `.sdlc/output-contracts/registry.json` before generating new durable artifacts.
 - Reuse approved artifacts and create only deltas when related stories cover the same requirement.
 - Ask for user approval before introducing a new output template or changing an approved output structure.
@@ -26,6 +29,9 @@ It is intentionally stored in the project repository so people and agents can co
 contracts/      Phase contracts and story-specific contracts
 output-contracts/ Approved output templates, artifact links, and structure decisions
 requirements/   Product requirements and constraints
+work-items/     Project-local epics and tasks
+work-breakdown/ Approved decomposition decisions
+dependencies/   Approved dependency graph and proposals
 stories/        Story workspaces, claims, plans, and evidence
 orchestration/  Parent-chat orchestration snapshots
 locks/          Phase and shared-artifact locks
