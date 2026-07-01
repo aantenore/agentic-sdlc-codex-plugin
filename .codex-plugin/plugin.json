@@ -1,6 +1,6 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A Codex plugin for contract-driven agentic SDLC execution with a shared Git-first project knowledge base.",
   "author": {
     "name": "Antonio Antenore",
@@ -23,6 +23,9 @@
     "longDescription": "Agentic SDLC turns a classic software development life cycle into an agent-legible operating system: each phase is governed by a contract, validated by gates, and recorded in a Git-first knowledge base that teams and agents can share in parallel.",
     "developerName": "Antonio Antenore",
     "category": "Productivity",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.png",
     "capabilities": [
       "Read",
       "Write",

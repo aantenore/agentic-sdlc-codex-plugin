@@ -2,6 +2,8 @@ interface:
   display_name: "Agentic SDLC"
   short_description: "Contract-driven SDLC with shared KB"
   brand_color: "#0EA5E9"
+  icon_small: "./assets/icon-small.png"
+  icon_large: "./assets/icon-large.png"
   default_prompt: "Use $agentic-sdlc to initialize and govern this project with contract-driven SDLC."
 policy:
   allow_implicit_invocation: true
