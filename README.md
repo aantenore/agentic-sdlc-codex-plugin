@@ -81,13 +81,28 @@ The plugin is portable across Codex installations because the manifest reference
 
 No project knowledge is stored in the plugin installation. Each target project gets its own `.sdlc/` directory, which can be shared through Git.
 
-To move it to another Codex, clone or copy the repository, then import that repository root as a local plugin in the target Codex installation. If a Codex build does not expose plugin import in the UI, use a local marketplace entry on that machine that points to the copied repository root; keep that machine-local marketplace file out of this repo.
-
-For local dogfooding when the Codex app does not expose a plugin import command, link the skill directly so future Codex sessions load the repo copy instead of a stale copy:
+Recommended local install uses the same personal marketplace flow as other local Codex plugins:
 
 ```bash
-ln -s "$(pwd)/skills/agentic-sdlc" "$HOME/.codex/skills/agentic-sdlc"
+git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git \
+  "$HOME/plugins/agentic-sdlc-codex-plugin"
+
+cd "$HOME/plugins/agentic-sdlc-codex-plugin"
+python3 scripts/install-personal-marketplace.py
+codex plugin add agentic-sdlc-codex-plugin@personal
+codex plugin list | grep agentic-sdlc-codex-plugin
 ```
+
+For development from an existing checkout, expose that checkout under the personal plugin parent before running the installer:
+
+```bash
+mkdir -p "$HOME/plugins"
+ln -s "$(pwd)" "$HOME/plugins/agentic-sdlc-codex-plugin"
+python3 scripts/install-personal-marketplace.py
+codex plugin add agentic-sdlc-codex-plugin@personal
+```
+
+The installer only updates the machine-local `~/.agents/plugins/marketplace.json`; do not commit that file into this repository. Start a new Codex thread after installing or reinstalling so Codex loads the plugin skill and assets from the installed plugin cache.
 
 Validate the portable package before sharing:
 
