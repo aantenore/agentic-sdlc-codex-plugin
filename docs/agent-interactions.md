@@ -302,7 +302,8 @@ node bin/agentic-sdlc.mjs trace append \
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type test \
-  --summary "Unit and integration tests passed for the trigger-driven workflow."
+  --summary "Unit and integration tests passed for the trigger-driven workflow." \
+  --evidence .sdlc/tests/ST-001-test-run.json
 ```
 
 Handoff to Validation:
@@ -317,7 +318,7 @@ and trace events linked to the story.
 The Validation Agent checks whether the story satisfies its contract and acceptance criteria.
 
 ```bash
-node bin/agentic-sdlc.mjs gate check --story ST-001
+node bin/agentic-sdlc.mjs gate check --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.md
 ```
 
 Reads:
@@ -382,7 +383,8 @@ Trace example:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type release \
-  --summary "Released workflow MVP with provider signal monitoring."
+  --summary "Released workflow MVP with provider signal monitoring." \
+  --evidence .sdlc/releases/REL-001.md
 ```
 
 ## Parallel Agent Example
@@ -440,7 +442,8 @@ Each chat records its own evidence:
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Functional flow accepted" --actor analysis-chat --actor-type agent
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed analysis artifacts"
 node bin/agentic-sdlc.mjs story handoff --id ST-001 --to-agent implementation-agent --artifact .sdlc/requirements/functional-analysis.md
-node bin/agentic-sdlc.mjs gate check --story ST-001 --strict
+node bin/agentic-sdlc.mjs story handoff close --id HND-ST-001-20260701123000 --status closed
+node bin/agentic-sdlc.mjs gate check --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
 ```
 
 When output resolution becomes slow or the KB grows, each chat can rebuild a local cache:
@@ -460,7 +463,7 @@ A parent chat coordinates available lanes without taking over worker claims:
 node bin/agentic-sdlc.mjs orchestrate plan --json
 node bin/agentic-sdlc.mjs phase lock --phase analysis --reason "Updating shared integration map"
 node bin/agentic-sdlc.mjs phase release --id LOCK-analysis-20260701123000 --reason "Integration map stable"
-node bin/agentic-sdlc.mjs gate check --scope all --strict
+node bin/agentic-sdlc.mjs gate check --scope all --strict --out .sdlc/reports/project-gate-report.json
 ```
 
 ## Human Governance
