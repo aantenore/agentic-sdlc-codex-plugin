@@ -13,6 +13,7 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - Parallel orchestration commands for multi-chat work, story claims, handoffs, locks, and sync/push attribution.
 - Output consistency registry for approved artifact templates, story-artifact links, and reuse/delta decisions.
 - Local regenerable cache for faster KB lookup, dependency graphs, artifact fingerprints, and output resolution.
+- Language-agnostic request routing: Codex normalizes user intent to canonical JSON, then the CLI deterministically decides the SDLC route from project state and policy.
 - Gate checks that validate contract completeness, story readiness, and traceability.
 - A regenerable search index over `.sdlc/` content.
 
@@ -89,6 +90,25 @@ node bin/agentic-sdlc.mjs cache rebuild
 node bin/agentic-sdlc.mjs index rebuild
 node bin/agentic-sdlc.mjs kb search "business workflow"
 ```
+
+## Intent Routing
+
+Use `route decide` when the user request could mean intake, story decomposition, contract creation, implementation, validation, or release. Codex first converts the conversation into the canonical schema in [schemas/route-intent.schema.json](schemas/route-intent.schema.json). The CLI then checks `.sdlc/` state, confidence thresholds, required story/contract/output evidence, and returns the next route without writing canonical artifacts.
+
+```bash
+node bin/agentic-sdlc.mjs route decide --json --intent-json '{
+  "requested_action": "implement_story",
+  "confidence": 0.92,
+  "referenced_entities": [{"type": "story", "id": "ST-001"}],
+  "provided_artifacts": [],
+  "missing_context": [],
+  "proposed_phase": "implementation",
+  "artifact_type": null,
+  "skip_phases": []
+}'
+```
+
+Raw text passed with `--text` is treated only as untrusted context. The CLI never keyword-matches natural language; low confidence, missing context, phase skips, new templates, duplicate outputs, and implementation starts are routed to confirmation or clarification.
 
 ## Collaboration Model
 
