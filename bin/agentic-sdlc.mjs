@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -47,6 +47,18 @@ const STORY_STEP_NAMES = new Set([
   "release",
 ]);
 const ACTIVITY_REPORT_VIEWS = new Set(["business", "dev", "agent-verbose"]);
+const REPORT_QUERY_SUBJECTS = new Set([
+  "activity",
+  "stories",
+  "story_steps",
+  "outputs",
+  "contracts",
+  "handoffs",
+  "work_items",
+  "approvals",
+  "tests",
+  "all",
+]);
 const ROUTE_REQUIRED_INTENT_FIELDS = [
   "requested_action",
   "confidence",
@@ -301,6 +313,10 @@ function main() {
     }
     if (command === "report" && subcommand === "activity") {
       reportActivity(context, parsed.options);
+      return;
+    }
+    if (command === "report" && subcommand === "query") {
+      reportQuery(context, parsed.options);
       return;
     }
     if (command === "index" && subcommand === "rebuild") {
@@ -5419,6 +5435,591 @@ function reportActivity(context, options) {
   );
 }
 
+function reportQuery(context, options) {
+  ensureInitialized(context);
+  const queryLoad = loadReportQuery(context, options);
+  if (!queryLoad.query) {
+    const guidance = buildReportQueryNormalizationGuidance(options, queryLoad);
+    output(options, guidance, [
+      "Report query needs canonical normalization.",
+      "Pass --query-json or --query-file with a report query object.",
+      "Raw natural language is recorded only as context and is not keyword-matched by the CLI.",
+    ]);
+    return;
+  }
+  const report = buildReportQueryResult(context, queryLoad.query, options);
+  if (options.out) {
+    writeReportQueryResult(context, report, options);
+  }
+  output(
+    options,
+    report,
+    [
+      `Report query: ${report.status}`,
+      `Matched: ${report.summary.result_count}`,
+      ...report.results.map((item) => `- ${item.created_at || item.updated_at || "unknown"} ${item.kind} ${item.id}: ${item.summary}`),
+      report.results.length === 0 ? "- No canonical KB records matched this query" : null,
+    ].filter(Boolean),
+  );
+}
+
+function loadReportQuery(context, options = {}) {
+  const json = getOptionString(options, "query-json");
+  const file = getOptionString(options, "query-file");
+  if (json && file) {
+    fail("Use either --query-json or --query-file, not both.");
+  }
+  if (json) {
+    return { source: "query-json", query: loadOptionalJsonInput(context, options, "query-json", "query-file", "Report query") };
+  }
+  if (file) {
+    const queryPath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, queryPath, "Report query file");
+    return { source: toProjectPath(context, queryPath), query: readJson(queryPath) };
+  }
+  return { source: "missing", query: null, raw_text: getOptionString(options, "text", "query") || null };
+}
+
+function buildReportQueryNormalizationGuidance(options, queryLoad) {
+  return {
+    kind: "report_query_normalization",
+    status: "needs_normalization",
+    schema_version: "report-query:v1",
+    raw_text: queryLoad.raw_text,
+    rule: "Codex or another LLM must normalize natural language into canonical query JSON. The CLI never keyword-matches raw user language.",
+    required_shape: {
+      intent: "find_records",
+      confidence: 0.0,
+      subjects: ["activity"],
+      time: { since: "10d", until: "now", field: "created_at" },
+      filters: {
+        actor: ["actor-id-or-email"],
+        story_id: ["ST-001"],
+        artifact_type: ["functional-analysis"],
+        event_type: ["decision"],
+        action: ["story.create"],
+        phase: ["analysis"],
+        status: ["draft"],
+        requirement: ["REQ-001"],
+        text: ["search term"],
+      },
+      sort: "created_at_desc",
+      limit: 50,
+    },
+    examples: [
+      {
+        natural_language: "tutte le modifiche fatte da me",
+        query: {
+          intent: "find_changes",
+          confidence: 0.9,
+          subjects: ["activity", "stories", "outputs", "contracts", "approvals"],
+          filters: { actor: ["<current-user-id-or-email>"] },
+          sort: "created_at_desc",
+        },
+      },
+      {
+        natural_language: "tutte le storie funzionali nuove degli ultimi 10 giorni",
+        query: {
+          intent: "find_new_functional_stories",
+          confidence: 0.9,
+          subjects: ["stories"],
+          time: { since: "10d", until: "now", field: "created_at" },
+          filters: { artifact_type: ["functional-analysis"], text: ["functional"] },
+          sort: "created_at_desc",
+        },
+      },
+    ],
+  };
+}
+
+function buildReportQueryResult(context, rawQuery, options = {}) {
+  const query = normalizeReportQuery(rawQuery, options);
+  const allRecords = collectReportQueryRecords(context);
+  const filtered = allRecords
+    .filter((record) => reportQuerySubjectMatches(record, query))
+    .filter((record) => reportQueryTimeMatches(record, query))
+    .filter((record) => reportQueryFiltersMatch(record, query))
+    .sort((left, right) => compareReportQueryRecords(left, right, query.sort))
+    .slice(0, query.limit)
+    .map(formatReportQueryRecord);
+  const sourcePaths = Array.from(
+    new Set(filtered.flatMap((record) => (record.sources || []).map((source) => source.path).filter(Boolean))),
+  ).sort();
+  return {
+    kind: "report_query_result",
+    status: "matched",
+    schema_version: context.config.schema_version,
+    generated_at: now(),
+    query,
+    summary: {
+      result_count: filtered.length,
+      by_kind: countBy(filtered, "kind"),
+      by_actor: countBy(filtered, (record) => traceActorKey(record.actor)),
+      by_story: countBy(filtered, (record) => record.story_id || "project"),
+    },
+    results: filtered,
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_policy: "Query results cite canonical .sdlc files. Cache and indexes are never query evidence.",
+  };
+}
+
+function normalizeReportQuery(rawQuery, options = {}) {
+  if (!rawQuery || typeof rawQuery !== "object" || Array.isArray(rawQuery)) {
+    fail("Report query must be a JSON object.");
+  }
+  const subjects = normalizeStringArray(rawQuery.subjects || rawQuery.subject || ["activity"]).map((subject) =>
+    String(subject).trim().toLowerCase(),
+  );
+  if (subjects.length === 0) {
+    fail("Report query subjects cannot be empty.");
+  }
+  for (const subject of subjects) {
+    if (!REPORT_QUERY_SUBJECTS.has(subject)) {
+      fail(`Unknown report query subject '${subject}'. Valid subjects: ${Array.from(REPORT_QUERY_SUBJECTS).join(", ")}`);
+    }
+  }
+  const time = rawQuery.time && typeof rawQuery.time === "object" && !Array.isArray(rawQuery.time) ? rawQuery.time : {};
+  const filters = rawQuery.filters && typeof rawQuery.filters === "object" && !Array.isArray(rawQuery.filters) ? rawQuery.filters : {};
+  const limit = Number(rawQuery.limit || options.limit || 50);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    fail("Report query limit must be an integer between 1 and 500.");
+  }
+  const sort = String(rawQuery.sort || "created_at_desc");
+  if (!["created_at_desc", "created_at_asc", "updated_at_desc", "updated_at_asc", "kind_asc"].includes(sort)) {
+    fail("Report query sort must be created_at_desc, created_at_asc, updated_at_desc, updated_at_asc, or kind_asc.");
+  }
+  return {
+    intent: String(rawQuery.intent || "find_records"),
+    confidence: rawQuery.confidence === undefined ? null : Number(rawQuery.confidence),
+    subjects,
+    time: {
+      since: time.since || options.since || null,
+      until: time.until || options.until || null,
+      field: String(time.field || "created_at"),
+    },
+    filters: normalizeReportQueryFilters(filters),
+    sort,
+    limit,
+  };
+}
+
+function normalizeReportQueryFilters(filters) {
+  return {
+    actor: normalizeStringArray(filters.actor),
+    story_id: normalizeStringArray(filters.story_id || filters.story),
+    requirement: normalizeStringArray(filters.requirement || filters.requirements),
+    artifact_type: normalizeStringArray(filters.artifact_type || filters.output_type),
+    event_type: normalizeStringArray(filters.event_type || filters.type),
+    action: normalizeStringArray(filters.action),
+    phase: normalizeStringArray(filters.phase),
+    status: normalizeStringArray(filters.status),
+    kind: normalizeStringArray(filters.kind),
+    path: normalizeStringArray(filters.path),
+    text: normalizeStringArray(filters.text || filters.contains),
+  };
+}
+
+function collectReportQueryRecords(context) {
+  const registry = readOutputRegistry(context, { missingOk: true });
+  return [
+    ...collectTraceQueryRecords(context),
+    ...collectStoryQueryRecords(context, registry),
+    ...collectStoryStepQueryRecords(context),
+    ...collectOutputQueryRecords(context, registry),
+    ...collectContractQueryRecords(context),
+    ...collectHandoffQueryRecords(context),
+    ...collectWorkItemQueryRecords(context),
+    ...collectApprovalQueryRecords(context),
+    ...collectTestQueryRecords(context),
+  ];
+}
+
+function collectTraceQueryRecords(context) {
+  return readAllTraceEvents(context)
+    .filter((event) => event.type !== "invalid")
+    .map((event) => ({
+      kind: "activity",
+      id: event.id || `${event.source?.path}:${event.source?.line}`,
+      summary: event.summary || event.action || event.type,
+      created_at: event.created_at || null,
+      updated_at: event.created_at || null,
+      actor: event.actor || null,
+      action: event.action || event.type || null,
+      event_type: event.type || null,
+      story_id: event.story_id || null,
+      artifact_type: inferArtifactTypeFromTrace(event),
+      requirements: [],
+      phase: null,
+      status: null,
+      text: stableJson(event),
+      sources: [event.source].filter(Boolean),
+      raw: event,
+    }));
+}
+
+function collectStoryQueryRecords(context, registry = null) {
+  return readAllStories(context).map((story) => {
+    const storyOutputTypes = (registry?.links || [])
+      .filter((link) => link.story_id === story.id && link.artifact_type)
+      .map((link) => link.artifact_type);
+    return {
+      kind: "stories",
+      id: story.id,
+      summary: story.title || story.id,
+      created_at: story.created_at || null,
+      updated_at: story.updated_at || story.created_at || null,
+      actor: story.audit?.created_by || story.audit?.updated_by || null,
+      action: "story.create",
+      event_type: "story",
+      story_id: story.id,
+      artifact_type: storyOutputTypes[0] || inferStoryArtifactType(story),
+      artifact_types: storyOutputTypes,
+      requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
+      phase: story.phase || null,
+      status: story.status || null,
+      text: stableJson(story),
+      sources: [{ path: `.sdlc/stories/${story.id}/story.json`, line: 1 }],
+      raw: story,
+    };
+  });
+}
+
+function collectStoryStepQueryRecords(context) {
+  const records = [];
+  for (const story of readAllStories(context)) {
+    for (const step of readStoryStepRecords(context, story.id)) {
+      records.push({
+        kind: "story_steps",
+        id: step.id || `${story.id}:${step.step}`,
+        summary: step.summary || `${story.id} ${step.step} completed`,
+        created_at: step.completed_at || null,
+        updated_at: step.completed_at || null,
+        actor: step.audit?.completed_by || null,
+        action: "story.complete-step",
+        event_type: "gate",
+        story_id: story.id,
+        artifact_type: Array.isArray(step.output_types) ? step.output_types[0] || null : null,
+        artifact_types: Array.isArray(step.output_types) ? step.output_types : [],
+        requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
+        phase: step.phase || story.phase || null,
+        status: step.status || null,
+        text: stableJson(step),
+        sources: [{ path: `.sdlc/stories/${story.id}/steps/${step.step}.json`, line: 1 }],
+        raw: step,
+      });
+    }
+  }
+  return records;
+}
+
+function collectOutputQueryRecords(context, registry = null) {
+  const registrySource = fs.existsSync(outputRegistryPath(context)) ? [{ path: toProjectPath(context, outputRegistryPath(context)), line: 1 }] : [];
+  const templateRecords = (registry?.templates || []).map((template) => ({
+    kind: "outputs",
+    id: template.id,
+    summary: `Output template ${template.id} for ${template.type}`,
+    created_at: template.proposed_at || template.created_at || null,
+    updated_at: template.approved_at || template.proposed_at || null,
+    actor: template.audit?.approved_by || template.audit?.proposed_by || template.approved_by || null,
+    action: template.status === "approved" ? "output.template.approve" : "output.template.propose",
+    event_type: "decision",
+    story_id: null,
+    artifact_type: template.type || null,
+    requirements: [],
+    phase: null,
+    status: template.status || null,
+    text: stableJson(template),
+    sources: registrySource,
+    raw: template,
+  }));
+  const linkRecords = (registry?.links || []).map((link) => ({
+    kind: "outputs",
+    id: link.id,
+    summary: `${link.artifact_type} output ${link.artifact_path} linked as ${link.mode}`,
+    created_at: link.created_at || null,
+    updated_at: link.updated_at || link.created_at || null,
+    actor: link.audit?.linked_by || null,
+    action: "output.link",
+    event_type: "decision",
+    story_id: link.story_id || null,
+    artifact_type: link.artifact_type || null,
+    requirements: Array.isArray(link.requirements) ? link.requirements : [],
+    phase: null,
+    status: link.mode || null,
+    text: stableJson(link),
+    sources: registrySource,
+    raw: link,
+  }));
+  return [...templateRecords, ...linkRecords];
+}
+
+function collectContractQueryRecords(context) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+    kind: "contracts",
+    id: contract.id || path.basename(contract.__path, ".json"),
+    summary: `${contract.phase || "unknown"} contract ${contract.id || path.basename(contract.__path, ".json")}`,
+    created_at: contract.created_at || null,
+    updated_at: contract.updated_at || contract.created_at || null,
+    actor: contract.audit?.created_by || contract.audit?.updated_by || null,
+    action: "contract.create",
+    event_type: "contract",
+    story_id: contract.story_id || null,
+    artifact_type: Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs[0]?.artifact_type || null : null,
+    artifact_types: Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs.map((ref) => ref.artifact_type).filter(Boolean) : [],
+    requirements: [],
+    phase: contract.phase || null,
+    status: contract.status || null,
+    text: stableJson(contract),
+    sources: [{ path: contract.__relative_path, line: 1 }],
+    raw: contract,
+  }));
+}
+
+function collectHandoffQueryRecords(context) {
+  return readHandoffs(context).map((handoff) => ({
+    kind: "handoffs",
+    id: handoff.id,
+    summary: handoff.summary || `Handoff ${handoff.id} to ${handoff.to_agent}`,
+    created_at: handoff.created_at || null,
+    updated_at: handoff.closed_at || handoff.created_at || null,
+    actor: handoff.from_actor || handoff.audit?.created_by || null,
+    action: handoff.closed_at ? "handoff.close" : "story.handoff",
+    event_type: "handoff",
+    story_id: handoff.story_id || null,
+    artifact_type: null,
+    requirements: [],
+    phase: null,
+    status: handoff.status || null,
+    text: stableJson(handoff),
+    sources: [{ path: `.sdlc/handoffs/${handoff.id}.json`, line: 1 }],
+    raw: handoff,
+  }));
+}
+
+function collectWorkItemQueryRecords(context) {
+  const roots = [path.join(workItemsRoot(context), "epics"), path.join(workItemsRoot(context), "tasks")];
+  return roots.flatMap((root) =>
+    collectJsonFiles(context, root).map((item) => ({
+      kind: "work_items",
+      id: item.id || path.basename(item.__path, ".json"),
+      summary: item.title || item.summary || item.id || path.basename(item.__path, ".json"),
+      created_at: item.created_at || null,
+      updated_at: item.updated_at || item.created_at || null,
+      actor: item.audit?.created_by || item.audit?.updated_by || null,
+      action: "work.item.create",
+      event_type: "work_item",
+      story_id: item.story_id || item.story || null,
+      artifact_type: null,
+      requirements: item.requirement_id ? [item.requirement_id] : normalizeStringArray(item.requirements),
+      phase: null,
+      status: item.status || null,
+      text: stableJson(item),
+      sources: [{ path: item.__relative_path, line: 1 }],
+      raw: item,
+    })),
+  );
+}
+
+function collectApprovalQueryRecords(context) {
+  return collectApprovalManifestEntries(context).map((approval) => ({
+    kind: "approvals",
+    id: approval.approval_id || `${approval.subject_id}:approval`,
+    summary: `${approval.subject_id} approval ${approval.status || "unknown"}`,
+    created_at: approval.created_at || null,
+    updated_at: approval.created_at || null,
+    actor: approval.actor || null,
+    action: "approve",
+    event_type: "gate",
+    story_id: null,
+    artifact_type: null,
+    requirements: [],
+    phase: null,
+    status: approval.status || null,
+    text: stableJson(approval),
+    sources: [{ path: approval.subject_path, line: 1 }],
+    raw: approval,
+  }));
+}
+
+function collectTestQueryRecords(context) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "tests")).map((testRecord) => ({
+    kind: "tests",
+    id: testRecord.id || path.basename(testRecord.__path, ".json"),
+    summary: testRecord.summary || testRecord.id || path.basename(testRecord.__path, ".json"),
+    created_at: testRecord.created_at || null,
+    updated_at: testRecord.updated_at || testRecord.created_at || null,
+    actor: testRecord.audit?.created_by || testRecord.audit?.updated_by || null,
+    action: "test.evidence",
+    event_type: "test",
+    story_id: testRecord.story_id || null,
+    artifact_type: null,
+    requirements: normalizeStringArray(testRecord.requirements),
+    phase: "validation",
+    status: testRecord.status || null,
+    text: stableJson(testRecord),
+    sources: [{ path: testRecord.__relative_path, line: 1 }],
+    raw: testRecord,
+  }));
+}
+
+function inferArtifactTypeFromTrace(event) {
+  if (event.action === "output.link" && Array.isArray(event.related)) {
+    return event.related.find((item) => String(item).includes("-analysis") || String(item).includes("summary")) || null;
+  }
+  return null;
+}
+
+function inferStoryArtifactType(story) {
+  const text = stableJson(story).toLowerCase();
+  if (text.includes("functional-analysis") || text.includes("functional")) {
+    return "functional-analysis";
+  }
+  if (text.includes("technical-analysis") || text.includes("technical")) {
+    return "technical-analysis";
+  }
+  return null;
+}
+
+function reportQuerySubjectMatches(record, query) {
+  return query.subjects.includes("all") || query.subjects.includes(record.kind);
+}
+
+function reportQueryTimeMatches(record, query) {
+  if (!query.time.since && !query.time.until) {
+    return true;
+  }
+  const fields = query.time.field === "updated_at" ? ["updated_at"] : query.time.field === "any" ? ["created_at", "updated_at"] : ["created_at"];
+  const timestamps = fields.map((field) => Date.parse(String(record[field] || ""))).filter(Number.isFinite);
+  if (timestamps.length === 0) {
+    return false;
+  }
+  const since = query.time.since ? parseDateBoundary(query.time.since, "query.time.since") : null;
+  const until = query.time.until ? parseDateBoundary(query.time.until, "query.time.until", { defaultNow: true }) : null;
+  return timestamps.some((timestamp) => (!since || timestamp >= since.getTime()) && (!until || timestamp <= until.getTime()));
+}
+
+function reportQueryFiltersMatch(record, query) {
+  const filters = query.filters;
+  return (
+    listFilterMatches(filters.kind, record.kind) &&
+    actorFilterMatches(filters.actor, record.actor) &&
+    listFilterMatches(filters.story_id, record.story_id) &&
+    listFilterOverlaps(filters.requirement, record.requirements || []) &&
+    listFilterOverlaps(filters.artifact_type, [record.artifact_type, ...(record.artifact_types || [])].filter(Boolean)) &&
+    listFilterMatches(filters.event_type, record.event_type) &&
+    listFilterMatches(filters.action, record.action) &&
+    listFilterMatches(filters.phase, record.phase) &&
+    listFilterMatches(filters.status, record.status) &&
+    listFilterOverlaps(filters.path, (record.sources || []).map((source) => source.path)) &&
+    textFilterMatches(filters.text, record.text)
+  );
+}
+
+function actorFilterMatches(filters, actor) {
+  if (!filters.length) {
+    return true;
+  }
+  return filters.some((filter) => traceActorMatches(actor, filter));
+}
+
+function listFilterMatches(filters, value) {
+  if (!filters.length) {
+    return true;
+  }
+  return filters.map(normalizeQueryToken).includes(normalizeQueryToken(value));
+}
+
+function listFilterOverlaps(filters, values) {
+  if (!filters.length) {
+    return true;
+  }
+  const normalizedValues = new Set((Array.isArray(values) ? values : [values]).map(normalizeQueryToken));
+  return filters.some((filter) => normalizedValues.has(normalizeQueryToken(filter)));
+}
+
+function textFilterMatches(filters, text) {
+  if (!filters.length) {
+    return true;
+  }
+  const normalized = normalizeText(text).toLowerCase();
+  return filters.every((filter) => normalizeText(filter).toLowerCase().split(" ").filter(Boolean).every((term) => normalized.includes(term)));
+}
+
+function normalizeQueryToken(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function compareReportQueryRecords(left, right, sort) {
+  if (sort === "kind_asc") {
+    return `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`);
+  }
+  const field = sort.startsWith("updated_at") ? "updated_at" : "created_at";
+  const direction = sort.endsWith("_asc") ? 1 : -1;
+  return direction * String(left[field] || "").localeCompare(String(right[field] || ""));
+}
+
+function formatReportQueryRecord(record) {
+  return {
+    kind: record.kind,
+    id: record.id,
+    summary: record.summary,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    actor: record.actor,
+    action: record.action,
+    event_type: record.event_type,
+    story_id: record.story_id,
+    artifact_type: record.artifact_type,
+    artifact_types: record.artifact_types || [],
+    requirements: record.requirements || [],
+    phase: record.phase,
+    status: record.status,
+    sources: record.sources || [],
+  };
+}
+
+function countBy(items, keyOrFn) {
+  const result = {};
+  for (const item of items) {
+    const key = typeof keyOrFn === "function" ? keyOrFn(item) : item[keyOrFn];
+    result[key || "unknown"] = (result[key || "unknown"] || 0) + 1;
+  }
+  return result;
+}
+
+function writeReportQueryResult(context, report, options) {
+  const reportPath = resolveProjectFilePath(context, options.out, { mustExist: false });
+  assertNotDerivedArtifact(context, reportPath, "Report query result");
+  if (path.extname(reportPath).toLowerCase() === ".md") {
+    writeTextFile(reportPath, renderReportQueryMarkdown(report), { force: Boolean(options.force) });
+    return;
+  }
+  writeJsonFile(reportPath, report, { force: Boolean(options.force) });
+}
+
+function renderReportQueryMarkdown(report) {
+  return [
+    "# SDLC Query Report",
+    "",
+    `- Intent: ${report.query.intent}`,
+    `- Subjects: ${report.query.subjects.join(", ")}`,
+    `- Results: ${report.summary.result_count}`,
+    "",
+    "## Results",
+    ...(report.results.length
+      ? report.results.map((item) => {
+          const source = item.sources?.[0] ? ` (${item.sources[0].path}:${item.sources[0].line})` : "";
+          return `- ${item.created_at || item.updated_at || "unknown"} ${item.kind} ${item.id}: ${item.summary}${source}`;
+        })
+      : ["- No canonical KB records matched this query"]),
+    "",
+    "## Sources",
+    ...(report.source_paths.length ? report.source_paths.map((sourcePath) => `- ${sourcePath}`) : ["- None"]),
+    "",
+  ].join("\n");
+}
+
 function buildActivityReport(context, options = {}) {
   const view = normalizeActivityReportView(options.view || "business");
   const untilDate = parseDateBoundary(options.until || "now", "until", { defaultNow: true });
@@ -8609,6 +9210,8 @@ Usage:
   agentic-sdlc trace compact [--story ST-001] [--before 90d] [--out path]
   agentic-sdlc archive closed [--before 90d] [--apply] [--out path]
   agentic-sdlc report activity [--since 3d] [--view business|dev|agent-verbose] [--out path]
+  agentic-sdlc report query [--query-json json | --query-file path] [--text raw]
+      [--out path] [--json]
   agentic-sdlc orchestrate status [--json]
   agentic-sdlc orchestrate plan [--limit n] [--json]
   agentic-sdlc gate check [--story ST-001] [--scope story|all] [--strict] [--out path] [--json]
@@ -8714,6 +9317,16 @@ Route options:
   --intent-file path     Read canonical route intent JSON from a project file.
   --text raw             Raw user text. The router records it as untrusted and
                          never classifies it without canonical intent JSON.
+
+Report query options:
+  --query-json json      Canonical report query JSON normalized from natural
+                         language by Codex or another LLM.
+  --query-file path      Read canonical report query JSON from a project file.
+                         Must not point to cache/indexes.
+  --text raw             Raw natural language request for audit/debug only.
+                         Without --query-json/file, report query returns
+                         a normalization request and examples.
+  --limit n              Maximum query results, from 1 to 500.
 
 Capability discovery options:
   --profile-json json    Canonical capability profile JSON normalized by Codex.

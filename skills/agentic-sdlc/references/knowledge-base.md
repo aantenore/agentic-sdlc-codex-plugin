@@ -103,6 +103,12 @@ Use `report activity` to answer recent-history questions from real trace events:
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view business
 ```
 
+Use `report query` for broader questions such as "all changes by me", "new functional stories in the last 10 days", or "outputs changed for a requirement". Natural language must be normalized by Codex or another LLM into `schemas/report-query.schema.json`; the CLI executes only the canonical query JSON:
+
+```bash
+node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical-report-query-json>' --json
+```
+
 Use `manifest rebuild` for a compact shared map of stories, contracts, outputs, approvals, and activity. Use `trace compact` when raw JSONL history is too long for context; compaction is additive and must keep the original source trace. Use `archive closed` as a plan-first command for old reports and compactions.
 
 ## Attribution
