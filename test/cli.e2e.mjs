@@ -1777,11 +1777,16 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(requests.requests.every((request) => request.user_prompt));
   assert.ok(requests.requests.every((request) => Array.isArray(request.review_items) && request.review_items.length > 0));
   assert.ok(requests.requests.some((request) => request.type === "contract_approval" && /Context:/.test(request.review_items.join(" "))));
+  const outputTemplateRequest = requests.requests.find((request) => request.type === "output_template_approval");
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Approval scope:/.test(item)));
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Sections to approve:/.test(item)));
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Template content to review:/.test(item)));
 
   assert.equal(requests.assistant_message_source_language, "en");
   assert.equal(requests.assistant_message_presentation.translate_to_chat_language, true);
   assert.equal(requests.assistant_message_presentation.presenter, "codex");
   assert.ok(requests.assistant_message_presentation.preserve_literals.includes("CLI commands"));
+  assert.match(requests.assistant_message_presentation.instruction, /Do not collapse/);
 
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
   assert.match(plainRequests, /I am stopping here/);
