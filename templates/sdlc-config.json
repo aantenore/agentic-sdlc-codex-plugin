@@ -1,6 +1,7 @@
 {
   "schema_version": "0.1.0",
   "kb_directories": [
+    "baseline",
     "contracts",
     "capability-discovery",
     "output-contracts",
@@ -143,6 +144,7 @@
     "canonical_intent_schema": "schemas/route-intent.schema.json",
     "routes": [
       "init_project",
+      "onboard_existing_project",
       "ask_clarification",
       "intake_requirement",
       "classify_artifact",
@@ -189,6 +191,16 @@
       },
       "init_project": {
         "route": "init_project"
+      },
+      "onboard_existing_project": {
+        "route": "onboard_existing_project"
+      },
+      "existing_project_onboarding": {
+        "route": "onboard_existing_project"
+      },
+      "create_baseline": {
+        "route": "onboard_existing_project",
+        "confirmation_key": "create_canonical_artifact"
       },
       "intake_requirement": {
         "route": "intake_requirement"
@@ -297,6 +309,25 @@
       "Apply approved recommendations to contracts instead of duplicating capability decisions in chat."
     ]
   },
+  "approval_policy": {
+    "principle": "Implementation authorization is not formal SDLC approval. Formal approvals must record an explicit source, approver, summary or evidence, and immutable subject hash.",
+    "formal_approval_requires_explicit_source": true,
+    "require_summary_or_evidence_for_explicit_user": true,
+    "allow_bootstrap_approvals_in_strict_gate": false,
+    "legacy_approval_behavior": "error",
+    "accepted_sources": [
+      "explicit-user",
+      "ci",
+      "automation",
+      "bootstrap"
+    ],
+    "agent_rules": [
+      "Do not record --actor-type human unless the user explicitly approved the specific artifact.",
+      "Use --approval-source explicit-user only with a summary or canonical evidence of the user's approval.",
+      "Use --approval-source bootstrap only for migration/provisional records; bootstrap approvals do not satisfy strict gates by default.",
+      "Treat permission to implement or push as operational authorization, not as formal SDLC approval."
+    ]
+  },
   "cache_policy": {
     "principle": "Cache and index files are local, derived, and regenerable optimizations. They can accelerate lookup and context assembly, but they must never be used as the canonical source for approvals, requirements, decisions, or story outputs.",
     "cache_path": ".sdlc/cache/kb-cache.json",
@@ -305,6 +336,7 @@
       "indexes"
     ],
     "source_of_truth_dirs": [
+      "baseline",
       "contracts",
       "capability-discovery",
       "requirements",
