@@ -49,6 +49,8 @@ Parallelism is story-scoped. Each agent or developer claims a story and works on
 
 This avoids one shared mutable planning document becoming a collaboration bottleneck.
 
+For phase-by-phase examples, see [Agent Interactions](agent-interactions.md).
+
 ## Gate Model
 
 Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, and release evidence gaps.
@@ -58,3 +60,5 @@ Gate checks are mechanical validations over `.sdlc/` artifacts. They do not repl
 The CLI accepts a custom template directory through `--template-dir`. Teams can replace the SDLC phase configuration without changing the plugin code.
 
 The schemas can be used by CI, pre-merge checks, or future MCP tools.
+
+For the full project knowledge base layout, see [Knowledge Base Structure](kb-structure.md).
