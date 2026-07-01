@@ -230,6 +230,50 @@
         }
       },
       "additionalProperties": true
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "contract_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "approved",
+              "changes_requested",
+              "rejected"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "approved_content_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hash_algorithm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
     }
   },
   "additionalProperties": true

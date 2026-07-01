@@ -54,6 +54,19 @@
       ],
       "additionalProperties": true
     },
+    "approved_content_hash": {
+      "type": "string"
+    },
+    "hash_algorithm": {
+      "type": "string"
+    },
+    "approval_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
     "audit": {
       "type": "object",
       "additionalProperties": true

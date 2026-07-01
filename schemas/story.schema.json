@@ -18,13 +18,35 @@
       "type": "string"
     },
     "status": {
-      "type": "string"
+      "enum": [
+        "draft",
+        "ready",
+        "analysis",
+        "design",
+        "implementation",
+        "in_progress",
+        "review",
+        "validation",
+        "release",
+        "done",
+        "blocked"
+      ]
     },
     "phase": {
-      "type": "string"
+      "enum": [
+        "discovery",
+        "analysis",
+        "design",
+        "implementation",
+        "validation",
+        "release"
+      ]
     },
     "contract_id": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "acceptance_criteria": {
       "type": "array",

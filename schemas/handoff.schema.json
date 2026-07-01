@@ -30,7 +30,8 @@
         "open",
         "accepted",
         "closed",
-        "rejected"
+        "rejected",
+        "cancelled"
       ]
     },
     "summary": {
@@ -56,7 +57,12 @@
       "additionalProperties": true
     },
     "created_at": {
-      "type": "string"
+      "type": "string",
+      "format": "date-time"
+    },
+    "closed_at": {
+      "type": "string",
+      "format": "date-time"
     }
   },
   "additionalProperties": true

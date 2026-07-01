@@ -64,6 +64,23 @@
               "null"
             ]
           },
+          "subject": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "approved_content_hash": {
+            "type": "string"
+          },
+          "hash_algorithm": {
+            "type": "string"
+          },
           "audit": {
             "type": "object",
             "additionalProperties": true

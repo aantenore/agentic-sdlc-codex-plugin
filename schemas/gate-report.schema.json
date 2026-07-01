@@ -6,6 +6,7 @@
   "required": [
     "status",
     "strict",
+    "scope",
     "checked_at",
     "errors",
     "warnings",
@@ -26,6 +27,30 @@
     },
     "root": {
       "type": "string"
+    },
+    "scope": {
+      "enum": [
+        "story",
+        "all"
+      ]
+    },
+    "story_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": true
     },
     "errors": {
       "type": "array",

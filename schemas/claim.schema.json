@@ -25,20 +25,23 @@
         "active",
         "released",
         "transferred",
-        "stale"
+        "cancelled"
       ]
     },
     "claimed_at": {
-      "type": "string"
+      "type": "string",
+      "format": "date-time"
     },
     "expires_at": {
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "format": "date-time"
     },
     "released_at": {
-      "type": "string"
+      "type": "string",
+      "format": "date-time"
     },
     "release_reason": {
       "type": [

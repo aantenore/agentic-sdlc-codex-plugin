@@ -80,7 +80,7 @@
     "unit_of_parallelism": "story",
     "branch_pattern": "feature/<story-id>",
     "active_claim_status": "active",
-    "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-transferred by a human"
+    "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-reclaimed by a human"
   },
   "output_consistency_policy": {
     "principle": "Every durable story output should resolve an approved project-wide output template before generation. Related stories should reuse the approved base artifact and create only an explicit delta unless the user approves a new structure.",
