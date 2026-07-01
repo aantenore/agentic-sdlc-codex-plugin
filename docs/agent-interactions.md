@@ -53,6 +53,31 @@ The operating model is not "agents freely coding." It is bounded execution:
 - gates catch missing evidence;
 - humans approve important transitions.
 
+## Request Router Behavior
+
+When the user's request is ambiguous, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision:
+
+```bash
+node bin/agentic-sdlc.mjs route decide --json --intent-json '<canonical-route-intent-json>'
+```
+
+```mermaid
+sequenceDiagram
+  participant Human as Human owner
+  participant Agent as Codex agent
+  participant Router as route decide
+  participant KB as SDLC KB
+
+  Human->>Agent: Request in any language
+  Agent-->>Human: Ask only if context is missing or confidence is low
+  Agent->>Router: Canonical intent JSON
+  Router->>KB: Read project state and policies
+  Router-->>Agent: Route, checks, questions, next commands
+  Agent-->>Human: Confirm risky transitions when required
+```
+
+The router can distinguish intake, story decomposition, contract creation, implementation, validation, release, phase skip confirmation, or clarification from canonical fields and KB state. It never writes canonical artifacts and never treats `.sdlc/cache/` as the authority.
+
 ## Contract Builder Behavior
 
 The contract-building agent is generic. It does not know the project domain in advance. Before creating a contract it should:

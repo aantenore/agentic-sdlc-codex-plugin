@@ -65,6 +65,23 @@ The source of truth is text and JSON. Cache and search indexes are derived artif
 
 During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
 
+## Intent Routing Layer
+
+The routing layer separates language understanding from deterministic SDLC control. Codex or another LLM normalizes the user conversation into the canonical intent schema; the CLI consumes only that JSON plus project-local `.sdlc/` state.
+
+```mermaid
+flowchart LR
+  User["User request in any language"] --> Codex["Codex normalizes intent"]
+  Codex --> Intent["Canonical route intent JSON"]
+  Intent --> Router["route decide"]
+  KB[".sdlc source files"] --> Router
+  Policy["routing_policy"] --> Router
+  Router --> Decision["Route, checks, questions, next commands"]
+  Decision --> Human["Human confirms when required"]
+```
+
+This keeps the deterministic layer language-agnostic: it does not search for words in the user's sentence. It validates configured `requested_action` values, confidence, referenced entities, missing context, artifact type, phase skips, story claims, contracts, and output registry state. `route decide` does not create source-of-truth artifacts; it returns a plan that the agent and user can accept, adjust, or rerun with a corrected intent.
+
 ## Contract Model
 
 Every SDLC phase is governed by a contract. A contract defines:
