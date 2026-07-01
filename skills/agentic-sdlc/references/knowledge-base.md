@@ -22,6 +22,8 @@ The project KB lives under `<target-project>/.sdlc/`. It is the durable source o
   tests/
   traces/
   releases/
+  manifests/
+  archive/
   cache/
   indexes/
   reports/
@@ -30,6 +32,8 @@ The project KB lives under `<target-project>/.sdlc/`. It is the durable source o
 ## Source Of Truth
 
 Use JSON and Markdown files as source of truth. Treat generated cache and indexes as derived artifacts. Reports are durable evidence when they support a review, gate, or release decision.
+
+Manifests under `.sdlc/manifests/` are shared compact maps of canonical KB state. Trace compactions under `.sdlc/traces/compactions/` summarize raw trace JSONL without deleting it. Archive plans under `.sdlc/archive/` can move old reports and compactions only when explicitly applied; live stories, contracts, approvals, and trace JSONL files stay canonical.
 
 ## What Belongs In The KB
 
@@ -46,6 +50,8 @@ Use JSON and Markdown files as source of truth. Treat generated cache and indexe
 - Risks and mitigations.
 - Test plans and evidence.
 - Release notes and feedback loops.
+- Story step completion records and handoff packages that allow another chat or developer to continue from the KB.
+- Shared KB manifests, non-destructive trace compactions, activity reports, and archive plans for closed evidence.
 - Cache/index files only as local regenerable acceleration data.
 
 ## Existing Project Baseline
@@ -88,6 +94,16 @@ Before producing a durable output, inspect `.sdlc/output-contracts/registry.json
 `.sdlc/cache/` is local and regenerable. It may store full-text indexes, story-requirement graphs, artifact fingerprints, compact summaries, dependency graphs, and `output resolve` results.
 
 Never cite cache files as canonical evidence. Cite the source paths recorded in the cache entry instead.
+
+## Activity And Scale
+
+Use `report activity` to answer recent-history questions from real trace events:
+
+```bash
+node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view business
+```
+
+Use `manifest rebuild` for a compact shared map of stories, contracts, outputs, approvals, and activity. Use `trace compact` when raw JSONL history is too long for context; compaction is additive and must keep the original source trace. Use `archive closed` as a plan-first command for old reports and compactions.
 
 ## Attribution
 

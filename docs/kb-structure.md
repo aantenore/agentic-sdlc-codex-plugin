@@ -27,6 +27,8 @@ The sample records below use neutral placeholders. The structure is generic and 
     tests/
     traces/
     releases/
+    manifests/
+    archive/
     cache/
     indexes/
     reports/
@@ -41,6 +43,8 @@ The source of truth is the human-readable and machine-readable files under `.sdl
 - JSONL for append-only trace logs.
 
 Cache and indexes are derived artifacts. They can be rebuilt from source files and must not be used as canonical requirements, approvals, decisions, or output artifacts. Reports are durable evidence when they support a gate or release decision.
+
+Manifests and archive plans are canonical KB files. Cache and indexes are not. Trace compactions are additive summaries under `traces/compactions/`; they point back to raw trace JSONL source paths and do not replace them.
 
 ```mermaid
 flowchart TB
@@ -57,6 +61,8 @@ flowchart TB
   Source --> Decisions["decisions"]
   Source --> Tests["tests"]
   Source --> Traces["traces"]
+  Source --> Manifests["manifests"]
+  Source --> Archive["archive plans"]
   Source --> Reports["reports as evidence"]
 
   Baseline --> Cache["cache"]
@@ -71,6 +77,8 @@ flowchart TB
   Decisions --> Cache
   Tests --> Cache
   Traces --> Cache
+  Manifests --> Cache
+  Archive --> Cache
 
   Baseline --> Indexes["indexes"]
   Contracts --> Indexes
@@ -82,6 +90,21 @@ flowchart TB
   Indexes -.-> Search["search"]
   FastLookup -.-> Gate["strict gate"]
   Search -.-> Gate
+```
+
+```mermaid
+flowchart LR
+  Traces["Raw trace JSONL"] --> Activity["report activity"]
+  Traces --> Compaction["trace compact"]
+  Stories["Story records"] --> Manifest["manifest rebuild"]
+  Contracts["Contracts"] --> Manifest
+  Outputs["Output registry"] --> Manifest
+  Approvals["Approvals"] --> Manifest
+  Activity --> Reports["reports"]
+  Compaction --> Compactions["traces/compactions"]
+  Reports --> ArchivePlan["archive closed plan"]
+  Compactions --> ArchivePlan
+  Manifest --> Cache["cache rebuild"]
 ```
 
 ## `project.json`
@@ -583,6 +606,52 @@ Examples:
 .sdlc/releases/observability-plan.md
 .sdlc/releases/feedback-loop.md
 ```
+
+## `manifests/`
+
+Shared compact maps of the KB, generated from canonical source files.
+
+Example:
+
+```text
+.sdlc/manifests/kb-manifest.json
+```
+
+Rebuild with:
+
+```bash
+node bin/agentic-sdlc.mjs manifest rebuild --root <target-project>
+```
+
+The manifest summarizes stories, claims, completed steps, contracts, output links, approvals, and trace activity. It records source paths and hashes, so it is auditable and useful for fast context assembly. It is still derived from canonical KB files; when in doubt, agents must inspect the source paths listed in the manifest.
+
+## `archive/`
+
+Archive plans and applied archive records for closed, old evidence.
+
+Example:
+
+```text
+.sdlc/archive/ARCH-20260701123000.json
+```
+
+Create a plan with:
+
+```bash
+node bin/agentic-sdlc.mjs archive closed --root <target-project> --before 90d
+```
+
+The command is plan-first. It only moves old reports and trace compactions when `--apply` is explicitly provided. Live story files, contracts, approvals, dependency graphs, output links, and raw trace JSONL are not moved by this command.
+
+## `traces/compactions/`
+
+Non-destructive summaries of raw trace history. Use them when a story trace becomes too long for efficient agent context.
+
+```bash
+node bin/agentic-sdlc.mjs trace compact --root <target-project> --story ST-001
+```
+
+Compactions keep `source_paths` and `source_hashes` for the raw traces they summarize. They help agents read history faster, but they do not replace trace JSONL as the canonical event log.
 
 ## `cache/`
 

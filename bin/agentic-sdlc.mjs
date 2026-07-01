@@ -6,14 +6,25 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
-const BOOLEAN_OPTIONS = new Set(["approve-install", "force", "help", "json", "preserve-status", "strict", "version"]);
+const BOOLEAN_OPTIONS = new Set([
+  "apply",
+  "approve-install",
+  "dry-run",
+  "force",
+  "help",
+  "json",
+  "preserve-status",
+  "release-claim",
+  "strict",
+  "version",
+]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
 const LOCK_STATUSES = new Set(["active", "released", "cancelled", "expired"]);
@@ -26,6 +37,16 @@ const DEPENDENCY_TYPES = new Set(["blocks", "requires_artifact", "requires_contr
 const DEPENDENCY_BLOCK_SCOPES = new Set(["analysis", "design", "implementation", "validation", "release", "none"]);
 const CAPABILITY_RECOMMENDATION_AVAILABILITY = new Set(["available", "missing", "unknown", "install_required"]);
 const APPROVAL_SOURCES = new Set(["explicit-user", "ci", "automation", "bootstrap"]);
+const STORY_STEP_NAMES = new Set([
+  "discovery",
+  "functional-analysis",
+  "technical-analysis",
+  "design",
+  "implementation",
+  "validation",
+  "release",
+]);
+const ACTIVITY_REPORT_VIEWS = new Set(["business", "dev", "agent-verbose"]);
 const ROUTE_REQUIRED_INTENT_FIELDS = [
   "requested_action",
   "confidence",
@@ -132,6 +153,14 @@ function main() {
     }
     if (command === "story" && subcommand === "release") {
       releaseStoryClaim(context, parsed.options);
+      return;
+    }
+    if (command === "story" && subcommand === "complete-step") {
+      completeStoryStep(context, parsed.options);
+      return;
+    }
+    if (command === "story" && subcommand === "prepare-handoff") {
+      prepareStoryHandoff(context, parsed.options);
       return;
     }
     if (command === "story" && subcommand === "handoff" && rest[0] === "close") {
@@ -256,6 +285,22 @@ function main() {
     }
     if (command === "cache" && subcommand === "clear") {
       clearCache(context, parsed.options);
+      return;
+    }
+    if (command === "manifest" && subcommand === "rebuild") {
+      rebuildManifests(context, parsed.options);
+      return;
+    }
+    if (command === "trace" && subcommand === "compact") {
+      compactTraces(context, parsed.options);
+      return;
+    }
+    if (command === "archive" && subcommand === "closed") {
+      archiveClosedArtifacts(context, parsed.options);
+      return;
+    }
+    if (command === "report" && subcommand === "activity") {
+      reportActivity(context, parsed.options);
       return;
     }
     if (command === "index" && subcommand === "rebuild") {
@@ -4448,6 +4493,11 @@ function claimStory(context, options) {
 }
 
 function releaseStoryClaim(context, options) {
+  const result = releaseStoryClaimRecord(context, options);
+  output(options, result, [`Released claim for story ${result.claim.story_id}`]);
+}
+
+function releaseStoryClaimRecord(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const storyDir = path.join(context.sdlcRoot, "stories", id);
@@ -4481,10 +4531,15 @@ function releaseStoryClaim(context, options) {
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "released", claim_path: claimPath, claim }, [`Released claim for story ${id}`]);
+  return { status: "released", claim_path: claimPath, claim };
 }
 
 function createStoryHandoff(context, options) {
+  const result = createStoryHandoffRecord(context, options);
+  output(options, result, [`Created handoff ${result.handoff.id}`]);
+}
+
+function createStoryHandoffRecord(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "id"));
   const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
@@ -4522,7 +4577,154 @@ function createStoryHandoff(context, options) {
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "created", handoff_path: handoffPath, handoff }, [`Created handoff ${handoffId}`]);
+  return { status: "created", handoff_path: handoffPath, handoff };
+}
+
+function completeStoryStep(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "id"));
+  const story = readStory(context, storyId);
+  if (!story) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  assertReleaseClaimPrecondition(context, storyId, options);
+  const step = normalizeStoryStep(requireOption(options, "step"));
+  const summary = getOptionString(options, "summary") || null;
+  const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
+  const artifactEvidence = buildCanonicalEvidence(context, normalizeListOption(options.artifact), "Story step artifact");
+  const extraEvidence = buildCanonicalEvidence(context, normalizeListOption(options.evidence), "Story step evidence");
+  if (!summary && outputTypes.length === 0 && artifactEvidence.length === 0 && extraEvidence.length === 0) {
+    fail("Complete-step requires --summary, --type, --artifact, or --evidence.");
+  }
+
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const outputLinks = collectStoryOutputLinksForStep(context, registry, storyId, outputTypes);
+  if (outputTypes.length > 0) {
+    const linkedTypes = new Set(outputLinks.map((link) => link.artifact_type));
+    for (const artifactType of outputTypes) {
+      if (!linkedTypes.has(artifactType)) {
+        fail(
+          `Story ${storyId} has no linked ${artifactType} output. Run output resolve/link before completing this step.`,
+        );
+      }
+    }
+  }
+
+  const attribution = buildAttribution(context, options, "story.complete-step");
+  const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
+  const stepPath = path.join(stepDir, `${step}.json`);
+  const relativeStepPath = toProjectPath(context, stepPath);
+  const record = {
+    id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${compactTimestamp()}`)),
+    story_id: storyId,
+    step,
+    status: "completed",
+    phase: storyStepPhase(step),
+    summary,
+    output_types: outputTypes,
+    output_links: outputLinks.map((link) => ({
+      id: link.id,
+      artifact_type: link.artifact_type,
+      artifact_path: link.artifact_path,
+      template_id: link.template_id,
+      mode: link.mode,
+      base_artifact: link.base_artifact || null,
+      requirements: Array.isArray(link.requirements) ? link.requirements : [],
+    })),
+    artifacts: artifactEvidence,
+    evidence: extraEvidence,
+    next_step: options["next-step"] ? normalizeStoryStep(options["next-step"]) : defaultNextStoryStep(step),
+    completed_at: now(),
+    audit: {
+      completed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  writeJsonFile(stepPath, record, { force: true });
+  appendJsonLine(path.join(stepDir, "history.jsonl"), record);
+  const traceEvent = appendTraceEvent(context, storyId, {
+    type: "gate",
+    summary: summary || `Completed ${step} for ${storyId}`,
+    action: "story.complete-step",
+    actor: attribution.actor,
+    evidence: [
+      relativeStepPath,
+      ...record.artifacts.map((item) => item.path),
+      ...record.evidence.map((item) => item.path),
+      ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
+    ],
+    related: [storyId, step, ...record.output_links.map((item) => item.id)],
+    git: attribution.git,
+    run: attribution.run,
+  });
+
+  const release = options["release-claim"]
+    ? releaseStoryClaimRecord(context, {
+        ...options,
+        id: storyId,
+        status: "released",
+        reason: getOptionString(options, "reason") || `Completed ${step}; story prepared for handoff`,
+      })
+    : null;
+
+  output(
+    options,
+    { status: "completed", step_path: stepPath, step: record, trace_event: traceEvent, release },
+    [
+      `Completed ${step} for story ${storyId}`,
+      `Step record: ${relativeStepPath}`,
+      release ? `Released claim for story ${storyId}` : null,
+    ].filter(Boolean),
+  );
+}
+
+function prepareStoryHandoff(context, options) {
+  ensureInitialized(context);
+  const storyId = normalizeId(requireOption(options, "id"));
+  if (!readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  assertReleaseClaimPrecondition(context, storyId, options);
+  requireOption(options, "to-agent");
+  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${compactTimestamp()}`));
+  const packagePath = path.join(context.sdlcRoot, "stories", storyId, "handoffs", `${handoffId}-package.json`);
+  const handoffPackage = buildStoryHandoffPackage(context, storyId, handoffId, options);
+  writeJsonFile(packagePath, handoffPackage, { force: Boolean(options.force) });
+
+  const existingArtifacts = normalizeListOption(options.artifact);
+  const handoffOptions = {
+    ...options,
+    id: storyId,
+    "handoff-id": handoffId,
+    artifact: [...existingArtifacts, toProjectPath(context, packagePath)],
+  };
+  const handoff = createStoryHandoffRecord(context, handoffOptions);
+  const release = options["release-claim"]
+    ? releaseStoryClaimRecord(context, {
+        ...options,
+        id: storyId,
+        status: "released",
+        reason: getOptionString(options, "reason") || `Prepared handoff ${handoffId}`,
+      })
+    : null;
+
+  output(
+    options,
+    {
+      status: "prepared",
+      handoff_id: handoffId,
+      package_path: packagePath,
+      package: handoffPackage,
+      handoff: handoff.handoff,
+      release,
+    },
+    [
+      `Prepared handoff ${handoffId} for story ${storyId}`,
+      `Handoff package: ${toProjectPath(context, packagePath)}`,
+      release ? `Released claim for story ${storyId}` : null,
+    ].filter(Boolean),
+  );
 }
 
 function closeHandoff(context, options) {
@@ -5198,6 +5400,588 @@ function clearCache(context, options) {
   output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
 }
 
+function reportActivity(context, options) {
+  ensureInitialized(context);
+  const report = buildActivityReport(context, options);
+  if (options.out) {
+    writeActivityReport(context, report, options);
+  }
+  output(
+    options,
+    report,
+    [
+      `Activity report (${report.view})`,
+      `Window: ${report.window.since} -> ${report.window.until}`,
+      `Events: ${report.summary.event_count}`,
+      ...report.items.map((item) => `- ${item.created_at || "unknown"} ${item.story_id || "project"} ${item.action}: ${item.summary}`),
+      report.items.length === 0 ? "- No canonical trace events in this window" : null,
+    ].filter(Boolean),
+  );
+}
+
+function buildActivityReport(context, options = {}) {
+  const view = normalizeActivityReportView(options.view || "business");
+  const untilDate = parseDateBoundary(options.until || "now", "until", { defaultNow: true });
+  const sinceDate = parseDateBoundary(options.since || "3d", "since", { relativeTo: untilDate });
+  if (sinceDate.getTime() > untilDate.getTime()) {
+    fail("--since must be before --until");
+  }
+  const storyFilter = options.story ? normalizeId(options.story) : null;
+  const actorFilter = getOptionString(options, "actor") || null;
+  const allEvents = readAllTraceEvents(context, { story: storyFilter });
+  const filteredEvents = allEvents
+    .filter((event) => event.type !== "invalid")
+    .filter((event) => isEventInsideWindow(event, sinceDate, untilDate))
+    .filter((event) => !actorFilter || traceActorMatches(event.actor, actorFilter))
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const items = filteredEvents.map((event) => formatActivityEventForView(event, view));
+  const summary = summarizeActivityEvents(filteredEvents);
+  const sourcePaths = Array.from(new Set(filteredEvents.map((event) => event.source?.path).filter(Boolean))).sort();
+  return {
+    kind: "activity_report",
+    schema_version: context.config.schema_version,
+    generated_at: now(),
+    view,
+    window: {
+      since: sinceDate.toISOString(),
+      until: untilDate.toISOString(),
+    },
+    filters: {
+      story_id: storyFilter,
+      actor: actorFilter,
+    },
+    summary,
+    items,
+    parse_errors: allEvents.filter((event) => event.type === "invalid").map((event) => event.source),
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_policy: "Only canonical .sdlc trace files are summarized; cache and indexes are not cited as evidence.",
+  };
+}
+
+function normalizeActivityReportView(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!ACTIVITY_REPORT_VIEWS.has(normalized)) {
+    fail(`Unknown activity report view '${value}'. Valid values: ${Array.from(ACTIVITY_REPORT_VIEWS).join(", ")}`);
+  }
+  return normalized;
+}
+
+function readAllTraceEvents(context, options = {}) {
+  const tracesRoot = path.join(context.sdlcRoot, "traces");
+  const storyFilter = options.story ? normalizeId(options.story) : null;
+  const files = walkFiles(tracesRoot)
+    .filter((filePath) => filePath.endsWith(".jsonl"))
+    .filter((filePath) => !storyFilter || path.basename(filePath) === `${storyFilter}.jsonl`);
+  const events = [];
+  for (const filePath of files) {
+    const sourcePath = toProjectPath(context, filePath);
+    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (!line.trim()) {
+        return;
+      }
+      try {
+        const event = JSON.parse(line);
+        events.push({
+          ...event,
+          story_id: event.story_id || inferStoryIdFromTraceFile(filePath),
+          source: { path: sourcePath, line: index + 1 },
+        });
+      } catch (error) {
+        events.push({
+          type: "invalid",
+          summary: error.message,
+          source: { path: sourcePath, line: index + 1 },
+        });
+      }
+    });
+  }
+  return events;
+}
+
+function inferStoryIdFromTraceFile(filePath) {
+  const base = path.basename(filePath, ".jsonl");
+  return base === "project" ? null : base;
+}
+
+function isEventInsideWindow(event, sinceDate, untilDate) {
+  const timestamp = Date.parse(String(event.created_at || ""));
+  return Number.isFinite(timestamp) && timestamp >= sinceDate.getTime() && timestamp <= untilDate.getTime();
+}
+
+function traceActorMatches(actor, filter) {
+  if (!filter) {
+    return true;
+  }
+  if (typeof actor === "string") {
+    return actor === filter;
+  }
+  return [actor?.id, actor?.name, actor?.email, actor?.type].filter(Boolean).some((value) => String(value) === filter);
+}
+
+function formatActivityEventForView(event, view) {
+  const base = {
+    created_at: event.created_at || null,
+    story_id: event.story_id || null,
+    type: event.type || null,
+    action: event.action || event.type || null,
+    summary: event.summary || null,
+    actor: event.actor || null,
+    sources: [event.source].filter(Boolean),
+  };
+  if (view === "business") {
+    return {
+      ...base,
+      impact: businessImpactForTrace(event),
+      evidence_count: Array.isArray(event.evidence) ? event.evidence.length : 0,
+      related: Array.isArray(event.related) ? event.related : [],
+    };
+  }
+  if (view === "dev") {
+    return {
+      ...base,
+      evidence: Array.isArray(event.evidence) ? event.evidence : [],
+      related: Array.isArray(event.related) ? event.related : [],
+      git: {
+        branch: event.git?.branch || null,
+        head_sha: event.git?.head_sha || null,
+        event: event.git?.event || null,
+        remote: event.git?.remote || null,
+        after_sha: event.git?.after_sha || null,
+      },
+    };
+  }
+  return {
+    ...base,
+    evidence: Array.isArray(event.evidence) ? event.evidence : [],
+    related: Array.isArray(event.related) ? event.related : [],
+    git: event.git || null,
+    run: event.run || null,
+    raw: event,
+  };
+}
+
+function businessImpactForTrace(event) {
+  const action = String(event.action || event.type || "");
+  if (event.type === "decision" || action.includes("approve")) {
+    return "decision";
+  }
+  if (event.type === "test" || action.includes("validation")) {
+    return "validation";
+  }
+  if (event.type === "release") {
+    return "release";
+  }
+  if (event.type === "risk") {
+    return "risk";
+  }
+  if (event.type === "handoff") {
+    return "handoff";
+  }
+  if (event.type === "implementation") {
+    return "implementation";
+  }
+  return "activity";
+}
+
+function summarizeActivityEvents(events) {
+  const byType = {};
+  const byAction = {};
+  const byStory = {};
+  const byActor = {};
+  for (const event of events) {
+    incrementCounter(byType, event.type || "unknown");
+    incrementCounter(byAction, event.action || event.type || "unknown");
+    incrementCounter(byStory, event.story_id || "project");
+    incrementCounter(byActor, traceActorKey(event.actor));
+  }
+  return {
+    event_count: events.length,
+    story_count: Object.keys(byStory).filter((storyId) => storyId !== "project").length,
+    by_type: byType,
+    by_action: byAction,
+    by_story: byStory,
+    by_actor: byActor,
+    first_event_at: events[0]?.created_at || null,
+    last_event_at: events.at(-1)?.created_at || null,
+  };
+}
+
+function incrementCounter(target, key) {
+  target[key] = (target[key] || 0) + 1;
+}
+
+function traceActorKey(actor) {
+  if (typeof actor === "string") {
+    return actor || "unknown";
+  }
+  return actor?.id || actor?.name || actor?.type || "unknown";
+}
+
+function parseDateBoundary(value, label, options = {}) {
+  const raw = String(value || "").trim();
+  if (raw === "now") {
+    return options.defaultNow || !options.relativeTo ? new Date() : new Date(options.relativeTo);
+  }
+  const relative = raw.match(/^(\d+)([dhm])$/i);
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2].toLowerCase();
+    const millis = unit === "d" ? amount * 86400000 : unit === "h" ? amount * 3600000 : amount * 60000;
+    const base = options.relativeTo ? new Date(options.relativeTo) : new Date();
+    return new Date(base.getTime() - millis);
+  }
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) {
+    fail(`Invalid --${label} '${value}'. Use ISO date/time, now, or a relative duration like 3d, 12h, 30m.`);
+  }
+  return new Date(timestamp);
+}
+
+function writeActivityReport(context, report, options) {
+  const reportPath = resolveProjectFilePath(context, options.out, { mustExist: false });
+  assertNotDerivedArtifact(context, reportPath, "Activity report");
+  if (path.extname(reportPath).toLowerCase() === ".md") {
+    writeTextFile(reportPath, renderActivityReportMarkdown(report), { force: Boolean(options.force) });
+    return;
+  }
+  writeJsonFile(reportPath, report, { force: Boolean(options.force) });
+}
+
+function renderActivityReportMarkdown(report) {
+  return [
+    "# SDLC Activity Report",
+    "",
+    `- View: ${report.view}`,
+    `- Window: ${report.window.since} -> ${report.window.until}`,
+    `- Events: ${report.summary.event_count}`,
+    `- Stories: ${report.summary.story_count}`,
+    "",
+    "## Summary",
+    ...Object.entries(report.summary.by_type).map(([type, count]) => `- ${type}: ${count}`),
+    "",
+    "## Activity",
+    ...(report.items.length
+      ? report.items.map((item) => {
+          const source = item.sources?.[0] ? ` (${item.sources[0].path}:${item.sources[0].line})` : "";
+          return `- ${item.created_at || "unknown"} ${item.story_id || "project"} ${item.action}: ${item.summary}${source}`;
+        })
+      : ["- No canonical trace events in this window"]),
+    "",
+    "## Sources",
+    ...(report.source_paths.length ? report.source_paths.map((sourcePath) => `- ${sourcePath}`) : ["- None"]),
+    "",
+  ].join("\n");
+}
+
+function rebuildManifests(context, options) {
+  ensureInitialized(context);
+  const manifest = buildKnowledgeManifest(context, options);
+  const manifestPath = path.join(context.sdlcRoot, "manifests", "kb-manifest.json");
+  writeJsonFile(manifestPath, manifest, { force: true });
+  output(
+    options,
+    { status: "rebuilt", manifest_path: manifestPath, manifest },
+    [
+      `Rebuilt KB manifest: ${toProjectPath(context, manifestPath)}`,
+      `Stories: ${manifest.summary.stories}`,
+      `Trace events: ${manifest.summary.trace_events}`,
+      `Approvals: ${manifest.summary.approvals}`,
+    ],
+  );
+}
+
+function buildKnowledgeManifest(context, options = {}) {
+  const generatedAt = now();
+  const sourceFiles = collectManifestSourceFiles(context);
+  const sourcePaths = sourceFiles.map((filePath) => toProjectPath(context, filePath)).sort();
+  const stories = readAllStories(context);
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const traceEvents = readAllTraceEvents(context).filter((event) => event.type !== "invalid");
+  const approvals = collectApprovalManifestEntries(context);
+  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+    id: contract.id || path.basename(contract.__path, ".json"),
+    phase: contract.phase || null,
+    story_id: contract.story_id || null,
+    status: contract.status || null,
+    path: contract.__relative_path,
+  }));
+  return {
+    kind: "kb_manifest",
+    schema_version: context.config.schema_version,
+    generated_at: generatedAt,
+    canonical_root: SDLC_DIR,
+    summary: {
+      stories: stories.length,
+      contracts: contracts.length,
+      output_templates: registry?.templates?.length || 0,
+      output_links: registry?.links?.length || 0,
+      trace_events: traceEvents.length,
+      approvals: approvals.length,
+      source_files: sourcePaths.length,
+    },
+    stories: stories.map((story) => {
+      const claimPath = path.join(context.sdlcRoot, "stories", story.id, "claim.json");
+      const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
+      return {
+        id: story.id,
+        title: story.title,
+        status: story.status,
+        phase: story.phase,
+        contract_id: story.contract_id || null,
+        requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
+        active_claim: claim?.status === "active" ? { agent: claim.agent, branch: claim.branch, expires_at: claim.expires_at || null } : null,
+        completed_steps: readStoryStepRecords(context, story.id).map((record) => ({
+          step: record.step,
+          completed_at: record.completed_at,
+          output_types: record.output_types || [],
+        })),
+        output_links: (registry?.links || [])
+          .filter((link) => link.story_id === story.id)
+          .map((link) => ({
+            id: link.id,
+            artifact_type: link.artifact_type,
+            artifact_path: link.artifact_path,
+            mode: link.mode,
+            template_id: link.template_id,
+          })),
+        last_trace: readLastTraceEvent(context, story.id),
+      };
+    }),
+    contracts,
+    output_contracts: {
+      templates: (registry?.templates || []).map((template) => ({
+        id: template.id,
+        type: template.type,
+        status: template.status,
+        path: template.path,
+        approved_at: template.approved_at || null,
+      })),
+      links: (registry?.links || []).map((link) => ({
+        id: link.id,
+        story_id: link.story_id,
+        artifact_type: link.artifact_type,
+        artifact_path: link.artifact_path,
+        template_id: link.template_id,
+        mode: link.mode,
+        requirements: link.requirements || [],
+      })),
+    },
+    activity: summarizeActivityEvents(traceEvents),
+    approvals,
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashMap(context, sourcePaths),
+    audit: {
+      generated_by: buildAttribution(context, options, "manifest.rebuild").actor,
+      git: buildGitMetadata(context.root),
+      run: buildRunMetadata(options),
+    },
+  };
+}
+
+function collectManifestSourceFiles(context) {
+  return collectKnowledgeSourceFiles(context).filter((filePath) => {
+    const relative = path.relative(context.sdlcRoot, filePath);
+    return !relative.startsWith(`manifests${path.sep}`);
+  });
+}
+
+function collectJsonFiles(context, root) {
+  return walkFiles(root)
+    .filter((filePath) => filePath.endsWith(".json"))
+    .map((filePath) => {
+      const data = readJson(filePath);
+      data.__path = filePath;
+      data.__relative_path = toProjectPath(context, filePath);
+      return data;
+    });
+}
+
+function collectApprovalManifestEntries(context) {
+  const entries = [];
+  for (const filePath of collectManifestSourceFiles(context).filter((candidate) => candidate.endsWith(".json"))) {
+    let data;
+    try {
+      data = readJson(filePath);
+    } catch {
+      continue;
+    }
+    const relativePath = toProjectPath(context, filePath);
+    for (const approval of data.approvals || []) {
+      entries.push({
+        subject_id: data.id || data.project_id || path.basename(filePath, ".json"),
+        subject_path: relativePath,
+        approval_id: approval.id || null,
+        status: approval.status || null,
+        approval_source: approval.approval_source || null,
+        actor: approval.approved_by || approval.actor || null,
+        created_at: approval.created_at || approval.approved_at || null,
+      });
+    }
+    if (data.approval_source || data.approved_by || data.approved_at) {
+      entries.push({
+        subject_id: data.id || path.basename(filePath, ".json"),
+        subject_path: relativePath,
+        approval_id: data.id || null,
+        status: data.status || null,
+        approval_source: data.approval_source || null,
+        actor: data.approved_by || data.audit?.decided_by || null,
+        created_at: data.approved_at || data.created_at || null,
+      });
+    }
+  }
+  return entries.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+
+function compactTraces(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(options.story) : null;
+  const beforeDate = options.before ? parseDateBoundary(options.before, "before") : null;
+  const events = readAllTraceEvents(context, { story: storyId })
+    .filter((event) => event.type !== "invalid")
+    .filter((event) => !beforeDate || Date.parse(String(event.created_at || "")) < beforeDate.getTime())
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const sourcePaths = Array.from(new Set(events.map((event) => event.source?.path).filter(Boolean))).sort();
+  const id = normalizeId(`CMP-${storyId || "project"}-${compactTimestamp()}`);
+  const compaction = {
+    id,
+    kind: "trace_compaction",
+    schema_version: context.config.schema_version,
+    story_id: storyId,
+    generated_at: now(),
+    cutoff_before: beforeDate ? beforeDate.toISOString() : null,
+    canonical_source_retained: true,
+    event_count: events.length,
+    summary: summarizeActivityEvents(events),
+    timeline: events.slice(-100).map((event) => ({
+      id: event.id || null,
+      created_at: event.created_at || null,
+      story_id: event.story_id || null,
+      type: event.type || null,
+      action: event.action || null,
+      summary: event.summary || null,
+      actor: event.actor || null,
+      sources: [event.source].filter(Boolean),
+    })),
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashMap(context, sourcePaths),
+    audit: {
+      generated_by: buildAttribution(context, options, "trace.compact").actor,
+      git: buildGitMetadata(context.root),
+      run: buildRunMetadata(options),
+    },
+  };
+  const outputPath = options.out
+    ? resolveProjectFilePath(context, options.out, { mustExist: false })
+    : path.join(context.sdlcRoot, "traces", "compactions", `${id}.json`);
+  assertNotDerivedArtifact(context, outputPath, "Trace compaction");
+  writeJsonFile(outputPath, compaction, { force: Boolean(options.force) });
+  appendTraceEvent(context, storyId, {
+    type: "decision",
+    summary: `Compacted ${events.length} trace events into ${toProjectPath(context, outputPath)}`,
+    action: "trace.compact",
+    actor: compaction.audit.generated_by,
+    evidence: [toProjectPath(context, outputPath)],
+    related: [id, storyId].filter(Boolean),
+    git: compaction.audit.git,
+    run: compaction.audit.run,
+  });
+  output(
+    options,
+    { status: "compacted", compaction_path: outputPath, compaction },
+    [`Compacted ${events.length} trace events into ${toProjectPath(context, outputPath)}`],
+  );
+}
+
+function archiveClosedArtifacts(context, options) {
+  ensureInitialized(context);
+  const beforeDate = parseDateBoundary(options.before || "90d", "before");
+  const candidates = collectArchiveCandidates(context, beforeDate);
+  const planId = normalizeId(`ARCH-${compactTimestamp()}`);
+  const plan = {
+    id: planId,
+    kind: "archive_plan",
+    schema_version: context.config.schema_version,
+    generated_at: now(),
+    cutoff_before: beforeDate.toISOString(),
+    apply_requested: Boolean(options.apply),
+    applied: false,
+    candidates,
+    source_paths: candidates.map((candidate) => candidate.source_path),
+    source_hashes: buildSourceHashMap(context, candidates.map((candidate) => candidate.source_path)),
+    policy: "Only closed reports and trace compactions are eligible; live story, contract, trace JSONL, and approval files are not moved.",
+    audit: {
+      generated_by: buildAttribution(context, options, "archive.closed").actor,
+      git: buildGitMetadata(context.root),
+      run: buildRunMetadata(options),
+    },
+  };
+  if (options.apply) {
+    for (const candidate of candidates) {
+      const sourcePath = resolveProjectFilePath(context, candidate.source_path, { mustExist: true, fileOnly: true });
+      const targetPath = resolveProjectFilePath(context, candidate.target_path, { mustExist: false });
+      if (fs.existsSync(targetPath) && !options.force) {
+        fail(`Archive target already exists: ${candidate.target_path}. Use --force to overwrite after review.`);
+      }
+      ensureDir(path.dirname(targetPath));
+      fs.renameSync(sourcePath, targetPath);
+      candidate.applied = true;
+    }
+    plan.applied = true;
+  }
+  const planPath = options.out
+    ? resolveProjectFilePath(context, options.out, { mustExist: false })
+    : path.join(context.sdlcRoot, "archive", `${planId}.json`);
+  assertNotDerivedArtifact(context, planPath, "Archive plan");
+  writeJsonFile(planPath, plan, { force: Boolean(options.force) });
+  output(
+    options,
+    { status: plan.applied ? "archived" : "planned", plan_path: planPath, plan },
+    [
+      `${plan.applied ? "Archived" : "Planned archive for"} ${candidates.length} closed artifacts`,
+      `Archive plan: ${toProjectPath(context, planPath)}`,
+    ],
+  );
+}
+
+function collectArchiveCandidates(context, beforeDate) {
+  const eligibleRoots = [
+    { root: path.join(context.sdlcRoot, "reports"), reason: "closed-report" },
+    { root: path.join(context.sdlcRoot, "traces", "compactions"), reason: "trace-compaction" },
+  ];
+  const candidates = [];
+  for (const entry of eligibleRoots) {
+    for (const filePath of walkFiles(entry.root)) {
+      if (!shouldIndexFile(context, filePath)) {
+        continue;
+      }
+      const stat = fs.statSync(filePath);
+      if (stat.mtime.getTime() >= beforeDate.getTime()) {
+        continue;
+      }
+      const relativeSource = toProjectPath(context, filePath);
+      const archiveRelative = path.posix.join(
+        SDLC_DIR,
+        "archive",
+        String(stat.mtime.getUTCFullYear()),
+        String(stat.mtime.getUTCMonth() + 1).padStart(2, "0"),
+        path.relative(context.sdlcRoot, filePath).split(path.sep).join("/"),
+      );
+      candidates.push({
+        source_path: relativeSource,
+        target_path: archiveRelative,
+        reason: entry.reason,
+        size_bytes: stat.size,
+        mtime: stat.mtime.toISOString(),
+        sha256: hashFile(filePath),
+        applied: false,
+      });
+    }
+  }
+  return candidates.sort((a, b) => a.source_path.localeCompare(b.source_path));
+}
+
 function buildOutputTemplateContent(context, options, artifactType, id) {
   const from = getOptionString(options, "from");
   if (from) {
@@ -5681,6 +6465,8 @@ function collectKnowledgeSourceFiles(context) {
     "locks",
     "orchestration",
     "releases",
+    "manifests",
+    "archive",
     "reports",
   ];
   const files = [];
@@ -6202,6 +6988,180 @@ function readHandoffs(context) {
   return safeReadDir(handoffsRoot)
     .filter((name) => name.endsWith(".json"))
     .map((name) => readJson(path.join(handoffsRoot, name)));
+}
+
+function normalizeStoryStep(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+  if (!STORY_STEP_NAMES.has(normalized)) {
+    fail(`Unknown story step '${value}'. Valid values: ${Array.from(STORY_STEP_NAMES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function storyStepPhase(step) {
+  if (["functional-analysis", "technical-analysis"].includes(step)) {
+    return "analysis";
+  }
+  return step;
+}
+
+function defaultNextStoryStep(step) {
+  const order = [
+    "discovery",
+    "functional-analysis",
+    "technical-analysis",
+    "design",
+    "implementation",
+    "validation",
+    "release",
+  ];
+  const index = order.indexOf(step);
+  return index >= 0 && index < order.length - 1 ? order[index + 1] : null;
+}
+
+function buildCanonicalEvidence(context, rawPaths, label) {
+  return rawPaths.map((rawPath) => {
+    const filePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, filePath, label);
+    return {
+      path: toProjectPath(context, filePath),
+      sha256: hashFile(filePath),
+      hash_algorithm: "sha256:file:v1",
+    };
+  });
+}
+
+function collectStoryOutputLinksForStep(context, registry, storyId, outputTypes) {
+  const typeFilter = new Set(outputTypes);
+  return (registry?.links || [])
+    .filter((link) => link.story_id === storyId)
+    .filter((link) => typeFilter.size === 0 || typeFilter.has(link.artifact_type))
+    .sort((a, b) => String(a.artifact_type || "").localeCompare(String(b.artifact_type || "")));
+}
+
+function assertReleaseClaimPrecondition(context, storyId, options) {
+  if (!options["release-claim"]) {
+    return;
+  }
+  const claimPath = path.join(context.sdlcRoot, "stories", storyId, "claim.json");
+  if (!fs.existsSync(claimPath)) {
+    fail(`Story ${storyId} has no claim to release`);
+  }
+  const claim = readJson(claimPath);
+  if (claim.status !== "active") {
+    fail(`Story ${storyId} claim is '${claim.status}', not active`);
+  }
+}
+
+function readStoryStepRecords(context, storyId) {
+  const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
+  return safeReadDir(stepsRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(stepsRoot, name)))
+    .sort((a, b) => String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
+}
+
+function buildStoryHandoffPackage(context, storyId, handoffId, options = {}) {
+  const story = readStory(context, storyId);
+  const claimPath = path.join(context.sdlcRoot, "stories", storyId, "claim.json");
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const storyLinks = (registry?.links || []).filter((link) => link.story_id === storyId);
+  const dependencyStatus = buildDependencyStatus(context, storyId);
+  const traceLimit = Math.max(1, Number(options["trace-limit"] || 25));
+  const traceEvents = readTraceEvents(context, storyId).filter((event) => event.type !== "invalid");
+  const handoffs = readHandoffs(context).filter((handoff) => handoff.story_id === storyId);
+  const sourceFiles = collectStoryHandoffSourceFiles(context, storyId);
+  const sourcePaths = sourceFiles.map((filePath) => toProjectPath(context, filePath)).sort();
+  return {
+    id: normalizeId(`PKG-${handoffId}`),
+    kind: "story_handoff_package",
+    schema_version: context.config.schema_version,
+    story_id: storyId,
+    handoff_id: handoffId,
+    generated_at: now(),
+    summary: getOptionString(options, "summary") || null,
+    story: {
+      id: story.id,
+      title: story.title,
+      status: story.status,
+      phase: story.phase,
+      contract_id: story.contract_id || null,
+      requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
+      acceptance_criteria: Array.isArray(story.acceptance_criteria) ? story.acceptance_criteria : [],
+    },
+    active_claim: fs.existsSync(claimPath) ? readJson(claimPath) : null,
+    completed_steps: readStoryStepRecords(context, storyId),
+    output_links: storyLinks,
+    dependency_status: {
+      blockers: dependencyStatus.blockers,
+      warnings: dependencyStatus.warnings,
+      edges: dependencyStatus.edges,
+    },
+    handoffs: handoffs.map((handoff) => ({
+      id: handoff.id,
+      status: handoff.status,
+      to_agent: handoff.to_agent,
+      summary: handoff.summary || null,
+      open_items: Array.isArray(handoff.open_items) ? handoff.open_items : [],
+      created_at: handoff.created_at || null,
+    })),
+    recent_traces: traceEvents.slice(-traceLimit).map((event) => ({
+      id: event.id || null,
+      created_at: event.created_at || null,
+      type: event.type || null,
+      action: event.action || null,
+      summary: event.summary || null,
+      actor: event.actor || null,
+      evidence: Array.isArray(event.evidence) ? event.evidence : [],
+      related: Array.isArray(event.related) ? event.related : [],
+      git: event.git || null,
+      run: event.run || null,
+    })),
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashMap(context, sourcePaths),
+    audit: {
+      generated_by: buildAttribution(context, options, "story.prepare-handoff").actor,
+      git: buildGitMetadata(context.root),
+      run: buildRunMetadata(options),
+    },
+  };
+}
+
+function collectStoryHandoffSourceFiles(context, storyId) {
+  const storyDir = path.join(context.sdlcRoot, "stories", storyId);
+  const files = [];
+  for (const filePath of walkFiles(storyDir)) {
+    if (shouldIndexFile(context, filePath) && !filePath.includes(`${path.sep}handoffs${path.sep}`)) {
+      files.push(filePath);
+    }
+  }
+  const tracePath = path.join(context.sdlcRoot, "traces", `${storyId}.jsonl`);
+  if (fs.existsSync(tracePath)) {
+    files.push(tracePath);
+  }
+  const registryPath = outputRegistryPath(context);
+  if (fs.existsSync(registryPath)) {
+    files.push(registryPath);
+  }
+  const graphPath = dependencyGraphPath(context);
+  if (fs.existsSync(graphPath)) {
+    files.push(graphPath);
+  }
+  return Array.from(new Set(files)).sort((a, b) => a.localeCompare(b));
+}
+
+function buildSourceHashMap(context, relativePaths) {
+  const result = {};
+  for (const relativePath of relativePaths) {
+    const filePath = resolveProjectFilePath(context, relativePath, { mustExist: false });
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      result[relativePath] = hashFile(filePath);
+    }
+  }
+  return result;
 }
 
 function isExpired(value) {
@@ -7037,7 +7997,57 @@ function validateStory(context, storyId, report) {
   }
   validateStoryBreakdown(context, story, report);
   validateStoryDependencies(context, story, report);
+  validateStoryStepRecords(context, storyId, report);
   report.checked.push(`story ${storyId}`);
+}
+
+function validateStoryStepRecords(context, storyId, report) {
+  const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
+  for (const fileName of safeReadDir(stepsRoot).filter((name) => name.endsWith(".json"))) {
+    const stepPath = path.join(stepsRoot, fileName);
+    const record = readJson(stepPath);
+    const label = `story step ${storyId}/${path.basename(fileName, ".json")}`;
+    if (record.story_id !== storyId) {
+      report.errors.push(`${label} story_id must match ${storyId}`);
+    }
+    if (!record.step || !STORY_STEP_NAMES.has(String(record.step))) {
+      report.errors.push(`${label} has unknown step '${record.step}'`);
+    }
+    if (record.status !== "completed") {
+      report.errors.push(`${label} has unsupported status '${record.status}'`);
+    }
+    if (!record.completed_at || !Number.isFinite(Date.parse(String(record.completed_at)))) {
+      report.errors.push(`${label} is missing valid completed_at`);
+    }
+    const stepArtifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
+    const stepEvidence = Array.isArray(record.evidence) ? record.evidence : [];
+    if (record.artifacts !== undefined && !Array.isArray(record.artifacts)) {
+      report.errors.push(`${label} artifacts must be an array`);
+    }
+    if (record.evidence !== undefined && !Array.isArray(record.evidence)) {
+      report.errors.push(`${label} evidence must be an array`);
+    }
+    for (const item of [...stepArtifacts, ...stepEvidence]) {
+      const evidencePath = resolveProjectFilePath(context, item.path || item, { mustExist: false });
+      const evidenceLabel = item.path || item;
+      if (!fs.existsSync(evidencePath)) {
+        report.errors.push(`${label} references missing evidence ${evidenceLabel}`);
+      } else if (isDerivedArtifactPath(context, evidencePath)) {
+        report.errors.push(`${label} uses derived cache/index evidence ${evidenceLabel}`);
+      } else if (item.sha256 && hashFile(evidencePath) !== item.sha256) {
+        report.errors.push(`${label} evidence changed after step completion: ${evidenceLabel}`);
+      }
+    }
+    if (report.strict && Array.isArray(record.output_types) && record.output_types.length > 0) {
+      const linkedTypes = new Set((record.output_links || []).map((link) => link.artifact_type));
+      for (const artifactType of record.output_types) {
+        if (!linkedTypes.has(artifactType)) {
+          report.errors.push(`${label} completed ${artifactType} without a linked output`);
+        }
+      }
+    }
+    report.checked.push(label);
+  }
 }
 
 function validateStoryBreakdown(context, story, report) {
@@ -7551,6 +8561,10 @@ Usage:
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
+  agentic-sdlc story complete-step --id ST-001 --step functional-analysis
+      [--type artifact-type] [--artifact path] [--evidence path] [--release-claim]
+  agentic-sdlc story prepare-handoff --id ST-001 --to-agent name
+      [--artifact path] [--open-item text] [--release-claim]
   agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]
   agentic-sdlc story handoff close --id handoff-id [--status closed|accepted|cancelled]
   agentic-sdlc story deps --id ST-001 [--json]
@@ -7591,6 +8605,10 @@ Usage:
   agentic-sdlc cache rebuild
   agentic-sdlc cache status
   agentic-sdlc cache clear
+  agentic-sdlc manifest rebuild
+  agentic-sdlc trace compact [--story ST-001] [--before 90d] [--out path]
+  agentic-sdlc archive closed [--before 90d] [--apply] [--out path]
+  agentic-sdlc report activity [--since 3d] [--view business|dev|agent-verbose] [--out path]
   agentic-sdlc orchestrate status [--json]
   agentic-sdlc orchestrate plan [--limit n] [--json]
   agentic-sdlc gate check [--story ST-001] [--scope story|all] [--strict] [--out path] [--json]
