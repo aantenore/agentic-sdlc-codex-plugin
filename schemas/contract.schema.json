@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/travelops-sdlc-codex-plugin/schemas/contract.schema.json",
-  "title": "TravelOps SDLC Contract",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/contract.schema.json",
+  "title": "Agentic SDLC Contract",
   "type": "object",
   "required": [
     "id",

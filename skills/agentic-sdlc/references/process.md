@@ -1,6 +1,6 @@
 # SDLC Process
 
-TravelOps SDLC keeps the classic SDLC sequence, but each phase is governed by an explicit contract and every durable decision is captured in the project knowledge base.
+Agentic SDLC keeps the classic SDLC sequence, but each phase is governed by an explicit contract and every durable decision is captured in the project knowledge base.
 
 ## Phases
 

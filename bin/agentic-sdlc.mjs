@@ -211,7 +211,7 @@ function initProject(context, options) {
       contracts_created: createdContracts,
     },
     [
-      `Initialized TravelOps SDLC at ${path.relative(context.root, context.sdlcRoot) || SDLC_DIR}`,
+      `Initialized Agentic SDLC at ${path.relative(context.root, context.sdlcRoot) || SDLC_DIR}`,
       `Project: ${projectName} (${projectId})`,
       `Phase contracts available: ${context.config.phase_order.join(", ")}`,
     ],
@@ -648,7 +648,7 @@ function inferTitle(filePath, raw) {
 
 function ensureInitialized(context) {
   if (!fs.existsSync(path.join(context.sdlcRoot, "project.json"))) {
-    fail(`No ${SDLC_DIR}/project.json found. Run 'travelops-sdlc init' first.`);
+    fail(`No ${SDLC_DIR}/project.json found. Run 'agentic-sdlc init' first.`);
   }
 }
 
@@ -798,18 +798,18 @@ function fail(message) {
 }
 
 function printHelp() {
-  console.log(`TravelOps SDLC ${VERSION}
+  console.log(`Agentic SDLC ${VERSION}
 
 Usage:
-  travelops-sdlc init [--project-name name] [--project-id id] [--root path]
-  travelops-sdlc contract create --phase phase [--id id] [--story ST-001]
-  travelops-sdlc story create --id ST-001 --title title [--acceptance text]
-  travelops-sdlc story claim --id ST-001 --agent name [--branch branch]
-  travelops-sdlc trace append --type decision --summary text [--story ST-001]
-  travelops-sdlc gate check [--story ST-001] [--json]
-  travelops-sdlc index rebuild
-  travelops-sdlc kb search <query>
-  travelops-sdlc status
+  agentic-sdlc init [--project-name name] [--project-id id] [--root path]
+  agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
+  agentic-sdlc story create --id ST-001 --title title [--acceptance text]
+  agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
+  agentic-sdlc trace append --type decision --summary text [--story ST-001]
+  agentic-sdlc gate check [--story ST-001] [--json]
+  agentic-sdlc index rebuild
+  agentic-sdlc kb search <query>
+  agentic-sdlc status
 
 Global options:
   --root path            Target project root. Defaults to current directory.
