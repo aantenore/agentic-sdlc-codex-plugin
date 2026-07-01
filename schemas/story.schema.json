@@ -31,6 +31,28 @@
       "items": {
         "type": "string"
       }
+    },
+    "audit": {
+      "type": "object",
+      "properties": {
+        "created_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "updated_by": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "run": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

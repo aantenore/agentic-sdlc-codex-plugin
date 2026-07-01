@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1.0",
+  "project_id": "<project-id>",
+  "status": "active",
+  "policy": {
+    "template_registry_scope": "project",
+    "default_related_story_mode": "reuse+delta",
+    "approvals_required_for_new_templates": true,
+    "cache_is_source_of_truth": false
+  },
+  "templates": [],
+  "links": [],
+  "decisions": [],
+  "created_at": "<iso-8601>",
+  "updated_at": "<iso-8601>",
+  "audit": {}
+}

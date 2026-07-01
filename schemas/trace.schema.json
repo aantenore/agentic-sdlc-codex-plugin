@@ -7,6 +7,10 @@
     "id",
     "type",
     "summary",
+    "actor",
+    "action",
+    "git",
+    "run",
     "created_at"
   ],
   "properties": {
@@ -21,9 +25,13 @@
         "assumption",
         "decision",
         "gate",
+        "claim",
+        "handoff",
         "implementation",
+        "lock",
         "release",
         "risk",
+        "sync",
         "test"
       ]
     },
@@ -35,6 +43,87 @@
       "items": {
         "type": "string"
       }
+    },
+    "related": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "actor": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "human",
+                "agent",
+                "system",
+                "ci",
+                "unknown"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "email": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "action": {
+      "type": "string"
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": true
     },
     "created_at": {
       "type": "string"

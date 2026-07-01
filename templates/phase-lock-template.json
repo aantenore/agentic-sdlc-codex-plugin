@@ -1,0 +1,14 @@
+{
+  "id": "LOCK-analysis-<timestamp>",
+  "phase": "analysis",
+  "scope": "analysis",
+  "status": "active",
+  "reason": "Updating shared phase artifacts.",
+  "expires_at": null,
+  "created_at": "<iso-8601>",
+  "audit": {
+    "locked_by": {},
+    "git": {},
+    "run": {}
+  }
+}

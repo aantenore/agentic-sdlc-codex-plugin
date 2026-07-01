@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/output-link.schema.json",
+  "title": "Agentic SDLC Output Link",
+  "type": "object",
+  "required": [
+    "id",
+    "story_id",
+    "artifact_type",
+    "artifact_path",
+    "template_id",
+    "mode"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "story_id": {
+      "type": "string"
+    },
+    "artifact_type": {
+      "type": "string"
+    },
+    "artifact_path": {
+      "type": "string"
+    },
+    "template_id": {
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "reuse",
+        "delta",
+        "new"
+      ]
+    },
+    "base_artifact": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rationale": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

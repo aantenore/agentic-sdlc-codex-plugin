@@ -2,14 +2,19 @@
   "schema_version": "0.1.0",
   "kb_directories": [
     "contracts",
+    "output-contracts",
     "requirements",
     "stories",
+    "orchestration",
+    "locks",
+    "handoffs",
     "decisions",
     "assumptions",
     "risks",
     "tests",
     "traces",
     "releases",
+    "cache",
     "indexes",
     "reports"
   ],
@@ -68,6 +73,105 @@
       "low",
       "medium",
       "high"
+    ]
+  },
+  "parallel_work": {
+    "principle": "Parallel work is story-scoped. Each active story lane has one active claim, an auditable actor, a branch, trace events, and explicit release or handoff.",
+    "unit_of_parallelism": "story",
+    "branch_pattern": "feature/<story-id>",
+    "active_claim_status": "active",
+    "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-transferred by a human"
+  },
+  "output_consistency_policy": {
+    "principle": "Every durable story output should resolve an approved project-wide output template before generation. Related stories should reuse the approved base artifact and create only an explicit delta unless the user approves a new structure.",
+    "registry_path": ".sdlc/output-contracts/registry.json",
+    "template_directory": ".sdlc/output-contracts/templates",
+    "default_related_story_mode": "reuse+delta",
+    "artifact_types": [
+      "functional-analysis",
+      "technical-analysis",
+      "test-strategy",
+      "test-plan",
+      "implementation-summary",
+      "release-evidence"
+    ],
+    "approval_required_for": [
+      "new_template",
+      "template_structure_change",
+      "duplicate_new_output",
+      "project_wide_template_replacement"
+    ],
+    "agent_rules": [
+      "Read the output registry before producing an artifact.",
+      "Resolve the artifact type for the story and requirement.",
+      "Prefer reuse plus delta when another story already covers the same requirement.",
+      "Ask the user before introducing a new template or changing an approved output structure.",
+      "Link every durable output to story, requirement, artifact path, template id, and reuse mode."
+    ]
+  },
+  "cache_policy": {
+    "principle": "Cache and index files are local, derived, and regenerable optimizations. They can accelerate lookup and context assembly, but they must never be used as the canonical source for approvals, requirements, decisions, or story outputs.",
+    "cache_path": ".sdlc/cache/kb-cache.json",
+    "derived_directories": [
+      "cache",
+      "indexes"
+    ],
+    "source_of_truth_dirs": [
+      "contracts",
+      "requirements",
+      "stories",
+      "decisions",
+      "tests",
+      "traces",
+      "handoffs",
+      "output-contracts",
+      "assumptions",
+      "risks",
+      "locks",
+      "orchestration",
+      "releases",
+      "reports"
+    ],
+    "required_entry_metadata": [
+      "source_paths",
+      "source_hashes",
+      "generated_at",
+      "schema_version"
+    ],
+    "strict_gate_behavior": {
+      "stale_cache": "warn",
+      "missing_cache": "warn",
+      "cache_as_primary_source": "error"
+    }
+  },
+  "claim_policy": {
+    "one_active_claim_per_story": true,
+    "require_branch_pattern": true,
+    "release_before_reclaim": true
+  },
+  "handoff_policy": {
+    "required_for_phase_transfer": true,
+    "record_trace": true,
+    "open_items_block_strict_gate": true
+  },
+  "phase_lock_policy": {
+    "record_trace": true,
+    "expired_locks_block_strict_gate": true,
+    "active_locks_warn_gate": true
+  },
+  "trace_policy": {
+    "principle": "Every durable event must be attributable to a human, agent, system, or CI actor.",
+    "require_actor": true,
+    "record_git_metadata": true,
+    "record_run_metadata": true,
+    "sync_events": [
+      "push",
+      "commit",
+      "merge",
+      "pull",
+      "rebase",
+      "branch",
+      "handoff"
     ]
   },
   "phases": {
@@ -327,6 +431,16 @@
     }
   },
   "gate_policy": {
+    "strict_mode": {
+      "requires_contextualized_contracts": true,
+      "requires_zero_open_contract_questions": true,
+      "requires_latest_human_gate_approval": true,
+      "requires_active_claim_for_implementation": true,
+      "requires_attributed_traces": true,
+      "requires_output_contract_coverage": true,
+      "blocks_cache_as_primary_source": true,
+      "blocks_unapproved_duplicate_outputs": true
+    },
     "contract_required_fields": [
       "id",
       "project",
