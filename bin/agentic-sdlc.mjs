@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.9";
+const VERSION = "0.4.10";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -2471,7 +2471,7 @@ function assistantMessagePresentationFields() {
         "schema keys",
       ],
       instruction:
-        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly.",
+        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Do not collapse the message into a bare approval question: show the review items and enough template or contract structure for the user to understand what they are approving.",
     },
   };
 }
@@ -2527,34 +2527,40 @@ function collectOutputTemplateApprovalRequests(context, storyId = null) {
   return (registry.templates || [])
     .filter((template) => !relevantTemplateIds || relevantTemplateIds.has(template.id) || template.status !== "approved")
     .filter((template) => template.status !== "approved")
-    .map((template) => ({
-      id: `approve-output-template-${template.id}`,
-      type: "output_template_approval",
-      status: "needs_explicit_user_approval",
-      summary: `Agree output format ${template.id} for ${template.type} before using it as a contract output.`,
-      subject_id: template.id,
-      subject_status: template.status || null,
-      artifact_type: template.type || null,
-      sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
-      ...humanApprovalFields({
-        title: `Output format ${template.id}`,
-        why_needed: "Before durable outputs are produced or linked, we need to agree on the format agents will use.",
-        review_items: [
-          `Output type: ${template.type || "unknown"}`,
-          template.summary ? `Summary: ${template.summary}` : null,
-          template.path ? `Template: ${template.path}` : null,
-          template.path ? `Preview: ${readProjectFileExcerpt(context, template.path, 240) || "unavailable"}` : null,
-        ],
-        approval_meaning: "If you approve it, this template becomes the official format for that output type.",
-        approve_if: "Approve if the structure, detail level, and sections fit the outputs you want to receive.",
-        change_if: "Ask for changes if you want different sections, more detail, less detail, or a different format.",
-        after_approval: `Then contracts can reference ${template.id} as an approved output format.`,
-        user_prompt: `Do you approve output format ${template.id} for ${template.type} outputs, or should the structure change?`,
-        approval_phrase: `I approve output format ${template.id} for ${template.type}.`,
-      }),
-      suggested_question: `Do you approve output format ${template.id} for ${template.type}?`,
-      suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
-    }));
+    .map((template) => {
+      const templateExcerpt = template.path ? readProjectFileExcerpt(context, template.path, 1200) : null;
+      const templateHeadings = template.path ? readProjectMarkdownHeadings(context, template.path, 10) : [];
+      return {
+        id: `approve-output-template-${template.id}`,
+        type: "output_template_approval",
+        status: "needs_explicit_user_approval",
+        summary: `Agree output format ${template.id} for ${template.type} before using it as a contract output.`,
+        subject_id: template.id,
+        subject_status: template.status || null,
+        artifact_type: template.type || null,
+        sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
+        ...humanApprovalFields({
+          title: `Output format ${template.id}`,
+          why_needed: "Before durable outputs are produced or linked, we need to agree on the format agents will use.",
+          review_items: [
+            `Approval scope: you are approving the reusable document structure for ${template.type || "this"} outputs, not approving the final content of any analysis.`,
+            `Output type: ${template.type || "unknown"}`,
+            template.summary ? `Summary: ${template.summary}` : null,
+            templateHeadings.length ? `Sections to approve: ${templateHeadings.join(" > ")}` : null,
+            template.path ? `Template file: ${template.path}` : null,
+            `Template content to review: ${templateExcerpt || "unavailable"}`,
+          ],
+          approval_meaning: "If you approve it, this template becomes the official reusable format for that output type; final outputs still need their own review and gate evidence.",
+          approve_if: "Approve only if the sections, required evidence, and detail level are the structure you want agents to use repeatedly.",
+          change_if: "Ask for changes if you want different sections, more detail, less detail, a different format, or more template content before deciding.",
+          after_approval: `Then contracts can reference ${template.id} as an approved output format.`,
+          user_prompt: `After reviewing the structure above, do you approve output format ${template.id} for ${template.type} outputs, or should the structure change?`,
+          approval_phrase: `I approve output format ${template.id} for ${template.type}.`,
+        }),
+        suggested_question: `After reviewing the template structure, do you approve output format ${template.id} for ${template.type}?`,
+        suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
+      };
+    });
 }
 
 function collectContractApprovalRequests(context, storyId = null) {
@@ -2752,6 +2758,21 @@ function readProjectFileExcerpt(context, relativePath, maxLength = 220) {
     return compactText(fs.readFileSync(filePath, "utf8"), maxLength);
   } catch {
     return null;
+  }
+}
+
+function readProjectMarkdownHeadings(context, relativePath, maxHeadings = 8) {
+  try {
+    const filePath = resolveProjectFilePath(context, relativePath, { mustExist: true, fileOnly: true });
+    return fs.readFileSync(filePath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.match(/^(#{1,3})\s+(.+?)\s*$/))
+      .filter(Boolean)
+      .map((match) => match[2].replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .slice(0, maxHeadings);
+  } catch {
+    return [];
   }
 }
 
