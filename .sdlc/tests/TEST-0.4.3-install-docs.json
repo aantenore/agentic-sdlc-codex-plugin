@@ -1,0 +1,74 @@
+{
+  "id": "TEST-0.4.3-install-docs",
+  "summary": "Personal marketplace install documentation and installer validation for Agentic SDLC 0.4.3.",
+  "status": "passed",
+  "created_at": "2026-07-01T12:31:02Z",
+  "scope": [
+    "README install instructions",
+    "portable install documentation",
+    "personal marketplace installer script",
+    "plugin reinstall through Codex personal marketplace",
+    "0.4.3 runtime version consistency"
+  ],
+  "commands": [
+    {
+      "command": "scripts/install-personal-marketplace.py",
+      "status": "passed",
+      "summary": "Updated ~/.agents/plugins/marketplace.json with the agentic-sdlc-codex-plugin personal marketplace entry."
+    },
+    {
+      "command": "python3 -m py_compile scripts/install-personal-marketplace.py",
+      "status": "passed"
+    },
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "45 tests passed."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help reports Agentic SDLC 0.4.3."
+    },
+    {
+      "command": "validate_plugin.py .",
+      "status": "passed",
+      "summary": "Plugin validation passed."
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc",
+      "status": "passed",
+      "summary": "Skill is valid."
+    },
+    {
+      "command": "codex plugin add agentic-sdlc-codex-plugin@personal",
+      "status": "passed",
+      "summary": "Installed plugin root: ~/.codex/plugins/cache/personal/agentic-sdlc-codex-plugin/0.4.3."
+    },
+    {
+      "command": "codex plugin list",
+      "status": "passed",
+      "summary": "agentic-sdlc-codex-plugin@personal is installed and enabled at version 0.4.3."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "evidence": [
+    "README.md",
+    "docs/portable-install.md",
+    "scripts/install-personal-marketplace.py",
+    ".codex-plugin/plugin.json",
+    "package.json",
+    "bin/agentic-sdlc.mjs"
+  ],
+  "notes": [
+    "The personal marketplace file is machine-local and intentionally not committed.",
+    "A new Codex thread is required after reinstall so plugin-provided skills and assets are reloaded."
+  ]
+}

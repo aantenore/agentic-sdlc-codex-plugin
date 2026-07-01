@@ -1,16 +1,16 @@
 {
   "kind": "kb_manifest",
   "schema_version": "0.1.0",
-  "generated_at": "2026-07-01T12:25:56.397Z",
+  "generated_at": "2026-07-01T12:31:27.482Z",
   "canonical_root": ".sdlc",
   "summary": {
     "stories": 1,
     "contracts": 7,
     "output_templates": 1,
     "output_links": 1,
-    "trace_events": 20,
+    "trace_events": 22,
     "approvals": 3,
-    "source_files": 30
+    "source_files": 31
   },
   "stories": [
     {
@@ -160,14 +160,14 @@
     ]
   },
   "activity": {
-    "event_count": 20,
+    "event_count": 22,
     "story_count": 1,
     "by_type": {
       "claim": 2,
       "decision": 5,
       "gate": 4,
-      "test": 5,
-      "implementation": 4
+      "test": 6,
+      "implementation": 5
     },
     "by_action": {
       "story.claim": 2,
@@ -176,23 +176,23 @@
       "capability.recommend": 1,
       "capability.approve": 1,
       "contract.approve": 1,
-      "test": 5,
+      "test": 6,
       "output.link": 1,
       "output.template.propose": 1,
       "output.template.approve": 1,
       "baseline.propose": 1,
-      "implementation": 4
+      "implementation": 5
     },
     "by_story": {
       "ST-CAPABILITY-DISCOVERY": 9,
-      "project": 11
+      "project": 13
     },
     "by_actor": {
-      "codex": 11,
+      "codex": 13,
       "antonioantenore": 9
     },
     "first_event_at": "2026-07-01T11:13:08.919Z",
-    "last_event_at": "2026-07-01T12:25:46.400Z"
+    "last_event_at": "2026-07-01T12:31:23.646Z"
   },
   "approvals": [
     {
@@ -269,6 +269,7 @@
     ".sdlc/tests/TEST-0.4.0-local.json",
     ".sdlc/tests/TEST-0.4.1-report-query.json",
     ".sdlc/tests/TEST-0.4.2-portable-plugin.json",
+    ".sdlc/tests/TEST-0.4.3-install-docs.json",
     ".sdlc/tests/approval-baseline-governance-test-run.json",
     ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl",
     ".sdlc/traces/project.jsonl"
@@ -289,7 +290,7 @@
     ".sdlc/dependencies/graph.json": "39143e7483b341727b197118610d7cafc5b64346dec9bf029471f2b982b8784e",
     ".sdlc/output-contracts/registry.json": "899a3f72ee98fa77e93f46df89e1c5a57a9e5e9aaf0feb433c2fded8a96c0a6f",
     ".sdlc/output-contracts/templates/implementation-summary-v1.md": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
-    ".sdlc/project.json": "423de33380c3f05f939008d4b9b337a8f9599faeb609b2bac7875a7270bacf5f",
+    ".sdlc/project.json": "ba9fd93a54293fc48e0547aad1cf5e6ec49ee9d73dc5642a6f78dad13531280b",
     ".sdlc/reports/ST-CAPABILITY-DISCOVERY-gate-report.json": "86081524d5f25d2772eb09619eebd4b81682beff8be5c5eeb98b33d3f4868a0a",
     ".sdlc/reports/activity-0.4.0.md": "9875ddb26e5a720e4ae81a9807150b6d410a07e453f5a2854160c6f46ea75f5c",
     ".sdlc/stories/ST-CAPABILITY-DISCOVERY/claim.json": "717bd434702177b6adc9a5178d69f525516110c673994a0b44f2f09d22b34b6f",
@@ -301,9 +302,10 @@
     ".sdlc/tests/TEST-0.4.0-local.json": "24bd774c7054b0700d672eef5c8d031b13803cfc5a5d1eaba0d06c2164a4ab4e",
     ".sdlc/tests/TEST-0.4.1-report-query.json": "3eb7ffeb54fa082f672eb51edf05dc4c757ec646d2a5b0f914d33518ebe17e05",
     ".sdlc/tests/TEST-0.4.2-portable-plugin.json": "938d43e25fed7e0765cbe0a6e3eec21d559063b8fd58c8733d1f604701ceaf5f",
+    ".sdlc/tests/TEST-0.4.3-install-docs.json": "8f7112fbaee63682806038e7a1815e672429b4c77f51203e2ff51e3aec98c8bf",
     ".sdlc/tests/approval-baseline-governance-test-run.json": "6482ca1cd6692edc0145380fe0258203a4dd198f7fd44f3c451b636f51c8b52d",
     ".sdlc/traces/ST-CAPABILITY-DISCOVERY.jsonl": "5abfc9ab793619de5c22706bbf319e1cb55b282653b497a8cc7505f6c23e68a8",
-    ".sdlc/traces/project.jsonl": "39c73b92e4f9e97171622a8477fcd23db4f22c223d65cb2ad577f6420fed9539"
+    ".sdlc/traces/project.jsonl": "f915d205b1d97f7d5a07a0cfc1947cb740500a5d47ada376d6d5d2b024e91faa"
   },
   "audit": {
     "generated_by": {
@@ -316,7 +318,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "main",
-      "head_sha": "52fc67a378724bdfd88c331de38e015249700719",
+      "head_sha": "76087dcf6619e8a3ab6697ac541191f37a75367b",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -331,7 +333,7 @@
       "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.4.2"
+      "version": "0.4.3"
     }
   }
 }
