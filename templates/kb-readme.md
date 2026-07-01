@@ -12,7 +12,8 @@ It is intentionally stored in the project repository so people and agents can co
 - Record actor, run, thread, branch, and head SHA metadata on claims, traces, handoffs, approvals, locks, and sync events.
 - For existing projects, create and review a baseline before treating inferred context as canonical.
 - Do not treat permission to implement or push as formal artifact approval.
-- Record formal approvals with `--approval-source explicit-user|ci|bootstrap` plus summary or evidence.
+- Record formal approvals with `--approval-source explicit-user|ci|automation|bootstrap` plus summary or evidence.
+- Use `--approval-source automation` only when a human/CI has explicitly delegated a matching approval level or autonomy scope; keep that scope in the summary/evidence.
 - Run `agentic-sdlc orchestrate status` before starting work in another chat.
 - Run `agentic-sdlc sync record --event push` after pushing a branch.
 - Release story claims and phase locks when work is done or handed off.

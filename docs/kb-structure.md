@@ -323,7 +323,7 @@ Examples:
 .sdlc/dependencies/graph.json
 ```
 
-Breakdowns and dependency proposals are proposed by agents and approved by a human or CI actor before they become authoritative. Strict gates enforce approved breakdown freshness and blocking dependencies for story delivery.
+Breakdowns and dependency proposals are proposed by agents and approved by a human/CI actor or delegated automation under an explicit user-approved scope before they become authoritative. Strict gates enforce approved breakdown freshness and blocking dependencies for story delivery.
 
 ## `output-contracts/`
 

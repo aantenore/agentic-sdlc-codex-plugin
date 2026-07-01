@@ -193,7 +193,7 @@ It wraps route decision plus contract readiness and returns one of three operati
 - `needs_user_input`: Codex must ask the user to normalize intent, create/approve/clarify a contract, or confirm the concrete task start.
 - `contract_revision_required`: the user explicitly requested `--revise-contract`, or the selected contract does not match the phase.
 
-`--confirm-start` is operational authorization only. It does not approve a contract; formal approvals still require `contract approve --approval-source explicit-user` with user-confirmed summary or evidence. User approval is scoped to the artifact or decision that was shown immediately before the answer; a generic "ok" cannot be reused for later templates, capability decisions, contracts, or start confirmations.
+`--confirm-start` is operational authorization only. It does not approve a contract. By default, formal approvals still require `contract approve --approval-source explicit-user` with user-confirmed summary or evidence, and a generic "ok" applies only to the artifact or decision shown immediately before the answer. If the user explicitly declares a broader approval level or autonomy scope, later in-scope formal artifacts can be recorded with `--actor-type agent --approval-source automation` plus a summary or evidence of that delegated scope; do not record them as `explicit-user`.
 
 ```bash
 node bin/agentic-sdlc.mjs task start --json --intent-json '{
@@ -234,7 +234,18 @@ node bin/agentic-sdlc.mjs contract approve \
   --summary "Approved analysis contract and output structure"
 ```
 
-Use `--approval-source bootstrap` only for migration or provisional records. Bootstrap approvals are marked provisional and do not satisfy strict gates by default.
+If the user specifies a broader approval level, preserve that level exactly in the approval summary or `--scope` and use delegated automation for later in-scope artifacts:
+
+```bash
+node bin/agentic-sdlc.mjs contract approve \
+  --id contract-ST-001-analysis \
+  --actor-type agent \
+  --approval-source automation \
+  --scope "technical assessment workbook, read-only repo analysis" \
+  --summary "Antonio approved autonomous approval for this assessment within read-only repo analysis and local workbook generation."
+```
+
+Use `--approval-source bootstrap` only for migration or provisional records. Bootstrap approvals are marked provisional and do not satisfy strict gates by default. Delegated automation does not expand to installs, deploys, secrets, external services, destructive commands, or unrelated work unless the user explicitly includes them.
 
 ## Collaboration Model
 
