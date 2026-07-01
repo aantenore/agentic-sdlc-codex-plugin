@@ -1,0 +1,19 @@
+{
+  "scope": "approval-governance-and-existing-project-onboarding",
+  "checked_at": "2026-07-01T11:47:18.000Z",
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "details": "39 tests passed"
+    },
+    {
+      "command": "jq empty templates/sdlc-config.json .sdlc/config.json templates/kb-structure.json schemas/baseline.schema.json package.json .codex-plugin/plugin.json",
+      "status": "passed"
+    }
+  ]
+}

@@ -10,6 +10,9 @@ It is intentionally stored in the project repository so people and agents can co
 - Work in story-scoped folders when possible.
 - Append trace events instead of rewriting history.
 - Record actor, run, thread, branch, and head SHA metadata on claims, traces, handoffs, approvals, locks, and sync events.
+- For existing projects, create and review a baseline before treating inferred context as canonical.
+- Do not treat permission to implement or push as formal artifact approval.
+- Record formal approvals with `--approval-source explicit-user|ci|bootstrap` plus summary or evidence.
 - Run `agentic-sdlc orchestrate status` before starting work in another chat.
 - Run `agentic-sdlc sync record --event push` after pushing a branch.
 - Release story claims and phase locks when work is done or handed off.
@@ -27,6 +30,7 @@ It is intentionally stored in the project repository so people and agents can co
 
 ```text
 contracts/      Phase contracts and story-specific contracts
+baseline/       Existing-project current-state baselines and approval records
 output-contracts/ Approved output templates, artifact links, and structure decisions
 requirements/   Product requirements and constraints
 work-items/     Project-local epics and tasks

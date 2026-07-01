@@ -3,7 +3,7 @@
   "strict": true,
   "scope": "story",
   "story_id": "ST-CAPABILITY-DISCOVERY",
-  "checked_at": "2026-07-01T11:26:51.965Z",
+  "checked_at": "2026-07-01T11:50:32.136Z",
   "root": "/Users/antonioantenore/Documents/TravelOps",
   "actor": {
     "id": "antonioantenore",
@@ -15,7 +15,7 @@
   "git": {
     "is_git_repo": true,
     "branch": "main",
-    "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+    "head_sha": "8ebae4e717c7b70608ffbfc96da51e703b34bab5",
     "is_dirty": true,
     "user": {
       "name": "Antonio Antenore",
@@ -30,12 +30,27 @@
     "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
     "session_id": null,
     "tool": "agentic-sdlc-cli",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "errors": [],
-  "warnings": [],
+  "warnings": [
+    "contract contract-ST-CAPABILITY-DISCOVERY-implementation.json approval APR-20260701112533-0b2ed7 is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source README.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source docs/architecture.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source package.json changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source skills/agentic-sdlc/SKILL.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source README.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source docs/architecture.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source package.json changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY source skills/agentic-sdlc/SKILL.md changed after record creation",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY approval APR-20260701112512-dfd35f is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "capability recommendation CAP-REC-ST-CAPABILITY-DISCOVERY approval APR-20260701112525-a50937 is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "output template implementation-summary-v1 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625 approval is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source"
+  ],
   "checked": [
     "project",
+    "baseline BASELINE-PLUGIN-CURRENT",
     "contract contract-ST-CAPABILITY-DISCOVERY-implementation.json capability recommendation CAP-REC-ST-CAPABILITY-DISCOVERY",
     "contract contract-ST-CAPABILITY-DISCOVERY-implementation.json",
     "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY",

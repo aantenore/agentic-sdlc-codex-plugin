@@ -1,0 +1,157 @@
+{
+  "id": "BASELINE-PLUGIN-CURRENT",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.3.0",
+  "kind": "existing-project",
+  "status": "proposed",
+  "summary": "Current observable baseline for the Agentic SDLC plugin after adding explicit approval governance and existing-project onboarding.",
+  "repository_snapshot": {
+    "root_name": "TravelOps",
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "8ebae4e717c7b70608ffbfc96da51e703b34bab5",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "detected_stack": [
+      {
+        "name": "package-json",
+        "type": "node",
+        "source_path": "package.json"
+      },
+      {
+        "name": "npm-scripts",
+        "type": "automation",
+        "source_path": "package.json",
+        "scripts": [
+          "check",
+          "smoke",
+          "test"
+        ]
+      }
+    ],
+    "key_files": [
+      {
+        "path": "package.json",
+        "sha256": "ff95ee4a2b7d75f46a3cdc10f1a69f74c4bb71a717c4e27d2fbbbfe6f3b872c9",
+        "size_bytes": 541
+      },
+      {
+        "path": "README.md",
+        "sha256": "800580b34f197b9493840707d745709545bff5f305e5febcb2cd73b8818f4a6d",
+        "size_bytes": 15714
+      }
+    ],
+    "package_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test test/*.mjs"
+    },
+    "source_roots": [
+      "bin"
+    ],
+    "test_roots": [
+      "test"
+    ],
+    "ci_files": []
+  },
+  "imported_documents": [
+    {
+      "type": "document",
+      "path": "README.md",
+      "sha256": "800580b34f197b9493840707d745709545bff5f305e5febcb2cd73b8818f4a6d",
+      "size_bytes": 15714,
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven agent-legible operating system. The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The CLI creates a shared `.sdlc/` knowledge base inside the target project so teams and agents can work in parallel through Git branches and pull requests. ## What It Implements - Phase contracts for Discovery Analysis Design Implementation Validation and Release. - Existing-project onboarding with an inferred baseline that must be confirmed before it becomes canonical. - A Git-first knowledge base for requirements stories decisions assumptions risks tests traces and releases. - Story-scoped workspaces so multiple agents can work in parallel without o"
+    }
+  ],
+  "inferred_context": {
+    "stack_summary": [
+      "node:package-json",
+      "automation:npm-scripts"
+    ],
+    "likely_entrypoints": [
+      "package.json",
+      "README.md"
+    ],
+    "test_surface": [
+      "check",
+      "smoke",
+      "test"
+    ],
+    "imported_document_count": 1,
+    "confidence": 0.7,
+    "caveats": [
+      "This is inferred from repository files and imported documents.",
+      "Historical authorship, prior approvals, and rationale are unknown unless present in evidence files."
+    ]
+  },
+  "canonicality": {
+    "state": "inferred",
+    "inferred_not_approved": true,
+    "confirmed_sources": [],
+    "user_confirmation_required": true,
+    "notes": [
+      "This baseline describes the current observable project state.",
+      "It does not reconstruct pre-SDLC historical decisions unless evidence is present in source files."
+    ]
+  },
+  "open_questions": [
+    "Which inferred plugin baseline facts should be treated as canonical by future SDLC work?"
+  ],
+  "assumptions": [],
+  "source_paths": [
+    "README.md",
+    "docs/agent-interactions.md",
+    "docs/architecture.md",
+    "docs/kb-structure.md",
+    "package.json",
+    "skills/agentic-sdlc/SKILL.md"
+  ],
+  "source_hashes": {
+    "README.md": "800580b34f197b9493840707d745709545bff5f305e5febcb2cd73b8818f4a6d",
+    "docs/agent-interactions.md": "187cb9448a2341fbaa8790e07fbcf614a5885267ef330a0d666f7549eb6b5bf9",
+    "docs/architecture.md": "3ba70f03a98e4fb7de382d46065a7519ec195b3afa997bd46f0a1a6a12f979a3",
+    "docs/kb-structure.md": "0a16b096cefc1dfb22ccae4a82d4532277181796393fe1173c290f7844c0d37b",
+    "package.json": "ff95ee4a2b7d75f46a3cdc10f1a69f74c4bb71a717c4e27d2fbbbfe6f3b872c9",
+    "skills/agentic-sdlc/SKILL.md": "483de02a4d4785d6efd56dcab8a7f025cb9b14328af2670451a1f0575e0ce7e4"
+  },
+  "approvals": [],
+  "created_at": "2026-07-01T11:47:07.250Z",
+  "updated_at": "2026-07-01T11:47:07.250Z",
+  "audit": {
+    "proposed_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "8ebae4e717c7b70608ffbfc96da51e703b34bab5",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.3.0"
+    }
+  }
+}
