@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/travelops-sdlc-codex-plugin/schemas/trace.schema.json",
+  "title": "TravelOps SDLC Trace Event",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "summary",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "story_id": {
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "assumption",
+        "decision",
+        "gate",
+        "implementation",
+        "release",
+        "risk",
+        "test"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}
