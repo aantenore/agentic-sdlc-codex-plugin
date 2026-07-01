@@ -429,6 +429,253 @@ test("phase locks reject concurrent active locks on the same scope", () => {
   mustFail(["phase", "lock", "--root", project, "--phase", "analysis", "--scope", "shared"], /already has active lock/);
 });
 
+test("work items and approved breakdown are persisted and indexed as canonical KB", () => {
+  const project = tmpProject("work-breakdown");
+  initProject(project);
+  story(project, "ST-001", ["--requirement", "REQ-001", "--breakdown", "BD-REQ-001"]);
+  mustRun(["work", "item", "create", "--root", project, "--type", "epic", "--id", "EP-001", "--title", "Epic 001", "--requirement", "REQ-001"]);
+  mustRun(["work", "item", "create", "--root", project, "--type", "task", "--id", "TASK-001", "--title", "Task 001", "--parent", "EP-001", "--story", "ST-001"]);
+  mustRun([
+    "breakdown",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BD-REQ-001",
+    "--requirement",
+    "REQ-001",
+    "--item",
+    "epic:EP-001",
+    "--item",
+    "story:ST-001",
+    "--item",
+    "task:TASK-001",
+    "--rationale",
+    "Split requirement into epic, story, and task",
+  ]);
+  mustRun(["breakdown", "approve", "--root", project, "--id", "BD-REQ-001", "--actor-type", "human"]);
+  const breakdown = readJson(path.join(project, ".sdlc", "work-breakdown", "BD-REQ-001.json"));
+  assert.equal(breakdown.status, "approved");
+  assert.equal(readJson(path.join(project, ".sdlc", "work-items", "epics", "EP-001.json")).type, "epic");
+  mustRun(["cache", "rebuild", "--root", project]);
+  const cache = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));
+  assert.ok(cache.source_paths.includes(".sdlc/work-breakdown/BD-REQ-001.json"));
+  assert.ok(cache.source_paths.includes(".sdlc/dependencies/graph.json"));
+});
+
+test("strict gate blocks story delivery when referenced breakdown is not approved", () => {
+  const project = tmpProject("breakdown-gate");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation", work_breakdown_id: "BD-REQ-001" });
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex", "--branch", "feature/ST-001"]);
+  mustRun([
+    "breakdown",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BD-REQ-001",
+    "--requirement",
+    "REQ-001",
+    "--item",
+    "story:ST-001",
+  ]);
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /not approved/);
+});
+
+test("contract capability policy requires bindings and rejects overlaps", () => {
+  const project = tmpProject("capability-contract");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation", contract_id: "contract-ST-001-implementation" });
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex", "--branch", "feature/ST-001"]);
+  const policy = JSON.stringify({
+    skills: { required: ["agentic-sdlc"], allowed: [], forbidden: [] },
+    mcp: { required: ["repo"], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: ["test-runner"], forbidden: [] },
+    approval_required_for: ["production_write"],
+  });
+  const binding = JSON.stringify({
+    type: "mcp",
+    name: "repo",
+    binding_id: "repo-main",
+    target: { repo: "local" },
+    permissions: ["read"],
+  });
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-implementation",
+    "--context-summary",
+    "Implementation capability contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "functional-analysis:functional-analysis-v1:new",
+    "--capability-policy-json",
+    policy,
+    "--force",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", "--actor-type", "human"]);
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /requires mcp capability 'repo'/);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-implementation",
+    "--context-summary",
+    "Implementation capability contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "functional-analysis:functional-analysis-v1:new",
+    "--capability-policy-json",
+    policy,
+    "--capability-binding-json",
+    binding,
+    "--force",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", "--actor-type", "human"]);
+  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  const overlap = JSON.stringify({
+    skills: { required: [], allowed: ["agentic-sdlc"], forbidden: ["agentic-sdlc"] },
+    mcp: { required: [], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: [], forbidden: [] },
+    approval_required_for: [],
+  });
+  mustFail(["contract", "create", "--root", project, "--phase", "analysis", "--capability-policy-json", overlap], /cannot be both allowed and forbidden/);
+});
+
+test("capability binding files cannot come from derived cache directories", () => {
+  const project = tmpProject("capability-cache");
+  initProject(project);
+  const bindingPath = path.join(project, ".sdlc", "cache", "binding.json");
+  fs.mkdirSync(path.dirname(bindingPath), { recursive: true });
+  fs.writeFileSync(bindingPath, JSON.stringify({ type: "mcp", name: "repo", binding_id: "repo-main", target: { repo: "local" } }));
+  mustFail(
+    ["contract", "create", "--root", project, "--phase", "analysis", "--capability-binding-file", ".sdlc/cache/binding.json"],
+    /derived artifacts/,
+  );
+});
+
+test("dependency graph blocks orchestration and strict gate until upstream is satisfied", () => {
+  const project = tmpProject("dependencies-block");
+  initProject(project);
+  story(project, "ST-001");
+  story(project, "ST-002");
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-001",
+    "--edge",
+    "ST-002:ST-001:blocks:implementation:done",
+  ]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-001", "--actor-type", "human"]);
+  const plan = JSON.parse(mustRun(["orchestrate", "plan", "--root", project, "--json"]).stdout);
+  assert.equal(plan.candidates.some((candidate) => candidate.story_id === "ST-002"), false);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-002", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation" });
+  mustFail(["gate", "check", "--root", project, "--story", "ST-002", "--strict"], /depends on ST-001/);
+});
+
+test("soft dependency is visible but does not block orchestration", () => {
+  const project = tmpProject("dependencies-soft");
+  initProject(project);
+  story(project, "ST-001");
+  story(project, "ST-002");
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-RELATED",
+    "--edge",
+    "ST-002:ST-001:related:none:exists",
+  ]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-RELATED", "--actor-type", "human"]);
+  const status = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const storyStatus = status.stories.find((item) => item.id === "ST-002");
+  assert.equal(storyStatus.orchestration_state, "available");
+  assert.ok(storyStatus.warnings.some((warning) => warning.includes("ST-002 depends on ST-001")));
+});
+
+test("blocking dependency cycles fail strict gate", () => {
+  const project = tmpProject("dependencies-cycle");
+  initProject(project);
+  story(project, "ST-001");
+  story(project, "ST-002");
+  mustRun(["dependency", "propose", "--root", project, "--id", "DEP-A", "--edge", "ST-001:ST-002:blocks:implementation:done"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-A", "--actor-type", "human"]);
+  mustRun(["dependency", "propose", "--root", project, "--id", "DEP-B", "--edge", "ST-002:ST-001:blocks:implementation:done"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-B", "--actor-type", "human"]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation" });
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /blocking dependency cycle/);
+});
+
+test("downstream dependency becomes stale when upstream artifact changes until revalidated", () => {
+  const project = tmpProject("dependencies-stale");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  story(project, "ST-002");
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-ARTIFACT",
+    "--edge",
+    "ST-002:ST-001:requires_artifact:validation:artifact_linked",
+  ]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-ARTIFACT", "--actor-type", "human"]);
+  fs.appendFileSync(path.join(project, ".sdlc", "requirements", "ST-001-functional-analysis.md"), "\nchanged upstream\n");
+  const stale = JSON.parse(mustRun(["dependency", "status", "--root", project, "--story", "ST-002", "--json"]).stdout);
+  assert.ok(stale.blockers.some((blocker) => blocker.includes("requires revalidation")));
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-002",
+    "--type",
+    "test",
+    "--summary",
+    "Revalidated downstream after upstream artifact change",
+    "--action",
+    "dependency.revalidate",
+    "--related",
+    "ST-001",
+  ]);
+  const revalidated = JSON.parse(mustRun(["dependency", "status", "--root", project, "--story", "ST-002", "--json"]).stdout);
+  assert.equal(revalidated.blockers.some((blocker) => blocker.includes("requires revalidation")), false);
+});
+
 test("route decide returns init_project when canonical intent arrives before KB initialization", () => {
   const project = tmpProject("route-no-kb");
   const decision = routeDecision(project);

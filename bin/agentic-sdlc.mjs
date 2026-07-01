@@ -18,6 +18,12 @@ const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "impleme
 const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
 const LOCK_STATUSES = new Set(["active", "released", "cancelled", "expired"]);
 const HANDOFF_STATUSES = new Set(["open", "accepted", "closed", "rejected", "cancelled"]);
+const WORK_ITEM_TYPES = new Set(["requirement", "epic", "story", "task"]);
+const WORK_ITEM_CREATE_TYPES = new Set(["epic", "task"]);
+const CAPABILITY_TYPES = new Set(["skills", "mcp", "tools"]);
+const CAPABILITY_GROUPS = new Set(["required", "allowed", "forbidden"]);
+const DEPENDENCY_TYPES = new Set(["blocks", "requires_artifact", "requires_contract", "related", "same_requirement", "parent_epic"]);
+const DEPENDENCY_BLOCK_SCOPES = new Set(["analysis", "design", "implementation", "validation", "release", "none"]);
 const ROUTE_REQUIRED_INTENT_FIELDS = [
   "requested_action",
   "confidence",
@@ -113,6 +119,46 @@ function main() {
     }
     if (command === "story" && subcommand === "handoff") {
       createStoryHandoff(context, parsed.options);
+      return;
+    }
+    if (command === "story" && subcommand === "deps") {
+      showStoryDependencies(context, parsed.options);
+      return;
+    }
+    if (command === "work" && subcommand === "item" && rest[0] === "create") {
+      createWorkItem(context, parsed.options);
+      return;
+    }
+    if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") {
+      showBreakdownPolicy(context, parsed.options);
+      return;
+    }
+    if (command === "breakdown" && subcommand === "policy" && rest[0] === "set") {
+      setBreakdownPolicy(context, parsed.options);
+      return;
+    }
+    if (command === "breakdown" && subcommand === "propose") {
+      proposeBreakdown(context, parsed.options);
+      return;
+    }
+    if (command === "breakdown" && subcommand === "approve") {
+      approveBreakdown(context, parsed.options);
+      return;
+    }
+    if (command === "breakdown" && subcommand === "status") {
+      showBreakdownStatus(context, parsed.options);
+      return;
+    }
+    if (command === "dependency" && subcommand === "propose") {
+      proposeDependencyGraph(context, parsed.options);
+      return;
+    }
+    if (command === "dependency" && subcommand === "approve") {
+      approveDependencyGraph(context, parsed.options);
+      return;
+    }
+    if (command === "dependency" && subcommand === "status") {
+      showDependencyStatus(context, parsed.options);
       return;
     }
     if (command === "handoff" && subcommand === "close") {
@@ -287,6 +333,7 @@ function validateSdlcConfig(config) {
   validateSdlcDirectoryList(config.cache_policy?.source_of_truth_dirs, "cache_policy.source_of_truth_dirs");
   validateSdlcDirectoryList(config.cache_policy?.derived_directories, "cache_policy.derived_directories");
   validateRoutingPolicy(config.routing_policy);
+  validateWorkBreakdownPolicy(config.work_breakdown_policy);
   return config;
 }
 
@@ -342,6 +389,36 @@ function validateRoutingPolicy(policy) {
     if (confidence.always_confirm !== undefined && !Array.isArray(confidence.always_confirm)) {
       fail("routing_policy.confidence.always_confirm must be an array");
     }
+  }
+}
+
+function validateWorkBreakdownPolicy(policy) {
+  if (policy === undefined) {
+    return;
+  }
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    fail("work_breakdown_policy must be a JSON object");
+  }
+  for (const field of ["levels", "claimable_units"]) {
+    if (policy[field] !== undefined) {
+      if (!Array.isArray(policy[field])) {
+        fail(`work_breakdown_policy.${field} must be an array`);
+      }
+      for (const value of policy[field]) {
+        const type = normalizeWorkItemType(value, { allowStory: true });
+        if (!WORK_ITEM_TYPES.has(type)) {
+          fail(`work_breakdown_policy.${field} contains unknown work item type '${value}'`);
+        }
+      }
+    }
+  }
+  for (const field of ["delivery_unit", "strict_gate_unit"]) {
+    if (policy[field] !== undefined) {
+      normalizeWorkItemType(policy[field], { allowStory: true });
+    }
+  }
+  if (policy.task_gate !== undefined && !["light", "strict", "none"].includes(String(policy.task_gate))) {
+    fail("work_breakdown_policy.task_gate must be light, strict, or none");
   }
 }
 
@@ -1382,6 +1459,7 @@ function initProject(context, options) {
     attribution,
     project_id: projectId,
   });
+  initializeDependencyGraph(context, { force, attribution });
 
   const createdContracts = [];
   for (const phase of context.config.phase_order) {
@@ -1446,6 +1524,8 @@ function createContract(context, options) {
     model: options.model,
     reasoning: options.reasoning,
     execution_notes: normalizeRawListOption(options["execution-note"]),
+    capability_policy: loadCapabilityPolicy(context, options),
+    capability_bindings: loadCapabilityBindings(context, options),
     audit_options: options,
     audit_action: "contract.create",
   });
@@ -1555,6 +1635,8 @@ function buildContract(context, phase, overrides = {}) {
     human_gate: Boolean(template.human_gate),
     metrics: mergeList(template.metrics, overrides.metrics),
     execution_policy: buildExecutionPolicy(context, overrides),
+    capability_policy: buildCapabilityPolicy(overrides.capability_policy),
+    capability_bindings: normalizeCapabilityBindings(overrides.capability_bindings || []),
     contextualization: {
       summary: overrides.context_summary ? String(overrides.context_summary) : null,
       context_sources: contextSources,
@@ -1620,6 +1702,207 @@ function buildExecutionPolicySelection(rawValue, valueKey, options = {}) {
     mode: "override",
     [valueKey]: value,
   };
+}
+
+function loadCapabilityPolicy(context, options) {
+  const inline = getOptionString(options, "capability-policy-json");
+  const file = getOptionString(options, "capability-policy-file");
+  if (inline && file) {
+    fail("Use only one of --capability-policy-json or --capability-policy-file.");
+  }
+  if (!inline && !file) {
+    return null;
+  }
+  try {
+    if (file) {
+      const policyPath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
+      assertNotDerivedArtifact(context, policyPath, "Capability policy file");
+      return JSON.parse(fs.readFileSync(policyPath, "utf8"));
+    }
+    return JSON.parse(inline);
+  } catch (error) {
+    fail(`Invalid capability policy JSON: ${error.message}`);
+  }
+}
+
+function loadCapabilityBindings(context, options) {
+  const bindingJson = normalizeRawListOption(options["capability-binding-json"]);
+  const bindingFiles = normalizeRawListOption(options["capability-binding-file"]).map((rawPath) => {
+    const bindingPath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, bindingPath, "Capability binding file");
+    return fs.readFileSync(bindingPath, "utf8");
+  });
+  return [...bindingJson, ...bindingFiles].map((rawValue) => {
+    try {
+      return JSON.parse(rawValue);
+    } catch (error) {
+      fail(`Invalid capability binding JSON: ${error.message}`);
+    }
+  });
+}
+
+function buildCapabilityPolicy(policy) {
+  const empty = {
+    skills: emptyCapabilitySet(),
+    mcp: emptyCapabilitySet(),
+    tools: emptyCapabilitySet(),
+    approval_required_for: [],
+  };
+  if (policy === null || policy === undefined) {
+    return empty;
+  }
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    fail("capability_policy must be a JSON object");
+  }
+  const normalized = {
+    skills: normalizeCapabilitySet(policy.skills),
+    mcp: normalizeCapabilitySet(policy.mcp),
+    tools: normalizeCapabilitySet(policy.tools),
+    approval_required_for: normalizeListValue(policy.approval_required_for, []),
+  };
+  validateCapabilityPolicy(normalized, "capability_policy");
+  return normalized;
+}
+
+function emptyCapabilitySet() {
+  return {
+    required: [],
+    allowed: [],
+    forbidden: [],
+  };
+}
+
+function normalizeCapabilitySet(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    required: normalizeListValue(source.required, []),
+    allowed: normalizeListValue(source.allowed, []),
+    forbidden: normalizeListValue(source.forbidden, []),
+  };
+}
+
+function validateCapabilityPolicy(policy, label, report = null) {
+  const errors = [];
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    errors.push(`${label} must be an object`);
+  } else {
+    for (const type of CAPABILITY_TYPES) {
+      const group = policy[type];
+      if (!group || typeof group !== "object" || Array.isArray(group)) {
+        errors.push(`${label}.${type} must be an object`);
+        continue;
+      }
+      for (const key of CAPABILITY_GROUPS) {
+        if (!Array.isArray(group[key])) {
+          errors.push(`${label}.${type}.${key} must be an array`);
+        }
+      }
+      const required = new Set(group.required || []);
+      const allowed = new Set(group.allowed || []);
+      const forbidden = new Set(group.forbidden || []);
+      for (const value of required) {
+        if (forbidden.has(value)) {
+          errors.push(`${label}.${type} capability '${value}' cannot be both required and forbidden`);
+        }
+      }
+      for (const value of allowed) {
+        if (forbidden.has(value)) {
+          errors.push(`${label}.${type} capability '${value}' cannot be both allowed and forbidden`);
+        }
+      }
+    }
+    if (!Array.isArray(policy.approval_required_for)) {
+      errors.push(`${label}.approval_required_for must be an array`);
+    }
+  }
+  if (report) {
+    report.errors.push(...errors);
+    return errors.length === 0;
+  }
+  if (errors.length > 0) {
+    fail(errors.join("; "));
+  }
+  return true;
+}
+
+function normalizeCapabilityBindings(bindings) {
+  if (!Array.isArray(bindings)) {
+    fail("capability_bindings must be an array");
+  }
+  return bindings.map((binding, index) => normalizeCapabilityBinding(binding, index));
+}
+
+function normalizeCapabilityBinding(binding, index = 0) {
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
+    fail(`capability binding ${index + 1} must be a JSON object`);
+  }
+  const type = String(binding.type || "").trim().toLowerCase();
+  if (!["skill", "mcp", "tool"].includes(type)) {
+    fail(`capability binding ${index + 1} type must be skill, mcp, or tool`);
+  }
+  const name = String(binding.name || "").trim();
+  if (!name) {
+    fail(`capability binding ${index + 1} is missing name`);
+  }
+  const target = binding.target && typeof binding.target === "object" && !Array.isArray(binding.target) ? binding.target : null;
+  if (!target) {
+    fail(`capability binding ${index + 1} is missing target object`);
+  }
+  return {
+    type,
+    name,
+    binding_id: normalizeId(binding.binding_id || `${type}-${name}`),
+    target,
+    permissions: normalizeListValue(binding.permissions, []),
+    requires_approval_for: normalizeListValue(binding.requires_approval_for, []),
+    environment: binding.environment ? String(binding.environment) : null,
+    notes: normalizeListValue(binding.notes, []),
+  };
+}
+
+function validateCapabilityBindings(contract, label, report) {
+  const policy = contract.capability_policy || buildCapabilityPolicy(null);
+  validateCapabilityPolicy(policy, `${label} capability_policy`, report);
+  const bindings = Array.isArray(contract.capability_bindings) ? contract.capability_bindings : [];
+  if (!Array.isArray(contract.capability_bindings)) {
+    report.errors.push(`${label} capability_bindings must be an array`);
+  }
+  const normalizedBindings = [];
+  for (const [index, binding] of bindings.entries()) {
+    try {
+      normalizedBindings.push(normalizeCapabilityBinding(binding, index));
+    } catch (error) {
+      report.errors.push(`${label} ${error.message}`);
+    }
+  }
+  if (!report.strict) {
+    return;
+  }
+  for (const type of ["mcp", "tools"]) {
+    const required = policy[type]?.required || [];
+    for (const name of required) {
+      if (capabilityHasBinding(normalizedBindings, type, name)) {
+        continue;
+      }
+      if (contractHasCapabilityOpenQuestion(contract, type, name)) {
+        continue;
+      }
+      report.errors.push(`${label} requires ${type} capability '${name}' but has no binding or open contract question`);
+    }
+  }
+}
+
+function capabilityHasBinding(bindings, type, name) {
+  const bindingType = type === "tools" ? "tool" : type === "skills" ? "skill" : type;
+  return bindings.some((binding) => binding.type === bindingType && binding.name === name);
+}
+
+function contractHasCapabilityOpenQuestion(contract, type, name) {
+  const questions = contract.contextualization?.questions || [];
+  return questions.some((question) => {
+    const text = `${question.question || ""} ${question.id || ""} ${question.label || ""}`.toLowerCase();
+    return question.status !== "answered" && text.includes(type.toLowerCase()) && text.includes(String(name).toLowerCase());
+  });
 }
 
 function buildAttribution(context, options = {}, action = "unknown") {
@@ -1884,6 +2167,7 @@ function createStory(context, options) {
     status,
     phase,
     contract_id: options.contract ? String(options.contract) : null,
+    work_breakdown_id: options.breakdown ? normalizeId(String(options.breakdown)) : null,
     acceptance_criteria: acceptanceCriteria,
     links: {
       requirements: normalizeListOption(options.requirement),
@@ -1921,6 +2205,638 @@ function createStory(context, options) {
     { status: "created", story_path: storyDir, story },
     [`Created story workspace ${id}`, `Path: ${path.relative(context.root, storyDir)}`],
   );
+}
+
+function createWorkItem(context, options) {
+  ensureInitialized(context);
+  ensurePlanningDirectories(context);
+  const type = normalizeWorkItemType(requireOption(options, "type"));
+  if (!WORK_ITEM_CREATE_TYPES.has(type)) {
+    fail(`work item create supports only ${Array.from(WORK_ITEM_CREATE_TYPES).join(", ")} in this version.`);
+  }
+  const id = normalizeId(requireOption(options, "id"));
+  const title = requireOption(options, "title");
+  const attribution = buildAttribution(context, options, "work_item.create");
+  const item = {
+    id,
+    type,
+    title,
+    schema_version: context.config.schema_version,
+    status: String(options.status || "draft"),
+    parent_id: options.parent ? normalizeId(String(options.parent)) : null,
+    story_id: options.story ? normalizeId(String(options.story)) : null,
+    requirement_ids: normalizeListOption(options.requirement).map(normalizeId),
+    acceptance_criteria: normalizeListOption(options.acceptance),
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const itemPath = workItemPath(context, type, id);
+  writeJsonFile(itemPath, item, { force: Boolean(options.force) });
+  output(
+    options,
+    { status: "created", work_item_path: itemPath, work_item: item },
+    [`Created ${type} ${id}`, `Path: ${toProjectPath(context, itemPath)}`],
+  );
+}
+
+function showBreakdownPolicy(context, options) {
+  ensureInitialized(context);
+  const policy = readEffectiveBreakdownPolicy(context);
+  output(options, policy, [
+    `Delivery unit: ${policy.delivery_unit}`,
+    `Strict gate unit: ${policy.strict_gate_unit}`,
+    `Levels: ${policy.levels.join(", ")}`,
+    `Claimable units: ${policy.claimable_units.join(", ")}`,
+  ]);
+}
+
+function setBreakdownPolicy(context, options) {
+  ensureInitialized(context);
+  ensurePlanningDirectories(context);
+  const current = readEffectiveBreakdownPolicy(context);
+  const policy = {
+    ...current,
+    levels: options.levels ? normalizeListOption(options.levels).map((item) => normalizeWorkItemType(item, { allowStory: true })) : current.levels,
+    default_flow: options["default-flow"] ? normalizeListOption(options["default-flow"]) : current.default_flow,
+    delivery_unit: options["delivery-unit"]
+      ? normalizeWorkItemType(options["delivery-unit"], { allowStory: true })
+      : current.delivery_unit,
+    strict_gate_unit: options["strict-gate-unit"]
+      ? normalizeWorkItemType(options["strict-gate-unit"], { allowStory: true })
+      : current.strict_gate_unit,
+    task_gate: options["task-gate"] ? String(options["task-gate"]) : current.task_gate,
+  };
+  validateWorkBreakdownPolicy(policy);
+  const attribution = buildAttribution(context, options, "breakdown.policy.set");
+  const record = {
+    schema_version: context.config.schema_version,
+    policy,
+    updated_at: now(),
+    audit: {
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const policyPath = path.join(workBreakdownRoot(context), "project-policy.json");
+  writeJsonFile(policyPath, record, { force: true });
+  output(options, { status: "updated", policy_path: policyPath, policy }, [`Updated breakdown policy at ${toProjectPath(context, policyPath)}`]);
+}
+
+function proposeBreakdown(context, options) {
+  ensureInitialized(context);
+  ensurePlanningDirectories(context);
+  const id = normalizeId(requireOption(options, "id"));
+  if (id === "project-policy") {
+    fail("breakdown id 'project-policy' is reserved");
+  }
+  const requirementId = normalizeId(requireOption(options, "requirement"));
+  const items = normalizeRawListOption(options.item).map(parseBreakdownItemRef);
+  if (items.length === 0) {
+    fail("breakdown propose requires at least one --item type:id.");
+  }
+  const attribution = buildAttribution(context, options, "breakdown.propose");
+  const breakdown = {
+    id,
+    schema_version: context.config.schema_version,
+    status: "proposed",
+    requirement_id: requirementId,
+    items,
+    rationale: getOptionString(options, "rationale") || null,
+    approvals: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const breakdownPath = breakdownPathById(context, id);
+  writeJsonFile(breakdownPath, breakdown, { force: Boolean(options.force) });
+  output(options, { status: "proposed", breakdown_path: breakdownPath, breakdown }, [`Proposed breakdown ${id}`]);
+}
+
+function approveBreakdown(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const breakdownPath = breakdownPathById(context, id);
+  if (!fs.existsSync(breakdownPath)) {
+    fail(`Breakdown ${id} does not exist`);
+  }
+  const breakdown = readJson(breakdownPath);
+  const attribution = buildAttribution(context, options, "breakdown.approve");
+  requireHumanOrCiActor(attribution, "Approving a work breakdown");
+  const approval = {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    breakdown_id: id,
+    status: "approved",
+    summary: getOptionString(options, "summary") || null,
+    approved_content_hash: hashApprovalSubject(breakdown),
+    hash_algorithm: "sha256:stable-json:v1",
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+  breakdown.status = "approved";
+  breakdown.approvals = Array.isArray(breakdown.approvals) ? breakdown.approvals : [];
+  breakdown.approvals.push(approval);
+  breakdown.updated_at = now();
+  breakdown.audit = {
+    ...(breakdown.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(breakdownPath, breakdown, { force: true });
+  output(options, { status: "approved", breakdown_path: breakdownPath, approval, breakdown }, [`Approved breakdown ${id}`]);
+}
+
+function showBreakdownStatus(context, options) {
+  ensureInitialized(context);
+  const requirementId = options.requirement ? normalizeId(String(options.requirement)) : null;
+  const breakdowns = readBreakdowns(context).filter(
+    (breakdown) => !requirementId || breakdown.requirement_id === requirementId,
+  );
+  output(
+    options,
+    { breakdowns },
+    breakdowns.length
+      ? breakdowns.map((breakdown) => `${breakdown.id}: ${breakdown.status} (${breakdown.requirement_id})`)
+      : ["No breakdown records found."],
+  );
+}
+
+function proposeDependencyGraph(context, options) {
+  ensureInitialized(context);
+  ensurePlanningDirectories(context);
+  const id = normalizeId(requireOption(options, "id"));
+  if (id === "graph") {
+    fail("dependency id 'graph' is reserved");
+  }
+  const requirementId = options.requirement ? normalizeId(String(options.requirement)) : null;
+  const edges = normalizeRawListOption(options.edge).map(parseDependencyEdge);
+  if (edges.length === 0) {
+    fail("dependency propose requires at least one --edge from:to:type:blocks:required_state.");
+  }
+  const attribution = buildAttribution(context, options, "dependency.propose");
+  const proposal = {
+    id,
+    schema_version: context.config.schema_version,
+    status: "proposed",
+    requirement_id: requirementId,
+    edges,
+    rationale: getOptionString(options, "rationale") || null,
+    approvals: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const proposalPath = dependencyProposalPath(context, id);
+  writeJsonFile(proposalPath, proposal, { force: Boolean(options.force) });
+  output(options, { status: "proposed", dependency_path: proposalPath, dependency: proposal }, [`Proposed dependency graph ${id}`]);
+}
+
+function approveDependencyGraph(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const proposalPath = dependencyProposalPath(context, id);
+  if (!fs.existsSync(proposalPath)) {
+    fail(`Dependency proposal ${id} does not exist`);
+  }
+  const proposal = readJson(proposalPath);
+  const attribution = buildAttribution(context, options, "dependency.approve");
+  requireHumanOrCiActor(attribution, "Approving dependency graph changes");
+  const approval = {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    dependency_id: id,
+    status: "approved",
+    summary: getOptionString(options, "summary") || null,
+    approved_content_hash: hashApprovalSubject(proposal),
+    hash_algorithm: "sha256:stable-json:v1",
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+  proposal.status = "approved";
+  proposal.approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
+  proposal.approvals.push(approval);
+  proposal.updated_at = now();
+  proposal.audit = {
+    ...(proposal.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(proposalPath, proposal, { force: true });
+
+  const graph = readDependencyGraph(context, { missingOk: true });
+  for (const edge of proposal.edges || []) {
+    upsertDependencyEdge(graph, {
+      ...edge,
+      proposal_id: id,
+      requirement_id: proposal.requirement_id || null,
+      rationale: proposal.rationale || null,
+      approved_at: now(),
+      approved_by: attribution.actor,
+    });
+  }
+  graph.updated_at = now();
+  graph.audit = {
+    ...(graph.audit || {}),
+    updated_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(dependencyGraphPath(context), graph, { force: true });
+  output(options, { status: "approved", dependency_path: proposalPath, graph_path: dependencyGraphPath(context), approval, dependency: proposal, graph }, [`Approved dependency graph ${id}`]);
+}
+
+function showDependencyStatus(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const status = buildDependencyStatus(context, storyId);
+  output(
+    options,
+    status,
+    storyId
+      ? [`Dependencies for ${storyId}: ${status.edges.length}`, ...status.blockers.map((item) => `BLOCKER ${item}`), ...status.warnings.map((item) => `WARN ${item}`)]
+      : [`Dependency edges: ${status.edges.length}`, `Blockers: ${status.blockers.length}`, `Warnings: ${status.warnings.length}`],
+  );
+}
+
+function showStoryDependencies(context, options) {
+  showDependencyStatus(context, { ...options, story: requireOption(options, "id") });
+}
+
+function ensurePlanningDirectories(context) {
+  ensureDir(workItemsRoot(context));
+  ensureDir(path.join(workItemsRoot(context), "epics"));
+  ensureDir(path.join(workItemsRoot(context), "tasks"));
+  ensureDir(workBreakdownRoot(context));
+  ensureDir(dependenciesRoot(context));
+}
+
+function workItemsRoot(context) {
+  return path.join(context.sdlcRoot, "work-items");
+}
+
+function workBreakdownRoot(context) {
+  return path.join(context.sdlcRoot, "work-breakdown");
+}
+
+function dependenciesRoot(context) {
+  return path.join(context.sdlcRoot, "dependencies");
+}
+
+function workItemPath(context, type, id) {
+  const directory = type === "epic" ? "epics" : type === "task" ? "tasks" : `${type}s`;
+  return path.join(workItemsRoot(context), directory, `${id}.json`);
+}
+
+function breakdownPathById(context, id) {
+  return path.join(workBreakdownRoot(context), `${id}.json`);
+}
+
+function dependencyProposalPath(context, id) {
+  return path.join(dependenciesRoot(context), `${id}.json`);
+}
+
+function dependencyGraphPath(context) {
+  return path.join(dependenciesRoot(context), "graph.json");
+}
+
+function normalizeWorkItemType(value, options = {}) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/\s+/g, "-");
+  const allowed = options.allowStory ? WORK_ITEM_TYPES : WORK_ITEM_CREATE_TYPES;
+  if (!allowed.has(normalized)) {
+    fail(`Unknown work item type '${value}'. Valid values: ${Array.from(allowed).join(", ")}`);
+  }
+  return normalized;
+}
+
+function parseBreakdownItemRef(value) {
+  const parts = String(value || "").split(":").map((part) => part.trim());
+  if (parts.length !== 2 || parts.some((part) => !part)) {
+    fail("Breakdown items must use --item type:id");
+  }
+  return {
+    type: normalizeWorkItemType(parts[0], { allowStory: true }),
+    id: normalizeId(parts[1]),
+  };
+}
+
+function parseDependencyEdge(value) {
+  const parts = String(value || "").split(":").map((part) => part.trim());
+  if (parts.length !== 5 || parts.some((part) => !part)) {
+    fail("Dependency edges must use --edge from:to:type:blocks:required_state");
+  }
+  const [from, to, type, blocks, requiredState] = parts;
+  const normalizedType = String(type).trim().toLowerCase();
+  const normalizedBlocks = String(blocks).trim().toLowerCase();
+  if (!DEPENDENCY_TYPES.has(normalizedType)) {
+    fail(`Unknown dependency type '${type}'. Valid values: ${Array.from(DEPENDENCY_TYPES).join(", ")}`);
+  }
+  if (!DEPENDENCY_BLOCK_SCOPES.has(normalizedBlocks)) {
+    fail(`Unknown dependency blocking scope '${blocks}'. Valid values: ${Array.from(DEPENDENCY_BLOCK_SCOPES).join(", ")}`);
+  }
+  return {
+    from: normalizeId(from),
+    to: normalizeId(to),
+    type: normalizedType,
+    blocks: normalizedBlocks,
+    required_state: String(requiredState).trim().toLowerCase(),
+  };
+}
+
+function readEffectiveBreakdownPolicy(context) {
+  const configured = context.config.work_breakdown_policy || {};
+  const defaults = {
+    levels: ["requirement", "epic", "story", "task"],
+    default_flow: ["requirement", "story"],
+    optional_levels: ["epic", "task"],
+    delivery_unit: "story",
+    claimable_units: ["story", "task"],
+    strict_gate_unit: "story",
+    task_gate: "light",
+  };
+  const policyPath = path.join(workBreakdownRoot(context), "project-policy.json");
+  const projectPolicy = fs.existsSync(policyPath) ? readJson(policyPath).policy || {} : {};
+  const policy = {
+    ...defaults,
+    ...configured,
+    ...projectPolicy,
+  };
+  policy.levels = normalizeListValue(policy.levels, defaults.levels).map((item) => normalizeWorkItemType(item, { allowStory: true }));
+  policy.default_flow = normalizeListValue(policy.default_flow, defaults.default_flow);
+  policy.optional_levels = normalizeListValue(policy.optional_levels, defaults.optional_levels);
+  policy.claimable_units = normalizeListValue(policy.claimable_units, defaults.claimable_units).map((item) => normalizeWorkItemType(item, { allowStory: true }));
+  policy.delivery_unit = normalizeWorkItemType(policy.delivery_unit || defaults.delivery_unit, { allowStory: true });
+  policy.strict_gate_unit = normalizeWorkItemType(policy.strict_gate_unit || defaults.strict_gate_unit, { allowStory: true });
+  policy.task_gate = String(policy.task_gate || defaults.task_gate);
+  return policy;
+}
+
+function normalizeListValue(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return [...fallback];
+  }
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function readBreakdowns(context) {
+  const root = workBreakdownRoot(context);
+  return safeReadDir(root)
+    .filter((name) => name.endsWith(".json") && name !== "project-policy.json")
+    .map((name) => readJson(path.join(root, name)));
+}
+
+function latestApprovedRecordApproval(record) {
+  return [...(record.approvals || [])]
+    .filter((approval) => approval?.status === "approved")
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .at(-1);
+}
+
+function isApprovedRecordFresh(record) {
+  const latest = latestApprovedRecordApproval(record);
+  return Boolean(latest?.approved_content_hash && latest.approved_content_hash === hashApprovalSubject(record));
+}
+
+function requireHumanOrCiActor(attribution, action) {
+  if (!["human", "ci"].includes(attribution.actor.type)) {
+    fail(`${action} requires --actor-type human or an approved CI actor.`);
+  }
+}
+
+function readDependencyGraph(context, options = {}) {
+  const graphPath = dependencyGraphPath(context);
+  if (!fs.existsSync(graphPath)) {
+    if (!options.missingOk) {
+      fail("Missing .sdlc/dependencies/graph.json. Run dependency approve first.");
+    }
+    return {
+      schema_version: context.config.schema_version,
+      status: "approved",
+      edges: [],
+      updated_at: null,
+      audit: {},
+    };
+  }
+  const graph = readJson(graphPath);
+  graph.edges = Array.isArray(graph.edges) ? graph.edges : [];
+  return graph;
+}
+
+function upsertDependencyEdge(graph, edge) {
+  graph.edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const key = dependencyEdgeKey(edge);
+  const index = graph.edges.findIndex((candidate) => dependencyEdgeKey(candidate) === key);
+  if (index >= 0) {
+    graph.edges[index] = edge;
+  } else {
+    graph.edges.push(edge);
+  }
+}
+
+function dependencyEdgeKey(edge) {
+  return [edge.from, edge.to, edge.type, edge.blocks].join("::");
+}
+
+function buildDependencyStatus(context, storyId = null) {
+  const graph = readDependencyGraph(context, { missingOk: true });
+  const edges = (graph.edges || []).filter((edge) => !storyId || edge.from === storyId || edge.to === storyId);
+  const blockers = [];
+  const warnings = [];
+  for (const edge of edges) {
+    if (storyId && edge.from !== storyId) {
+      warnings.push(`${edge.from} depends on ${edge.to} via ${edge.type}`);
+      continue;
+    }
+    const state = inspectDependencyEdge(context, edge);
+    if (state.blocking && !state.satisfied) {
+      blockers.push(state.message);
+    } else if (!state.satisfied) {
+      warnings.push(state.message);
+    } else if (!isHardDependencyEdge(edge)) {
+      warnings.push(state.message);
+    }
+  }
+  const cycles = findBlockingDependencyCycles(graph.edges || []);
+  for (const cycle of cycles) {
+    blockers.push(`blocking dependency cycle: ${cycle.join(" -> ")}`);
+  }
+  return {
+    graph_path: dependencyGraphPath(context),
+    story_id: storyId,
+    edges,
+    blockers,
+    warnings,
+    cycles,
+  };
+}
+
+function inspectDependencyEdge(context, edge, story = null) {
+  const blocking = isHardDependencyEdge(edge) && shouldDependencyBlockStory(edge, story);
+  const satisfied = isDependencySatisfied(context, edge);
+  const message = `${edge.from} depends on ${edge.to} (${edge.type}, ${edge.blocks}, requires ${edge.required_state})`;
+  if (!satisfied) {
+    return { blocking, satisfied, message };
+  }
+  const stale = dependencyUpstreamArtifactChanged(context, edge);
+  if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since)) {
+    return {
+      blocking: isHardDependencyEdge(edge),
+      satisfied: false,
+      message: `${edge.from} requires revalidation because upstream artifact ${stale.artifact_path} changed after linking`,
+    };
+  }
+  return { blocking: false, satisfied: true, message };
+}
+
+function isHardDependencyEdge(edge) {
+  return edge.blocks !== "none" && ["blocks", "requires_artifact", "requires_contract"].includes(edge.type);
+}
+
+function shouldDependencyBlockStory(edge, story) {
+  if (!story || edge.blocks === "none") {
+    return true;
+  }
+  return storyPhaseRank(story) >= phaseRank(edge.blocks);
+}
+
+function storyPhaseRank(story) {
+  const value = String(story.phase || story.status || "").toLowerCase();
+  return phaseRank(value);
+}
+
+function phaseRank(value) {
+  const order = ["discovery", "analysis", "design", "implementation", "validation", "release"];
+  if (["in_progress", "review"].includes(value)) {
+    return order.indexOf("implementation");
+  }
+  if (value === "done") {
+    return order.indexOf("release");
+  }
+  const index = order.indexOf(value);
+  return index >= 0 ? index : order.indexOf("design");
+}
+
+function isDependencySatisfied(context, edge) {
+  const upstream = readStory(context, edge.to);
+  if (!upstream) {
+    return false;
+  }
+  const state = String(edge.required_state || "").toLowerCase();
+  if (edge.type === "requires_contract" || state === "contract_approved") {
+    const contractState = inspectStoryContract(context, upstream);
+    return contractState.exists && contractState.approved;
+  }
+  if (edge.type === "requires_artifact" || state === "artifact_linked") {
+    return storyHasOutputLink(context, edge.to);
+  }
+  if (["exists", "none"].includes(state)) {
+    return true;
+  }
+  if (state === "ready") {
+    return ["ready", "implementation", "in_progress", "review", "validation", "release", "done"].includes(String(upstream.status));
+  }
+  if (state === "validated") {
+    return ["validation", "release", "done"].includes(String(upstream.status)) || upstream.phase === "validation" || upstream.phase === "release";
+  }
+  if (state === "done") {
+    return upstream.status === "done";
+  }
+  return upstream.status === state || upstream.phase === state;
+}
+
+function storyHasOutputLink(context, storyId) {
+  const registry = readOutputRegistry(context, { missingOk: true });
+  return (registry?.links || []).some((link) => link.story_id === storyId);
+}
+
+function dependencyUpstreamArtifactChanged(context, edge) {
+  if (!["requires_artifact", "blocks"].includes(edge.type)) {
+    return null;
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const links = (registry?.links || []).filter((link) => link.story_id === edge.to);
+  for (const link of links) {
+    if (!link.artifact_path || !link.fingerprints?.artifact_sha256) {
+      continue;
+    }
+    const artifactPath = resolveProjectFilePath(context, link.artifact_path, { mustExist: false });
+    if (fs.existsSync(artifactPath) && hashFile(artifactPath) !== link.fingerprints.artifact_sha256) {
+      return {
+        artifact_path: link.artifact_path,
+        since: link.updated_at || link.created_at || null,
+      };
+    }
+  }
+  return null;
+}
+
+function hasDependencyRevalidationTrace(context, storyId, edge, since) {
+  const sinceTime = since ? Date.parse(since) : 0;
+  return readTraceEvents(context, storyId).some((event) => {
+    const eventTime = Date.parse(String(event.created_at || ""));
+    return (
+      event.action === "dependency.revalidate" &&
+      (!Number.isFinite(sinceTime) || !Number.isFinite(eventTime) || eventTime >= sinceTime) &&
+      Array.isArray(event.related) &&
+      event.related.includes(edge.to)
+    );
+  });
+}
+
+function findBlockingDependencyCycles(edges) {
+  const graph = new Map();
+  for (const edge of edges.filter(isHardDependencyEdge)) {
+    if (!graph.has(edge.from)) {
+      graph.set(edge.from, []);
+    }
+    graph.get(edge.from).push(edge.to);
+  }
+  const cycles = [];
+  const visiting = new Set();
+  const visited = new Set();
+  const stack = [];
+  function visit(node) {
+    if (visiting.has(node)) {
+      const start = stack.indexOf(node);
+      cycles.push([...stack.slice(start), node]);
+      return;
+    }
+    if (visited.has(node)) {
+      return;
+    }
+    visiting.add(node);
+    stack.push(node);
+    for (const next of graph.get(node) || []) {
+      visit(next);
+    }
+    stack.pop();
+    visiting.delete(node);
+    visited.add(node);
+  }
+  for (const node of graph.keys()) {
+    visit(node);
+  }
+  return cycles;
 }
 
 function claimStory(context, options) {
@@ -2236,6 +3152,29 @@ function recordSyncEvent(context, options) {
     run: attribution.run,
   });
   output(options, { status: "recorded", event: traceEvent }, [`Recorded sync ${event}`]);
+}
+
+function initializeDependencyGraph(context, options = {}) {
+  ensurePlanningDirectories(context);
+  const graphPath = dependencyGraphPath(context);
+  if (fs.existsSync(graphPath) && !options.force) {
+    return readJson(graphPath);
+  }
+  const attribution = options.attribution || buildAttribution(context, {}, "dependency.graph.init");
+  const graph = {
+    schema_version: context.config.schema_version,
+    status: "approved",
+    edges: [],
+    updated_at: now(),
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  writeJsonFile(graphPath, graph, { force: true });
+  return graph;
 }
 
 function initializeOutputContracts(context, options = {}) {
@@ -2812,7 +3751,10 @@ function buildCache(context) {
   const stories = readAllStories(context);
   const templateResolution = buildTemplateResolution(registry);
   const storyRequirementGraph = buildStoryRequirementGraph(stories);
-  const dependencyGraph = buildStoryDependencyGraph(stories);
+  const dependencyGraph = {
+    approved: readDependencyGraph(context, { missingOk: true }),
+    derived_story_links: buildStoryDependencyGraph(stories),
+  };
   const artifactFingerprints = buildArtifactFingerprints(context, registry);
   const outputResolutions = {};
   const artifactTypes = collectOutputArtifactTypes(context, registry);
@@ -3147,6 +4089,9 @@ function collectKnowledgeSourceFiles(context) {
     "traces",
     "handoffs",
     "output-contracts",
+    "work-items",
+    "work-breakdown",
+    "dependencies",
     "assumptions",
     "risks",
     "locks",
@@ -3581,6 +4526,8 @@ function buildOrchestrationSnapshot(context) {
       const claimPath = path.join(storiesRoot, entry, "claim.json");
       const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
       const lastTrace = readLastTraceEvent(context, entry);
+      const dependencyStatus = buildDependencyStatus(context, story.id || entry);
+      const blockers = inferStoryBlockers(context, story, claim, dependencyStatus);
       return {
         id: story.id || entry,
         title: story.title || entry,
@@ -3589,8 +4536,10 @@ function buildOrchestrationSnapshot(context) {
         contract_id: story.contract_id || null,
         claim,
         last_trace: lastTrace,
-        orchestration_state: inferStoryOrchestrationState(context, story, claim),
-        blockers: inferStoryBlockers(context, story, claim),
+        dependency_edges: dependencyStatus.edges,
+        warnings: dependencyStatus.warnings,
+        orchestration_state: inferStoryOrchestrationState(context, story, claim, blockers),
+        blockers,
       };
     })
     .filter(Boolean)
@@ -3615,14 +4564,14 @@ function buildOrchestrationSnapshot(context) {
   };
 }
 
-function inferStoryOrchestrationState(context, story, claim) {
+function inferStoryOrchestrationState(context, story, claim, blockers = null) {
   if (claim && claim.status === "active") {
     return isExpired(claim.expires_at) ? "stale" : "claimed";
   }
-  return inferStoryBlockers(context, story, claim).length > 0 ? "blocked" : "available";
+  return (blockers || inferStoryBlockers(context, story, claim)).length > 0 ? "blocked" : "available";
 }
 
-function inferStoryBlockers(context, story, claim) {
+function inferStoryBlockers(context, story, claim, dependencyStatus = null) {
   const blockers = [];
   if (story.id && story.__folder_id && story.id !== story.__folder_id) {
     blockers.push(`story id ${story.id} does not match folder ${story.__folder_id}`);
@@ -3639,6 +4588,7 @@ function inferStoryBlockers(context, story, claim) {
   if (claim && claim.status === "active" && isExpired(claim.expires_at)) {
     blockers.push("active claim is expired");
   }
+  blockers.push(...(dependencyStatus || buildDependencyStatus(context, story.id)).blockers);
   return blockers;
 }
 
@@ -4073,6 +5023,7 @@ function validateContracts(context, report, contractIds = null) {
     }
     validateContractOutputRefs(context, report, contract, label);
     validateExecutionPolicy(context, contract, label, report);
+    validateCapabilityBindings(contract, label, report);
     report.checked.push(label);
   }
 }
@@ -4346,7 +5297,54 @@ function validateStory(context, storyId, report) {
   if ((story.phase === "release" || story.status === "release") && !traceEvents.some((event) => event.type === "release")) {
     report.errors.push(`Story ${storyId} is in release but has no release trace`);
   }
+  validateStoryBreakdown(context, story, report);
+  validateStoryDependencies(context, story, report);
   report.checked.push(`story ${storyId}`);
+}
+
+function validateStoryBreakdown(context, story, report) {
+  const breakdowns = readBreakdowns(context);
+  const storyRefs = new Set([story.id]);
+  const referenced = breakdowns.filter((breakdown) =>
+    (breakdown.items || []).some((item) => item.type === "story" && storyRefs.has(item.id)) ||
+    (story.work_breakdown_id && breakdown.id === story.work_breakdown_id),
+  );
+  if (referenced.length === 0) {
+    return;
+  }
+  const implementationLike = ["implementation", "in_progress", "review", "validation", "release", "done"].includes(String(story.status)) ||
+    ["implementation", "validation", "release"].includes(String(story.phase));
+  for (const breakdown of referenced) {
+    const label = `breakdown ${breakdown.id}`;
+    if (breakdown.status !== "approved") {
+      const severity = report.strict && implementationLike ? "errors" : "warnings";
+      report[severity].push(`Story ${story.id} references ${label} but it is not approved`);
+      continue;
+    }
+    if (!isApprovedRecordFresh(breakdown)) {
+      report.errors.push(`Story ${story.id} references ${label} but its approval is stale; re-approve the breakdown`);
+    }
+  }
+}
+
+function validateStoryDependencies(context, story, report) {
+  const graph = readDependencyGraph(context, { missingOk: true });
+  const relevant = (graph.edges || []).filter((edge) => edge.from === story.id);
+  if (relevant.length === 0) {
+    return;
+  }
+  for (const edge of relevant) {
+    const state = inspectDependencyEdge(context, edge, story);
+    if (!state.satisfied) {
+      const severity = report.strict && state.blocking ? "errors" : "warnings";
+      report[severity].push(`Story ${story.id} dependency ${state.message}`);
+    }
+  }
+  for (const cycle of findBlockingDependencyCycles(graph.edges || [])) {
+    if (cycle.includes(story.id)) {
+      report.errors.push(`Story ${story.id} is part of blocking dependency cycle: ${cycle.join(" -> ")}`);
+    }
+  }
 }
 
 function validateClaim(context, storyId, claim, report) {
@@ -4807,6 +5805,17 @@ Usage:
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]
   agentic-sdlc story handoff close --id handoff-id [--status closed|accepted|cancelled]
+  agentic-sdlc story deps --id ST-001 [--json]
+  agentic-sdlc work item create --type epic|task --id id --title title
+      [--parent id] [--story ST-001] [--requirement REQ-001]
+  agentic-sdlc breakdown policy show
+  agentic-sdlc breakdown policy set [--delivery-unit story] [--strict-gate-unit story]
+  agentic-sdlc breakdown propose --id id --requirement REQ-001 --item story:ST-001
+  agentic-sdlc breakdown approve --id id --actor-type human|ci
+  agentic-sdlc breakdown status [--requirement REQ-001]
+  agentic-sdlc dependency propose --id id --edge from:to:type:blocks:required_state
+  agentic-sdlc dependency approve --id id --actor-type human|ci
+  agentic-sdlc dependency status [--story ST-001]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -4869,6 +5878,15 @@ Contract execution policy options:
                          Built-in levels: inherit, minimal, low, medium, high.
   --execution-note text  Record a note about model or reasoning selection.
                          Repeatable.
+  --capability-policy-json json
+                         Attach contract capability policy JSON.
+  --capability-policy-file path
+                         Read capability policy JSON from a canonical file.
+  --capability-binding-json json
+                         Attach one capability binding JSON object. Repeatable.
+  --capability-binding-file path
+                         Read one capability binding from a canonical file.
+                         Binding files must not point to cache/indexes.
   --approval-evidence path
                          Attach canonical approval evidence and content hash.
                          Repeatable. Must not point to cache/indexes.
