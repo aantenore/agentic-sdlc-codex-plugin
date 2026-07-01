@@ -60,6 +60,13 @@
         "type": "string"
       }
     },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Human-readable alias for acceptance_criteria. acceptance_criteria remains the canonical gate field."
+    },
     "audit": {
       "type": "object",
       "properties": {

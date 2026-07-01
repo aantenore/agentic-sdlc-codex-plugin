@@ -301,17 +301,17 @@ node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view bus
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view dev --json
 node bin/agentic-sdlc.mjs report activity --root <project> --since 12h --view agent-verbose --story ST-001
 node bin/agentic-sdlc.mjs approval requests --root <project> --story ST-001 --json
-node bin/agentic-sdlc.mjs report query --root <project> --text "dimmi tutte le modifiche fatte da me" --json
+node bin/agentic-sdlc.mjs report query --root <project> --text "show all changes made by me" --json
 node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical-report-query-json>' --json
 ```
 
 Activity reports reconstruct what happened from canonical trace files only. Business view focuses on decisions, validation, risk, handoffs, implementation, and release. Dev view includes evidence, branch/SHA, related IDs, and source lines. Agent-verbose view includes raw trace, git, and run metadata for audit.
 
-Use `approval requests` before continuing when a baseline, output template, contract clarification, contract approval, or canonical output link needs human agreement. The command is intentionally summary-first: agents should present the request list to the user and stop until the user approves, answers, or asks for changes.
+Use `approval requests` before continuing when a baseline, output template, contract clarification, contract approval, or canonical output link needs human agreement. The command is intentionally user-facing and returns `assistant_message`: agents should present what must be reviewed, why it matters, what approval means, and what will happen next, then stop until the user approves, answers, or asks for changes.
 
 Use `report query` for broader natural-language history questions. Codex or another LLM should normalize the user request into `schemas/report-query.schema.json`; the CLI then filters canonical KB records deterministically. Supported subjects are `activity`, `stories`, `story_steps`, `outputs`, `contracts`, `handoffs`, `work_items`, `approvals`, `tests`, and `all`.
 
-Example normalized query for "tutte le modifiche eseguite da me":
+Example normalized query for "all changes made by me":
 
 ```json
 {
@@ -325,7 +325,7 @@ Example normalized query for "tutte le modifiche eseguite da me":
 }
 ```
 
-Example normalized query for "tutte le modifiche fatte da Codex su mia richiesta":
+Example normalized query for "all changes made by Codex at my request":
 
 ```json
 {
@@ -340,7 +340,7 @@ Example normalized query for "tutte le modifiche fatte da Codex su mia richiesta
 }
 ```
 
-Example normalized query for "tutte le storie funzionali nuove degli ultimi 10 giorni":
+Example normalized query for "all new functional stories from the last 10 days":
 
 ```json
 {

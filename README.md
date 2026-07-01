@@ -149,7 +149,7 @@ node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary 
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "Add the requested workflow"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
 node bin/agentic-sdlc.mjs report activity --since 3d --view business --out .sdlc/reports/activity.md
-node bin/agentic-sdlc.mjs report query --text "dimmi tutte le modifiche fatte da me" --json
+node bin/agentic-sdlc.mjs report query --text "show all changes made by me" --json
 node bin/agentic-sdlc.mjs report query --query-json '{"subjects":["stories"],"time":{"since":"10d","until":"now"},"filters":{"text":["functional"]}}'
 node bin/agentic-sdlc.mjs task start --intent-json '{"requested_action":"implement_story","confidence":0.95,"referenced_entities":[{"type":"story","id":"ST-001"}],"provided_artifacts":[],"missing_context":[],"proposed_phase":"implementation","artifact_type":null,"skip_phases":[]}'
 node bin/agentic-sdlc.mjs gate check --story ST-001 --out .sdlc/reports/ST-001-gate-report.json
@@ -252,13 +252,15 @@ Recommended workflow:
 
 Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If there is no approved output template for that type, propose one and stop for user agreement before creating a contract that references it. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts must include `--output-ref artifact-type:template-id:mode` by default; `contract create` rejects missing story output refs and refs to draft or missing templates unless an explicit migration/clarification override is used. `output link` requires the story contract to be approved and fresh. Strict gates require those refs to be satisfied by output links.
 
-Use `approval requests --story <id>` whenever a gate or route needs human input. It returns the pending baseline, output-template, contract clarification, contract approval, and output-link actions with a summary and suggested command. Agents should show this summary to the user and stop until the user approves, answers, or requests changes.
+Use `approval requests --story <id>` whenever a gate or route needs human input. It returns an `assistant_message` plus the pending baseline, output-template, contract clarification, contract approval, and output-link actions with a natural-language explanation: what to review, why it matters, what approval means, when to ask for changes, and the suggested command. Agents should show this message to the user and stop until the user approves, answers, or requests changes.
 
 Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regenerated and must not be treated as the source of truth. `output resolve` verifies cached recommendations against canonical KB files and rejects tampered cache results.
 
 ## Activity, Handoff, And KB Scale
 
 `story complete-step` creates a story-local completion record under `.sdlc/stories/<story-id>/steps/`, requires an approved fresh story contract, appends a `story.complete-step` trace, and verifies linked output artifacts when `--type` is supplied. `story prepare-handoff` writes a handoff package with the story state, claim, completed steps, output links, dependencies, handoffs, and recent traces, then can release the active claim so another chat or machine can continue.
+
+Story files store acceptance criteria in the canonical `acceptance_criteria` array and also expose `acceptance` as a human-readable alias, so tools and agents do not show a null acceptance field after `story create --acceptance`.
 
 ```mermaid
 flowchart LR

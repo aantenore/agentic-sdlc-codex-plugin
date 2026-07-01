@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.7";
+const VERSION = "0.4.8";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -899,11 +899,42 @@ function dedupeTaskStartDecision(decision) {
   decision.blocking_reasons = Array.from(new Set(decision.blocking_reasons));
   decision.questions = Array.from(new Set(decision.questions));
   decision.next_commands = Array.from(new Set(decision.next_commands));
+  decision.assistant_message = renderTaskStartAssistantMessage(decision);
   return decision;
+}
+
+function renderTaskStartAssistantMessage(decision) {
+  if (decision.approval_requests?.length > 0) {
+    return renderApprovalRequestsAssistantMessage(decision.approval_requests);
+  }
+  if (decision.status === "ready_to_execute") {
+    return [
+      "The SDLC step is ready to start.",
+      `Route: ${decision.route}.`,
+      decision.phase ? `Phase: ${decision.phase}.` : null,
+      decision.story_id ? `Story: ${decision.story_id}.` : null,
+      decision.contract_id ? `Contract: ${decision.contract_id}.` : null,
+    ].filter(Boolean).join("\n");
+  }
+  const lines = [
+    "I am stopping here because I need your confirmation or clarification before proceeding.",
+    "You do not need to know SDLC internals: I will explain what is missing and what you can answer.",
+    "",
+    decision.questions?.length ? "What I need:" : null,
+    ...(decision.questions || []).map((question) => `- ${question}`),
+    decision.blocking_reasons?.length ? `Blocking reason(s): ${decision.blocking_reasons.join(", ")}.` : null,
+    decision.next_commands?.length ? "Useful commands for the agent:" : null,
+    ...(decision.next_commands || []).map((command) => `- ${command}`),
+    "",
+    'You can answer naturally, for example "proceed", "I approve", or "change this point...".',
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function formatTaskStartDecision(decision) {
   const lines = [
+    decision.assistant_message || null,
+    "",
     `Task start: ${decision.status}`,
     `Execution allowed: ${decision.execution_allowed ? "yes" : "no"}`,
     `Route: ${decision.route}`,
@@ -923,13 +954,13 @@ function formatTaskStartDecision(decision) {
   }
   if (decision.approval_requests.length > 0) {
     lines.push("Human input requests:");
-    lines.push(...decision.approval_requests.map((request) => `- ${request.summary}`));
+    lines.push(...decision.approval_requests.map((request) => `- ${request.title || request.summary}: ${request.user_prompt || request.summary}`));
   }
   if (decision.next_commands.length > 0) {
     lines.push("Next commands:");
     lines.push(...decision.next_commands.map((command) => `- ${command}`));
   }
-  return lines;
+  return lines.filter((line) => line !== null && line !== undefined);
 }
 
 function buildRouteDecision(context, options) {
@@ -1467,12 +1498,12 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
     });
   }
 
-  const acceptanceReady = Array.isArray(story.acceptance_criteria) && story.acceptance_criteria.length > 0;
+  const acceptanceReady = storyAcceptanceCriteria(story).length > 0;
   addRouteCheck(
     decision,
     "story_acceptance_criteria",
     acceptanceReady ? "passed" : "failed",
-    acceptanceReady ? `${story.acceptance_criteria.length} criteria` : "No acceptance criteria",
+    acceptanceReady ? `${storyAcceptanceCriteria(story).length} criteria` : "No acceptance criteria",
   );
   if (!acceptanceReady) {
     return finalizeAskRoute(decision, {
@@ -2374,6 +2405,7 @@ function showApprovalRequests(context, options) {
   ensureInitialized(context);
   const storyId = options.story ? normalizeId(String(options.story)) : null;
   const requests = collectApprovalRequests(context, { storyId });
+  const assistantMessage = renderApprovalRequestsAssistantMessage(requests);
   output(
     options,
     {
@@ -2381,15 +2413,11 @@ function showApprovalRequests(context, options) {
       story_id: storyId,
       status: requests.length ? "needs_user_input" : "clear",
       generated_at: now(),
+      assistant_message: assistantMessage,
       requests,
       source_paths: Array.from(new Set(requests.flatMap((request) => request.sources || []))).sort(),
     },
-    requests.length
-      ? [
-          `Human input required: ${requests.length}`,
-          ...requests.map((request) => `${request.id}: ${request.summary}`),
-        ]
-      : ["No pending approval or agreement requests."],
+    assistantMessage.split("\n"),
   );
 }
 
@@ -2402,6 +2430,25 @@ function collectApprovalRequests(context, options = {}) {
     ...collectContractApprovalRequests(context, storyId),
     ...collectOutputLinkActionRequests(context, storyId),
   ];
+}
+
+function renderApprovalRequestsAssistantMessage(requests) {
+  if (!requests.length) {
+    return [
+      "There are no pending SDLC approvals or clarifications.",
+      "I can continue with the next operational step when needed.",
+    ].join("\n");
+  }
+  return [
+    "I am stopping here because I need your explicit decision before proceeding.",
+    "You do not need to know SDLC internals: below I explain what I am asking for, why it matters, what approval means, and when you should ask for changes instead.",
+    "",
+    ...requests.flatMap((request, index) => formatHumanApprovalRequest(request, index + 1)),
+    "You can answer in natural language, for example:",
+    '- "I approve item 1"',
+    '- "change the contract: I also want X"',
+    '- "I do not approve yet; first clarify Y"',
+  ].join("\n");
 }
 
 function collectBaselineApprovalRequests(context) {
@@ -2418,6 +2465,24 @@ function collectBaselineApprovalRequests(context) {
         `.sdlc/baseline/${baseline.id}.json`,
         `.sdlc/baseline/${baseline.id}-current-state.md`,
       ].filter((source) => fs.existsSync(path.join(context.root, source))),
+      ...humanApprovalFields({
+        title: `Initial baseline ${baseline.id}`,
+        why_needed: "The baseline turns the observed project state into trusted context for later SDLC steps.",
+        review_items: [
+          baseline.summary ? `Summary: ${baseline.summary}` : null,
+          baseline.repository_snapshot?.detected_stack?.length
+            ? `Detected stack: ${baseline.repository_snapshot.detected_stack.map((item) => item.name || item.type).filter(Boolean).join(", ")}`
+            : null,
+          baseline.source_paths?.length ? `Sources reviewed: ${baseline.source_paths.join(", ")}` : null,
+          baseline.open_questions?.length ? `Open questions: ${baseline.open_questions.join(" ")}` : null,
+        ],
+        approval_meaning: "If you approve it, these inferred facts can be used as canonical context by the plugin and agents.",
+        approve_if: "Approve only if the project description and sources are accurate enough to guide the work.",
+        change_if: "Ask for changes if important sources are missing, the stack is wrong, or you do not want this state treated as canonical.",
+        after_approval: `Then the approval can be recorded with baseline approve for ${baseline.id}.`,
+        user_prompt: `Do you approve baseline ${baseline.id} as the initial canonical project state, or should anything be corrected first?`,
+        approval_phrase: `I approve baseline ${baseline.id} as the canonical project state.`,
+      }),
       suggested_question: `Review baseline ${baseline.id}. Do you approve it as canonical, or should it be revised?`,
       suggested_command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`,
     }));
@@ -2441,6 +2506,22 @@ function collectOutputTemplateApprovalRequests(context, storyId = null) {
       subject_status: template.status || null,
       artifact_type: template.type || null,
       sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
+      ...humanApprovalFields({
+        title: `Output format ${template.id}`,
+        why_needed: "Before durable outputs are produced or linked, we need to agree on the format agents will use.",
+        review_items: [
+          `Output type: ${template.type || "unknown"}`,
+          template.summary ? `Summary: ${template.summary}` : null,
+          template.path ? `Template: ${template.path}` : null,
+          template.path ? `Preview: ${readProjectFileExcerpt(context, template.path, 240) || "unavailable"}` : null,
+        ],
+        approval_meaning: "If you approve it, this template becomes the official format for that output type.",
+        approve_if: "Approve if the structure, detail level, and sections fit the outputs you want to receive.",
+        change_if: "Ask for changes if you want different sections, more detail, less detail, or a different format.",
+        after_approval: `Then contracts can reference ${template.id} as an approved output format.`,
+        user_prompt: `Do you approve output format ${template.id} for ${template.type} outputs, or should the structure change?`,
+        approval_phrase: `I approve output format ${template.id} for ${template.type}.`,
+      }),
       suggested_question: `Do you approve output format ${template.id} for ${template.type}?`,
       suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
     }));
@@ -2460,6 +2541,17 @@ function collectContractApprovalRequests(context, storyId = null) {
       story_id: contract.story_id || null,
       phase: contract.phase || null,
       sources: [contract.__relative_path],
+      ...humanApprovalFields({
+        title: `${capitalizeLabel(contract.phase)} contract ${contract.id}`,
+        why_needed: "The contract defines what the agent may do in this phase, the boundaries, expected outputs, and validation criteria.",
+        review_items: describeContractForHuman(contract),
+        approval_meaning: "If you approve it, you authorize the agent to proceed under this contract. You are not automatically approving final outputs.",
+        approve_if: "Approve if the objective, context, boundaries, tools, and expected outputs match what you want the agent to do.",
+        change_if: "Ask for changes if the scope is ambiguous, criteria are missing, outputs are not what you want, or you want to change how the work is done.",
+        after_approval: `Then the step can start, and outputs must still follow the approved template.`,
+        user_prompt: `Do you approve contract ${contract.id} for the ${contract.phase} phase, or should scope, outputs, or criteria change?`,
+        approval_phrase: `I approve contract ${contract.id} for the ${contract.phase} phase.`,
+      }),
       suggested_question: `Review contract ${contract.id}. Do you approve this phase contract, or should it be changed?`,
       suggested_command: `agentic-sdlc contract approve --id ${contract.id} --actor-type human --approval-source explicit-user --summary "<user-approved contract>"`,
     }));
@@ -2484,6 +2576,19 @@ function collectContractClarificationRequests(context, storyId = null) {
       phase: contract.phase || null,
       gaps: gaps.map((gap) => gap.code),
       sources: [contract.__relative_path],
+      ...humanApprovalFields({
+        title: `Missing information for ${contract.id}`,
+        why_needed: "The contract does not yet have enough context to guide the phase without inventing details.",
+        review_items: [
+          ...describeContractForHuman(contract),
+          ...gaps.map((gap) => `Clarify: ${gap.summary}`),
+        ],
+        approval_meaning: "This is not an approval yet: it needs an answer or a contract change.",
+        approve_if: null,
+        change_if: "Answer the missing questions or ask the agent to rewrite the contract with more context.",
+        after_approval: "After clarification, the contract can be proposed again for explicit approval.",
+        user_prompt: `Before approving ${contract.id}, please clarify: ${gaps.map((gap) => gap.question).join(" ")}`,
+      }),
       suggested_question: `Before approving ${contract.id}, please provide: ${gaps.map((gap) => gap.question).join(" ")}`,
     }));
 }
@@ -2519,6 +2624,22 @@ function collectOutputLinkActionRequests(context, storyId = null) {
           template_id: ref.template_id,
           mode: ref.mode,
           sources: [contract.__relative_path],
+          ...humanApprovalFields({
+            title: `Canonical ${ref.artifact_type} output for ${contract.story_id}`,
+            why_needed: "The contract requires a durable output, but the canonical file representing the phase result is not linked yet.",
+            review_items: [
+              `Story: ${contract.story_id}`,
+              `Output type: ${ref.artifact_type}`,
+              `Required template: ${ref.template_id}`,
+              `Mode: ${ref.mode}`,
+              `Contract: ${contract.id}`,
+            ],
+            approval_meaning: "Choosing the canonical file makes that artifact verifiable by later gates.",
+            approve_if: "Provide the file only when the output exists and is the official source you want to use.",
+            change_if: "Ask for changes if the output does not exist yet, does not follow the template, or does not represent the correct result.",
+            after_approval: "After the link, the gate can verify hashes, template, mode, and covered requirements.",
+            user_prompt: `Which file should be the canonical ${ref.artifact_type} output for ${contract.story_id}?`,
+          }),
           suggested_question: `Which ${ref.artifact_type} artifact should be canonical for ${contract.story_id}?`,
           suggested_command: `agentic-sdlc output link --story ${contract.story_id} --type ${ref.artifact_type} --artifact <path> --template ${ref.template_id} --mode ${ref.mode} --requirement <REQ-ID>`,
         });
@@ -2526,6 +2647,95 @@ function collectOutputLinkActionRequests(context, storyId = null) {
     }
   }
   return requests;
+}
+
+function humanApprovalFields(fields = {}) {
+  const reviewItems = normalizeListValue(fields.review_items, [])
+    .map((item) => (item === null || item === undefined ? null : String(item).trim()))
+    .filter(Boolean);
+  return {
+    title: fields.title || null,
+    why_needed: fields.why_needed || null,
+    review_items: reviewItems,
+    approval_meaning: fields.approval_meaning || null,
+    approve_if: fields.approve_if || null,
+    change_if: fields.change_if || null,
+    after_approval: fields.after_approval || null,
+    user_prompt: fields.user_prompt || null,
+    approval_phrase: fields.approval_phrase || null,
+  };
+}
+
+function formatHumanApprovalRequest(request, index = null) {
+  const prefix = index === null ? "-" : `${index}.`;
+  const lines = [
+    `${prefix} ${request.title || request.summary}`,
+    request.why_needed ? `   Why: ${request.why_needed}` : null,
+    request.review_items?.length ? "   What to review:" : null,
+    ...(request.review_items || []).slice(0, 6).map((item) => `   - ${item}`),
+    request.approval_meaning ? `   What approval means: ${request.approval_meaning}` : null,
+    request.approve_if ? `   Approve if: ${request.approve_if}` : null,
+    request.change_if ? `   Ask for changes if: ${request.change_if}` : null,
+    request.after_approval ? `   After: ${request.after_approval}` : null,
+    request.user_prompt ? `   Question: ${request.user_prompt}` : null,
+    request.approval_phrase ? `   Useful approval phrase: "${request.approval_phrase}"` : null,
+    request.suggested_command ? `   Command: ${request.suggested_command}` : null,
+    "",
+  ];
+  return lines.filter((line) => line !== null && line !== undefined);
+}
+
+function describeContractForHuman(contract) {
+  const contextualization = contract.contextualization || {};
+  const contextSources = Array.isArray(contextualization.context_sources)
+    ? contextualization.context_sources.map((source) => source.path).filter(Boolean)
+    : [];
+  const answeredQuestions = Array.isArray(contextualization.questions)
+    ? contextualization.questions
+        .filter((question) => question.status === "answered")
+        .map((question) => `${question.question}: ${question.answer}`)
+    : [];
+  const openQuestions = Array.isArray(contextualization.questions)
+    ? contextualization.questions
+        .filter((question) => question.status !== "answered")
+        .map((question) => question.question)
+    : [];
+  const outputRefs = Array.isArray(contract.output_contract_refs)
+    ? contract.output_contract_refs.map((ref) => `${ref.artifact_type}:${ref.template_id}:${ref.mode}`)
+    : [];
+  return [
+    contract.story_id ? `Story: ${contract.story_id}` : "Scope: project",
+    contract.purpose ? `Purpose: ${contract.purpose}` : null,
+    contextualization.summary ? `Context: ${contextualization.summary}` : null,
+    contextSources.length ? `Context sources: ${contextSources.join(", ")}` : null,
+    answeredQuestions.length ? `Recorded answers: ${answeredQuestions.join("; ")}` : null,
+    openQuestions.length ? `Open questions: ${openQuestions.join("; ")}` : null,
+    outputRefs.length ? `Expected outputs: ${outputRefs.join(", ")}` : null,
+    contract.validation?.length ? `Validation: ${contract.validation.slice(0, 4).join("; ")}` : null,
+    contract.allowed_tools?.length ? `Allowed tools: ${contract.allowed_tools.slice(0, 6).join(", ")}` : null,
+  ].filter(Boolean);
+}
+
+function readProjectFileExcerpt(context, relativePath, maxLength = 220) {
+  try {
+    const filePath = resolveProjectFilePath(context, relativePath, { mustExist: true, fileOnly: true });
+    return compactText(fs.readFileSync(filePath, "utf8"), maxLength);
+  } catch {
+    return null;
+  }
+}
+
+function compactText(value, maxLength = 220) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function capitalizeLabel(value) {
+  const text = String(value || "phase");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function collectStoryTemplateIds(context, storyId, registry = null) {
@@ -3783,6 +3993,7 @@ function createStory(context, options) {
     phase,
     contract_id: options.contract ? String(options.contract) : null,
     work_breakdown_id: options.breakdown ? normalizeId(String(options.breakdown)) : null,
+    acceptance: acceptanceCriteria,
     acceptance_criteria: acceptanceCriteria,
     links: {
       requirements: normalizeListOption(options.requirement),
@@ -3841,6 +4052,7 @@ function createWorkItem(context, options) {
     parent_id: options.parent ? normalizeId(String(options.parent)) : null,
     story_id: options.story ? normalizeId(String(options.story)) : null,
     requirement_ids: normalizeListOption(options.requirement).map(normalizeId),
+    acceptance: normalizeListOption(options.acceptance),
     acceptance_criteria: normalizeListOption(options.acceptance),
     created_at: now(),
     updated_at: now(),
@@ -6373,7 +6585,7 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
     },
     examples: [
       {
-        natural_language: "tutte le modifiche fatte da me",
+        natural_language: "all changes made by me",
         query: {
           intent: "find_changes",
           confidence: 0.9,
@@ -6383,7 +6595,7 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
         },
       },
       {
-        natural_language: "tutte le storie funzionali nuove degli ultimi 10 giorni",
+        natural_language: "all new functional stories from the last 10 days",
         query: {
           intent: "find_new_functional_stories",
           confidence: 0.9,
@@ -8280,6 +8492,7 @@ function gateCheck(context, options) {
   report.approval_requests = collectApprovalRequests(context, {
     storyId: scope === "story" ? storyId : null,
   });
+  report.assistant_message = renderApprovalRequestsAssistantMessage(report.approval_requests);
 
   if (report.errors.length > 0) {
     report.status = "failed";
@@ -8300,14 +8513,34 @@ function gateCheck(context, options) {
       `Human input requests: ${report.approval_requests.length}`,
       ...report.errors.map((item) => `ERROR ${item}`),
       ...report.warnings.map((item) => `WARN ${item}`),
-      ...report.approval_requests.map((item) => `ASK ${item.summary}`),
+      ...report.approval_requests.flatMap((item, index) => formatHumanApprovalRequest(item, index + 1).map((line) => `ASK ${line}`)),
     ],
   );
 }
 
 function readStory(context, storyId) {
   const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
-  return fs.existsSync(storyPath) ? readJson(storyPath) : null;
+  return fs.existsSync(storyPath) ? normalizeStoryRecord(readJson(storyPath)) : null;
+}
+
+function normalizeStoryRecord(story) {
+  if (!story || typeof story !== "object") {
+    return story;
+  }
+  const acceptanceCriteria = storyAcceptanceCriteria(story);
+  return {
+    ...story,
+    acceptance: Array.isArray(story.acceptance) ? story.acceptance : acceptanceCriteria,
+    acceptance_criteria: acceptanceCriteria,
+  };
+}
+
+function storyAcceptanceCriteria(story) {
+  const canonical = Array.isArray(story?.acceptance_criteria) ? story.acceptance_criteria : [];
+  if (canonical.length > 0) {
+    return canonical;
+  }
+  return normalizeListValue(story?.acceptance, []);
 }
 
 function writeGateReport(context, report, options) {
@@ -8340,13 +8573,27 @@ function renderGateReportMarkdown(report) {
     "",
     "## Human Input Requests",
     ...(report.approval_requests?.length
-      ? report.approval_requests.map((item) => `- ${item.summary}`)
+      ? report.approval_requests.flatMap((item, index) => formatMarkdownApprovalRequest(item, index + 1))
       : ["- None"]),
     "",
     "## Checked",
     ...(report.checked.length ? report.checked.map((item) => `- ${item}`) : ["- None"]),
     "",
   ].join("\n");
+}
+
+function formatMarkdownApprovalRequest(request, index = null) {
+  const prefix = index === null ? "-" : `${index}.`;
+  const lines = [
+    `${prefix} ${request.title || request.summary}`,
+    request.why_needed ? `   - Why: ${request.why_needed}` : null,
+    request.review_items?.length ? "   - What to review:" : null,
+    ...(request.review_items || []).slice(0, 6).map((item) => `     - ${item}`),
+    request.approval_meaning ? `   - What approval means: ${request.approval_meaning}` : null,
+    request.user_prompt ? `   - Question: ${request.user_prompt}` : null,
+    request.suggested_command ? `   - Command: \`${request.suggested_command}\`` : null,
+  ];
+  return lines.filter(Boolean);
 }
 
 function showStatus(context, options) {
@@ -8478,7 +8725,7 @@ function inferStoryBlockers(context, story, claim, dependencyStatus = null) {
   if (story.id && story.__folder_id && story.id !== story.__folder_id) {
     blockers.push(`story id ${story.id} does not match folder ${story.__folder_id}`);
   }
-  if (!Array.isArray(story.acceptance_criteria) || story.acceptance_criteria.length === 0) {
+  if (storyAcceptanceCriteria(story).length === 0) {
     blockers.push("missing acceptance criteria");
   }
   if (story.contract_id) {
@@ -8617,7 +8864,8 @@ function buildStoryHandoffPackage(context, storyId, handoffId, options = {}) {
       phase: story.phase,
       contract_id: story.contract_id || null,
       requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
-      acceptance_criteria: Array.isArray(story.acceptance_criteria) ? story.acceptance_criteria : [],
+      acceptance: storyAcceptanceCriteria(story),
+      acceptance_criteria: storyAcceptanceCriteria(story),
     },
     active_claim: fs.existsSync(claimPath) ? readJson(claimPath) : null,
     completed_steps: readStoryStepRecords(context, storyId),
@@ -9486,7 +9734,7 @@ function validateStory(context, storyId, report) {
     report.errors.push(`Story ${storyId} is missing story.json`);
     return;
   }
-  const story = readJson(storyPath);
+  const story = normalizeStoryRecord(readJson(storyPath));
   for (const field of context.config.gate_policy.story_required_fields) {
     if (story[field] === undefined || story[field] === null || story[field] === "") {
       report.errors.push(`Story ${storyId} is missing required field '${field}'`);
@@ -9501,7 +9749,7 @@ function validateStory(context, storyId, report) {
   if (!context.config.phases[story.phase]) {
     report.errors.push(`Story ${storyId} has unknown phase '${story.phase}'`);
   }
-  if (!Array.isArray(story.acceptance_criteria) || story.acceptance_criteria.length === 0) {
+  if (storyAcceptanceCriteria(story).length === 0) {
     const severity = story.status === "draft" ? "warnings" : "errors";
     report[severity].push(`Story ${storyId} has no acceptance criteria`);
   }
