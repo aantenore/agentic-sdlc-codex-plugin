@@ -10,6 +10,7 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - A Git-first knowledge base for requirements, stories, decisions, assumptions, risks, tests, traces, and releases.
 - Story-scoped workspaces so multiple agents can work in parallel without overwriting each other.
 - Work breakdown agreements for project-local epics, stories, tasks, and approved decomposition choices.
+- Contextual capability discovery for project/story profiles, skill/MCP/tool/model recommendations, install approvals, and technical decision matrices.
 - Contract capability policies for agreed skills, MCPs, tools, bindings, permissions, and approval boundaries.
 - Approved dependency graphs that control orchestration, stale downstream work, and strict gates.
 - Append-only trace logs for decisions, tests, implementation events, gate reviews, and release notes.
@@ -67,6 +68,12 @@ flowchart TB
 
 Import this repository as a Codex plugin. The plugin root is the repository root and contains `.codex-plugin/plugin.json`.
 
+For local dogfooding when the Codex app does not expose a plugin import command, link the skill directly so future Codex sessions load the repo copy instead of a stale copy:
+
+```bash
+ln -s "$(pwd)/skills/agentic-sdlc" "$HOME/.codex/skills/agentic-sdlc"
+```
+
 After import, invoke the skill with:
 
 ```text
@@ -86,6 +93,10 @@ node bin/agentic-sdlc.mjs breakdown propose --id BD-REQ-001 --requirement REQ-00
 node bin/agentic-sdlc.mjs breakdown approve --id BD-REQ-001 --actor-type human
 node bin/agentic-sdlc.mjs dependency propose --id DEP-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
 node bin/agentic-sdlc.mjs dependency approve --id DEP-001 --actor-type human
+node bin/agentic-sdlc.mjs capability profile propose --id CAP-PROFILE-ST-001 --story ST-001 --phase analysis --context-file .sdlc/requirements/REQ-001.md
+node bin/agentic-sdlc.mjs capability profile approve --id CAP-PROFILE-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability recommend --id CAP-REC-ST-001 --profile CAP-PROFILE-ST-001 --available-capabilities-file .sdlc/decisions/available-capabilities.json
+node bin/agentic-sdlc.mjs capability approve --id CAP-REC-ST-001 --actor-type human
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
 node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human
@@ -117,6 +128,8 @@ node bin/agentic-sdlc.mjs route decide --json --intent-json '{
 ```
 
 Raw text passed with `--text` is treated only as untrusted context. The CLI never keyword-matches natural language; low confidence, missing context, phase skips, new templates, duplicate outputs, and implementation starts are routed to confirmation or clarification.
+
+For technical analysis, the route layer also checks whether an approved capability profile exists. If it does not, the returned next commands point to `capability profile propose` before contract creation, so architecture decisions can use project-specific evidence and approved skill/MCP/tool choices.
 
 ## Collaboration Model
 
@@ -186,6 +199,31 @@ node bin/agentic-sdlc.mjs contract create \
 Model identifiers are stored as free-form Codex model IDs so the plugin does not need hardcoded model catalogs. Reasoning levels are configurable in `templates/sdlc-config.json`.
 
 Contracts can also carry a `capability_policy` and `capability_bindings`. Use these to agree which skills, MCPs, tools, concrete targets, permissions, and approval-required actions are allowed for the step. Required MCP/tool capabilities must either have a binding or remain as explicit open questions before strict gates pass.
+
+## Capability Discovery
+
+Capability discovery is the technical architect layer. Codex or another LLM can inspect the repo, `.sdlc/`, user files, and available skills/MCPs/tools, then submit canonical JSON. The CLI stores only validated project evidence under `.sdlc/capability-discovery/`; it does not infer technologies from user-language keywords.
+
+```mermaid
+flowchart LR
+  Context["Repo, KB, user files"] --> Profile["capability profile propose"]
+  Profile --> ProfileApproval["profile approve"]
+  Available["Installed capabilities snapshot"] --> Recommend["capability recommend"]
+  ProfileApproval --> Recommend
+  Recommend --> RecommendationApproval["capability approve"]
+  RecommendationApproval --> Contract["contract create --capability-recommendation"]
+  Contract --> Gate["gate check --strict"]
+```
+
+Use `--approve-install` only when the user or CI has explicitly approved installing missing capabilities. Without that approval, an install-required recommendation can be recorded but cannot be applied to a contract.
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --phase analysis \
+  --story ST-001 \
+  --context-summary "Technical analysis for the approved workflow." \
+  --capability-recommendation CAP-REC-ST-001
+```
 
 ## How Agents Interact
 

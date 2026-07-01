@@ -576,6 +576,210 @@ test("capability binding files cannot come from derived cache directories", () =
   );
 });
 
+test("capability profiles and recommendations can be approved and applied to contracts", () => {
+  const project = tmpProject("capability-discovery");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+  story(project, "ST-001");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--phase",
+    "analysis",
+    "--context-file",
+    "package.json",
+  ]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  const recommendation = JSON.stringify({
+    recommendations: [
+      { type: "skill", name: "agentic-sdlc", availability: "available", install_required: false },
+      { type: "mcp", name: "repo", availability: "available", install_required: false }
+    ],
+    policy_patch: {
+      skills: { required: ["agentic-sdlc"], allowed: [], forbidden: [] },
+      mcp: { required: ["repo"], allowed: [], forbidden: [] },
+      tools: { required: [], allowed: [], forbidden: [] },
+      approval_required_for: []
+    },
+    bindings: [
+      { type: "mcp", name: "repo", binding_id: "repo-main", target: { repo: "local" }, permissions: ["read"] }
+    ],
+    execution_policy_suggestions: { reasoning: "high", notes: ["Use high reasoning for architecture tradeoffs"] },
+    decision_matrix: [{ option: "local repo", recommendation: "use" }]
+  });
+  mustRun([
+    "capability",
+    "recommend",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-ST-001",
+    "--profile",
+    "CAP-PROFILE-ST-001",
+    "--recommendation-json",
+    recommendation,
+  ]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", "--actor-type", "human"]);
+  const contract = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analyze with approved capability discovery.",
+    "--capability-recommendation",
+    "CAP-REC-ST-001",
+    "--json",
+  ]).stdout).contract;
+  assert.equal(contract.capability_policy.mcp.required.includes("repo"), true);
+  assert.equal(contract.capability_bindings.some((binding) => binding.name === "repo"), true);
+  assert.equal(contract.execution_policy.reasoning.level, "high");
+  assert.equal(contract.capability_recommendation_refs[0].id, "CAP-REC-ST-001");
+});
+
+test("install-required capability recommendation blocks strict gate without install approval", () => {
+  const project = tmpProject("capability-install");
+  initProject(project);
+  story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
+  mustRun(["capability", "profile", "propose", "--root", project, "--id", "CAP-PROFILE-ST-001", "--story", "ST-001"]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  mustRun([
+    "capability",
+    "recommend",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-INSTALL",
+    "--profile",
+    "CAP-PROFILE-ST-001",
+    "--recommendation-json",
+    JSON.stringify({
+      recommendations: [{ type: "skill", name: "missing-skill", availability: "install_required", install_required: true }],
+      policy_patch: {
+        skills: { required: ["missing-skill"], allowed: [], forbidden: [] },
+        mcp: { required: [], allowed: [], forbidden: [] },
+        tools: { required: [], allowed: [], forbidden: [] },
+        approval_required_for: ["skill:missing-skill"]
+      }
+    }),
+  ]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--actor-type", "human"]);
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analyze with missing install approval.",
+    "--capability-recommendation",
+    "CAP-REC-INSTALL",
+  ], /without install approval/);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--actor-type", "human", "--approve-install"]);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analyze with install-approved capability.",
+    "--capability-recommendation",
+    "CAP-REC-INSTALL",
+    "--force",
+  ]);
+});
+
+test("stale capability recommendation source fails strict gate", () => {
+  const project = tmpProject("capability-stale");
+  initProject(project);
+  story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
+  const source = writeArtifact(project, ".sdlc/requirements/REQ-001.md", "# Requirement\n");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--context-file",
+    source,
+  ]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "recommend", "--root", project, "--id", "CAP-REC-ST-001", "--profile", "CAP-PROFILE-ST-001"]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", "--actor-type", "human"]);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analyze with approved recommendation.",
+    "--capability-recommendation",
+    "CAP-REC-ST-001",
+    "--force",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", "--actor-type", "human"]);
+  fs.appendFileSync(path.join(project, source), "\nchanged\n");
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /changed after record creation/);
+});
+
+test("technical analysis route suggests capability discovery when no profile exists", () => {
+  const project = tmpProject("capability-route");
+  initProject(project);
+  story(project, "ST-001");
+  const decision = routeDecision(project, {
+    requested_action: "technical_analysis",
+    proposed_phase: "analysis",
+    artifact_type: "technical-analysis",
+    referenced_entities: [{ type: "story", id: "ST-001" }],
+  });
+  assert.ok(decision.blocking_reasons.includes("capability_profile_missing"));
+  assert.ok(decision.next_commands.some((command) => command.includes("capability profile propose")));
+});
+
+test("cache rebuild includes capability discovery sources", () => {
+  const project = tmpProject("capability-cache-source");
+  initProject(project);
+  mustRun(["capability", "profile", "propose", "--root", project, "--id", "CAP-PROJECT"]);
+  const cache = JSON.parse(mustRun(["cache", "rebuild", "--root", project, "--json"]).stdout);
+  assert.equal(cache.status, "rebuilt");
+  const cacheFile = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));
+  assert.equal(cacheFile.source_paths.some((sourcePath) => sourcePath.includes("capability-discovery/profiles/CAP-PROJECT.json")), true);
+});
+
 test("dependency graph blocks orchestration and strict gate until upstream is satisfied", () => {
   const project = tmpProject("dependencies-block");
   initProject(project);

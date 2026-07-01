@@ -40,8 +40,32 @@ Never store project contracts or project KB state inside the plugin installation
    ```
 
 6. Before creating a contract, gather project-specific context from `.sdlc/`, user-provided files, repository files, or direct user answers. If critical context is missing, ask concise questions instead of inventing details.
-7. Decide the contract execution policy and capability policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model`, `--reasoning`, capability policies, or capability bindings only when the user asks or the project KB mandates them.
-8. Create or update a phase contract before doing phase work. Pass known context into the contract:
+7. Before technical analysis or a contract that depends on project-specific tooling, profile the project/story and propose capability recommendations. Do not keyword-match the user's language. Use repo files, `.sdlc/`, user files, or canonical JSON normalized by Codex:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs capability profile propose \
+     --root <target-project> \
+     --id CAP-PROFILE-ST-001 \
+     --story ST-001 \
+     --phase analysis \
+     --context-file .sdlc/requirements/REQ-001.md
+
+   node <plugin-root>/bin/agentic-sdlc.mjs capability profile approve \
+     --root <target-project> \
+     --id CAP-PROFILE-ST-001 \
+     --actor-type human
+
+   node <plugin-root>/bin/agentic-sdlc.mjs capability recommend \
+     --root <target-project> \
+     --id CAP-REC-ST-001 \
+     --profile CAP-PROFILE-ST-001 \
+     --available-capabilities-file .sdlc/decisions/available-capabilities.json
+   ```
+
+   Ask for approval before installing missing skills/plugins or using external, write, production, tenant, workspace, endpoint, or secret-bearing targets. Use `capability approve --approve-install` only when that installation approval was explicitly granted.
+
+8. Decide the contract execution policy and capability policy with the user only when it matters. By default, leave model and reasoning as `inherit`, which means spawned Codex agents reuse the main Codex thread settings. Set `--model`, `--reasoning`, capability policies, capability bindings, or `--capability-recommendation` only when the user asks, the approved capability recommendation says so, or the project KB mandates them.
+9. Create or update a phase contract before doing phase work. Pass known context and approved capability recommendations into the contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs contract create \
@@ -50,10 +74,11 @@ Never store project contracts or project KB state inside the plugin installation
      --context-file .sdlc/requirements/REQ-001.md \
      --context-summary "Project-specific summary" \
      --qa "Who is the target user?|Back-office operators" \
+     --capability-recommendation CAP-REC-ST-001 \
      --output-ref functional-analysis:functional-analysis-v1:new
    ```
 
-9. Before creating a durable output artifact, resolve the project-wide output contract:
+10. Before creating a durable output artifact, resolve the project-wide output contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
@@ -66,7 +91,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human
    ```
 
-10. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
+11. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -79,20 +104,20 @@ Never store project contracts or project KB state inside the plugin installation
      --requirement REQ-001
    ```
 
-11. For implementation work or parallel worker work, inspect the current orchestration state before editing:
+12. For implementation work or parallel worker work, inspect the current orchestration state before editing:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs orchestrate status --root <target-project> --json
    ```
 
-12. Create and claim a story before editing code. Include actor/run/thread attribution when available:
+13. Create and claim a story before editing code. Include actor/run/thread attribution when available:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..."
    node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-13. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
+14. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
@@ -100,17 +125,17 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-14. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+15. Use `story handoff` when passing work between chats or phases, and close it when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
 
-15. Run a strict gate check before closing a phase or merging implementation work:
+16. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
    ```
 
-16. Release claims and locks when work is complete or handed off.
+17. Release claims and locks when work is complete or handed off.
 
-17. Rebuild/search the local cache and KB index when context retrieval is needed:
+18. Rebuild/search the local cache and KB index when context retrieval is needed:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs cache rebuild --root <target-project>
@@ -136,6 +161,7 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify relevant contracts exist under `.sdlc/contracts/`;
 - verify durable outputs are linked in `.sdlc/output-contracts/registry.json` with approved templates;
 - verify approved breakdowns and dependency graph entries are satisfied when the story uses them;
+- verify capability profiles and recommendations referenced by contracts are approved, fresh, and not missing install approvals;
 - verify contract capability policies have required bindings or explicit open questions;
 - verify story work is under `.sdlc/stories/<story-id>/`;
 - verify decisions and evidence are captured in `.sdlc/traces/`;

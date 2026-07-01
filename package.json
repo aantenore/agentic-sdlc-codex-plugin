@@ -1,6 +1,6 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex plugin for contract-driven agentic SDLC with a shared Git-first knowledge base.",
   "type": "module",
   "bin": {

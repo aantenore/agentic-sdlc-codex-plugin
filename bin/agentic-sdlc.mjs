@@ -6,14 +6,14 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
-const BOOLEAN_OPTIONS = new Set(["force", "help", "json", "preserve-status", "strict", "version"]);
+const BOOLEAN_OPTIONS = new Set(["approve-install", "force", "help", "json", "preserve-status", "strict", "version"]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
 const LOCK_STATUSES = new Set(["active", "released", "cancelled", "expired"]);
@@ -24,6 +24,7 @@ const CAPABILITY_TYPES = new Set(["skills", "mcp", "tools"]);
 const CAPABILITY_GROUPS = new Set(["required", "allowed", "forbidden"]);
 const DEPENDENCY_TYPES = new Set(["blocks", "requires_artifact", "requires_contract", "related", "same_requirement", "parent_epic"]);
 const DEPENDENCY_BLOCK_SCOPES = new Set(["analysis", "design", "implementation", "validation", "release", "none"]);
+const CAPABILITY_RECOMMENDATION_AVAILABILITY = new Set(["available", "missing", "unknown", "install_required"]);
 const ROUTE_REQUIRED_INTENT_FIELDS = [
   "requested_action",
   "confidence",
@@ -56,6 +57,8 @@ const ROUTE_DEFAULT_ROUTES = new Set([
   "create_contract",
   "confirm_phase_skip",
   "claim_and_implement",
+  "discover_capabilities",
+  "technical_decision",
   "validate_story",
   "release_story",
 ]);
@@ -159,6 +162,30 @@ function main() {
     }
     if (command === "dependency" && subcommand === "status") {
       showDependencyStatus(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "profile" && rest[0] === "propose") {
+      proposeCapabilityProfile(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "profile" && rest[0] === "approve") {
+      approveCapabilityProfile(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "profile" && rest[0] === "status") {
+      showCapabilityStatus(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "recommend") {
+      proposeCapabilityRecommendation(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "approve") {
+      approveCapabilityRecommendation(context, parsed.options);
+      return;
+    }
+    if (command === "capability" && subcommand === "status") {
+      showCapabilityStatus(context, parsed.options);
       return;
     }
     if (command === "handoff" && subcommand === "close") {
@@ -543,6 +570,10 @@ function buildRouteDecision(context, options) {
       return decideClaimAndImplementRoute(context, decision, policy, actionConfig, confidenceOutcome);
     case "classify_artifact":
       return decideClassifyArtifactRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "discover_capabilities":
+      return decideCapabilityDiscoveryRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "technical_decision":
+      return decideTechnicalDecisionRoute(context, decision, policy, actionConfig, confidenceOutcome);
     case "validate_story":
       return decideStoryGateRoute(context, decision, policy, actionConfig, confidenceOutcome, "validate_story");
     case "release_story":
@@ -632,6 +663,19 @@ function defaultRouteActions() {
     decompose_stories: { route: "decompose_stories", confirmation_key: "create_story" },
     create_story: { route: "decompose_stories", confirmation_key: "create_story" },
     create_contract: { route: "create_contract" },
+    discover_capabilities: {
+      route: "discover_capabilities",
+      confirmation_key: "discover_capabilities",
+    },
+    capability_discovery: {
+      route: "discover_capabilities",
+      confirmation_key: "discover_capabilities",
+    },
+    technical_decision: {
+      route: "technical_decision",
+      confirmation_key: "create_canonical_artifact",
+      default_artifact_type: "technical-decision-matrix",
+    },
     implement_story: {
       route: "claim_and_implement",
       confirmation_key: "start_implementation",
@@ -868,6 +912,9 @@ function decideCreateContractRoute(context, decision, policy, actionConfig, conf
   decision.route = "create_contract";
   const storyId = routeStoryId(decision.intent, policy);
   const phase = decision.intent.proposed_phase || "design";
+  if (phase === "analysis" || phase === "design") {
+    addCapabilityDiscoveryRouteChecks(context, decision, storyId, phase);
+  }
   if (storyId) {
     const story = readStory(context, storyId);
     addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
@@ -996,6 +1043,9 @@ function decideClassifyArtifactRoute(context, decision, policy, actionConfig, co
   }
   decision.route = "classify_artifact";
   const storyId = routeStoryId(decision.intent, policy);
+  if (artifactType === "technical-analysis" || artifactType === "technical-decision-matrix") {
+    addCapabilityDiscoveryRouteChecks(context, decision, storyId, decision.intent.proposed_phase || "analysis");
+  }
   if (storyId) {
     const story = readStory(context, storyId);
     addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
@@ -1058,6 +1108,49 @@ function decideClassifyArtifactRoute(context, decision, policy, actionConfig, co
   }
 
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideCapabilityDiscoveryRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "discover_capabilities";
+  const storyId = routeStoryId(decision.intent, policy);
+  const phase = decision.intent.proposed_phase || "analysis";
+  addCapabilityDiscoveryRouteChecks(context, decision, storyId, phase);
+  const subject = storyId ? ` --story ${storyId}` : "";
+  const phaseOption = phase ? ` --phase ${phase}` : "";
+  decision.next_commands.push(
+    `agentic-sdlc capability profile propose --id CAP-PROFILE-${storyId || "PROJECT"}${subject}${phaseOption} --context-file <path>`,
+  );
+  decision.next_commands.push(
+    `agentic-sdlc capability recommend --id CAP-REC-${storyId || "PROJECT"} --profile CAP-PROFILE-${storyId || "PROJECT"} --available-capabilities-file <path>`,
+  );
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideTechnicalDecisionRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "technical_decision";
+  const storyId = routeStoryId(decision.intent, policy);
+  addCapabilityDiscoveryRouteChecks(context, decision, storyId, decision.intent.proposed_phase || "analysis");
+  decision.next_commands.push("agentic-sdlc capability status --json");
+  decision.next_commands.push("agentic-sdlc contract create --phase analysis --capability-recommendation <id>");
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function addCapabilityDiscoveryRouteChecks(context, decision, storyId, phase) {
+  const profiles = findApprovedCapabilityProfiles(context, { storyId, phase });
+  addRouteCheck(
+    decision,
+    "approved_capability_profile",
+    profiles.length > 0 ? "passed" : "warning",
+    profiles.length > 0 ? profiles.map((profile) => profile.id).join(", ") : "No approved capability profile for this subject",
+  );
+  if (profiles.length === 0) {
+    pushAllUnique(decision.blocking_reasons, ["capability_profile_missing"]);
+    const subject = storyId ? ` --story ${storyId}` : "";
+    const phaseOption = phase ? ` --phase ${phase}` : "";
+    decision.next_commands.push(
+      `agentic-sdlc capability profile propose --id CAP-PROFILE-${storyId || "PROJECT"}${subject}${phaseOption} --context-file <path>`,
+    );
+  }
 }
 
 function decideStoryGateRoute(context, decision, policy, actionConfig, confidenceOutcome, route) {
@@ -1503,6 +1596,10 @@ function createContract(context, options) {
   const id = normalizeId(
     options.id || (storyId ? `contract-${storyId}-${phase}` : `contract-${phase}-${shortDate()}`),
   );
+  const recommendationContext = loadCapabilityRecommendationsForContract(context, options);
+  const explicitCapabilityPolicy = loadCapabilityPolicy(context, options);
+  const explicitCapabilityBindings = loadCapabilityBindings(context, options);
+  const executionSuggestions = recommendationContext.execution_policy_suggestions;
   const contract = buildContract(context, phase, {
     id,
     story_id: storyId,
@@ -1521,11 +1618,19 @@ function createContract(context, options) {
     allowed_tools: normalizeListOption(options.tool),
     kb_writes: normalizeListOption(options["kb-write"]),
     metrics: normalizeListOption(options.metric),
-    model: options.model,
-    reasoning: options.reasoning,
-    execution_notes: normalizeRawListOption(options["execution-note"]),
-    capability_policy: loadCapabilityPolicy(context, options),
-    capability_bindings: loadCapabilityBindings(context, options),
+    model: options.model === undefined ? executionSuggestions.model : options.model,
+    reasoning: options.reasoning === undefined ? executionSuggestions.reasoning : options.reasoning,
+    execution_notes: mergeList(
+      executionSuggestions.notes,
+      normalizeRawListOption(options["execution-note"]),
+    ),
+    capability_policy: mergeCapabilityPolicies(recommendationContext.policy_patch, explicitCapabilityPolicy),
+    capability_bindings: [
+      ...recommendationContext.bindings,
+      ...explicitCapabilityBindings,
+    ],
+    capability_recommendation_refs: recommendationContext.refs,
+    questions: mergeList(normalizeRawListOption(options.question), recommendationContext.open_questions),
     audit_options: options,
     audit_action: "contract.create",
   });
@@ -1637,6 +1742,7 @@ function buildContract(context, phase, overrides = {}) {
     execution_policy: buildExecutionPolicy(context, overrides),
     capability_policy: buildCapabilityPolicy(overrides.capability_policy),
     capability_bindings: normalizeCapabilityBindings(overrides.capability_bindings || []),
+    capability_recommendation_refs: normalizeCapabilityRecommendationRefs(overrides.capability_recommendation_refs || []),
     contextualization: {
       summary: overrides.context_summary ? String(overrides.context_summary) : null,
       context_sources: contextSources,
@@ -1832,6 +1938,23 @@ function normalizeCapabilityBindings(bindings) {
   return bindings.map((binding, index) => normalizeCapabilityBinding(binding, index));
 }
 
+function normalizeCapabilityRecommendationRefs(refs) {
+  if (!Array.isArray(refs)) {
+    fail("capability_recommendation_refs must be an array");
+  }
+  return refs.map((ref, index) => {
+    if (!ref || typeof ref !== "object" || Array.isArray(ref)) {
+      fail(`capability recommendation ref ${index + 1} must be a JSON object`);
+    }
+    return {
+      id: normalizeId(ref.id),
+      profile_id: ref.profile_id ? normalizeId(ref.profile_id) : null,
+      path: String(ref.path || "").trim(),
+      approved_content_hash: String(ref.approved_content_hash || "").trim(),
+    };
+  });
+}
+
 function normalizeCapabilityBinding(binding, index = 0) {
   if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
     fail(`capability binding ${index + 1} must be a JSON object`);
@@ -1860,7 +1983,7 @@ function normalizeCapabilityBinding(binding, index = 0) {
   };
 }
 
-function validateCapabilityBindings(contract, label, report) {
+function validateCapabilityBindings(context, contract, label, report) {
   const policy = contract.capability_policy || buildCapabilityPolicy(null);
   validateCapabilityPolicy(policy, `${label} capability_policy`, report);
   const bindings = Array.isArray(contract.capability_bindings) ? contract.capability_bindings : [];
@@ -1890,6 +2013,7 @@ function validateCapabilityBindings(contract, label, report) {
       report.errors.push(`${label} requires ${type} capability '${name}' but has no binding or open contract question`);
     }
   }
+  validateCapabilityBindingTargets(context, normalizedBindings, label, report);
 }
 
 function capabilityHasBinding(bindings, type, name) {
@@ -1903,6 +2027,159 @@ function contractHasCapabilityOpenQuestion(contract, type, name) {
     const text = `${question.question || ""} ${question.id || ""} ${question.label || ""}`.toLowerCase();
     return question.status !== "answered" && text.includes(type.toLowerCase()) && text.includes(String(name).toLowerCase());
   });
+}
+
+function validateCapabilityBindingTargets(context, bindings, label, report) {
+  for (const binding of bindings) {
+    const target = binding.target || {};
+    for (const [key, value] of Object.entries(target)) {
+      if (!String(key).toLowerCase().includes("path") || typeof value !== "string") {
+        continue;
+      }
+      const resolved = resolveProjectFilePath(context, value, { mustExist: false });
+      if (isDerivedArtifactPath(context, resolved)) {
+        report.errors.push(`${label} capability binding ${binding.binding_id} target.${key} points to derived cache/index path ${value}`);
+      }
+    }
+  }
+}
+
+function validateContractCapabilityRecommendations(context, report, contract, label) {
+  const refs = Array.isArray(contract.capability_recommendation_refs) ? contract.capability_recommendation_refs : [];
+  if (refs.length === 0) {
+    return;
+  }
+  for (const rawRef of refs) {
+    let ref;
+    try {
+      ref = normalizeCapabilityRecommendationRefs([rawRef])[0];
+    } catch (error) {
+      report.errors.push(`${label} ${error.message}`);
+      continue;
+    }
+    const recommendationPath = capabilityRecommendationPath(context, ref.id);
+    if (!fs.existsSync(recommendationPath)) {
+      report.errors.push(`${label} references missing capability recommendation ${ref.id}`);
+      continue;
+    }
+    const recommendation = readJson(recommendationPath);
+    const recommendationLabel = `capability recommendation ${ref.id}`;
+    if (recommendation.status !== "approved") {
+      report.errors.push(`${label} references ${recommendationLabel} but it is not approved`);
+    }
+    if (!isApprovedRecordFresh(recommendation)) {
+      report.errors.push(`${label} references ${recommendationLabel} but its approval is stale`);
+    }
+    const latestApproval = latestApprovedRecordApproval(recommendation);
+    if (ref.approved_content_hash && latestApproval?.approved_content_hash !== ref.approved_content_hash) {
+      report.errors.push(`${label} references ${recommendationLabel} with an outdated approved_content_hash`);
+    }
+    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, recommendationLabel, { collectOnly: true })) {
+      const severity = report.strict ? "errors" : "warnings";
+      report[severity].push(issue);
+    }
+    const profilePath = capabilityProfilePath(context, recommendation.profile_id);
+    if (!recommendation.profile_id || !fs.existsSync(profilePath)) {
+      report.errors.push(`${label} ${recommendationLabel} references missing profile ${recommendation.profile_id || "unknown"}`);
+    } else {
+      const profile = readJson(profilePath);
+      if (profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+        report.errors.push(`${label} ${recommendationLabel} profile ${profile.id} is not approved or is stale`);
+      }
+      for (const issue of validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true })) {
+        const severity = report.strict ? "errors" : "warnings";
+        report[severity].push(issue);
+      }
+    }
+    for (const item of recommendation.recommendations || []) {
+      if (item.install_required && !item.install_approved) {
+        const severity = report.strict ? "errors" : "warnings";
+        report[severity].push(`${label} uses install-required capability ${item.type}:${item.name} without install approval`);
+      }
+    }
+    report.checked.push(`${label} capability recommendation ${ref.id}`);
+  }
+}
+
+function mergeCapabilityPolicies(...policies) {
+  const merged = buildCapabilityPolicy(null);
+  for (const policy of policies.filter(Boolean)) {
+    const normalized = buildCapabilityPolicy(policy);
+    for (const type of CAPABILITY_TYPES) {
+      for (const group of CAPABILITY_GROUPS) {
+        pushAllUnique(merged[type][group], normalized[type][group]);
+      }
+    }
+    pushAllUnique(merged.approval_required_for, normalized.approval_required_for);
+  }
+  validateCapabilityPolicy(merged, "capability_policy");
+  return merged;
+}
+
+function loadCapabilityRecommendationsForContract(context, options) {
+  const ids = normalizeRawListOption(options["capability-recommendation"]).map(normalizeId);
+  const result = {
+    refs: [],
+    policy_patch: null,
+    bindings: [],
+    open_questions: [],
+    execution_policy_suggestions: {
+      model: undefined,
+      reasoning: undefined,
+      notes: [],
+    },
+  };
+  for (const id of ids) {
+    const recommendationPath = capabilityRecommendationPath(context, id);
+    if (!fs.existsSync(recommendationPath)) {
+      fail(`Capability recommendation ${id} does not exist`);
+    }
+    const recommendation = readJson(recommendationPath);
+    validateApprovedCapabilityRecommendationForUse(context, recommendation, `capability recommendation ${id}`);
+    result.refs.push({
+      id,
+      profile_id: recommendation.profile_id || null,
+      path: toProjectPath(context, recommendationPath),
+      approved_content_hash: latestApprovedRecordApproval(recommendation)?.approved_content_hash || null,
+    });
+    result.policy_patch = mergeCapabilityPolicies(result.policy_patch, recommendation.policy_patch || recommendation.capability_policy || null);
+    result.bindings.push(...normalizeCapabilityBindings(recommendation.bindings || recommendation.capability_bindings || []));
+    pushAllUnique(result.open_questions, normalizeCapabilityOpenQuestions(recommendation.open_questions, id));
+    const suggestions = normalizeExecutionPolicySuggestions(recommendation.execution_policy_suggestions || {});
+    result.execution_policy_suggestions.model = result.execution_policy_suggestions.model || suggestions.model;
+    result.execution_policy_suggestions.reasoning = result.execution_policy_suggestions.reasoning || suggestions.reasoning;
+    pushAllUnique(result.execution_policy_suggestions.notes, suggestions.notes);
+  }
+  return result;
+}
+
+function normalizeCapabilityOpenQuestions(questions, recommendationId) {
+  if (!Array.isArray(questions)) {
+    return [];
+  }
+  return questions
+    .map((question) => {
+      if (typeof question === "string") {
+        return question;
+      }
+      if (question && typeof question === "object") {
+        return question.question || question.prompt || question.label || question.id;
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .map((question) => `Capability recommendation ${recommendationId}: ${question}`);
+}
+
+function normalizeExecutionPolicySuggestions(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { model: undefined, reasoning: undefined, notes: [] };
+  }
+  return {
+    model: value.model && typeof value.model === "object" ? value.model.value || undefined : value.model || undefined,
+    reasoning: value.reasoning && typeof value.reasoning === "object" ? value.reasoning.level || undefined : value.reasoning || undefined,
+    notes: normalizeListValue(value.notes, []),
+  };
 }
 
 function buildAttribution(context, options = {}, action = "unknown") {
@@ -2483,6 +2760,279 @@ function showStoryDependencies(context, options) {
   showDependencyStatus(context, { ...options, story: requireOption(options, "id") });
 }
 
+function proposeCapabilityProfile(context, options) {
+  ensureInitialized(context);
+  ensureCapabilityDiscoveryDirectories(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const input = loadOptionalJsonInput(context, options, "profile-json", "profile-file", "Capability profile");
+  const contextFiles = normalizeRawListOption(options["context-file"]);
+  const attribution = buildAttribution(context, options, "capability.profile.propose");
+  const detectedStack = Array.isArray(input.detected_stack) && input.detected_stack.length > 0
+    ? input.detected_stack
+    : detectProjectStack(context);
+  const evidence = [
+    ...normalizeCapabilityEvidence(input.evidence),
+    ...buildCapabilityEvidenceFromContextFiles(context, contextFiles),
+    ...detectedStack.map((item) => ({
+      type: "detected_stack",
+      path: item.source_path || null,
+      summary: `${item.type || "technology"}:${item.name || "unknown"}`,
+    })),
+  ];
+  const sourcePaths = normalizeCapabilitySourcePaths(context, [
+    ...normalizeListValue(input.source_paths, []),
+    ...evidence.map((item) => item.path).filter(Boolean),
+  ]);
+  const profile = {
+    id,
+    schema_version: context.config.schema_version,
+    status: "proposed",
+    subject: normalizeCapabilitySubject(options, input.subject || {}),
+    application_profile: normalizeObject(input.application_profile),
+    detected_stack: detectedStack,
+    constraints: mergeList(normalizeListValue(input.constraints, []), normalizeListOption(options.constraint)),
+    integrations: normalizeListValue(input.integrations, []),
+    evidence,
+    confidence: normalizeConfidence(input.confidence ?? options.confidence ?? 0.7),
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashes(context, sourcePaths),
+    approvals: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      proposed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const profilePath = capabilityProfilePath(context, id);
+  writeJsonFile(profilePath, profile, { force: Boolean(options.force) });
+  appendTraceEvent(context, profile.subject.story_id || null, {
+    type: "decision",
+    summary: `Proposed capability profile ${id}`,
+    action: "capability.profile.propose",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, profilePath), ...sourcePaths],
+    related: [id, profile.subject.story_id, ...(profile.subject.requirement_ids || [])].filter(Boolean),
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "proposed", profile_path: profilePath, profile }, [`Proposed capability profile ${id}`]);
+}
+
+function approveCapabilityProfile(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const profilePath = capabilityProfilePath(context, id);
+  if (!fs.existsSync(profilePath)) {
+    fail(`Capability profile ${id} does not exist`);
+  }
+  const profile = readJson(profilePath);
+  const attribution = buildAttribution(context, options, "capability.profile.approve");
+  requireHumanOrCiActor(attribution, "Approving a capability profile");
+  validateCapabilityRecordSourceHashes(context, profile, `capability profile ${id}`, { failOnStale: true });
+  const approval = {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    profile_id: id,
+    status: "approved",
+    summary: getOptionString(options, "summary") || null,
+    approved_content_hash: hashApprovalSubject(profile),
+    hash_algorithm: "sha256:stable-json:v1",
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+  profile.status = "approved";
+  profile.approvals = Array.isArray(profile.approvals) ? profile.approvals : [];
+  profile.approvals.push(approval);
+  profile.updated_at = now();
+  profile.audit = {
+    ...(profile.audit || {}),
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(profilePath, profile, { force: true });
+  appendTraceEvent(context, profile.subject?.story_id || null, {
+    type: "gate",
+    summary: `Approved capability profile ${id}`,
+    action: "capability.profile.approve",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, profilePath)],
+    related: [id, profile.subject?.story_id].filter(Boolean),
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "approved", profile_path: profilePath, approval, profile }, [`Approved capability profile ${id}`]);
+}
+
+function proposeCapabilityRecommendation(context, options) {
+  ensureInitialized(context);
+  ensureCapabilityDiscoveryDirectories(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const profileId = normalizeId(requireOption(options, "profile"));
+  const profilePath = capabilityProfilePath(context, profileId);
+  if (!fs.existsSync(profilePath)) {
+    fail(`Capability profile ${profileId} does not exist`);
+  }
+  const profile = readJson(profilePath);
+  const input = loadOptionalJsonInput(context, options, "recommendation-json", "recommendation-file", "Capability recommendation");
+  const availableCapabilities = loadOptionalJsonInput(
+    context,
+    options,
+    "available-capabilities-json",
+    "available-capabilities-file",
+    "Available capabilities",
+  );
+  const attribution = buildAttribution(context, options, "capability.recommend");
+  const recommendations = normalizeCapabilityRecommendations(
+    input.recommendations || buildDefaultCapabilityRecommendations(profile, availableCapabilities),
+  );
+  const policyPatch = mergeCapabilityPolicies(
+    buildDefaultCapabilityPolicyPatch(recommendations),
+    input.policy_patch || input.capability_policy || null,
+  );
+  const bindings = normalizeCapabilityBindings(input.bindings || input.capability_bindings || []);
+  const sourcePaths = normalizeCapabilitySourcePaths(context, [
+    toProjectPath(context, profilePath),
+    ...normalizeListValue(input.source_paths, []),
+  ]);
+  const recommendation = {
+    id,
+    schema_version: context.config.schema_version,
+    status: "proposed",
+    profile_id: profileId,
+    profile_ref: {
+      path: toProjectPath(context, profilePath),
+      approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
+    },
+    recommendations,
+    available_capabilities: normalizeObject(availableCapabilities),
+    policy_patch: policyPatch,
+    bindings,
+    execution_policy_suggestions: normalizeExecutionPolicySuggestions(input.execution_policy_suggestions || {}),
+    decision_matrix: Array.isArray(input.decision_matrix) ? input.decision_matrix : [],
+    open_questions: Array.isArray(input.open_questions) ? input.open_questions : [],
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashes(context, sourcePaths),
+    approvals: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      proposed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  const recommendationPath = capabilityRecommendationPath(context, id);
+  writeJsonFile(recommendationPath, recommendation, { force: Boolean(options.force) });
+  appendTraceEvent(context, profile.subject?.story_id || null, {
+    type: "decision",
+    summary: `Proposed capability recommendation ${id}`,
+    action: "capability.recommend",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, recommendationPath), toProjectPath(context, profilePath)],
+    related: [id, profileId, profile.subject?.story_id].filter(Boolean),
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "proposed", recommendation_path: recommendationPath, recommendation }, [`Proposed capability recommendation ${id}`]);
+}
+
+function approveCapabilityRecommendation(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const recommendationPath = capabilityRecommendationPath(context, id);
+  if (!fs.existsSync(recommendationPath)) {
+    fail(`Capability recommendation ${id} does not exist`);
+  }
+  const recommendation = readJson(recommendationPath);
+  const attribution = buildAttribution(context, options, "capability.approve");
+  requireHumanOrCiActor(attribution, "Approving a capability recommendation");
+  const profile = readCapabilityProfile(context, recommendation.profile_id);
+  validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
+  validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${id}`, { failOnStale: true });
+  if (options["approve-install"]) {
+    recommendation.recommendations = (recommendation.recommendations || []).map((item) =>
+      item.install_required ? { ...item, install_approved: true, install_approved_at: now(), install_approved_by: attribution.actor } : item,
+    );
+  }
+  recommendation.profile_ref = {
+    path: toProjectPath(context, capabilityProfilePath(context, recommendation.profile_id)),
+    approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
+  };
+  const approval = {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    recommendation_id: id,
+    status: "approved",
+    summary: getOptionString(options, "summary") || null,
+    approved_content_hash: hashApprovalSubject(recommendation),
+    hash_algorithm: "sha256:stable-json:v1",
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+  recommendation.status = "approved";
+  recommendation.approvals = Array.isArray(recommendation.approvals) ? recommendation.approvals : [];
+  recommendation.approvals.push(approval);
+  recommendation.updated_at = now();
+  recommendation.audit = {
+    ...(recommendation.audit || {}),
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(recommendationPath, recommendation, { force: true });
+  appendTraceEvent(context, profile.subject?.story_id || null, {
+    type: "gate",
+    summary: `Approved capability recommendation ${id}`,
+    action: "capability.approve",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, recommendationPath)],
+    related: [id, recommendation.profile_id, profile.subject?.story_id].filter(Boolean),
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "approved", recommendation_path: recommendationPath, approval, recommendation }, [`Approved capability recommendation ${id}`]);
+}
+
+function showCapabilityStatus(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const profileId = options.profile ? normalizeId(String(options.profile)) : null;
+  const profiles = readCapabilityProfiles(context).filter((profile) => {
+    if (profileId && profile.id !== profileId) {
+      return false;
+    }
+    return !storyId || profile.subject?.story_id === storyId;
+  });
+  const profileIds = new Set(profiles.map((profile) => profile.id));
+  const recommendations = readCapabilityRecommendations(context).filter((recommendation) => {
+    if (profileId && recommendation.profile_id !== profileId) {
+      return false;
+    }
+    return !storyId || profileIds.has(recommendation.profile_id);
+  });
+  const status = {
+    profiles: profiles.map((profile) => capabilityRecordStatus(context, profile, `capability profile ${profile.id}`)),
+    recommendations: recommendations.map((recommendation) =>
+      capabilityRecordStatus(context, recommendation, `capability recommendation ${recommendation.id}`),
+    ),
+  };
+  output(
+    options,
+    status,
+    [
+      `Capability profiles: ${status.profiles.length}`,
+      ...status.profiles.map((profile) => `${profile.id}: ${profile.status}${profile.fresh ? "" : " (stale)"}`),
+      `Capability recommendations: ${status.recommendations.length}`,
+      ...status.recommendations.map((recommendation) => `${recommendation.id}: ${recommendation.status}${recommendation.fresh ? "" : " (stale)"}`),
+    ],
+  );
+}
+
 function ensurePlanningDirectories(context) {
   ensureDir(workItemsRoot(context));
   ensureDir(path.join(workItemsRoot(context), "epics"));
@@ -2501,6 +3051,387 @@ function workBreakdownRoot(context) {
 
 function dependenciesRoot(context) {
   return path.join(context.sdlcRoot, "dependencies");
+}
+
+function capabilityDiscoveryRoot(context) {
+  return path.join(context.sdlcRoot, "capability-discovery");
+}
+
+function capabilityProfilesRoot(context) {
+  return path.join(capabilityDiscoveryRoot(context), "profiles");
+}
+
+function capabilityRecommendationsRoot(context) {
+  return path.join(capabilityDiscoveryRoot(context), "recommendations");
+}
+
+function ensureCapabilityDiscoveryDirectories(context) {
+  ensureDir(capabilityDiscoveryRoot(context));
+  ensureDir(capabilityProfilesRoot(context));
+  ensureDir(capabilityRecommendationsRoot(context));
+}
+
+function capabilityProfilePath(context, id) {
+  return path.join(capabilityProfilesRoot(context), `${normalizeId(id)}.json`);
+}
+
+function capabilityRecommendationPath(context, id) {
+  return path.join(capabilityRecommendationsRoot(context), `${normalizeId(id)}.json`);
+}
+
+function readCapabilityProfile(context, id) {
+  const profilePath = capabilityProfilePath(context, id);
+  if (!fs.existsSync(profilePath)) {
+    fail(`Capability profile ${id} does not exist`);
+  }
+  return readJson(profilePath);
+}
+
+function readCapabilityProfiles(context) {
+  return safeReadDir(capabilityProfilesRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(capabilityProfilesRoot(context), name)))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+function readCapabilityRecommendations(context) {
+  return safeReadDir(capabilityRecommendationsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(capabilityRecommendationsRoot(context), name)))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+function loadOptionalJsonInput(context, options, inlineKey, fileKey, label) {
+  const inline = getOptionString(options, inlineKey);
+  const file = getOptionString(options, fileKey);
+  if (inline && file) {
+    fail(`Use only one of --${inlineKey} or --${fileKey}.`);
+  }
+  if (!inline && !file) {
+    return {};
+  }
+  try {
+    if (file) {
+      const filePath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
+      assertNotDerivedArtifact(context, filePath, label);
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    }
+    return JSON.parse(inline);
+  } catch (error) {
+    fail(`Invalid ${label} JSON: ${error.message}`);
+  }
+}
+
+function normalizeCapabilitySubject(options, subject) {
+  const requirementIds = mergeList(
+    normalizeListValue(subject.requirement_ids || subject.requirements, []),
+    normalizeListOption(options.requirement),
+  ).map(normalizeId);
+  return {
+    story_id: options.story ? normalizeId(String(options.story)) : subject.story_id ? normalizeId(subject.story_id) : null,
+    requirement_ids: requirementIds,
+    phase: options.phase ? normalizeRoutePhase(options.phase) : subject.phase ? normalizeRoutePhase(subject.phase) : null,
+    scope: String(options.scope || subject.scope || "project"),
+  };
+}
+
+function normalizeCapabilityEvidence(evidence) {
+  if (!Array.isArray(evidence)) {
+    return [];
+  }
+  return evidence
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .map((item) => ({
+      type: String(item.type || "evidence"),
+      path: item.path ? String(item.path) : null,
+      summary: item.summary ? String(item.summary) : null,
+      sha256: item.sha256 ? String(item.sha256) : null,
+    }));
+}
+
+function buildCapabilityEvidenceFromContextFiles(context, contextFiles) {
+  return contextFiles.map((rawPath) => {
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, resolved, "Capability context file");
+    const content = fs.readFileSync(resolved);
+    return {
+      type: "context_file",
+      path: toProjectPath(context, resolved),
+      sha256: hashBuffer(content),
+      size_bytes: content.length,
+      excerpt: normalizeText(content.toString("utf8")).slice(0, 600),
+    };
+  });
+}
+
+function normalizeCapabilitySourcePaths(context, rawPaths) {
+  const result = [];
+  for (const rawPath of rawPaths) {
+    if (!rawPath) {
+      continue;
+    }
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: false });
+    assertNotDerivedArtifact(context, resolved, "Capability source path");
+    result.push(toProjectPath(context, resolved));
+  }
+  return Array.from(new Set(result)).sort();
+}
+
+function buildSourceHashes(context, sourcePaths) {
+  const hashes = {};
+  for (const sourcePath of sourcePaths || []) {
+    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      hashes[sourcePath] = hashFile(resolved);
+    }
+  }
+  return hashes;
+}
+
+function normalizeObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function normalizeConfidence(value) {
+  const confidence = Number(value);
+  if (!Number.isFinite(confidence)) {
+    fail("Capability confidence must be a number between 0 and 1");
+  }
+  return clamp01(confidence);
+}
+
+function normalizeCapabilityRecommendations(recommendations) {
+  if (!Array.isArray(recommendations)) {
+    fail("Capability recommendations must be an array");
+  }
+  return recommendations.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      fail(`Capability recommendation ${index + 1} must be a JSON object`);
+    }
+    const type = normalizeCapabilityItemType(item.type);
+    const name = String(item.name || "").trim();
+    if (!name) {
+      fail(`Capability recommendation ${index + 1} is missing name`);
+    }
+    const availability = normalizeCapabilityAvailability(item.availability || item.status || "unknown");
+    const installRequired = Boolean(item.install_required || availability === "install_required");
+    return {
+      type,
+      name,
+      availability: installRequired ? "install_required" : availability,
+      purpose: item.purpose ? String(item.purpose) : null,
+      rationale: item.rationale ? String(item.rationale) : null,
+      risk: item.risk ? String(item.risk) : null,
+      permissions: normalizeListValue(item.permissions, []),
+      install_required: installRequired,
+      install_approved: Boolean(item.install_approved),
+      approval_required: item.approval_required !== undefined ? Boolean(item.approval_required) : installRequired,
+    };
+  });
+}
+
+function normalizeCapabilityItemType(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!["skill", "mcp", "tool", "plugin", "connector", "model"].includes(normalized)) {
+    fail(`Unknown capability recommendation type '${value}'`);
+  }
+  return normalized;
+}
+
+function normalizeCapabilityAvailability(value) {
+  const normalized = String(value || "unknown").trim().toLowerCase();
+  if (!CAPABILITY_RECOMMENDATION_AVAILABILITY.has(normalized)) {
+    fail(`Unknown capability availability '${value}'`);
+  }
+  return normalized;
+}
+
+function buildDefaultCapabilityRecommendations(profile, availableCapabilities) {
+  const availableSkills = new Set(normalizeAvailableCapabilityNames(availableCapabilities, "skills"));
+  const recommendations = [
+    {
+      type: "skill",
+      name: "agentic-sdlc",
+      availability: availableSkills.has("agentic-sdlc") ? "available" : "unknown",
+      purpose: "Govern the work through contracts, gates, traces, and shared project KB.",
+      rationale: "Every SDLC step should be traceable and reusable across Codex chats.",
+      install_required: false,
+    },
+  ];
+  const hasNode = (profile.detected_stack || []).some((item) => ["node", "npm", "package-json"].includes(item.name) || item.type === "node");
+  if (hasNode) {
+    recommendations.push({
+      type: "tool",
+      name: "test-runner",
+      availability: "available",
+      purpose: "Run the repository's Node checks and tests.",
+      rationale: "package.json is present and exposes the project test surface.",
+      permissions: ["read", "execute"],
+      install_required: false,
+    });
+  }
+  return recommendations;
+}
+
+function normalizeAvailableCapabilityNames(availableCapabilities, key) {
+  const value = availableCapabilities?.[key] || availableCapabilities?.[key.replace(/s$/, "")] || [];
+  if (Array.isArray(value)) {
+    return value.map((item) => (typeof item === "string" ? item : item?.name)).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return normalizeListValue(value.installed || value.available || value.names, []);
+  }
+  return [];
+}
+
+function buildDefaultCapabilityPolicyPatch(recommendations) {
+  const policy = buildCapabilityPolicy(null);
+  for (const item of recommendations) {
+    const group = item.install_required ? "required" : "allowed";
+    if (item.type === "skill") {
+      pushAllUnique(policy.skills[group], [item.name]);
+    } else if (item.type === "mcp") {
+      pushAllUnique(policy.mcp[group], [item.name]);
+    } else if (item.type === "tool") {
+      pushAllUnique(policy.tools[group], [item.name]);
+    }
+    if (item.approval_required) {
+      pushAllUnique(policy.approval_required_for, [`${item.type}:${item.name}`]);
+    }
+  }
+  return policy;
+}
+
+function detectProjectStack(context) {
+  const detections = [];
+  const add = (name, type, sourcePath, details = {}) => {
+    detections.push({
+      name,
+      type,
+      source_path: sourcePath,
+      ...details,
+    });
+  };
+  const has = (relativePath) => fs.existsSync(path.join(context.root, relativePath));
+  if (has("package.json")) {
+    const packageJsonPath = path.join(context.root, "package.json");
+    add("package-json", "node", "package.json");
+    try {
+      const pkg = readJson(packageJsonPath);
+      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      for (const [dependency, type] of Object.entries({
+        next: "web-framework",
+        react: "frontend-library",
+        vue: "frontend-framework",
+        "@angular/core": "frontend-framework",
+        svelte: "frontend-framework",
+        vite: "build-tool",
+        typescript: "language",
+        jest: "test-runner",
+        vitest: "test-runner",
+        playwright: "browser-test-runner",
+      })) {
+        if (deps[dependency]) {
+          add(dependency, type, "package.json", { version: deps[dependency] });
+        }
+      }
+      if (pkg.scripts && Object.keys(pkg.scripts).length > 0) {
+        add("npm-scripts", "automation", "package.json", { scripts: Object.keys(pkg.scripts).sort() });
+      }
+    } catch {
+      add("package-json-unreadable", "warning", "package.json");
+    }
+  }
+  for (const [relativePath, name, type] of [
+    ["tsconfig.json", "typescript", "language"],
+    ["next.config.js", "next", "web-framework"],
+    ["next.config.mjs", "next", "web-framework"],
+    ["vite.config.js", "vite", "build-tool"],
+    ["vite.config.ts", "vite", "build-tool"],
+    ["pyproject.toml", "python", "language"],
+    ["requirements.txt", "python-requirements", "dependency-file"],
+    ["Dockerfile", "docker", "container"],
+    ["docker-compose.yml", "docker-compose", "container"],
+    ["go.mod", "go", "language"],
+    ["Cargo.toml", "rust", "language"],
+    ["Package.swift", "swift-package", "language"],
+    ["build.gradle", "gradle", "build-tool"],
+    ["pom.xml", "maven", "build-tool"],
+    ["terraform.tf", "terraform", "infrastructure"],
+  ]) {
+    if (has(relativePath)) {
+      add(name, type, relativePath);
+    }
+  }
+  return detections;
+}
+
+function findApprovedCapabilityProfiles(context, options = {}) {
+  return readCapabilityProfiles(context).filter((profile) => {
+    if (profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+      return false;
+    }
+    if (options.storyId && profile.subject?.story_id && profile.subject.story_id !== options.storyId) {
+      return false;
+    }
+    if (options.phase && profile.subject?.phase && profile.subject.phase !== options.phase) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function capabilityRecordStatus(context, record, label) {
+  const staleSources = validateCapabilityRecordSourceHashes(context, record, label, { collectOnly: true });
+  return {
+    id: record.id,
+    status: record.status || "unknown",
+    fresh: staleSources.length === 0 && (record.status !== "approved" || isApprovedRecordFresh(record)),
+    stale_sources: staleSources,
+    source_paths: record.source_paths || [],
+  };
+}
+
+function validateCapabilityRecordSourceHashes(context, record, label, options = {}) {
+  const issues = [];
+  for (const [sourcePath, expectedHash] of Object.entries(record.source_hashes || {})) {
+    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+    if (isDerivedArtifactPath(context, resolved)) {
+      issues.push(`${label} uses derived source ${sourcePath}`);
+    } else if (!fs.existsSync(resolved)) {
+      issues.push(`${label} source ${sourcePath} is missing`);
+    } else if (hashFile(resolved) !== expectedHash) {
+      issues.push(`${label} source ${sourcePath} changed after record creation`);
+    }
+  }
+  if (options.failOnStale && issues.length > 0) {
+    fail(issues.join("; "));
+  }
+  if (options.collectOnly) {
+    return issues;
+  }
+  return issues;
+}
+
+function validateApprovedCapabilityProfileForUse(context, profile, label) {
+  if (!profile || profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+    fail(`${label} is not approved or its approval is stale`);
+  }
+  validateCapabilityRecordSourceHashes(context, profile, label, { failOnStale: true });
+}
+
+function validateApprovedCapabilityRecommendationForUse(context, recommendation, label) {
+  if (!recommendation || recommendation.status !== "approved" || !isApprovedRecordFresh(recommendation)) {
+    fail(`${label} is not approved or its approval is stale`);
+  }
+  validateCapabilityRecordSourceHashes(context, recommendation, label, { failOnStale: true });
+  const profile = readCapabilityProfile(context, recommendation.profile_id);
+  validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
+  for (const item of recommendation.recommendations || []) {
+    if (item.install_required && !item.install_approved) {
+      fail(`${label} requires installation of ${item.type}:${item.name} without install approval`);
+    }
+  }
 }
 
 function workItemPath(context, type, id) {
@@ -4368,12 +5299,14 @@ function gateCheck(context, options) {
     if (story?.contract_id) {
       validateContracts(context, report, new Set([story.contract_id]));
     }
+    validateCapabilityDiscovery(context, report, storyId);
     validateTraces(context, report, storyId);
     validateHandoffs(context, report, storyId);
     validateStory(context, storyId, report);
     validateOutputContracts(context, report, storyId);
   } else {
     validateContracts(context, report);
+    validateCapabilityDiscovery(context, report);
     validateTraces(context, report);
     validateHandoffs(context, report);
     const storiesRoot = path.join(context.sdlcRoot, "stories");
@@ -4912,6 +5845,83 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
   }
 }
 
+function validateCapabilityDiscovery(context, report, storyId = null) {
+  const profiles = readCapabilityProfiles(context).filter((profile) => !storyId || profile.subject?.story_id === storyId);
+  const profileIds = new Set(profiles.map((profile) => profile.id));
+  const recommendations = readCapabilityRecommendations(context).filter((recommendation) => {
+    if (!storyId) {
+      return true;
+    }
+    return profileIds.has(recommendation.profile_id);
+  });
+
+  for (const profile of profiles) {
+    const label = `capability profile ${profile.id || "unknown"}`;
+    if (!profile.id || !profile.schema_version || !profile.status || !profile.subject) {
+      report.errors.push(`${label} is missing id, schema_version, status, or subject`);
+    }
+    if (!Array.isArray(profile.detected_stack)) {
+      report.errors.push(`${label} detected_stack must be an array`);
+    }
+    if (!Array.isArray(profile.evidence)) {
+      report.errors.push(`${label} evidence must be an array`);
+    }
+    for (const sourcePath of profile.source_paths || []) {
+      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+      if (isDerivedArtifactPath(context, resolved)) {
+        report.errors.push(`${label} uses derived source ${sourcePath}`);
+      }
+    }
+    for (const issue of validateCapabilityRecordSourceHashes(context, profile, label, { collectOnly: true })) {
+      const severity = profile.status === "approved" && report.strict ? "errors" : "warnings";
+      report[severity].push(issue);
+    }
+    if (profile.status === "approved") {
+      const approval = latestApprovedRecordApproval(profile);
+      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
+        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      }
+      if (!isApprovedRecordFresh(profile)) {
+        report.errors.push(`${label} approval is stale`);
+      }
+    }
+    report.checked.push(label);
+  }
+
+  for (const recommendation of recommendations) {
+    const label = `capability recommendation ${recommendation.id || "unknown"}`;
+    if (!recommendation.id || !recommendation.schema_version || !recommendation.status || !recommendation.profile_id) {
+      report.errors.push(`${label} is missing id, schema_version, status, or profile_id`);
+    }
+    if (!profileIds.has(recommendation.profile_id) && !fs.existsSync(capabilityProfilePath(context, recommendation.profile_id || "missing"))) {
+      report.errors.push(`${label} references missing profile ${recommendation.profile_id || "unknown"}`);
+    }
+    if (!Array.isArray(recommendation.recommendations)) {
+      report.errors.push(`${label} recommendations must be an array`);
+    }
+    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, label, { collectOnly: true })) {
+      const severity = recommendation.status === "approved" && report.strict ? "errors" : "warnings";
+      report[severity].push(issue);
+    }
+    if (recommendation.status === "approved") {
+      const approval = latestApprovedRecordApproval(recommendation);
+      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
+        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      }
+      if (!isApprovedRecordFresh(recommendation)) {
+        report.errors.push(`${label} approval is stale`);
+      }
+      const profile = fs.existsSync(capabilityProfilePath(context, recommendation.profile_id))
+        ? readJson(capabilityProfilePath(context, recommendation.profile_id))
+        : null;
+      if (!profile || profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+        report.errors.push(`${label} approved recommendation requires an approved fresh profile`);
+      }
+    }
+    report.checked.push(label);
+  }
+}
+
 function validateOutputLinkDecision(context, report, decisions, link, label) {
   if (!link.decision_id) {
     return null;
@@ -5023,7 +6033,8 @@ function validateContracts(context, report, contractIds = null) {
     }
     validateContractOutputRefs(context, report, contract, label);
     validateExecutionPolicy(context, contract, label, report);
-    validateCapabilityBindings(contract, label, report);
+    validateCapabilityBindings(context, contract, label, report);
+    validateContractCapabilityRecommendations(context, report, contract, label);
     report.checked.push(label);
   }
 }
@@ -5816,6 +6827,14 @@ Usage:
   agentic-sdlc dependency propose --id id --edge from:to:type:blocks:required_state
   agentic-sdlc dependency approve --id id --actor-type human|ci
   agentic-sdlc dependency status [--story ST-001]
+  agentic-sdlc capability profile propose --id id [--story ST-001] [--phase analysis]
+      [--context-file path] [--profile-json json | --profile-file path]
+  agentic-sdlc capability profile approve --id id --actor-type human|ci
+  agentic-sdlc capability recommend --id id --profile profile-id
+      [--recommendation-json json | --recommendation-file path]
+      [--available-capabilities-json json | --available-capabilities-file path]
+  agentic-sdlc capability approve --id id --actor-type human|ci [--approve-install]
+  agentic-sdlc capability status [--story ST-001] [--profile profile-id] [--json]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -5887,6 +6906,10 @@ Contract execution policy options:
   --capability-binding-file path
                          Read one capability binding from a canonical file.
                          Binding files must not point to cache/indexes.
+  --capability-recommendation id
+                         Apply an approved capability recommendation to the
+                         contract. Repeatable. Pulls agreed policy, bindings,
+                         open questions, and model/reasoning suggestions.
   --approval-evidence path
                          Attach canonical approval evidence and content hash.
                          Repeatable. Must not point to cache/indexes.
@@ -5919,6 +6942,21 @@ Route options:
   --intent-file path     Read canonical route intent JSON from a project file.
   --text raw             Raw user text. The router records it as untrusted and
                          never classifies it without canonical intent JSON.
+
+Capability discovery options:
+  --profile-json json    Canonical capability profile JSON normalized by Codex.
+  --profile-file path    Read canonical capability profile JSON from a project file.
+  --recommendation-json json
+                         Canonical capability recommendation JSON.
+  --recommendation-file path
+                         Read capability recommendation JSON from a project file.
+  --available-capabilities-json json
+                         Snapshot of installed/available skills, MCPs, tools,
+                         plugins, connectors, or models.
+  --available-capabilities-file path
+                         Read available capability snapshot from a project file.
+  --approve-install      While approving a recommendation, also approve
+                         install-required capabilities declared in it.
 
 Gate options:
   --scope story|all      With --story, defaults to story-scoped validation.

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/capability-recommendation.schema.json",
+  "title": "Agentic SDLC Capability Recommendation",
+  "type": "object",
+  "required": [
+    "id",
+    "schema_version",
+    "status",
+    "profile_id",
+    "recommendations",
+    "policy_patch",
+    "bindings",
+    "execution_policy_suggestions",
+    "decision_matrix",
+    "open_questions",
+    "source_paths",
+    "source_hashes",
+    "approvals",
+    "audit"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "approved",
+        "rejected"
+      ]
+    },
+    "profile_id": {
+      "type": "string"
+    },
+    "profile_ref": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "name",
+          "availability",
+          "install_required"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "skill",
+              "mcp",
+              "tool",
+              "plugin",
+              "connector",
+              "model"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "availability": {
+            "enum": [
+              "available",
+              "missing",
+              "unknown",
+              "install_required"
+            ]
+          },
+          "install_required": {
+            "type": "boolean"
+          },
+          "install_approved": {
+            "type": "boolean"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "available_capabilities": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "policy_patch": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "execution_policy_suggestions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "decision_matrix": {
+      "type": "array"
+    },
+    "open_questions": {
+      "type": "array"
+    },
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "approvals": {
+      "type": "array"
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
