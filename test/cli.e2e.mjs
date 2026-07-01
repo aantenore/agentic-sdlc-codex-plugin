@@ -166,6 +166,30 @@ test("--version is not shadowed by help and boolean --json does not consume quer
   assert.ok(payload.results.length > 0);
 });
 
+test("story create persists acceptance criteria with human-readable alias", () => {
+  const project = tmpProject("story-acceptance-alias");
+  initProject(project);
+  const created = JSON.parse(mustRun([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-ACCEPTANCE",
+    "--title",
+    "Story acceptance alias",
+    "--acceptance",
+    "The current architecture assessment is observable and actionable",
+    "--json",
+  ]).stdout);
+  assert.deepEqual(created.story.acceptance_criteria, ["The current architecture assessment is observable and actionable"]);
+  assert.deepEqual(created.story.acceptance, ["The current architecture assessment is observable and actionable"]);
+
+  const stored = readJson(path.join(project, ".sdlc", "stories", "ST-ACCEPTANCE", "story.json"));
+  assert.deepEqual(stored.acceptance_criteria, ["The current architecture assessment is observable and actionable"]);
+  assert.deepEqual(stored.acceptance, ["The current architecture assessment is observable and actionable"]);
+});
+
 test("strict gate fails when a story has no contract", () => {
   const project = tmpProject("missing-contract");
   initProject(project);
@@ -1384,7 +1408,7 @@ test("report query requires canonical normalization for raw natural language", (
     "--root",
     project,
     "--text",
-    "dimmi tutte le modifiche fatte da me",
+    "show all changes made by me",
     "--json",
   ]).stdout);
   assert.equal(guidance.status, "needs_normalization");
@@ -1739,10 +1763,23 @@ test("contract create requires agreed output templates and approval requests sum
 
   const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
   assert.equal(requests.status, "needs_user_input");
+  assert.match(requests.assistant_message, /You do not need to know SDLC internals/);
+  assert.match(requests.assistant_message, /You can answer in natural language/);
   assert.ok(requests.requests.some((request) => request.type === "output_template_approval" && request.subject_id === "technical-analysis-v1"));
   assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-001-analysis"));
   assert.ok(requests.requests.some((request) => request.type === "contract_approval" && request.subject_id === "contract-ST-001-analysis"));
   assert.ok(requests.requests.every((request) => request.suggested_question));
+  assert.ok(requests.requests.every((request) => request.title));
+  assert.ok(requests.requests.every((request) => request.why_needed));
+  assert.ok(requests.requests.every((request) => request.user_prompt));
+  assert.ok(requests.requests.every((request) => Array.isArray(request.review_items) && request.review_items.length > 0));
+  assert.ok(requests.requests.some((request) => request.type === "contract_approval" && /Context:/.test(request.review_items.join(" "))));
+
+  const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
+  assert.match(plainRequests, /I am stopping here/);
+  assert.match(plainRequests, /What to review/);
+  assert.match(plainRequests, /What approval means/);
+  assert.match(plainRequests, /Question:/);
 
   const gate = JSON.parse(mustRun([
     "gate",
@@ -1753,6 +1790,7 @@ test("contract create requires agreed output templates and approval requests sum
     "ST-001",
     "--json",
   ]).stdout);
+  assert.match(gate.assistant_message, /You do not need to know SDLC internals/);
   assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
 });
 
