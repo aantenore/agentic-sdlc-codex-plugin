@@ -7,11 +7,11 @@ description: Use this skill when a user wants to run a contract-driven agentic S
 
 ## Purpose
 
-Use this skill to operate a stateless, contract-driven SDLC for a target project. The plugin contains process templates, schemas, and CLI automation; all contracts, traces, and knowledge base artifacts must be saved inside the target project's `.sdlc/` directory.
+Use this skill to operate a stateless, contract-driven SDLC for a target project. The plugin contains process templates, schemas, and CLI automation; all contracts, output contracts, traces, and knowledge base artifacts must be saved inside the target project's `.sdlc/` directory.
 
 ## Core Rule
 
-Never store project contracts or project KB state inside the plugin installation. Treat the plugin as reusable method code only. Treat `<target-project>/.sdlc/` as the project source of truth.
+Never store project contracts or project KB state inside the plugin installation. Treat the plugin as reusable method code only. Treat `<target-project>/.sdlc/` as the project source of truth. Treat `<target-project>/.sdlc/cache/` and `<target-project>/.sdlc/indexes/` as derived local optimization artifacts, never as canonical evidence.
 
 ## Workflow
 
@@ -36,28 +36,67 @@ Never store project contracts or project KB state inside the plugin installation
      --qa "Who is the target user?|Back-office operators"
    ```
 
-7. For implementation work, create and claim a story before editing code:
+7. Before creating a durable output artifact, resolve the project-wide output contract:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs output resolve --root <target-project> --story ST-001 --type functional-analysis
+   ```
+
+   If an approved template exists, use it. If a related story already covers the same requirement, prefer reuse plus delta. If no template exists or the structure must change, propose a template and ask the user to approve it before making it canonical:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs output template propose --root <target-project> --type functional-analysis --summary "..."
+   node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human
+   ```
+
+8. Link every durable output back to story, requirement, approved template, and mode:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs output link \
+     --root <target-project> \
+     --story ST-001 \
+     --type functional-analysis \
+     --artifact .sdlc/requirements/functional-analysis.md \
+     --template functional-analysis-v1 \
+     --mode new \
+     --requirement REQ-001
+   ```
+
+9. For implementation work or parallel worker work, inspect the current orchestration state before editing:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs orchestrate status --root <target-project> --json
+   ```
+
+10. Create and claim a story before editing code. Include actor/run/thread attribution when available:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..."
-   node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001
+   node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-8. Capture durable decisions, assumptions, risks, tests, and release evidence as traces:
+11. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, and release evidence as traces:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..."
+   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
+   node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-9. Run a gate check before closing a phase or merging implementation work:
+12. Use `story handoff` when passing work between chats or phases. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
+
+13. Run a strict gate check before closing a phase or merging implementation work:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001
+   node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict
    ```
 
-10. Rebuild/search the KB index when context retrieval is needed:
+14. Release claims and locks when work is complete or handed off.
+
+15. Rebuild/search the local cache and KB index when context retrieval is needed:
 
    ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs cache rebuild --root <target-project>
+   node <plugin-root>/bin/agentic-sdlc.mjs cache status --root <target-project>
    node <plugin-root>/bin/agentic-sdlc.mjs index rebuild --root <target-project>
    node <plugin-root>/bin/agentic-sdlc.mjs kb search --root <target-project> "query"
    ```
@@ -77,6 +116,7 @@ Before claiming the SDLC is complete or a story is ready to merge:
 
 - verify `.sdlc/project.json` exists in the target project;
 - verify relevant contracts exist under `.sdlc/contracts/`;
+- verify durable outputs are linked in `.sdlc/output-contracts/registry.json` with approved templates;
 - verify story work is under `.sdlc/stories/<story-id>/`;
 - verify decisions and evidence are captured in `.sdlc/traces/`;
 - run `gate check`;

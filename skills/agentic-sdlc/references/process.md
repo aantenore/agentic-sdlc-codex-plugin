@@ -1,6 +1,6 @@
 # SDLC Process
 
-Agentic SDLC keeps the classic SDLC sequence, but each phase is governed by an explicit contract and every durable decision is captured in the project knowledge base.
+Agentic SDLC keeps the classic SDLC sequence, but each phase is governed by an explicit contract and every durable decision, output structure, and handoff is captured in the project knowledge base.
 
 ## Phases
 
@@ -17,6 +17,24 @@ Agentic SDLC keeps the classic SDLC sequence, but each phase is governed by an e
 6. Release
    - Produce release notes, deployment notes, observability signals, feedback loop, and updated project context.
 
+```mermaid
+flowchart LR
+  Discovery["Discovery"] --> Analysis["Analysis"]
+  Analysis --> Design["Design"]
+  Design --> Implementation["Implementation"]
+  Implementation --> Validation["Validation"]
+  Validation --> Release["Release"]
+
+  Contract["Contract"] --> Discovery
+  Contract --> Analysis
+  Contract --> Design
+  OutputRegistry["Output registry"] --> Analysis
+  OutputRegistry --> Design
+  OutputRegistry --> Validation
+  Trace["Trace evidence"] --> Validation
+  Validation --> Gate["Strict gate"]
+```
+
 ## Operating Principle
 
 The model proposes and executes bounded work. The harness, CLI, schemas, contracts, and human gates enforce the process. Human owners keep responsibility for objectives, architecture, trade-offs, and approvals.
@@ -27,10 +45,31 @@ The model proposes and executes bounded work. The harness, CLI, schemas, contrac
 - Required inputs are present or missing inputs are logged as assumptions.
 - Human gate expectations are explicit.
 - KB writes for the phase are known.
+- Output contract registry has been checked for required artifact types.
+- Active phase locks are understood and owned.
+- Parallel story claims do not conflict.
 
 ## Phase Exit Checklist
 
 - Required outputs exist.
+- Required outputs are linked to approved output templates.
+- Related-story outputs use reuse plus delta unless a duplicate/new structure decision was approved.
 - Validation criteria are satisfied or failures are recorded.
 - Decisions, assumptions, risks, and evidence are traceable.
-- Gate check has been run.
+- Cache/index files are not cited as canonical evidence.
+- Handoffs are recorded when another agent or chat takes over.
+- Push, merge, and release sync events are recorded.
+- Strict gate check has been run for phase exit, review, or merge.
+
+```mermaid
+flowchart TB
+  Entry["Phase entry"] --> ContractReady["Contract exists"]
+  Entry --> InputsReady["Inputs or assumptions captured"]
+  Entry --> OutputPolicy["Output contract checked"]
+  ContractReady --> Work["Agent work"]
+  InputsReady --> Work
+  OutputPolicy --> Work
+  Work --> Evidence["Outputs, traces, decisions, tests"]
+  Evidence --> Gate["gate check --strict"]
+  Gate --> Exit["Phase exit or repair"]
+```
