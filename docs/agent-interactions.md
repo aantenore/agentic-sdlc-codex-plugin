@@ -103,7 +103,7 @@ flowchart LR
 
 ## Request Router Behavior
 
-When the user's request is ambiguous, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision. Before phase work starts, use `task start` as the execution front door so contract readiness and human control are checked together:
+When the user invokes Agentic SDLC, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision. Natural-language assessment requests, such as an initial technical assessment, must be normalized to a configured action like `technical_analysis` before any analysis is produced. Before phase work starts, use `task start` as the execution front door so contract readiness and human control are checked together:
 
 ```bash
 node bin/agentic-sdlc.mjs route decide --json --intent-json '<canonical-route-intent-json>'
@@ -125,7 +125,7 @@ sequenceDiagram
   Agent-->>Human: Ask for contract creation, revision, approval, or start confirmation
 ```
 
-If `task start` does not return `ready_to_execute`, the agent stops. `--confirm-start` confirms the concrete execution start but does not approve or revise contracts.
+If `task start` does not return `ready_to_execute`, the agent stops and explains the missing decision in user-facing language. Do not show raw route or gate codes as the main answer. Translate baseline to project context, capability profile to tools-and-permissions profile, capability recommendation to concrete tool choices, template to output format, and contract to work brief before mentioning technical IDs. When the decision depends on files, summarize the contents the user is being asked to trust or approve; paths are evidence, not the primary explanation. A user approval applies only to the item just shown and summarized; do not carry a baseline approval forward to templates, capabilities, contracts, or `--confirm-start`. `--confirm-start` confirms the concrete execution start but does not approve or revise contracts.
 
 The router can distinguish intake, story decomposition, contract creation, implementation, validation, release, phase skip confirmation, or clarification from canonical fields and KB state. It never writes canonical artifacts and never treats `.sdlc/cache/` as the authority.
 

@@ -27,7 +27,7 @@ node bin/agentic-sdlc.mjs onboard existing-project \
   --question "Which inferred facts are canonical?"
 ```
 
-Review `.sdlc/baseline/BASELINE-INITIAL-current-state.md`, then approve only after explicit confirmation:
+Summarize `.sdlc/baseline/BASELINE-INITIAL-current-state.md` in chat, including inferred summary, documents read, detected stack, important files, assumptions, and open questions. Do not make the user open the file as the main approval flow. Approve only after explicit confirmation:
 
 ```bash
 node bin/agentic-sdlc.mjs baseline approve \
@@ -42,7 +42,7 @@ node bin/agentic-sdlc.mjs baseline approve \
 
 Approval commands require a formal source. `--actor-type human` alone is not enough.
 
-Use `--approval-source explicit-user` when the user explicitly approves the specific artifact and include `--summary` or `--approval-evidence`. Use `--approval-source ci` for approved CI actors. Use `--approval-source bootstrap` only for provisional migration records; bootstrap approvals do not satisfy strict gates by default.
+Use `--approval-source explicit-user` when the user explicitly approves the specific artifact and include `--summary` or `--approval-evidence`. A short "ok" or "yes" applies only to the artifact or decision that was shown immediately before it; do not reuse it for newly created templates, capability profiles, recommendations, contracts, or task start confirmations. Use `--approval-source ci` for approved CI actors. Use `--approval-source bootstrap` only for provisional migration records; bootstrap approvals do not satisfy strict gates by default.
 
 ## Create Contract
 
@@ -307,7 +307,7 @@ node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical
 
 Activity reports reconstruct what happened from canonical trace files only. Business view focuses on decisions, validation, risk, handoffs, implementation, and release. Dev view includes evidence, branch/SHA, related IDs, and source lines. Agent-verbose view includes raw trace, git, and run metadata for audit.
 
-Use `approval requests` before continuing when a baseline, output template, contract clarification, contract approval, or canonical output link needs human agreement. The command is intentionally user-facing and returns `assistant_message` plus `assistant_message_presentation`. Agents should translate and contextualize `assistant_message` in the active chat language when `translate_to_chat_language` is true, preserving IDs, paths, commands, status codes, and schema keys exactly. Present what must be reviewed, why it matters, what approval means, and what will happen next. Do not reduce approval to a bare question; for output-template approvals, show approval scope, sections, template content, delivery/presentation options, recommended delivery, and delivery question before asking. Then stop until the user approves, answers, or asks for changes.
+Use `approval requests` before continuing when a baseline, capability profile, capability recommendation, output template, contract clarification, contract approval, or canonical output link needs human agreement. Proposal commands for those artifact types return an `assistant_message` and `approval_request` too; show those when available instead of saying only that artifacts were prepared. The command is intentionally user-facing and returns `assistant_message` plus `assistant_message_presentation`. Agents should translate and contextualize `assistant_message` in the active chat language when `translate_to_chat_language` is true. Present plain-language meaning first: baseline means trusted project context, capability profile means tools-and-permissions boundaries, capability recommendation means concrete tool choices, output template means assessment/output format, and contract means the work brief. Preserve IDs, paths, commands, status codes, and schema keys only as technical detail when needed. Present what must be reviewed, why it matters, what approval means, whether more information is needed, and what will happen next. Do not reduce approval to a bare question, a file link, or a list of artifact IDs; summarize relevant baseline report, capability records, template, contract, and source-list contents directly in chat. For output-template approvals, show the sections, template content when useful, delivery/presentation options, recommended delivery, and delivery question before asking. Approval scope is exact: a user response approves only the displayed request, not later artifacts. Then stop until the user approves, answers, or asks for changes.
 
 Use `report query` for broader natural-language history questions. Codex or another LLM should normalize the user request into `schemas/report-query.schema.json`; the CLI then filters canonical KB records deterministically. Supported subjects are `activity`, `stories`, `story_steps`, `outputs`, `contracts`, `handoffs`, `work_items`, `approvals`, `tests`, and `all`.
 
