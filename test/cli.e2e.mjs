@@ -46,6 +46,10 @@ function initProject(project, extra = []) {
   mustRun(["init", "--root", project, "--project-name", "E2E", "--force", ...extra]);
 }
 
+function humanApproval(summary = "Approved in test") {
+  return ["--actor-type", "human", "--approval-source", "explicit-user", "--summary", summary];
+}
+
 function story(project, id, extra = []) {
   mustRun([
     "story",
@@ -64,7 +68,7 @@ function story(project, id, extra = []) {
 
 function createApprovedTemplate(project, type = "functional-analysis") {
   mustRun(["output", "template", "propose", "--root", project, "--type", type, "--summary", "Standard template"]);
-  mustRun(["output", "template", "approve", "--root", project, "--id", `${type}-v1`, "--actor-type", "human"]);
+  mustRun(["output", "template", "approve", "--root", project, "--id", `${type}-v1`, ...humanApproval("Approved template")]);
 }
 
 function writeArtifact(project, relativePath, body = "# Artifact\n") {
@@ -141,7 +145,7 @@ function createStrictReadyStory(project, id, artifactType = "functional-analysis
     `${artifactType}:${artifactType}-v1:new`,
     "--force",
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", `contract-${id}-design`, "--actor-type", "human"]);
+  mustRun(["contract", "approve", "--root", project, "--id", `contract-${id}-design`, ...humanApproval("Approved contract")]);
 }
 
 test("--version is not shadowed by help and boolean --json does not consume query", () => {
@@ -211,6 +215,86 @@ test("contract approval becomes stale after contract mutation", () => {
   contract.outputs.push("unapproved extra output");
   writeJson(contractPath, contract);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /approved human gate is stale/);
+});
+
+test("formal approvals require explicit source and summary or evidence", () => {
+  const project = tmpProject("approval-policy");
+  initProject(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-approval-policy",
+    "--context-summary",
+    "Approval policy test",
+    "--qa",
+    "Who approves?|Owner",
+    "--force",
+  ]);
+  mustFail(
+    ["contract", "approve", "--root", project, "--id", "contract-approval-policy", "--actor-type", "human"],
+    /requires --approval-source/,
+  );
+  mustFail(
+    [
+      "contract",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "contract-approval-policy",
+      "--actor-type",
+      "human",
+      "--approval-source",
+      "explicit-user",
+    ],
+    /requires --summary or --approval-evidence/,
+  );
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-approval-policy", ...humanApproval("Explicitly approved")]);
+});
+
+test("onboard existing project initializes KB and proposes approvable baseline", () => {
+  const project = tmpProject("onboard-existing");
+  fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }, null, 2));
+  fs.writeFileSync(path.join(project, "README.md"), "# Legacy App\nCurrent project description.\n");
+
+  const onboard = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Legacy App",
+    "--document",
+    "README.md",
+    "--question",
+    "Which inferred facts are canonical?",
+    "--json",
+  ]).stdout);
+  assert.equal(onboard.initialized, true);
+  assert.equal(onboard.baseline.status, "proposed");
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "project.json")), true);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json")), true);
+  assert.ok(onboard.baseline.imported_documents.some((document) => document.path === "README.md"));
+  assert.ok(onboard.baseline.repository_snapshot.detected_stack.some((item) => item.name === "package-json"));
+
+  mustFail(["baseline", "approve", "--root", project, "--id", "BASELINE-INITIAL", "--actor-type", "human"], /requires --approval-source/);
+  mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-INITIAL", ...humanApproval("Confirmed baseline for existing project")]);
+  const approved = readJson(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json"));
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.approvals.at(-1).approval_source, "explicit-user");
+
+  fs.appendFileSync(path.join(project, "README.md"), "\nChanged after baseline.\n");
+  const status = JSON.parse(mustRun(["baseline", "status", "--root", project, "--id", "BASELINE-INITIAL", "--json"]).stdout);
+  assert.equal(status.baselines[0].stale, true);
+
+  mustRun(["cache", "rebuild", "--root", project]);
+  const cache = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));
+  assert.ok(cache.source_paths.includes(".sdlc/baseline/BASELINE-INITIAL.json"));
 });
 
 test("output duplicate new is blocked before registry write without matching decision", () => {
@@ -311,8 +395,7 @@ test("output override decision cannot be reused for a different link", () => {
     "DEC-override-001",
     "--rationale",
     "Separate artifact approved",
-    "--actor-type",
-    "human",
+    ...humanApproval("Approved output override"),
   ]);
   const third = writeArtifact(project, ".sdlc/requirements/ST-003.md");
   story(project, "ST-003", ["--requirement", "REQ-001"]);
@@ -453,7 +536,7 @@ test("work items and approved breakdown are persisted and indexed as canonical K
     "--rationale",
     "Split requirement into epic, story, and task",
   ]);
-  mustRun(["breakdown", "approve", "--root", project, "--id", "BD-REQ-001", "--actor-type", "human"]);
+  mustRun(["breakdown", "approve", "--root", project, "--id", "BD-REQ-001", ...humanApproval("Approved breakdown")]);
   const breakdown = readJson(path.join(project, ".sdlc", "work-breakdown", "BD-REQ-001.json"));
   assert.equal(breakdown.status, "approved");
   assert.equal(readJson(path.join(project, ".sdlc", "work-items", "epics", "EP-001.json")).type, "epic");
@@ -528,7 +611,7 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     policy,
     "--force",
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", "--actor-type", "human"]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /requires mcp capability 'repo'/);
   mustRun([
     "contract",
@@ -553,7 +636,7 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     binding,
     "--force",
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", "--actor-type", "human"]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
   mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
   const overlap = JSON.stringify({
     skills: { required: [], allowed: ["agentic-sdlc"], forbidden: ["agentic-sdlc"] },
@@ -596,7 +679,7 @@ test("capability profiles and recommendations can be approved and applied to con
     "--context-file",
     "package.json",
   ]);
-  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   const recommendation = JSON.stringify({
     recommendations: [
       { type: "skill", name: "agentic-sdlc", availability: "available", install_required: false },
@@ -626,7 +709,7 @@ test("capability profiles and recommendations can be approved and applied to con
     "--recommendation-json",
     recommendation,
   ]);
-  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", ...humanApproval("Approved capability recommendation")]);
   const contract = JSON.parse(mustRun([
     "contract",
     "create",
@@ -655,7 +738,7 @@ test("install-required capability recommendation blocks strict gate without inst
   initProject(project);
   story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
   mustRun(["capability", "profile", "propose", "--root", project, "--id", "CAP-PROFILE-ST-001", "--story", "ST-001"]);
-  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   mustRun([
     "capability",
     "recommend",
@@ -676,7 +759,7 @@ test("install-required capability recommendation blocks strict gate without inst
       }
     }),
   ]);
-  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--actor-type", "human"]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", ...humanApproval("Approved install recommendation without install")]);
   mustFail([
     "contract",
     "create",
@@ -693,7 +776,7 @@ test("install-required capability recommendation blocks strict gate without inst
     "--capability-recommendation",
     "CAP-REC-INSTALL",
   ], /without install approval/);
-  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--actor-type", "human", "--approve-install"]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--approve-install", ...humanApproval("Approved install-required capability")]);
   mustRun([
     "contract",
     "create",
@@ -731,9 +814,9 @@ test("stale capability recommendation source fails strict gate", () => {
     "--context-file",
     source,
   ]);
-  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   mustRun(["capability", "recommend", "--root", project, "--id", "CAP-REC-ST-001", "--profile", "CAP-PROFILE-ST-001"]);
-  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", "--actor-type", "human"]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", ...humanApproval("Approved capability recommendation")]);
   mustRun([
     "contract",
     "create",
@@ -751,7 +834,7 @@ test("stale capability recommendation source fails strict gate", () => {
     "CAP-REC-ST-001",
     "--force",
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", "--actor-type", "human"]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", ...humanApproval("Approved analysis contract")]);
   fs.appendFileSync(path.join(project, source), "\nchanged\n");
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /changed after record creation/);
 });
@@ -795,7 +878,7 @@ test("dependency graph blocks orchestration and strict gate until upstream is sa
     "--edge",
     "ST-002:ST-001:blocks:implementation:done",
   ]);
-  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-001", "--actor-type", "human"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-001", ...humanApproval("Approved dependency")]);
   const plan = JSON.parse(mustRun(["orchestrate", "plan", "--root", project, "--json"]).stdout);
   assert.equal(plan.candidates.some((candidate) => candidate.story_id === "ST-002"), false);
   const storyPath = path.join(project, ".sdlc", "stories", "ST-002", "story.json");
@@ -819,7 +902,7 @@ test("soft dependency is visible but does not block orchestration", () => {
     "--edge",
     "ST-002:ST-001:related:none:exists",
   ]);
-  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-RELATED", "--actor-type", "human"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-RELATED", ...humanApproval("Approved related dependency")]);
   const status = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
   const storyStatus = status.stories.find((item) => item.id === "ST-002");
   assert.equal(storyStatus.orchestration_state, "available");
@@ -832,9 +915,9 @@ test("blocking dependency cycles fail strict gate", () => {
   story(project, "ST-001");
   story(project, "ST-002");
   mustRun(["dependency", "propose", "--root", project, "--id", "DEP-A", "--edge", "ST-001:ST-002:blocks:implementation:done"]);
-  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-A", "--actor-type", "human"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-A", ...humanApproval("Approved dependency A")]);
   mustRun(["dependency", "propose", "--root", project, "--id", "DEP-B", "--edge", "ST-002:ST-001:blocks:implementation:done"]);
-  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-B", "--actor-type", "human"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-B", ...humanApproval("Approved dependency B")]);
   const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
   const storyData = readJson(storyPath);
   writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation" });
@@ -856,7 +939,7 @@ test("downstream dependency becomes stale when upstream artifact changes until r
     "--edge",
     "ST-002:ST-001:requires_artifact:validation:artifact_linked",
   ]);
-  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-ARTIFACT", "--actor-type", "human"]);
+  mustRun(["dependency", "approve", "--root", project, "--id", "DEP-ARTIFACT", ...humanApproval("Approved artifact dependency")]);
   fs.appendFileSync(path.join(project, ".sdlc", "requirements", "ST-001-functional-analysis.md"), "\nchanged upstream\n");
   const stale = JSON.parse(mustRun(["dependency", "status", "--root", project, "--story", "ST-002", "--json"]).stdout);
   assert.ok(stale.blockers.some((blocker) => blocker.includes("requires revalidation")));
@@ -886,6 +969,24 @@ test("route decide returns init_project when canonical intent arrives before KB 
   assert.equal(decision.route, "init_project");
   assert.equal(decision.requires_confirmation, false);
   assert.ok(decision.next_commands.some((command) => command.includes("agentic-sdlc init")));
+});
+
+test("route decide returns onboarding when canonical intent targets an existing project", () => {
+  const project = tmpProject("route-onboard");
+  const decision = routeDecision(project, {
+    requested_action: "onboard_existing_project",
+    provided_artifacts: [{ type: "document", path: "README.md" }],
+  });
+  assert.equal(decision.route, "onboard_existing_project");
+  assert.ok(decision.next_commands.some((command) => command.includes("onboard existing-project")));
+
+  initProject(project);
+  const initializedDecision = routeDecision(project, {
+    requested_action: "onboard_existing_project",
+    provided_artifacts: [{ type: "document", path: "README.md" }],
+  });
+  assert.equal(initializedDecision.route, "onboard_existing_project");
+  assert.ok(initializedDecision.next_commands.some((command) => command.includes("baseline propose")));
 });
 
 test("route decide does not inherit risky action confirmation before KB initialization", () => {
