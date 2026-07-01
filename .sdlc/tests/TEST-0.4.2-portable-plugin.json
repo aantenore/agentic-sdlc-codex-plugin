@@ -1,0 +1,80 @@
+{
+  "id": "TEST-0.4.2-portable-plugin",
+  "summary": "Portable Codex plugin packaging validation for Agentic SDLC 0.4.2.",
+  "status": "passed",
+  "created_at": "2026-07-01T12:25:23Z",
+  "scope": [
+    "plugin manifest asset references",
+    "skill agent card icon references",
+    "deterministic PNG asset generation",
+    "portable install documentation",
+    "CLI runtime version consistency"
+  ],
+  "commands": [
+    {
+      "command": "node scripts/generate-plugin-assets.mjs",
+      "status": "passed",
+      "evidence": [
+        "assets/icon.png",
+        "assets/logo.png",
+        "assets/logo-dark.png",
+        "skills/agentic-sdlc/assets/icon-small.png",
+        "skills/agentic-sdlc/assets/icon-large.png"
+      ]
+    },
+    {
+      "command": "find assets skills/agentic-sdlc/assets -maxdepth 2 -type f -print -exec file {} \\;",
+      "status": "passed",
+      "summary": "Generated assets are valid non-interlaced RGBA PNG files."
+    },
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "45 tests passed."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help reports Agentic SDLC 0.4.2."
+    },
+    {
+      "command": "validate_plugin.py .",
+      "status": "passed",
+      "summary": "Plugin validation passed."
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc",
+      "status": "passed",
+      "summary": "Skill is valid."
+    },
+    {
+      "command": "JSON parse check for .codex-plugin, .sdlc, schemas, and templates",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "portable_install_evidence": [
+    ".codex-plugin/plugin.json",
+    "assets/icon.png",
+    "assets/logo.png",
+    "assets/logo-dark.png",
+    "skills/agentic-sdlc/agents/openai.yaml",
+    "skills/agentic-sdlc/assets/icon-small.png",
+    "skills/agentic-sdlc/assets/icon-large.png",
+    "docs/portable-install.md",
+    "README.md",
+    "scripts/generate-plugin-assets.mjs"
+  ],
+  "notes": [
+    "Manifest and skill asset paths are repository-relative.",
+    "The plugin package does not include target-project KB state beyond this repository's own dogfooding .sdlc records.",
+    "Machine-local Codex marketplace entries are intentionally not committed."
+  ]
+}

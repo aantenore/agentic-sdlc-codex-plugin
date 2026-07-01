@@ -72,11 +72,31 @@ flowchart TB
 
 Import this repository as a Codex plugin. The plugin root is the repository root and contains `.codex-plugin/plugin.json`.
 
+The plugin is portable across Codex installations because the manifest references only repository-relative paths:
+
+- `.codex-plugin/plugin.json` for the plugin metadata;
+- `assets/` for the composer icon and light/dark logo images;
+- `skills/agentic-sdlc/` for the Codex skill and agent card assets;
+- `bin/`, `schemas/`, `templates/`, and `docs/` for the cross-platform CLI and reusable SDLC method.
+
+No project knowledge is stored in the plugin installation. Each target project gets its own `.sdlc/` directory, which can be shared through Git.
+
+To move it to another Codex, clone or copy the repository, then import that repository root as a local plugin in the target Codex installation. If a Codex build does not expose plugin import in the UI, use a local marketplace entry on that machine that points to the copied repository root; keep that machine-local marketplace file out of this repo.
+
 For local dogfooding when the Codex app does not expose a plugin import command, link the skill directly so future Codex sessions load the repo copy instead of a stale copy:
 
 ```bash
 ln -s "$(pwd)/skills/agentic-sdlc" "$HOME/.codex/skills/agentic-sdlc"
 ```
+
+Validate the portable package before sharing:
+
+```bash
+python /path/to/plugin-creator/scripts/validate_plugin.py .
+python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
+```
+
+See [Portable Codex Install](docs/portable-install.md) for the full portability model.
 
 After import, invoke the skill with:
 
@@ -323,8 +343,10 @@ Detailed examples are available in:
 
 ```text
 .codex-plugin/plugin.json      Codex plugin manifest
-skills/agentic-sdlc/         Codex skill and references
-bin/agentic-sdlc.mjs         Cross-platform CLI
+assets/                       Plugin icon and light/dark logo images
+skills/agentic-sdlc/          Codex skill, references, and agent card assets
+bin/agentic-sdlc.mjs          Cross-platform CLI
+scripts/generate-plugin-assets.mjs  Deterministic asset generator
 templates/sdlc-config.json     Configurable SDLC phase contracts and policies
 templates/kb-readme.md         Generated project KB guide
 schemas/                       JSON schemas for SDLC artifacts
