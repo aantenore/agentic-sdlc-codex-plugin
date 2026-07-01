@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/baseline.schema.json",
+  "title": "Agentic SDLC Project Baseline",
+  "type": "object",
+  "required": [
+    "id",
+    "schema_version",
+    "kind",
+    "status",
+    "summary",
+    "repository_snapshot",
+    "canonicality",
+    "source_paths",
+    "source_hashes"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "sdlc_version": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "existing-project",
+        "project",
+        "migration"
+      ]
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "approved",
+        "provisionally_approved",
+        "stale",
+        "rejected"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "repository_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "imported_documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "excerpt": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "inferred_context": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "canonicality": {
+      "type": "object",
+      "required": [
+        "state",
+        "inferred_not_approved",
+        "user_confirmation_required"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "inferred",
+            "confirmed",
+            "bootstrap"
+          ]
+        },
+        "inferred_not_approved": {
+          "type": "boolean"
+        },
+        "confirmed_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "user_confirmation_required": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "audit": {
+      "$ref": "common.schema.json#/$defs/audit"
+    }
+  },
+  "additionalProperties": true
+}

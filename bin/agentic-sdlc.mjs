@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -25,6 +25,7 @@ const CAPABILITY_GROUPS = new Set(["required", "allowed", "forbidden"]);
 const DEPENDENCY_TYPES = new Set(["blocks", "requires_artifact", "requires_contract", "related", "same_requirement", "parent_epic"]);
 const DEPENDENCY_BLOCK_SCOPES = new Set(["analysis", "design", "implementation", "validation", "release", "none"]);
 const CAPABILITY_RECOMMENDATION_AVAILABILITY = new Set(["available", "missing", "unknown", "install_required"]);
+const APPROVAL_SOURCES = new Set(["explicit-user", "ci", "automation", "bootstrap"]);
 const ROUTE_REQUIRED_INTENT_FIELDS = [
   "requested_action",
   "confidence",
@@ -50,6 +51,7 @@ const ROUTE_DEFAULT_CONFIDENCE = {
 };
 const ROUTE_DEFAULT_ROUTES = new Set([
   "init_project",
+  "onboard_existing_project",
   "ask_clarification",
   "intake_requirement",
   "classify_artifact",
@@ -94,6 +96,22 @@ function main() {
 
     if (command === "init") {
       initProject(context, parsed.options);
+      return;
+    }
+    if (command === "onboard" && subcommand === "existing-project") {
+      onboardExistingProject(context, parsed.options);
+      return;
+    }
+    if (command === "baseline" && subcommand === "propose") {
+      proposeBaseline(context, parsed.options);
+      return;
+    }
+    if (command === "baseline" && subcommand === "approve") {
+      approveBaseline(context, parsed.options);
+      return;
+    }
+    if (command === "baseline" && subcommand === "status") {
+      showBaselineStatus(context, parsed.options);
       return;
     }
     if (command === "contract" && subcommand === "create") {
@@ -361,6 +379,7 @@ function validateSdlcConfig(config) {
   validateSdlcDirectoryList(config.cache_policy?.derived_directories, "cache_policy.derived_directories");
   validateRoutingPolicy(config.routing_policy);
   validateWorkBreakdownPolicy(config.work_breakdown_policy);
+  validateApprovalPolicy(config.approval_policy);
   return config;
 }
 
@@ -449,6 +468,31 @@ function validateWorkBreakdownPolicy(policy) {
   }
 }
 
+function validateApprovalPolicy(policy) {
+  if (policy === undefined) {
+    return;
+  }
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    fail("approval_policy must be an object");
+  }
+  if (policy.accepted_sources !== undefined) {
+    if (!Array.isArray(policy.accepted_sources)) {
+      fail("approval_policy.accepted_sources must be an array");
+    }
+    for (const source of policy.accepted_sources) {
+      if (!APPROVAL_SOURCES.has(String(source))) {
+        fail(`approval_policy.accepted_sources contains invalid source '${source}'`);
+      }
+    }
+  }
+  if (
+    policy.legacy_approval_behavior !== undefined &&
+    !["warn", "error"].includes(String(policy.legacy_approval_behavior))
+  ) {
+    fail("approval_policy.legacy_approval_behavior must be 'warn' or 'error'");
+  }
+}
+
 function decideRoute(context, options) {
   const decision = buildRouteDecision(context, options);
   output(options, decision, formatRouteDecision(decision));
@@ -516,6 +560,7 @@ function buildRouteDecision(context, options) {
     });
   }
 
+  const preInitActionConfig = routeActionConfig(policy, decision.intent.requested_action);
   const kbInitialized = isKbInitialized(context);
   addRouteCheck(
     decision,
@@ -524,9 +569,14 @@ function buildRouteDecision(context, options) {
     kbInitialized ? `${SDLC_DIR}/project.json exists` : `${SDLC_DIR}/project.json is missing`,
   );
   if (!kbInitialized) {
+    if (preInitActionConfig?.route === "onboard_existing_project") {
+      decision.route = "onboard_existing_project";
+      decision.next_commands.push(`agentic-sdlc onboard existing-project --root ${context.root} --project-name <name> --document <path>`);
+      return finalizeConcreteRoute(decision, policy, preInitActionConfig, confidenceOutcome);
+    }
     decision.route = "init_project";
     decision.next_commands.push(`agentic-sdlc init --root ${context.root}`);
-    return finalizeConcreteRoute(decision, policy, routeActionConfig(policy, "init_project"), confidenceOutcome);
+    return finalizeConcreteRoute(decision, policy, preInitActionConfig?.route === "init_project" ? preInitActionConfig : routeActionConfig(policy, "init_project"), confidenceOutcome);
   }
 
   if (decision.intent.missing_context.length > 0) {
@@ -560,6 +610,8 @@ function buildRouteDecision(context, options) {
   switch (actionConfig.route) {
     case "init_project":
       return decideInitProjectRoute(decision, policy, actionConfig, confidenceOutcome);
+    case "onboard_existing_project":
+      return decideOnboardExistingProjectRoute(context, decision, policy, actionConfig, confidenceOutcome);
     case "intake_requirement":
       return decideIntakeRequirementRoute(decision, policy, actionConfig, confidenceOutcome);
     case "decompose_stories":
@@ -658,6 +710,9 @@ function defaultRouteActions() {
   return {
     initialize_project: { route: "init_project" },
     init_project: { route: "init_project" },
+    onboard_existing_project: { route: "onboard_existing_project" },
+    existing_project_onboarding: { route: "onboard_existing_project" },
+    create_baseline: { route: "onboard_existing_project", confirmation_key: "create_canonical_artifact" },
     intake_requirement: { route: "intake_requirement" },
     classify_artifact: { route: "classify_artifact", requires_artifact_type: true },
     decompose_stories: { route: "decompose_stories", confirmation_key: "create_story" },
@@ -887,6 +942,27 @@ function decideInitProjectRoute(decision, policy, actionConfig, confidenceOutcom
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
 
+function decideOnboardExistingProjectRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "onboard_existing_project";
+  const baselines = readBaselines(context);
+  addRouteCheck(
+    decision,
+    "baseline_exists",
+    baselines.length > 0 ? "passed" : "failed",
+    baselines.length > 0 ? baselines.map((baseline) => `${baseline.id}:${baseline.status}`).join(", ") : "No baseline records found",
+  );
+  if (baselines.length === 0) {
+    decision.next_commands.push(`agentic-sdlc baseline propose --id BASELINE-INITIAL --document <path> --question "Which inferred facts are canonical?"`);
+  } else {
+    const latest = baselines.at(-1);
+    decision.next_commands.push(`agentic-sdlc baseline status --id ${latest.id}`);
+    if (latest.status === "proposed") {
+      decision.next_commands.push(`agentic-sdlc baseline approve --id ${latest.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`);
+    }
+  }
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
 function decideIntakeRequirementRoute(decision, policy, actionConfig, confidenceOutcome) {
   decision.route = "intake_requirement";
   decision.next_commands.push("agentic-sdlc contract create --phase discovery --context-summary <summary>");
@@ -998,7 +1074,9 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
       status: "blocked",
       blocking_reasons: ["contract_needs_approval"],
       questions: [`Approve or refresh contract ${contractState.contract.id} before implementation.`],
-      next_commands: [`agentic-sdlc contract approve --id ${contractState.contract.id} --actor-type human`],
+      next_commands: [
+        `agentic-sdlc contract approve --id ${contractState.contract.id} --actor-type human --approval-source explicit-user --summary "<user-approved contract>"`,
+      ],
     });
   }
 
@@ -1072,14 +1150,14 @@ function decideClassifyArtifactRoute(context, decision, policy, actionConfig, co
 
   if (decision.intent.requested_action === "new_output_template") {
     decision.next_commands.push(`agentic-sdlc output template propose --type ${artifactType} --summary <summary>`);
-    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human`);
+    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human --approval-source explicit-user --summary "<user-approved template>"`);
     return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
   }
 
   if (approvedTemplates.length === 0) {
     decision.blocking_reasons.push("approved_template_missing");
     decision.next_commands.push(`agentic-sdlc output template propose --type ${artifactType} --summary <summary>`);
-    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human`);
+    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human --approval-source explicit-user --summary "<user-approved template>"`);
     return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
   }
 
@@ -1495,6 +1573,11 @@ function clamp01(value) {
 }
 
 function initProject(context, options) {
+  const result = initializeProject(context, options);
+  output(options, result.payload, result.messages);
+}
+
+function initializeProject(context, options) {
   const projectName = String(options["project-name"] || path.basename(context.root));
   const projectId = String(options["project-id"] || slugify(projectName));
   const force = Boolean(options.force);
@@ -1569,20 +1652,222 @@ function initProject(context, options) {
     }
   }
 
-  output(
-    options,
-    {
+  return {
+    payload: {
       status: "initialized",
       root: context.root,
       sdlc_root: context.sdlcRoot,
       project,
       contracts_created: createdContracts,
     },
-    [
+    messages: [
       `Initialized Agentic SDLC at ${path.relative(context.root, context.sdlcRoot) || SDLC_DIR}`,
       `Project: ${projectName} (${projectId})`,
       `Phase contracts available: ${context.config.phase_order.join(", ")}`,
     ],
+  };
+}
+
+function onboardExistingProject(context, options) {
+  const initializedBefore = fs.existsSync(path.join(context.sdlcRoot, "project.json"));
+  let initialization = null;
+  if (!initializedBefore) {
+    initialization = initializeProject(context, options);
+  } else {
+    ensureInitialized(context);
+  }
+
+  const baseline = createBaselineProposal(context, {
+    ...options,
+    id: options.id || "BASELINE-INITIAL",
+    kind: options.kind || "existing-project",
+  });
+
+  output(
+    options,
+    {
+      status: "onboarded",
+      initialized: !initializedBefore,
+      init: initialization?.payload || null,
+      baseline_path: baseline.baseline_path,
+      report_path: baseline.report_path,
+      baseline: baseline.baseline,
+      next_commands: [
+        `agentic-sdlc baseline status --id ${baseline.baseline.id}`,
+        `agentic-sdlc baseline approve --id ${baseline.baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
+      ],
+    },
+    [
+      initializedBefore ? "Existing SDLC KB found." : "Initialized SDLC KB.",
+      `Proposed baseline ${baseline.baseline.id}`,
+      `Review: ${toProjectPath(context, baseline.report_path)}`,
+      "Approve only after the user confirms what is canonical.",
+    ],
+  );
+}
+
+function proposeBaseline(context, options) {
+  ensureInitialized(context);
+  const result = createBaselineProposal(context, options);
+  output(
+    options,
+    { status: "proposed", baseline_path: result.baseline_path, report_path: result.report_path, baseline: result.baseline },
+    [
+      `Proposed baseline ${result.baseline.id}`,
+      `Review: ${toProjectPath(context, result.report_path)}`,
+      `Approve with: agentic-sdlc baseline approve --id ${result.baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
+    ],
+  );
+}
+
+function createBaselineProposal(context, options) {
+  ensureBaselineDirectory(context);
+  const id = normalizeId(options.id || `BASELINE-${shortDate()}`);
+  const attribution = buildAttribution(context, options, "baseline.propose");
+  const documents = normalizeRawListOption(options.document).map((rawPath) => buildBaselineDocumentEvidence(context, rawPath));
+  const extraSources = normalizeBaselineSourcePaths(context, normalizeRawListOption(options.source));
+  const detectedStack = detectProjectStack(context);
+  const repoSnapshot = buildRepositorySnapshot(context, detectedStack);
+  const sourcePaths = Array.from(
+    new Set([
+      ...documents.map((item) => item.path),
+      ...extraSources,
+      ...detectedStack.map((item) => item.source_path).filter(Boolean),
+      ...repoSnapshot.key_files.map((item) => item.path),
+    ]),
+  ).sort();
+  const summary =
+    getOptionString(options, "summary") ||
+    getOptionString(options, "context-summary") ||
+    `Initial baseline for existing project ${readProjectSafe(context)?.project_name || path.basename(context.root)}.`;
+  const questions = normalizeRawListOption(options.question);
+  const assumptions = normalizeRawListOption(options.assumption);
+  const baseline = {
+    id,
+    schema_version: context.config.schema_version,
+    sdlc_version: VERSION,
+    kind: String(options.kind || "existing-project"),
+    status: "proposed",
+    summary,
+    repository_snapshot: repoSnapshot,
+    imported_documents: documents,
+    inferred_context: buildInferredContext(repoSnapshot, detectedStack, documents),
+    canonicality: {
+      state: "inferred",
+      inferred_not_approved: true,
+      confirmed_sources: normalizeRawListOption(options["confirmed-source"]),
+      user_confirmation_required: true,
+      notes: [
+        "This baseline describes the current observable project state.",
+        "It does not reconstruct pre-SDLC historical decisions unless evidence is present in source files.",
+      ],
+    },
+    open_questions: questions,
+    assumptions,
+    source_paths: sourcePaths,
+    source_hashes: buildSourceHashes(context, sourcePaths),
+    approvals: [],
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      proposed_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+
+  const baselinePath = baselinePathById(context, id);
+  const reportPath = path.join(baselineRoot(context), `${id}-current-state.md`);
+  writeJsonFile(baselinePath, baseline, { force: Boolean(options.force) });
+  writeTextFile(reportPath, renderBaselineReport(baseline), { force: Boolean(options.force) });
+  appendTraceEvent(context, null, {
+    type: "decision",
+    summary: `Proposed project baseline ${id}`,
+    action: "baseline.propose",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, baselinePath), toProjectPath(context, reportPath), ...documents.map((item) => item.path)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  return { baseline, baseline_path: baselinePath, report_path: reportPath };
+}
+
+function approveBaseline(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const baselinePath = baselinePathById(context, id);
+  if (!fs.existsSync(baselinePath)) {
+    fail(`Baseline ${id} does not exist`);
+  }
+  const baseline = readJson(baselinePath);
+  validateBaselineSourceHashes(context, baseline, `baseline ${id}`, { failOnStale: true });
+  const attribution = buildAttribution(context, options, "baseline.approve");
+  requireHumanOrCiActor(attribution, "Approving a project baseline");
+  const approvalSource = normalizeApprovalSource(context, options, attribution, `baseline ${id}`, "approved");
+  const canonicality = {
+    ...(baseline.canonicality || {}),
+    state: approvalSource === "bootstrap" ? "bootstrap" : "confirmed",
+    inferred_not_approved: approvalSource === "bootstrap",
+    user_confirmation_required: approvalSource === "bootstrap",
+  };
+  baseline.canonicality = canonicality;
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: baseline,
+    subject_id_field: "baseline_id",
+    subject_id: id,
+    label: `baseline ${id}`,
+  });
+  baseline.status = approval.provisional ? "provisionally_approved" : "approved";
+  baseline.approvals = Array.isArray(baseline.approvals) ? baseline.approvals : [];
+  baseline.approvals.push(approval);
+  baseline.updated_at = now();
+  baseline.audit = {
+    ...(baseline.audit || {}),
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(baselinePath, baseline, { force: true });
+  appendTraceEvent(context, null, {
+    type: "gate",
+    summary: approval.summary || `Approved project baseline ${id}`,
+    action: "baseline.approve",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, baselinePath), ...approval.evidence.map((item) => item.path)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: baseline.status, baseline_path: baselinePath, approval, baseline }, [`Approved baseline ${id}`]);
+}
+
+function showBaselineStatus(context, options) {
+  ensureInitialized(context);
+  const id = options.id ? normalizeId(String(options.id)) : null;
+  const baselines = readBaselines(context).filter((baseline) => !id || baseline.id === id);
+  if (id && baselines.length === 0) {
+    fail(`Baseline ${id} does not exist`);
+  }
+  const status = baselines.map((baseline) => {
+    const staleSources = validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true });
+    return {
+      id: baseline.id,
+      status: baseline.status,
+      kind: baseline.kind,
+      source_paths: baseline.source_paths || [],
+      stale: staleSources.length > 0,
+      stale_sources: staleSources,
+      open_questions: Array.isArray(baseline.open_questions) ? baseline.open_questions.length : 0,
+      approved: baseline.status === "approved" && isApprovedRecordFresh(baseline),
+    };
+  });
+  output(
+    options,
+    { baselines: status },
+    status.length
+      ? status.map((item) => `${item.id}: ${item.status}${item.stale ? " (stale)" : ""}, open questions ${item.open_questions}`)
+      : ["No baselines found."],
   );
 }
 
@@ -1653,24 +1938,17 @@ function approveContract(context, options) {
   const contract = readJson(contractPath);
   const attribution = buildAttribution(context, options, "contract.approve");
   const approvalStatus = normalizeApprovalStatus(options.status || "approved");
-  const approvedContentHash = approvalStatus === "approved" ? hashApprovalSubject(contract) : null;
   if (contract.human_gate === true && !["human", "ci"].includes(attribution.actor.type)) {
     fail("Human-gated contracts require --actor-type human or an approved CI actor.");
   }
-  const approval = {
-    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
-    contract_id: id,
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: contract,
+    subject_id_field: "contract_id",
+    subject_id: id,
     status: approvalStatus,
-    summary: options.summary ? String(options.summary) : null,
     scope: String(options.scope || "contract"),
-    evidence: buildApprovalEvidence(context, options),
-    approved_content_hash: approvedContentHash,
-    hash_algorithm: approvedContentHash ? "sha256:stable-json:v1" : null,
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-    created_at: now(),
-  };
+    label: `contract ${id}`,
+  });
   contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
   contract.approvals.push(approval);
   if (approval.status === "approved" && !options["preserve-status"]) {
@@ -2067,15 +2345,16 @@ function validateContractCapabilityRecommendations(context, report, contract, la
     if (recommendation.status !== "approved") {
       report.errors.push(`${label} references ${recommendationLabel} but it is not approved`);
     }
-    if (!isApprovedRecordFresh(recommendation)) {
-      report.errors.push(`${label} references ${recommendationLabel} but its approval is stale`);
-    }
     const latestApproval = latestApprovedRecordApproval(recommendation);
+    const recommendationSeverity = approvalIssueSeverity(context, report, latestApproval);
+    if (!isApprovedRecordFresh(recommendation)) {
+      report[recommendationSeverity].push(`${label} references ${recommendationLabel} but its approval is stale`);
+    }
     if (ref.approved_content_hash && latestApproval?.approved_content_hash !== ref.approved_content_hash) {
-      report.errors.push(`${label} references ${recommendationLabel} with an outdated approved_content_hash`);
+      report[recommendationSeverity].push(`${label} references ${recommendationLabel} with an outdated approved_content_hash`);
     }
     for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, recommendationLabel, { collectOnly: true })) {
-      const severity = report.strict ? "errors" : "warnings";
+      const severity = approvedRecordIssueSeverity(context, report, recommendation);
       report[severity].push(issue);
     }
     const profilePath = capabilityProfilePath(context, recommendation.profile_id);
@@ -2083,11 +2362,13 @@ function validateContractCapabilityRecommendations(context, report, contract, la
       report.errors.push(`${label} ${recommendationLabel} references missing profile ${recommendation.profile_id || "unknown"}`);
     } else {
       const profile = readJson(profilePath);
-      if (profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+      if (profile.status !== "approved") {
         report.errors.push(`${label} ${recommendationLabel} profile ${profile.id} is not approved or is stale`);
+      } else if (!isApprovedRecordFresh(profile)) {
+        report[approvedRecordIssueSeverity(context, report, profile)].push(`${label} ${recommendationLabel} profile ${profile.id} is not approved or is stale`);
       }
       for (const issue of validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true })) {
-        const severity = report.strict ? "errors" : "warnings";
+        const severity = approvedRecordIssueSeverity(context, report, profile);
         report[severity].push(issue);
       }
     }
@@ -2201,6 +2482,156 @@ function buildApprovalEvidence(context, options = {}) {
       sha256: hashFile(evidencePath),
     };
   });
+}
+
+function getApprovalPolicy(context) {
+  const policy = context.config.approval_policy || {};
+  return {
+    principle:
+      policy.principle ||
+      "Implementation authorization is not formal SDLC approval. Formal approvals must record an explicit source, approver, summary or evidence, and immutable subject hash.",
+    formal_approval_requires_explicit_source: policy.formal_approval_requires_explicit_source !== false,
+    require_summary_or_evidence_for_explicit_user: policy.require_summary_or_evidence_for_explicit_user !== false,
+    allow_bootstrap_approvals_in_strict_gate: Boolean(policy.allow_bootstrap_approvals_in_strict_gate),
+    legacy_approval_behavior: policy.legacy_approval_behavior || "error",
+    accepted_sources: Array.isArray(policy.accepted_sources)
+      ? policy.accepted_sources
+      : ["explicit-user", "ci", "automation", "bootstrap"],
+  };
+}
+
+function buildApprovalRecord(context, options, attribution, settings = {}) {
+  const status = normalizeApprovalStatus(settings.status || options.status || "approved");
+  const evidence = buildApprovalEvidence(context, options);
+  const summary = getOptionString(options, "summary") || null;
+  const source = normalizeApprovalSource(context, options, attribution, settings.label || "approval", status);
+  validateApprovalSourceForActor(context, {
+    source,
+    status,
+    summary,
+    evidence,
+    actor: attribution.actor,
+    label: settings.label || "approval",
+  });
+  const approvedContentHash = status === "approved" ? hashApprovalSubject(settings.subject) : null;
+  return {
+    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+    ...(settings.subject_id_field && settings.subject_id ? { [settings.subject_id_field]: settings.subject_id } : {}),
+    status,
+    summary,
+    scope: settings.scope || undefined,
+    evidence,
+    approval_source: source,
+    explicit_user_confirmation: source === "explicit-user",
+    provisional: source === "bootstrap",
+    approved_content_hash: approvedContentHash,
+    hash_algorithm: approvedContentHash ? "sha256:stable-json:v1" : null,
+    approved_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+    created_at: now(),
+  };
+}
+
+function normalizeApprovalSource(context, options, attribution, label, status) {
+  if (status !== "approved") {
+    return getOptionString(options, "approval-source") || null;
+  }
+  const source = getOptionString(options, "approval-source");
+  if (!source && attribution.actor.type === "ci") {
+    return "ci";
+  }
+  const policy = getApprovalPolicy(context);
+  if (!source) {
+    if (policy.formal_approval_requires_explicit_source) {
+      fail(`${label} requires --approval-source explicit-user|ci|automation|bootstrap. Implementation permission is not formal SDLC approval.`);
+    }
+    return null;
+  }
+  const normalized = String(source).trim().toLowerCase();
+  if (!APPROVAL_SOURCES.has(normalized) || !policy.accepted_sources.includes(normalized)) {
+    fail(`Unknown approval source '${source}'. Valid sources: ${policy.accepted_sources.join(", ")}`);
+  }
+  return normalized;
+}
+
+function validateApprovalSourceForActor(context, approval) {
+  if (approval.status !== "approved") {
+    return;
+  }
+  const policy = getApprovalPolicy(context);
+  if (!approval.source && policy.formal_approval_requires_explicit_source) {
+    fail(`${approval.label} requires --approval-source.`);
+  }
+  if (approval.source === "explicit-user" && approval.actor?.type !== "human") {
+    fail(`${approval.label} uses approval_source explicit-user but actor type is '${approval.actor?.type || "unknown"}'.`);
+  }
+  if (approval.source === "ci" && approval.actor?.type !== "ci") {
+    fail(`${approval.label} uses approval_source ci but actor type is '${approval.actor?.type || "unknown"}'.`);
+  }
+  if (
+    approval.source === "explicit-user" &&
+    policy.require_summary_or_evidence_for_explicit_user &&
+    !approval.summary &&
+    approval.evidence.length === 0
+  ) {
+    fail(`${approval.label} requires --summary or --approval-evidence when --approval-source explicit-user is used.`);
+  }
+  if (approval.source === "bootstrap" && !approval.summary && approval.evidence.length === 0) {
+    fail(`${approval.label} bootstrap approval requires --summary or --approval-evidence so future readers can distinguish migration from user consent.`);
+  }
+}
+
+function validateFormalApprovalRecord(context, report, approval, label, actor) {
+  if (!approval || approval.status !== "approved") {
+    return;
+  }
+  const policy = getApprovalPolicy(context);
+  const source = approval.approval_source || null;
+  if (report.strict && policy.formal_approval_requires_explicit_source && !source) {
+    const severity = policy.legacy_approval_behavior === "warn" ? "warnings" : "errors";
+    report[severity].push(`${label} is a legacy approval without approval_source; re-approve with explicit-user, ci, automation, or bootstrap source`);
+  }
+  if (source && (!APPROVAL_SOURCES.has(source) || !policy.accepted_sources.includes(source))) {
+    report.errors.push(`${label} has invalid approval_source '${source}'`);
+  }
+  if (report.strict && source === "bootstrap" && !policy.allow_bootstrap_approvals_in_strict_gate) {
+    report.errors.push(`${label} is bootstrap/provisional and cannot satisfy strict gate; re-approve with explicit-user or ci`);
+  }
+  if (source === "explicit-user" && actor?.type !== "human") {
+    report.errors.push(`${label} approval_source explicit-user requires a human approver`);
+  }
+  if (source === "ci" && actor?.type !== "ci") {
+    report.errors.push(`${label} approval_source ci requires a CI approver`);
+  }
+  if (
+    report.strict &&
+    source === "explicit-user" &&
+    policy.require_summary_or_evidence_for_explicit_user &&
+    !approval.summary &&
+    !approval.approval_summary &&
+    (!Array.isArray(approval.evidence || approval.approval_evidence) || (approval.evidence || approval.approval_evidence).length === 0)
+  ) {
+    report.errors.push(`${label} explicit-user approval requires summary or evidence`);
+  }
+}
+
+function approvalIssueSeverity(context, report, approval) {
+  if (!report.strict) {
+    return "warnings";
+  }
+  const policy = getApprovalPolicy(context);
+  if (!approval?.approval_source && policy.legacy_approval_behavior === "warn") {
+    return "warnings";
+  }
+  return "errors";
+}
+
+function approvedRecordIssueSeverity(context, report, record) {
+  if (record?.status !== "approved") {
+    return "warnings";
+  }
+  return approvalIssueSeverity(context, report, latestApprovedRecordApproval(record));
 }
 
 function hashApprovalSubject(value) {
@@ -2611,18 +3042,12 @@ function approveBreakdown(context, options) {
   const breakdown = readJson(breakdownPath);
   const attribution = buildAttribution(context, options, "breakdown.approve");
   requireHumanOrCiActor(attribution, "Approving a work breakdown");
-  const approval = {
-    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
-    breakdown_id: id,
-    status: "approved",
-    summary: getOptionString(options, "summary") || null,
-    approved_content_hash: hashApprovalSubject(breakdown),
-    hash_algorithm: "sha256:stable-json:v1",
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-    created_at: now(),
-  };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: breakdown,
+    subject_id_field: "breakdown_id",
+    subject_id: id,
+    label: `breakdown ${id}`,
+  });
   breakdown.status = "approved";
   breakdown.approvals = Array.isArray(breakdown.approvals) ? breakdown.approvals : [];
   breakdown.approvals.push(approval);
@@ -2697,18 +3122,12 @@ function approveDependencyGraph(context, options) {
   const proposal = readJson(proposalPath);
   const attribution = buildAttribution(context, options, "dependency.approve");
   requireHumanOrCiActor(attribution, "Approving dependency graph changes");
-  const approval = {
-    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
-    dependency_id: id,
-    status: "approved",
-    summary: getOptionString(options, "summary") || null,
-    approved_content_hash: hashApprovalSubject(proposal),
-    hash_algorithm: "sha256:stable-json:v1",
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-    created_at: now(),
-  };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: proposal,
+    subject_id_field: "dependency_id",
+    subject_id: id,
+    label: `dependency ${id}`,
+  });
   proposal.status = "approved";
   proposal.approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
   proposal.approvals.push(approval);
@@ -2831,18 +3250,12 @@ function approveCapabilityProfile(context, options) {
   const attribution = buildAttribution(context, options, "capability.profile.approve");
   requireHumanOrCiActor(attribution, "Approving a capability profile");
   validateCapabilityRecordSourceHashes(context, profile, `capability profile ${id}`, { failOnStale: true });
-  const approval = {
-    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
-    profile_id: id,
-    status: "approved",
-    summary: getOptionString(options, "summary") || null,
-    approved_content_hash: hashApprovalSubject(profile),
-    hash_algorithm: "sha256:stable-json:v1",
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-    created_at: now(),
-  };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: profile,
+    subject_id_field: "profile_id",
+    subject_id: id,
+    label: `capability profile ${id}`,
+  });
   profile.status = "approved";
   profile.approvals = Array.isArray(profile.approvals) ? profile.approvals : [];
   profile.approvals.push(approval);
@@ -2962,18 +3375,12 @@ function approveCapabilityRecommendation(context, options) {
     path: toProjectPath(context, capabilityProfilePath(context, recommendation.profile_id)),
     approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
   };
-  const approval = {
-    id: `APR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
-    recommendation_id: id,
-    status: "approved",
-    summary: getOptionString(options, "summary") || null,
-    approved_content_hash: hashApprovalSubject(recommendation),
-    hash_algorithm: "sha256:stable-json:v1",
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-    created_at: now(),
-  };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: recommendation,
+    subject_id_field: "recommendation_id",
+    subject_id: id,
+    label: `capability recommendation ${id}`,
+  });
   recommendation.status = "approved";
   recommendation.approvals = Array.isArray(recommendation.approvals) ? recommendation.approvals : [];
   recommendation.approvals.push(approval);
@@ -3069,6 +3476,214 @@ function ensureCapabilityDiscoveryDirectories(context) {
   ensureDir(capabilityDiscoveryRoot(context));
   ensureDir(capabilityProfilesRoot(context));
   ensureDir(capabilityRecommendationsRoot(context));
+}
+
+function baselineRoot(context) {
+  return path.join(context.sdlcRoot, "baseline");
+}
+
+function ensureBaselineDirectory(context) {
+  ensureDir(baselineRoot(context));
+}
+
+function baselinePathById(context, id) {
+  return path.join(baselineRoot(context), `${normalizeId(id)}.json`);
+}
+
+function readBaselines(context) {
+  return safeReadDir(baselineRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readJson(path.join(baselineRoot(context), name)))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+function buildBaselineDocumentEvidence(context, rawPath) {
+  const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+  assertNotDerivedArtifact(context, resolved, "Baseline document");
+  const content = fs.readFileSync(resolved);
+  return {
+    type: "document",
+    path: toProjectPath(context, resolved),
+    sha256: hashBuffer(content),
+    size_bytes: content.length,
+    excerpt: normalizeText(content.toString("utf8")).slice(0, 800),
+  };
+}
+
+function normalizeBaselineSourcePaths(context, rawPaths) {
+  const result = [];
+  for (const rawPath of rawPaths) {
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true });
+    assertNotDerivedArtifact(context, resolved, "Baseline source");
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      for (const filePath of walkFiles(resolved)) {
+        if (shouldIndexFile(context, filePath) && !isDerivedArtifactPath(context, filePath)) {
+          result.push(toProjectPath(context, filePath));
+        }
+      }
+    } else if (stat.isFile()) {
+      result.push(toProjectPath(context, resolved));
+    }
+  }
+  return Array.from(new Set(result)).sort();
+}
+
+function buildRepositorySnapshot(context, detectedStack = detectProjectStack(context)) {
+  const keyFiles = collectProjectKeyFiles(context);
+  return {
+    root_name: path.basename(context.root),
+    git: buildGitMetadata(context.root),
+    detected_stack: detectedStack,
+    key_files: keyFiles,
+    package_scripts: readPackageScripts(context),
+    source_roots: inferSourceRoots(context),
+    test_roots: inferTestRoots(context),
+    ci_files: keyFiles.filter((item) => item.path.startsWith(".github/") || item.path.includes("ci") || item.path.includes("workflow")),
+  };
+}
+
+function collectProjectKeyFiles(context) {
+  const candidates = [
+    "README.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "tsconfig.json",
+    "jsconfig.json",
+    "vite.config.js",
+    "vite.config.ts",
+    "next.config.js",
+    "next.config.mjs",
+    "pyproject.toml",
+    "requirements.txt",
+    "Dockerfile",
+    "docker-compose.yml",
+    "go.mod",
+    "Cargo.toml",
+    "Package.swift",
+    ".github/workflows",
+  ];
+  const files = [];
+  for (const candidate of candidates) {
+    const resolved = path.join(context.root, candidate);
+    if (!fs.existsSync(resolved)) {
+      continue;
+    }
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      for (const filePath of walkFiles(resolved)) {
+        if (shouldIndexFile(context, filePath)) {
+          files.push(fileSummary(context, filePath));
+        }
+      }
+    } else if (stat.isFile()) {
+      files.push(fileSummary(context, resolved));
+    }
+  }
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function fileSummary(context, filePath) {
+  return {
+    path: toProjectPath(context, filePath),
+    sha256: hashFile(filePath),
+    size_bytes: fs.statSync(filePath).size,
+  };
+}
+
+function readPackageScripts(context) {
+  const packageJsonPath = path.join(context.root, "package.json");
+  if (!fs.existsSync(packageJsonPath)) {
+    return {};
+  }
+  try {
+    const pkg = readJson(packageJsonPath);
+    return normalizeObject(pkg.scripts);
+  } catch {
+    return {};
+  }
+}
+
+function inferSourceRoots(context) {
+  return ["src", "app", "pages", "lib", "bin", "server", "client"]
+    .filter((entry) => fs.existsSync(path.join(context.root, entry)) && fs.statSync(path.join(context.root, entry)).isDirectory());
+}
+
+function inferTestRoots(context) {
+  return ["test", "tests", "__tests__", "spec", "e2e"]
+    .filter((entry) => fs.existsSync(path.join(context.root, entry)) && fs.statSync(path.join(context.root, entry)).isDirectory());
+}
+
+function buildInferredContext(repoSnapshot, detectedStack, documents) {
+  return {
+    stack_summary: detectedStack.map((item) => `${item.type}:${item.name}`),
+    likely_entrypoints: repoSnapshot.key_files.map((item) => item.path),
+    test_surface: Object.keys(repoSnapshot.package_scripts || {}).filter((script) => /test|check|lint|smoke/i.test(script)),
+    imported_document_count: documents.length,
+    confidence: detectedStack.length > 0 || documents.length > 0 ? 0.7 : 0.35,
+    caveats: [
+      "This is inferred from repository files and imported documents.",
+      "Historical authorship, prior approvals, and rationale are unknown unless present in evidence files.",
+    ],
+  };
+}
+
+function renderBaselineReport(baseline) {
+  return [
+    `# ${baseline.id} Current State`,
+    "",
+    `Status: ${baseline.status}`,
+    `Kind: ${baseline.kind}`,
+    "",
+    "## Summary",
+    baseline.summary || "No summary provided.",
+    "",
+    "## Detected Stack",
+    ...listOrNone((baseline.repository_snapshot?.detected_stack || []).map((item) => `${item.type}: ${item.name}${item.source_path ? ` (${item.source_path})` : ""}`)),
+    "",
+    "## Key Files",
+    ...listOrNone((baseline.repository_snapshot?.key_files || []).map((item) => `${item.path} (${item.sha256})`)),
+    "",
+    "## Imported Documents",
+    ...listOrNone((baseline.imported_documents || []).map((item) => `${item.path} (${item.sha256})`)),
+    "",
+    "## Open Questions",
+    ...listOrNone(baseline.open_questions || []),
+    "",
+    "## Caveats",
+    ...listOrNone(baseline.inferred_context?.caveats || []),
+    "",
+    "## Approval Guidance",
+    "Approve this baseline only after the user confirms which inferred facts are canonical. Use bootstrap only for migration/provisional records.",
+    "",
+  ].join("\n");
+}
+
+function listOrNone(values) {
+  return values.length ? values.map((value) => `- ${value}`) : ["- None"];
+}
+
+function validateBaselineSourceHashes(context, baseline, label, options = {}) {
+  const issues = [];
+  for (const [sourcePath, expectedHash] of Object.entries(baseline.source_hashes || {})) {
+    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+    if (isDerivedArtifactPath(context, resolved)) {
+      issues.push(`${label} uses derived source ${sourcePath}`);
+    } else if (!fs.existsSync(resolved)) {
+      issues.push(`${label} source ${sourcePath} is missing`);
+    } else if (fs.statSync(resolved).isFile() && hashFile(resolved) !== expectedHash) {
+      issues.push(`${label} source ${sourcePath} changed after baseline proposal`);
+    }
+  }
+  if (options.failOnStale && issues.length > 0) {
+    fail(issues.join("; "));
+  }
+  if (options.collectOnly) {
+    return issues;
+  }
+  return issues;
 }
 
 function capabilityProfilePath(context, id) {
@@ -3571,6 +4186,13 @@ function readDependencyGraph(context, options = {}) {
   const graph = readJson(graphPath);
   graph.edges = Array.isArray(graph.edges) ? graph.edges : [];
   return graph;
+}
+
+function readDependencyProposals(context) {
+  return safeReadDir(dependenciesRoot(context))
+    .filter((name) => name.endsWith(".json") && name !== "graph.json")
+    .map((name) => readJson(path.join(dependenciesRoot(context), name)))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
 function upsertDependencyEdge(graph, edge) {
@@ -4205,7 +4827,7 @@ function proposeOutputTemplate(context, options) {
     { status: "proposed", template_path: templatePath, template: templateRecord },
     [
       `Proposed output template ${id} for ${artifactType}`,
-      `Approve it with: agentic-sdlc output template approve --id ${id}`,
+      `Approve it with: agentic-sdlc output template approve --id ${id} --actor-type human --approval-source explicit-user --summary "<user-approved template>"`,
     ],
   );
   });
@@ -4230,13 +4852,27 @@ function approveOutputTemplate(context, options) {
   const templatePath = resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true });
   assertNotDerivedArtifact(context, templatePath, "Output template");
   const approvedContentHash = hashFile(templatePath);
+  const approvalEvidence = buildApprovalEvidence(context, options);
+  const approvalSummary = getOptionString(options, "summary") || template.approval_summary || null;
+  const approvalSource = normalizeApprovalSource(context, options, attribution, `output template ${id}`, "approved");
+  validateApprovalSourceForActor(context, {
+    source: approvalSource,
+    status: "approved",
+    summary: approvalSummary,
+    evidence: approvalEvidence,
+    actor: attribution.actor,
+    label: `output template ${id}`,
+  });
   template.status = "approved";
   template.approved_at = now();
   template.approved_by = attribution.actor;
-  template.approval_summary = getOptionString(options, "summary") || template.approval_summary || null;
+  template.approval_summary = approvalSummary;
   template.approved_content_hash = approvedContentHash;
   template.hash_algorithm = "sha256:file:v1";
-  template.approval_evidence = buildApprovalEvidence(context, options);
+  template.approval_evidence = approvalEvidence;
+  template.approval_source = approvalSource;
+  template.explicit_user_confirmation = approvalSource === "explicit-user";
+  template.provisional = approvalSource === "bootstrap";
   template.audit = {
     ...(template.audit || {}),
     approved_by: attribution.actor,
@@ -4252,6 +4888,9 @@ function approveOutputTemplate(context, options) {
     summary: template.approval_summary,
     status: "approved",
     evidence: template.approval_evidence,
+    approval_source: approvalSource,
+    explicit_user_confirmation: approvalSource === "explicit-user",
+    provisional: approvalSource === "bootstrap",
     approved_content_hash: approvedContentHash,
     hash_algorithm: "sha256:file:v1",
     created_at: now(),
@@ -4381,6 +5020,17 @@ function linkOutputArtifact(context, options) {
     if (!["human", "ci"].includes(attribution.actor.type)) {
       fail("Creating an output override decision requires --actor-type human or an approved CI actor.");
     }
+    const decisionEvidence = buildApprovalEvidence(context, options);
+    const decisionSummary = getOptionString(options, "rationale") || `Approved output override for ${storyId}/${artifactType}`;
+    const approvalSource = normalizeApprovalSource(context, options, attribution, `output override ${decisionId}`, "approved");
+    validateApprovalSourceForActor(context, {
+      source: approvalSource,
+      status: "approved",
+      summary: decisionSummary,
+      evidence: decisionEvidence,
+      actor: attribution.actor,
+      label: `output override ${decisionId}`,
+    });
     const decisionSubject = buildOutputLinkDecisionSubject({
       story_id: storyId,
       artifact_type: artifactType,
@@ -4397,9 +5047,12 @@ function linkOutputArtifact(context, options) {
       story_id: storyId,
       artifact_type: artifactType,
       status: "approved",
-      summary: getOptionString(options, "rationale") || `Approved output override for ${storyId}/${artifactType}`,
+      summary: decisionSummary,
       subject: decisionSubject,
-      evidence: buildApprovalEvidence(context, options),
+      evidence: decisionEvidence,
+      approval_source: approvalSource,
+      explicit_user_confirmation: approvalSource === "explicit-user",
+      provisional: approvalSource === "bootstrap",
       approved_content_hash: hashApprovalSubject(decisionSubject),
       hash_algorithm: "sha256:stable-json:v1",
       created_at: now(),
@@ -5292,10 +5945,12 @@ function gateCheck(context, options) {
     fail("Gate scope 'story' requires --story.");
   }
   validateProject(context, report);
+  validateBaselines(context, report);
   validateLocks(context, report);
 
   if (storyId && scope === "story") {
     const story = readStory(context, storyId);
+    validateDependencyProposals(context, report, storyId);
     if (story?.contract_id) {
       validateContracts(context, report, new Set([story.contract_id]));
     }
@@ -5305,6 +5960,7 @@ function gateCheck(context, options) {
     validateStory(context, storyId, report);
     validateOutputContracts(context, report, storyId);
   } else {
+    validateDependencyProposals(context, report);
     validateContracts(context, report);
     validateCapabilityDiscovery(context, report);
     validateTraces(context, report);
@@ -5574,6 +6230,57 @@ function validateProject(context, report) {
   report.checked.push("project");
 }
 
+function validateBaselines(context, report) {
+  for (const baseline of readBaselines(context)) {
+    const label = `baseline ${baseline.id || "unknown"}`;
+    if (!baseline.id || !baseline.schema_version || !baseline.status || !baseline.kind) {
+      report.errors.push(`${label} is missing id, schema_version, status, or kind`);
+    }
+    for (const issue of validateBaselineSourceHashes(context, baseline, label, { collectOnly: true })) {
+      const severity = ["approved", "provisionally_approved"].includes(baseline.status) && report.strict ? "errors" : "warnings";
+      report[severity].push(issue);
+    }
+    if (baseline.status === "approved") {
+      const approval = latestApprovedRecordApproval(baseline);
+      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
+        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      }
+      validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
+      if (!isApprovedRecordFresh(baseline)) {
+        report.errors.push(`${label} approval is stale`);
+      }
+    }
+    if (baseline.status === "provisionally_approved" && report.strict) {
+      report.errors.push(`${label} is provisionally approved; explicit user or CI approval is required for strict gate`);
+    }
+    report.checked.push(label);
+  }
+}
+
+function validateDependencyProposals(context, report, storyId = null) {
+  for (const proposal of readDependencyProposals(context)) {
+    const relevant = !storyId || (proposal.edges || []).some((edge) => edge.from === storyId || edge.to === storyId);
+    if (!relevant) {
+      continue;
+    }
+    const label = `dependency proposal ${proposal.id || "unknown"}`;
+    if (!proposal.id || !proposal.status || !Array.isArray(proposal.edges)) {
+      report.errors.push(`${label} is missing id, status, or edges`);
+    }
+    if (proposal.status === "approved") {
+      const approval = latestApprovedRecordApproval(proposal);
+      if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
+        report.errors.push(`${label} approval must be attributed to a human or CI actor`);
+      }
+      validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
+      if (!isApprovedRecordFresh(proposal)) {
+        report.errors.push(`${label} approval is stale`);
+      }
+    }
+    report.checked.push(label);
+  }
+}
+
 function validateLocks(context, report) {
   const activeScopes = new Map();
   for (const lock of readLocks(context)) {
@@ -5685,6 +6392,20 @@ function validateOutputContracts(context, report, storyId = null) {
       if (!template.approved_by || !["human", "ci"].includes(template.approved_by.type)) {
         report.errors.push(`${label} approved template is missing human/CI approval attribution`);
       }
+      validateFormalApprovalRecord(
+        context,
+        report,
+        {
+          status: "approved",
+          summary: template.approval_summary,
+          evidence: template.approval_evidence || [],
+          approval_source: template.approval_source || null,
+          explicit_user_confirmation: template.explicit_user_confirmation,
+          provisional: template.provisional,
+        },
+        `${label} approval`,
+        template.approved_by,
+      );
       if (!template.approved_content_hash) {
         const severity = report.strict ? "errors" : "warnings";
         report[severity].push(`${label} is approved but has no approved_content_hash; re-approve the template`);
@@ -5731,6 +6452,7 @@ function validateOutputDecision(context, report, decision) {
     if (!actor || !["human", "ci"].includes(actor.type)) {
       report.errors.push(`${label} approved decision is missing human/CI attribution`);
     }
+    validateFormalApprovalRecord(context, report, decision, `${label} approval`, actor);
     for (const evidence of decision.evidence || []) {
       const evidencePath = resolveProjectFilePath(context, evidence.path || evidence, { mustExist: false });
       if (!fs.existsSync(evidencePath)) {
@@ -5873,7 +6595,7 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
       }
     }
     for (const issue of validateCapabilityRecordSourceHashes(context, profile, label, { collectOnly: true })) {
-      const severity = profile.status === "approved" && report.strict ? "errors" : "warnings";
+      const severity = approvedRecordIssueSeverity(context, report, profile);
       report[severity].push(issue);
     }
     if (profile.status === "approved") {
@@ -5881,8 +6603,9 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
       if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
         report.errors.push(`${label} approval must be attributed to a human or CI actor`);
       }
+      validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(profile)) {
-        report.errors.push(`${label} approval is stale`);
+        report[approvalIssueSeverity(context, report, approval)].push(`${label} approval is stale`);
       }
     }
     report.checked.push(label);
@@ -5900,7 +6623,7 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
       report.errors.push(`${label} recommendations must be an array`);
     }
     for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, label, { collectOnly: true })) {
-      const severity = recommendation.status === "approved" && report.strict ? "errors" : "warnings";
+      const severity = approvedRecordIssueSeverity(context, report, recommendation);
       report[severity].push(issue);
     }
     if (recommendation.status === "approved") {
@@ -5908,14 +6631,17 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
       if (!approval || !["human", "ci"].includes(approval.approved_by?.type)) {
         report.errors.push(`${label} approval must be attributed to a human or CI actor`);
       }
+      validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
       if (!isApprovedRecordFresh(recommendation)) {
-        report.errors.push(`${label} approval is stale`);
+        report[approvalIssueSeverity(context, report, approval)].push(`${label} approval is stale`);
       }
       const profile = fs.existsSync(capabilityProfilePath(context, recommendation.profile_id))
         ? readJson(capabilityProfilePath(context, recommendation.profile_id))
         : null;
-      if (!profile || profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
+      if (!profile || profile.status !== "approved") {
         report.errors.push(`${label} approved recommendation requires an approved fresh profile`);
+      } else if (!isApprovedRecordFresh(profile)) {
+        report[approvedRecordIssueSeverity(context, report, profile)].push(`${label} approved recommendation requires an approved fresh profile`);
       }
     }
     report.checked.push(label);
@@ -6058,6 +6784,7 @@ function validateContractApprovals(context, report, contract, label) {
       if (!actor || !["human", "ci"].includes(actor.type)) {
         report.errors.push(`${approvalLabel} is missing human/CI approval attribution`);
       }
+      validateFormalApprovalRecord(context, report, approval, approvalLabel, actor);
       for (const evidence of approval.evidence || []) {
         const evidencePath = resolveProjectFilePath(context, evidence.path || evidence, { mustExist: false });
         if (!fs.existsSync(evidencePath)) {
@@ -6335,6 +7062,8 @@ function validateStoryBreakdown(context, story, report) {
     if (!isApprovedRecordFresh(breakdown)) {
       report.errors.push(`Story ${story.id} references ${label} but its approval is stale; re-approve the breakdown`);
     }
+    const approval = latestApprovedRecordApproval(breakdown);
+    validateFormalApprovalRecord(context, report, approval, `${label} approval ${approval?.id || "unknown"}`, approval?.approved_by);
   }
 }
 
@@ -6805,12 +7534,20 @@ function printHelp() {
 
 Usage:
   agentic-sdlc init [--project-name name] [--project-id id] [--root path]
+  agentic-sdlc onboard existing-project [--project-name name] [--document path]
+      [--source path] [--question text] [--summary text]
+  agentic-sdlc baseline propose --id id [--document path] [--source path]
+      [--question text] [--assumption text] [--summary text]
+  agentic-sdlc baseline approve --id id --actor-type human|ci
+      --approval-source explicit-user|ci|bootstrap [--summary text]
+  agentic-sdlc baseline status [--id id]
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
       [--output-ref artifact-type:template-id:mode]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
-  agentic-sdlc contract approve --id contract-id [--summary text] [--approval-evidence path]
+  agentic-sdlc contract approve --id contract-id
+      --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
@@ -6822,18 +7559,18 @@ Usage:
   agentic-sdlc breakdown policy show
   agentic-sdlc breakdown policy set [--delivery-unit story] [--strict-gate-unit story]
   agentic-sdlc breakdown propose --id id --requirement REQ-001 --item story:ST-001
-  agentic-sdlc breakdown approve --id id --actor-type human|ci
+  agentic-sdlc breakdown approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
   agentic-sdlc breakdown status [--requirement REQ-001]
   agentic-sdlc dependency propose --id id --edge from:to:type:blocks:required_state
-  agentic-sdlc dependency approve --id id --actor-type human|ci
+  agentic-sdlc dependency approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
   agentic-sdlc dependency status [--story ST-001]
   agentic-sdlc capability profile propose --id id [--story ST-001] [--phase analysis]
       [--context-file path] [--profile-json json | --profile-file path]
-  agentic-sdlc capability profile approve --id id --actor-type human|ci
+  agentic-sdlc capability profile approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap
   agentic-sdlc capability recommend --id id --profile profile-id
       [--recommendation-json json | --recommendation-file path]
       [--available-capabilities-json json | --available-capabilities-file path]
-  agentic-sdlc capability approve --id id --actor-type human|ci [--approve-install]
+  agentic-sdlc capability approve --id id --actor-type human|ci --approval-source explicit-user|ci|bootstrap [--approve-install]
   agentic-sdlc capability status [--story ST-001] [--profile profile-id] [--json]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
@@ -6842,7 +7579,8 @@ Usage:
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
   agentic-sdlc output template propose --type artifact-type [--id id]
       [--from path | --body text] [--summary text]
-  agentic-sdlc output template approve --id template-id [--summary text] [--approval-evidence path]
+  agentic-sdlc output template approve --id template-id
+      --approval-source explicit-user|ci|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc output resolve --story ST-001 --type artifact-type
   agentic-sdlc output link --story ST-001 --type artifact-type
       --artifact path --template template-id --mode reuse|delta|new
@@ -6914,6 +7652,22 @@ Contract execution policy options:
                          Attach canonical approval evidence and content hash.
                          Repeatable. Must not point to cache/indexes.
   --preserve-status      Record an approval without changing contract.status.
+
+Approval governance options:
+  --approval-source source
+                         Formal approval source: explicit-user, ci,
+                         automation, or bootstrap. For explicit-user,
+                         provide --summary or --approval-evidence.
+                         Permission to implement or push is not formal SDLC
+                         approval.
+
+Baseline onboarding options:
+  --document path        Import a project or user-provided document as baseline
+                         evidence. Repeatable.
+  --source path          Extra project file or directory to hash into the
+                         baseline source set. Repeatable.
+  --confirmed-source id  Source name the user already confirmed as canonical.
+                         Repeatable.
 
 Trace options:
   --git-event event      Classify a sync trace as push, commit, merge, pull,
