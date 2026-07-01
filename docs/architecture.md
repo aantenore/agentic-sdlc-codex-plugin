@@ -1,6 +1,6 @@
 # Architecture
 
-TravelOps SDLC separates the reusable method from project-specific knowledge.
+Agentic SDLC separates the reusable method from project-specific knowledge.
 
 ```text
 Codex plugin

@@ -1,7 +1,0 @@
-interface:
-  display_name: "TravelOps SDLC"
-  short_description: "Contract-driven SDLC with shared KB"
-  brand_color: "#0EA5E9"
-  default_prompt: "Use $travelops-sdlc to initialize and govern this project with contract-driven SDLC."
-policy:
-  allow_implicit_invocation: true

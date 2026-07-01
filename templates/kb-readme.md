@@ -10,7 +10,7 @@ It is intentionally stored in the project repository so people and agents can co
 - Work in story-scoped folders when possible.
 - Append trace events instead of rewriting history.
 - Link requirements, stories, decisions, tests, and release evidence.
-- Run `travelops-sdlc gate check` before merging implementation work.
+- Run `agentic-sdlc gate check` before merging implementation work.
 - Rebuild indexes when search quality matters; indexes are derived artifacts.
 
 ## Directory Map

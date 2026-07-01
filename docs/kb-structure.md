@@ -1,6 +1,6 @@
 # Knowledge Base Structure
 
-TravelOps SDLC uses a Git-first project knowledge base. The plugin is stateless; the KB is created inside each target project.
+Agentic SDLC uses a Git-first project knowledge base. The plugin is stateless; the KB is created inside each target project.
 
 ```text
 <target-project>/
@@ -38,8 +38,8 @@ Example:
 
 ```json
 {
-  "project_id": "travelops",
-  "project_name": "TravelOps",
+  "project_id": "example-product",
+  "project_name": "Example Product",
   "schema_version": "0.1.0",
   "sdlc_version": "0.1.0",
   "knowledge_base": {
@@ -101,12 +101,12 @@ Example:
 ```json
 {
   "id": "ST-001",
-  "title": "Replan a trekking activity when rain is forecast",
+  "title": "Let users manage notification preferences",
   "status": "draft",
   "phase": "implementation",
   "contract_id": "contract-ST-001-implementation",
   "acceptance_criteria": [
-    "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
+    "Given a user disables email notifications, the system does not send non-critical email updates."
   ]
 }
 ```
@@ -130,13 +130,13 @@ Recommended naming:
 
 ```text
 .sdlc/decisions/ADR-0001-problem-framing.md
-.sdlc/decisions/ADR-0002-weather-provider-strategy.md
+.sdlc/decisions/ADR-0002-notification-channel-strategy.md
 ```
 
 Recommended content:
 
 ```text
-# ADR-0002 Weather Provider Strategy
+# ADR-0002 Notification Channel Strategy
 
 Status: Accepted
 Context: ...
@@ -153,8 +153,8 @@ Explicit assumptions that need validation or later review.
 Examples:
 
 ```text
-.sdlc/assumptions/ASM-001-weather-refresh-rate.md
-.sdlc/assumptions/ASM-002-user-location-permission.md
+.sdlc/assumptions/ASM-001-provider-retry-policy.md
+.sdlc/assumptions/ASM-002-user-consent-state.md
 ```
 
 ## `risks/`
@@ -164,8 +164,8 @@ Delivery, product, technical, operational, or compliance risks.
 Examples:
 
 ```text
-.sdlc/risks/RISK-001-map-api-cost.md
-.sdlc/risks/RISK-002-weather-api-availability.md
+.sdlc/risks/RISK-001-provider-cost.md
+.sdlc/risks/RISK-002-email-provider-availability.md
 ```
 
 ## `tests/`
@@ -199,7 +199,7 @@ Example event:
   "id": "TR-20260701084828-7514f5",
   "story_id": "ST-001",
   "type": "decision",
-  "summary": "Use weather events as replanning triggers",
+  "summary": "Use a provider adapter for notification delivery",
   "actor": "codex",
   "evidence": [],
   "related": ["ADR-0002", "REQ-003"],
@@ -238,7 +238,7 @@ Example:
 Rebuild with:
 
 ```bash
-node bin/travelops-sdlc.mjs index rebuild --root <target-project>
+node bin/agentic-sdlc.mjs index rebuild --root <target-project>
 ```
 
 ## `reports/`

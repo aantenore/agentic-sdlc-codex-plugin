@@ -1,6 +1,6 @@
 # Agent Interactions
 
-TravelOps SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory.
+Agentic SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory.
 
 ## Interaction Pattern
 
@@ -29,8 +29,8 @@ The model is not "agents freely coding." It is bounded execution:
 The Discovery Agent starts from an idea or product request.
 
 ```bash
-node bin/travelops-sdlc.mjs init --project-name "TravelOps"
-node bin/travelops-sdlc.mjs contract create --phase discovery
+node bin/agentic-sdlc.mjs init --project-name "Example Product"
+node bin/agentic-sdlc.mjs contract create --phase discovery
 ```
 
 Reads:
@@ -54,9 +54,9 @@ Produces:
 Trace example:
 
 ```bash
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --type decision \
-  --summary "Target the MVP on disruption-aware travel replanning instead of generic itinerary generation."
+  --summary "Target the MVP on notification preferences instead of a broad account settings redesign."
 ```
 
 Handoff to Analysis:
@@ -71,7 +71,7 @@ discarded options, and success metrics are now durable KB artifacts.
 The Analysis Agent turns discovery output into functional and technical boundaries.
 
 ```bash
-node bin/travelops-sdlc.mjs contract create --phase analysis
+node bin/agentic-sdlc.mjs contract create --phase analysis
 ```
 
 Reads:
@@ -89,16 +89,16 @@ Produces:
 ```text
 .sdlc/requirements/functional-analysis.md
 .sdlc/requirements/integration-map.md
-.sdlc/risks/RISK-002-weather-api-availability.md
-.sdlc/decisions/ADR-0002-weather-provider-strategy.md
+.sdlc/risks/RISK-002-email-provider-availability.md
+.sdlc/decisions/ADR-0002-notification-channel-strategy.md
 ```
 
 Trace example:
 
 ```bash
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --type assumption \
-  --summary "Weather data can be refreshed at itinerary checkpoint granularity for MVP."
+  --summary "Email delivery can be abstracted behind a provider adapter for MVP."
 ```
 
 Handoff to Design:
@@ -112,12 +112,12 @@ Functional flows, edge cases, API/mock strategy, and integration risks.
 The Design Agent converts analysis into story workspaces and acceptance criteria.
 
 ```bash
-node bin/travelops-sdlc.mjs contract create --phase design
-node bin/travelops-sdlc.mjs story create \
+node bin/agentic-sdlc.mjs contract create --phase design
+node bin/agentic-sdlc.mjs story create \
   --id ST-001 \
-  --title "Replan a trekking activity when rain is forecast" \
+  --title "Let users manage notification preferences" \
   --phase design \
-  --acceptance "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
+  --acceptance "Given a user disables email notifications, the system does not send non-critical email updates."
 ```
 
 Reads:
@@ -136,7 +136,7 @@ Produces:
 .sdlc/stories/ST-001/plan.md
 .sdlc/stories/ST-001/implementation-log.md
 .sdlc/tests/ST-001-test-strategy.md
-.sdlc/decisions/ADR-0003-replanning-scope.md
+.sdlc/decisions/ADR-0003-notification-preferences-scope.md
 ```
 
 Handoff to Implementation:
@@ -151,12 +151,12 @@ test strategy, and relevant decisions.
 The Implementation Agent works only after a story has been claimed.
 
 ```bash
-node bin/travelops-sdlc.mjs contract create \
+node bin/agentic-sdlc.mjs contract create \
   --phase implementation \
   --story ST-001 \
   --id contract-ST-001-implementation
 
-node bin/travelops-sdlc.mjs story claim \
+node bin/agentic-sdlc.mjs story claim \
   --id ST-001 \
   --agent codex \
   --branch feature/ST-001
@@ -184,15 +184,15 @@ application code changes
 Trace examples:
 
 ```bash
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type implementation \
-  --summary "Added weather-triggered replanning service and fallback activity selector."
+  --summary "Added notification preference persistence and delivery-provider adapter."
 
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type test \
-  --summary "Unit and integration tests passed for rain-triggered replanning."
+  --summary "Unit and integration tests passed for notification opt-out rules."
 ```
 
 Handoff to Validation:
@@ -207,7 +207,7 @@ and trace events linked to the story.
 The Validation Agent checks whether the story satisfies its contract and acceptance criteria.
 
 ```bash
-node bin/travelops-sdlc.mjs gate check --story ST-001
+node bin/agentic-sdlc.mjs gate check --story ST-001
 ```
 
 Reads:
@@ -231,7 +231,7 @@ Produces:
 Trace example:
 
 ```bash
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type gate \
   --summary "Validation gate passed with test evidence linked."
@@ -269,10 +269,10 @@ Produces:
 Trace example:
 
 ```bash
-node bin/travelops-sdlc.mjs trace append \
+node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type release \
-  --summary "Released disruption-aware replanning MVP with weather signal monitoring."
+  --summary "Released notification preferences MVP with delivery status monitoring."
 ```
 
 ## Parallel Agent Example

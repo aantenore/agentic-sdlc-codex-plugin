@@ -1,14 +1,14 @@
 {
-  "name": "travelops-sdlc-codex-plugin",
+  "name": "agentic-sdlc-codex-plugin",
   "version": "0.1.0",
   "description": "Codex plugin for contract-driven agentic SDLC with a shared Git-first knowledge base.",
   "type": "module",
   "bin": {
-    "travelops-sdlc": "./bin/travelops-sdlc.mjs"
+    "agentic-sdlc": "./bin/agentic-sdlc.mjs"
   },
   "scripts": {
-    "check": "node --check bin/travelops-sdlc.mjs",
-    "smoke": "node bin/travelops-sdlc.mjs --help"
+    "check": "node --check bin/agentic-sdlc.mjs",
+    "smoke": "node bin/agentic-sdlc.mjs --help"
   },
   "keywords": [
     "codex",

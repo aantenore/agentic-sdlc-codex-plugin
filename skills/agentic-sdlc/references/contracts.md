@@ -20,7 +20,7 @@ A contract is the operational descriptor for an SDLC phase or story. It tells Co
 The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template directory through:
 
 ```bash
-node <plugin-root>/bin/travelops-sdlc.mjs --template-dir <dir> ...
+node <plugin-root>/bin/agentic-sdlc.mjs --template-dir <dir> ...
 ```
 
 ## Review Guidance
