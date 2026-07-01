@@ -115,7 +115,11 @@ If no approved template exists, the agent proposes one and waits for user approv
 
 ```bash
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
-node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human
+node bin/agentic-sdlc.mjs output template approve \
+  --id functional-analysis-v1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approved functional analysis template"
 ```
 
 If a related story already covers the same requirement, the agent reuses the base artifact and creates only a delta:

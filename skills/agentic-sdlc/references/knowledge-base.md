@@ -8,6 +8,7 @@ The project KB lives under `<target-project>/.sdlc/`. It is the durable source o
 .sdlc/
   project.json
   README.md
+  baseline/
   contracts/
   output-contracts/
   requirements/
@@ -33,6 +34,7 @@ Use JSON and Markdown files as source of truth. Treat generated cache and indexe
 ## What Belongs In The KB
 
 - Contracts and phase rules.
+- Existing-project baselines, including inferred current state, imported documents, source hashes, open questions, and explicit baseline approvals.
 - Output contract registry, approved templates, story-artifact links, and structural output decisions.
 - Requirements and constraints.
 - Story workspaces and claims.
@@ -45,6 +47,22 @@ Use JSON and Markdown files as source of truth. Treat generated cache and indexe
 - Test plans and evidence.
 - Release notes and feedback loops.
 - Cache/index files only as local regenerable acceleration data.
+
+## Existing Project Baseline
+
+When SDLC tracking starts on a project that already has code or documentation, create a baseline proposal instead of inventing past history:
+
+```bash
+node bin/agentic-sdlc.mjs onboard existing-project --root <project> --document README.md
+```
+
+The baseline is inferred context until approved. It can describe what exists now, but it cannot prove who made past decisions, why they were made, or whether previous approvals happened unless those facts are present in canonical evidence files.
+
+Approve a baseline only with explicit user or CI confirmation:
+
+```bash
+node bin/agentic-sdlc.mjs baseline approve --id BASELINE-INITIAL --actor-type human --approval-source explicit-user --summary "<confirmed scope>"
+```
 
 ## What Does Not Belong In The Plugin
 
@@ -80,3 +98,7 @@ Claims, traces, handoffs, approvals, locks, and sync events should record:
 - Git branch and head SHA;
 - event timestamp;
 - evidence paths or related artifact IDs.
+
+## Approval Governance
+
+Do not equate implementation authorization with formal artifact approval. Approval records should include `approval_source`, approver attribution, summary or evidence, content hash, Git metadata, and run metadata. Use `approval_source: bootstrap` only for migration/provisional records.

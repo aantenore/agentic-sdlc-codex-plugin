@@ -24,7 +24,7 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `capability_recommendation_refs`: Approved capability recommendations that supplied policy, bindings, open questions, or execution-policy suggestions.
 - `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
 - `audit`: Actor, Git, and run metadata for contract creation and updates.
-- `approvals`: Human or CI gate decisions. The latest approved decision controls strict gate status only while its content hash still matches the contract.
+- `approvals`: Human or CI gate decisions. The latest approved decision controls strict gate status only while its content hash still matches the contract and its approval source satisfies policy.
 
 ## Execution Policy
 
@@ -69,6 +69,8 @@ Do not duplicate template structure inside every phase contract. Let the phase c
 
 Approved contracts, approved templates, and linked artifacts carry hashes. If the approved content changes after approval or linking, strict gates fail until the contract, template, or artifact link is refreshed through the CLI.
 
+Formal approval records should include `approval_source`, approver attribution, summary or evidence, and approved content hash. `explicit-user` means the user confirmed that specific artifact; it is not implied by permission to implement. `bootstrap` is reserved for migration/provisional records and does not satisfy strict gates unless the project explicitly allows it.
+
 ## Template Source
 
 The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template directory through:
@@ -94,6 +96,7 @@ Reject or revise a contract when:
 - linked output artifacts do not use approved output templates;
 - duplicate outputs are created without an approved decision;
 - the latest human gate decision is not `approved` before phase exit;
+- approval source is missing, legacy-only, or bootstrap when strict gate requires explicit approval;
 - audit metadata is missing for contract updates;
 - human approval is missing for high-impact actions;
 - KB writes are missing for decisions, assumptions, risks, or tests.

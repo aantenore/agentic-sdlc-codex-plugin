@@ -9,6 +9,7 @@ The sample records below use neutral placeholders. The structure is generic and 
   .sdlc/
     project.json
     README.md
+    baseline/
     contracts/
     capability-discovery/
     output-contracts/
@@ -44,6 +45,7 @@ Cache and indexes are derived artifacts. They can be rebuilt from source files a
 ```mermaid
 flowchart TB
   Source["Source of truth"]
+  Source --> Baseline["baseline"]
   Source --> Contracts["contracts"]
   Source --> Capabilities["capability-discovery"]
   Source --> OutputContracts["output-contracts"]
@@ -57,7 +59,8 @@ flowchart TB
   Source --> Traces["traces"]
   Source --> Reports["reports as evidence"]
 
-  Contracts --> Cache["cache"]
+  Baseline --> Cache["cache"]
+  Contracts --> Cache
   Capabilities --> Cache
   OutputContracts --> Cache
   Requirements --> Cache
@@ -69,7 +72,8 @@ flowchart TB
   Tests --> Cache
   Traces --> Cache
 
-  Contracts --> Indexes["indexes"]
+  Baseline --> Indexes["indexes"]
+  Contracts --> Indexes
   Requirements --> Indexes
   Stories --> Indexes
   Traces --> Indexes
@@ -103,6 +107,49 @@ Example:
     "cache_policy_path": ".sdlc/cache/kb-cache.json"
   }
 }
+```
+
+## `baseline/`
+
+Baselines describe the current observable state of an existing project when SDLC tracking starts after the project already exists.
+
+Examples:
+
+```text
+.sdlc/baseline/BASELINE-INITIAL.json
+.sdlc/baseline/BASELINE-INITIAL-current-state.md
+```
+
+The JSON record stores detected stack, key files, imported documents, inferred context, source hashes, open questions, and approval records. A baseline starts as `proposed` and explicitly separates inferred facts from confirmed canonical facts.
+
+```json
+{
+  "id": "BASELINE-INITIAL",
+  "status": "proposed",
+  "kind": "existing-project",
+  "summary": "Initial baseline for an existing product.",
+  "canonicality": {
+    "state": "inferred",
+    "inferred_not_approved": true,
+    "user_confirmation_required": true
+  },
+  "source_paths": ["README.md", "package.json"],
+  "source_hashes": {
+    "README.md": "content-hash",
+    "package.json": "content-hash"
+  },
+  "open_questions": ["Which inferred facts are canonical?"]
+}
+```
+
+Approve a baseline only after the user confirms what is canonical:
+
+```bash
+node bin/agentic-sdlc.mjs baseline approve \
+  --id BASELINE-INITIAL \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Confirmed baseline scope and current-state assumptions"
 ```
 
 ## `contracts/`
