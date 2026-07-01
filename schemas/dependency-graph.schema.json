@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/dependency-graph.schema.json",
+  "title": "Agentic SDLC Dependency Graph",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "edges"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "approved"
+      ]
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    }
+  },
+  "$defs": {
+    "edge": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "type",
+        "blocks",
+        "required_state"
+      ],
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "blocks",
+            "requires_artifact",
+            "requires_contract",
+            "related",
+            "same_requirement",
+            "parent_epic"
+          ]
+        },
+        "blocks": {
+          "enum": [
+            "analysis",
+            "design",
+            "implementation",
+            "validation",
+            "release",
+            "none"
+          ]
+        },
+        "required_state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
