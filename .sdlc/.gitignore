@@ -1,0 +1,3 @@
+cache/**/*
+indexes/*.json
+reports/*.tmp

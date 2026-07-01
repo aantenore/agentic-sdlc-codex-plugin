@@ -1,0 +1,208 @@
+{
+  "schema_version": "0.1.0",
+  "project_id": "agentic-sdlc-codex-plugin",
+  "status": "active",
+  "policy": {
+    "template_registry_scope": "project",
+    "default_related_story_mode": "reuse+delta",
+    "approvals_required_for_new_templates": true,
+    "cache_is_source_of_truth": false
+  },
+  "templates": [
+    {
+      "id": "implementation-summary-v1",
+      "type": "implementation-summary",
+      "status": "approved",
+      "path": ".sdlc/output-contracts/templates/implementation-summary-v1.md",
+      "summary": "Standard implementation summary for plugin changes.",
+      "source_paths": [],
+      "proposed_at": "2026-07-01T11:26:24.866Z",
+      "approved_at": "2026-07-01T11:26:25.050Z",
+      "approved_by": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "audit": {
+        "proposed_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.2.0"
+        },
+        "approved_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "environment"
+        }
+      },
+      "approval_summary": "Approved implementation summary template.",
+      "approved_content_hash": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+      "hash_algorithm": "sha256:file:v1",
+      "approval_evidence": []
+    }
+  ],
+  "links": [
+    {
+      "id": "OUT-ST-CAPABILITY-DISCOVERY-implementation-summary-093c1de9",
+      "story_id": "ST-CAPABILITY-DISCOVERY",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-CAPABILITY-DISCOVERY"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "source_paths": [
+        ".sdlc/stories/ST-CAPABILITY-DISCOVERY/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "27eec4a379e9a4779450fe679bb95051307df3f98108b45620d83067d3611c4b",
+        "base_artifact_sha256": null,
+        "template_sha256": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-01T11:26:44.277Z",
+      "updated_at": "2026-07-01T11:26:44.277Z",
+      "audit": {
+        "linked_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.2.0"
+        }
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "DEC-output-template-implementation-summary-v1-20260701112625",
+      "type": "template_approved",
+      "template_id": "implementation-summary-v1",
+      "artifact_type": "implementation-summary",
+      "summary": "Approved implementation summary template.",
+      "status": "approved",
+      "evidence": [],
+      "approved_content_hash": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+      "hash_algorithm": "sha256:file:v1",
+      "created_at": "2026-07-01T11:26:25.050Z",
+      "audit": {
+        "decided_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it",
+          "source": "environment"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "main",
+          "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.2.0"
+        }
+      }
+    }
+  ],
+  "created_at": "2026-07-01T11:12:46.834Z",
+  "updated_at": "2026-07-01T11:26:44.277Z",
+  "audit": {
+    "created_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "updated_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.2.0"
+    }
+  }
+}

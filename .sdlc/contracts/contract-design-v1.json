@@ -1,0 +1,131 @@
+{
+  "id": "contract-design-v1",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.1.0",
+  "project": {
+    "project_id": "agentic-sdlc-codex-plugin",
+    "project_name": "Agentic SDLC Codex Plugin"
+  },
+  "phase": "design",
+  "story_id": null,
+  "status": "draft",
+  "purpose": "Convert analysis into user stories, task decomposition, acceptance criteria, test strategy, and UX or architecture decisions.",
+  "owner_agent": "design-agent",
+  "inputs": [
+    "functional analysis",
+    "technical analysis",
+    "integration map",
+    "risk register"
+  ],
+  "outputs": [
+    "user stories",
+    "task decomposition",
+    "acceptance criteria",
+    "test strategy",
+    "UX or UI notes",
+    "architecture decisions"
+  ],
+  "output_contract_refs": [],
+  "validation": [
+    "stories are independently deliverable",
+    "acceptance criteria are observable",
+    "test strategy maps to acceptance criteria",
+    "architecture decisions include rationale"
+  ],
+  "allowed_tools": [
+    "knowledge-base",
+    "repo-read",
+    "design-docs",
+    "test-planning"
+  ],
+  "kb_writes": [
+    "stories",
+    "decisions",
+    "tests",
+    "risks"
+  ],
+  "human_gate": true,
+  "metrics": [
+    "stories_ready_count",
+    "acceptance_criteria_count",
+    "decision_records_count"
+  ],
+  "execution_policy": {
+    "runtime": "codex",
+    "model": {
+      "mode": "inherit",
+      "value": null
+    },
+    "reasoning": {
+      "mode": "inherit",
+      "level": null
+    },
+    "notes": []
+  },
+  "capability_policy": {
+    "skills": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "approval_required_for": []
+  },
+  "capability_bindings": [],
+  "contextualization": {
+    "summary": null,
+    "context_sources": [],
+    "questions": [],
+    "constraints": [],
+    "assumptions": [],
+    "open_questions": 0
+  },
+  "approvals": [],
+  "created_at": "2026-07-01T11:12:47.236Z",
+  "updated_at": "2026-07-01T11:12:47.236Z",
+  "audit": {
+    "created_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "updated_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.1.0"
+    }
+  }
+}

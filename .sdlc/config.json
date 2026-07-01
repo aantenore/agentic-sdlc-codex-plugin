@@ -1,0 +1,663 @@
+{
+  "schema_version": "0.1.0",
+  "kb_directories": [
+    "contracts",
+    "capability-discovery",
+    "output-contracts",
+    "requirements",
+    "stories",
+    "work-items",
+    "work-breakdown",
+    "dependencies",
+    "orchestration",
+    "locks",
+    "handoffs",
+    "decisions",
+    "assumptions",
+    "risks",
+    "tests",
+    "traces",
+    "releases",
+    "cache",
+    "indexes",
+    "reports"
+  ],
+  "indexable_extensions": [
+    ".json",
+    ".jsonl",
+    ".md",
+    ".txt",
+    ".yaml",
+    ".yml"
+  ],
+  "phase_order": [
+    "discovery",
+    "analysis",
+    "design",
+    "implementation",
+    "validation",
+    "release"
+  ],
+  "contract_generation": {
+    "principle": "Contract templates are generic. Generated contracts must be contextualized for the target project by inspecting project KB artifacts, reading user-provided files, and asking questions when critical context is missing.",
+    "context_sources": [
+      ".sdlc/project.json",
+      ".sdlc/requirements/",
+      ".sdlc/stories/",
+      ".sdlc/decisions/",
+      ".sdlc/risks/",
+      "user-provided files"
+    ],
+    "ask_when_missing": [
+      "project objective",
+      "target users or stakeholders",
+      "constraints and non-functional requirements",
+      "phase-specific inputs",
+      "acceptance criteria",
+      "required integrations",
+      "approval boundaries"
+    ],
+    "required_contract_context": [
+      "project",
+      "contextualization.summary",
+      "contextualization.context_sources",
+      "contextualization.questions",
+      "contextualization.constraints",
+      "contextualization.assumptions"
+    ]
+  },
+  "execution_policy": {
+    "principle": "Contracts run inside Codex. If a contract does not explicitly override model or reasoning, spawned agents should inherit the main Codex thread configuration.",
+    "runtime": "codex",
+    "default_model": "inherit",
+    "default_reasoning": "inherit",
+    "reasoning_levels": [
+      "inherit",
+      "minimal",
+      "low",
+      "medium",
+      "high"
+    ]
+  },
+  "parallel_work": {
+    "principle": "Parallel work is story-scoped. Each active story lane has one active claim, an auditable actor, a branch, trace events, and explicit release or handoff.",
+    "unit_of_parallelism": "story",
+    "branch_pattern": "feature/<story-id>",
+    "active_claim_status": "active",
+    "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-reclaimed by a human"
+  },
+  "work_breakdown_policy": {
+    "principle": "Work breakdown is agreed with the user and stored in .sdlc. Story remains the main delivery and strict-gate unit; epic and task are optional internal aggregation/operational levels.",
+    "levels": [
+      "requirement",
+      "epic",
+      "story",
+      "task"
+    ],
+    "default_flow": [
+      "requirement",
+      "story"
+    ],
+    "optional_levels": [
+      "epic",
+      "task"
+    ],
+    "delivery_unit": "story",
+    "claimable_units": [
+      "story",
+      "task"
+    ],
+    "strict_gate_unit": "story",
+    "task_gate": "light"
+  },
+  "output_consistency_policy": {
+    "principle": "Every durable story output should resolve an approved project-wide output template before generation. Related stories should reuse the approved base artifact and create only an explicit delta unless the user approves a new structure.",
+    "registry_path": ".sdlc/output-contracts/registry.json",
+    "template_directory": ".sdlc/output-contracts/templates",
+    "default_related_story_mode": "reuse+delta",
+    "artifact_types": [
+      "functional-analysis",
+      "technical-analysis",
+      "technical-decision-matrix",
+      "test-strategy",
+      "test-plan",
+      "implementation-summary",
+      "release-evidence"
+    ],
+    "approval_required_for": [
+      "new_template",
+      "template_structure_change",
+      "duplicate_new_output",
+      "project_wide_template_replacement"
+    ],
+    "agent_rules": [
+      "Read the output registry before producing an artifact.",
+      "Resolve the artifact type for the story and requirement.",
+      "Prefer reuse plus delta when another story already covers the same requirement.",
+      "Ask the user before introducing a new template or changing an approved output structure.",
+      "Link every durable output to story, requirement, artifact path, template id, and reuse mode."
+    ]
+  },
+  "routing_policy": {
+    "principle": "The route router is language-agnostic. It consumes canonical intent JSON normalized by an LLM or Codex and never classifies raw text with linguistic keywords.",
+    "canonical_intent_schema": "schemas/route-intent.schema.json",
+    "routes": [
+      "init_project",
+      "ask_clarification",
+      "intake_requirement",
+      "classify_artifact",
+      "decompose_stories",
+      "create_contract",
+      "discover_capabilities",
+      "technical_decision",
+      "confirm_phase_skip",
+      "claim_and_implement",
+      "validate_story",
+      "release_story"
+    ],
+    "confidence": {
+      "auto_route_min": 0.85,
+      "confirm_min": 0.6,
+      "ask_below": 0.45,
+      "always_confirm": [
+        "skip_phase",
+        "create_story",
+        "start_implementation",
+        "create_canonical_artifact",
+        "new_output_template",
+        "duplicate_output"
+      ]
+    },
+    "entity_types": {
+      "story": [
+        "story"
+      ],
+      "contract": [
+        "contract"
+      ],
+      "requirement": [
+        "requirement"
+      ],
+      "template": [
+        "template",
+        "output_template"
+      ]
+    },
+    "canonical_actions": {
+      "initialize_project": {
+        "route": "init_project"
+      },
+      "init_project": {
+        "route": "init_project"
+      },
+      "intake_requirement": {
+        "route": "intake_requirement"
+      },
+      "classify_artifact": {
+        "route": "classify_artifact",
+        "requires_artifact_type": true
+      },
+      "decompose_stories": {
+        "route": "decompose_stories",
+        "confirmation_key": "create_story"
+      },
+      "create_story": {
+        "route": "decompose_stories",
+        "confirmation_key": "create_story"
+      },
+      "create_contract": {
+        "route": "create_contract"
+      },
+      "discover_capabilities": {
+        "route": "discover_capabilities",
+        "confirmation_key": "discover_capabilities"
+      },
+      "capability_discovery": {
+        "route": "discover_capabilities",
+        "confirmation_key": "discover_capabilities"
+      },
+      "technical_decision": {
+        "route": "technical_decision",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-decision-matrix"
+      },
+      "implement_story": {
+        "route": "claim_and_implement",
+        "confirmation_key": "start_implementation",
+        "requires_story": true,
+        "requires_contract": true
+      },
+      "start_implementation": {
+        "route": "claim_and_implement",
+        "confirmation_key": "start_implementation",
+        "requires_story": true,
+        "requires_contract": true
+      },
+      "validate_story": {
+        "route": "validate_story",
+        "requires_story": true
+      },
+      "release_story": {
+        "route": "release_story",
+        "requires_story": true
+      },
+      "skip_phase": {
+        "route": "confirm_phase_skip",
+        "confirmation_key": "skip_phase"
+      },
+      "functional_analysis": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "functional-analysis",
+        "requires_artifact_type": true
+      },
+      "technical_analysis": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "create_canonical_artifact": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "requires_artifact_type": true
+      },
+      "new_output_template": {
+        "route": "classify_artifact",
+        "confirmation_key": "new_output_template",
+        "requires_artifact_type": true
+      },
+      "duplicate_output": {
+        "route": "classify_artifact",
+        "confirmation_key": "duplicate_output",
+        "requires_artifact_type": true
+      }
+    }
+  },
+  "capability_discovery_policy": {
+    "principle": "Capability discovery is contextual and technology-agnostic. Codex or another LLM proposes canonical profiles and recommendations; the CLI validates, persists, approves, and applies only structured JSON with evidence.",
+    "registry_path": ".sdlc/capability-discovery",
+    "default_auto_use_installed": true,
+    "default_auto_install": false,
+    "require_approval_for_install": true,
+    "require_approval_for_external_access": true,
+    "require_approval_for_write_access": true,
+    "require_approval_for_production": true,
+    "source_priorities": [
+      "project repository files",
+      ".sdlc canonical knowledge base",
+      "user-provided files",
+      "official documentation",
+      "approved connector responses"
+    ],
+    "agent_rules": [
+      "Profile the project or story before technical analysis when the stack, integrations, or useful capabilities are unclear.",
+      "Recommend skills, MCPs, tools, models, and bindings from evidence, not from language keywords.",
+      "Ask for approval before installing missing capabilities or using external/write/production targets.",
+      "Apply approved recommendations to contracts instead of duplicating capability decisions in chat."
+    ]
+  },
+  "cache_policy": {
+    "principle": "Cache and index files are local, derived, and regenerable optimizations. They can accelerate lookup and context assembly, but they must never be used as the canonical source for approvals, requirements, decisions, or story outputs.",
+    "cache_path": ".sdlc/cache/kb-cache.json",
+    "derived_directories": [
+      "cache",
+      "indexes"
+    ],
+    "source_of_truth_dirs": [
+      "contracts",
+      "capability-discovery",
+      "requirements",
+      "stories",
+      "work-items",
+      "work-breakdown",
+      "dependencies",
+      "decisions",
+      "tests",
+      "traces",
+      "handoffs",
+      "output-contracts",
+      "assumptions",
+      "risks",
+      "locks",
+      "orchestration",
+      "releases",
+      "reports"
+    ],
+    "required_entry_metadata": [
+      "source_paths",
+      "source_hashes",
+      "generated_at",
+      "schema_version"
+    ],
+    "strict_gate_behavior": {
+      "stale_cache": "warn",
+      "missing_cache": "warn",
+      "cache_as_primary_source": "error"
+    }
+  },
+  "claim_policy": {
+    "one_active_claim_per_story": true,
+    "require_branch_pattern": true,
+    "release_before_reclaim": true
+  },
+  "handoff_policy": {
+    "required_for_phase_transfer": true,
+    "record_trace": true,
+    "open_items_block_strict_gate": true
+  },
+  "phase_lock_policy": {
+    "record_trace": true,
+    "expired_locks_block_strict_gate": true,
+    "active_locks_warn_gate": true
+  },
+  "trace_policy": {
+    "principle": "Every durable event must be attributable to a human, agent, system, or CI actor.",
+    "require_actor": true,
+    "record_git_metadata": true,
+    "record_run_metadata": true,
+    "sync_events": [
+      "push",
+      "commit",
+      "merge",
+      "pull",
+      "rebase",
+      "branch",
+      "handoff"
+    ]
+  },
+  "phases": {
+    "discovery": {
+      "purpose": "Understand the problem, target users, market context, constraints, and value hypothesis before solution design.",
+      "owner_agent": "discovery-agent",
+      "inputs": [
+        "initial idea or business problem",
+        "target user assumptions",
+        "known constraints",
+        "available reference material"
+      ],
+      "outputs": [
+        "problem statement",
+        "target users",
+        "competitor and alternative analysis",
+        "process gaps",
+        "feature proposal",
+        "success metrics"
+      ],
+      "validation": [
+        "problem statement is specific",
+        "target users are explicit",
+        "constraints and non-goals are captured",
+        "feature proposal links to user value"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "web-research",
+        "document-analysis"
+      ],
+      "kb_writes": [
+        "requirements",
+        "assumptions",
+        "risks",
+        "decisions"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "open_questions_count",
+        "validated_requirements_count",
+        "discarded_alternatives_count"
+      ]
+    },
+    "analysis": {
+      "purpose": "Translate approved discovery output into functional and technical analysis with integrations, APIs, mocks, and system boundaries.",
+      "owner_agent": "analysis-agent",
+      "inputs": [
+        "approved requirements",
+        "feature proposal",
+        "constraints",
+        "known integrations"
+      ],
+      "outputs": [
+        "functional analysis",
+        "technical analysis",
+        "integration map",
+        "API or mock strategy",
+        "edge cases",
+        "risk register"
+      ],
+      "validation": [
+        "must-have requirements are covered",
+        "user flows include inputs and outputs",
+        "edge cases are testable",
+        "integration strategy is explicit"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "api-docs",
+        "mock-generation"
+      ],
+      "kb_writes": [
+        "decisions",
+        "assumptions",
+        "risks",
+        "requirements"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "covered_requirements_count",
+        "integration_risks_count",
+        "mocked_services_count"
+      ]
+    },
+    "design": {
+      "purpose": "Convert analysis into user stories, task decomposition, acceptance criteria, test strategy, and UX or architecture decisions.",
+      "owner_agent": "design-agent",
+      "inputs": [
+        "functional analysis",
+        "technical analysis",
+        "integration map",
+        "risk register"
+      ],
+      "outputs": [
+        "user stories",
+        "task decomposition",
+        "acceptance criteria",
+        "test strategy",
+        "UX or UI notes",
+        "architecture decisions"
+      ],
+      "validation": [
+        "stories are independently deliverable",
+        "acceptance criteria are observable",
+        "test strategy maps to acceptance criteria",
+        "architecture decisions include rationale"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "design-docs",
+        "test-planning"
+      ],
+      "kb_writes": [
+        "stories",
+        "decisions",
+        "tests",
+        "risks"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "stories_ready_count",
+        "acceptance_criteria_count",
+        "decision_records_count"
+      ]
+    },
+    "implementation": {
+      "purpose": "Implement story-scoped changes on dedicated branches using the approved contract, tests, and knowledge base context.",
+      "owner_agent": "implementation-agent",
+      "inputs": [
+        "approved story",
+        "contract",
+        "acceptance criteria",
+        "test strategy",
+        "active claim"
+      ],
+      "outputs": [
+        "code changes",
+        "implementation log",
+        "test evidence",
+        "review notes",
+        "updated knowledge base"
+      ],
+      "validation": [
+        "branch is story-scoped",
+        "acceptance criteria are addressed",
+        "blocking tests pass",
+        "decision and assumption changes are recorded",
+        "no unauthorized tool or resource use"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "repo-write",
+        "test-runner",
+        "code-review"
+      ],
+      "kb_writes": [
+        "traces",
+        "tests",
+        "decisions",
+        "stories"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "tests_run_count",
+        "blocking_failures_count",
+        "review_findings_count"
+      ]
+    },
+    "validation": {
+      "purpose": "Validate implementation against contracts, acceptance criteria, tests, observability needs, and release readiness.",
+      "owner_agent": "validation-agent",
+      "inputs": [
+        "implementation output",
+        "acceptance criteria",
+        "test evidence",
+        "risk register",
+        "release target"
+      ],
+      "outputs": [
+        "test report",
+        "coverage notes",
+        "unresolved risks",
+        "fix list",
+        "gate decision"
+      ],
+      "validation": [
+        "blocking tests pass",
+        "known risks are accepted or mitigated",
+        "test evidence is linked",
+        "gate decision is recorded"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "test-runner",
+        "observability-check"
+      ],
+      "kb_writes": [
+        "tests",
+        "risks",
+        "traces",
+        "reports"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "blocking_tests_passed",
+        "open_risks_count",
+        "evidence_links_count"
+      ]
+    },
+    "release": {
+      "purpose": "Package the validated work with documentation, observability, feedback loop, and updated project context.",
+      "owner_agent": "release-agent",
+      "inputs": [
+        "validated implementation",
+        "gate decision",
+        "test report",
+        "deployment target",
+        "feedback channels"
+      ],
+      "outputs": [
+        "release notes",
+        "deployment or delivery notes",
+        "observability plan",
+        "feedback loop",
+        "updated app context"
+      ],
+      "validation": [
+        "release notes describe user-visible changes",
+        "deployment notes include rollback or recovery path",
+        "observability signals are defined",
+        "feedback loop has an owner"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "release-management",
+        "observability-check"
+      ],
+      "kb_writes": [
+        "releases",
+        "decisions",
+        "traces",
+        "reports"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "release_evidence_count",
+        "observability_signals_count",
+        "feedback_items_count"
+      ]
+    }
+  },
+  "gate_policy": {
+    "strict_mode": {
+      "requires_contextualized_contracts": true,
+      "requires_zero_open_contract_questions": true,
+      "requires_latest_human_gate_approval": true,
+      "requires_active_claim_for_implementation": true,
+      "requires_attributed_traces": true,
+      "requires_output_contract_coverage": true,
+      "blocks_cache_as_primary_source": true,
+      "blocks_unapproved_duplicate_outputs": true
+    },
+    "contract_required_fields": [
+      "id",
+      "project",
+      "phase",
+      "purpose",
+      "owner_agent",
+      "inputs",
+      "outputs",
+      "validation",
+      "allowed_tools",
+      "kb_writes",
+      "human_gate",
+      "execution_policy",
+      "contextualization"
+    ],
+    "story_required_fields": [
+      "id",
+      "title",
+      "status",
+      "phase",
+      "acceptance_criteria"
+    ],
+    "implementation_requires_claim": true,
+    "implementation_requires_acceptance_criteria": true,
+    "validation_requires_test_trace": true,
+    "release_requires_release_trace": true
+  }
+}

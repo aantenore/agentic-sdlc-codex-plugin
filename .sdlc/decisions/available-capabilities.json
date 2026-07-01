@@ -1,0 +1,21 @@
+{
+  "skills": [
+    "agentic-sdlc",
+    "software-lifecycle-orchestrator",
+    "agents-best-practices"
+  ],
+  "tools": [
+    "agentic-sdlc-cli",
+    "test-runner",
+    "plugin-validator",
+    "skill-validator",
+    "git"
+  ],
+  "mcp": [],
+  "plugins": [
+    "agentic-sdlc-codex-plugin"
+  ],
+  "models": [
+    "inherit"
+  ]
+}

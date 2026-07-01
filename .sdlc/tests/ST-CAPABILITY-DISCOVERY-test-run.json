@@ -1,0 +1,31 @@
+{
+  "story_id": "ST-CAPABILITY-DISCOVERY",
+  "checked_at": "2026-07-01T11:45:00.000Z",
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed"
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "details": "36 tests passed"
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed"
+    },
+    {
+      "command": "JSON parse schemas/templates/manifest",
+      "status": "passed"
+    },
+    {
+      "command": "plugin validator",
+      "status": "passed"
+    },
+    {
+      "command": "skill validator",
+      "status": "passed"
+    }
+  ]
+}

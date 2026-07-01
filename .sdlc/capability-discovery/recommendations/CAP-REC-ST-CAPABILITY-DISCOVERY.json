@@ -1,0 +1,251 @@
+{
+  "id": "CAP-REC-ST-CAPABILITY-DISCOVERY",
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "profile_id": "CAP-PROFILE-ST-CAPABILITY-DISCOVERY",
+  "profile_ref": {
+    "path": ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json",
+    "approved_content_hash": "c865ef8c25e4aec549ae26bf92fa6ee65b3ac430ecaf2f8a7388bd39629020a4"
+  },
+  "recommendations": [
+    {
+      "type": "skill",
+      "name": "agentic-sdlc",
+      "availability": "available",
+      "purpose": "Govern plugin changes with its own SDLC contracts and gates.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "skill",
+      "name": "software-lifecycle-orchestrator",
+      "availability": "available",
+      "purpose": "Keep delivery, verification, and git policy explicit.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "skill",
+      "name": "agents-best-practices",
+      "availability": "available",
+      "purpose": "Review agentic harness and capability-discovery design.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "test-runner",
+      "availability": "available",
+      "purpose": null,
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "plugin-validator",
+      "availability": "available",
+      "purpose": null,
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "skill-validator",
+      "availability": "available",
+      "purpose": null,
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    }
+  ],
+  "available_capabilities": {
+    "skills": [
+      "agentic-sdlc",
+      "software-lifecycle-orchestrator",
+      "agents-best-practices"
+    ],
+    "tools": [
+      "agentic-sdlc-cli",
+      "test-runner",
+      "plugin-validator",
+      "skill-validator",
+      "git"
+    ],
+    "mcp": [],
+    "plugins": [
+      "agentic-sdlc-codex-plugin"
+    ],
+    "models": [
+      "inherit"
+    ]
+  },
+  "policy_patch": {
+    "skills": {
+      "required": [
+        "agentic-sdlc"
+      ],
+      "allowed": [
+        "agentic-sdlc",
+        "software-lifecycle-orchestrator",
+        "agents-best-practices"
+      ],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [],
+      "allowed": [
+        "test-runner",
+        "plugin-validator",
+        "skill-validator",
+        "git"
+      ],
+      "forbidden": []
+    },
+    "approval_required_for": [
+      "install_missing_capability",
+      "external_write",
+      "production_write"
+    ]
+  },
+  "bindings": [],
+  "execution_policy_suggestions": {
+    "reasoning": "high",
+    "notes": [
+      "Use high reasoning for the capability-discovery architecture and gate behavior."
+    ]
+  },
+  "decision_matrix": [
+    {
+      "option": "Apply recommendations through contract refs",
+      "pros": [
+        "auditable",
+        "freshness-gated",
+        "project-agnostic"
+      ],
+      "cons": [
+        "more KB artifacts"
+      ],
+      "recommendation": "chosen"
+    }
+  ],
+  "open_questions": [],
+  "source_paths": [
+    ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json"
+  ],
+  "source_hashes": {
+    ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-CAPABILITY-DISCOVERY.json": "891062fa9b1fe83b8a78c7a43922e827d3a5813591aacb14c89db3706661ece0"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260701112525-a50937",
+      "recommendation_id": "CAP-REC-ST-CAPABILITY-DISCOVERY",
+      "status": "approved",
+      "summary": "Approved capabilities for implementing contextual capability discovery.",
+      "approved_content_hash": "3c8da385341c2fcad6473ad9ebbaf32f419bcc99f4a4ab237be215b127122b2c",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "main",
+        "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.2.0"
+      },
+      "created_at": "2026-07-01T11:25:25.621Z"
+    }
+  ],
+  "created_at": "2026-07-01T11:25:25.420Z",
+  "updated_at": "2026-07-01T11:25:25.621Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.2.0"
+    },
+    "approved_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    }
+  }
+}

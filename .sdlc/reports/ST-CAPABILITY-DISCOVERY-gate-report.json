@@ -1,0 +1,49 @@
+{
+  "status": "passed",
+  "strict": true,
+  "scope": "story",
+  "story_id": "ST-CAPABILITY-DISCOVERY",
+  "checked_at": "2026-07-01T11:26:51.965Z",
+  "root": "/Users/antonioantenore/Documents/TravelOps",
+  "actor": {
+    "id": "antonioantenore",
+    "type": "human",
+    "name": "Antonio Antenore",
+    "email": "a.antenore@reply.it",
+    "source": "environment"
+  },
+  "git": {
+    "is_git_repo": true,
+    "branch": "main",
+    "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+    "is_dirty": true,
+    "user": {
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it"
+    },
+    "remotes": [
+      "origin"
+    ]
+  },
+  "run": {
+    "run_id": null,
+    "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+    "session_id": null,
+    "tool": "agentic-sdlc-cli",
+    "version": "0.2.0"
+  },
+  "errors": [],
+  "warnings": [],
+  "checked": [
+    "project",
+    "contract contract-ST-CAPABILITY-DISCOVERY-implementation.json capability recommendation CAP-REC-ST-CAPABILITY-DISCOVERY",
+    "contract contract-ST-CAPABILITY-DISCOVERY-implementation.json",
+    "capability profile CAP-PROFILE-ST-CAPABILITY-DISCOVERY",
+    "capability recommendation CAP-REC-ST-CAPABILITY-DISCOVERY",
+    "trace traces/ST-CAPABILITY-DISCOVERY.jsonl",
+    "story ST-CAPABILITY-DISCOVERY",
+    "output template implementation-summary-v1",
+    "output decision DEC-output-template-implementation-summary-v1-20260701112625",
+    "output link OUT-ST-CAPABILITY-DISCOVERY-implementation-summary-093c1de9"
+  ]
+}

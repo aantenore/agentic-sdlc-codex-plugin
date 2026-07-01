@@ -1,0 +1,164 @@
+{
+  "id": "CAP-PROFILE-ST-CAPABILITY-DISCOVERY",
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "subject": {
+    "story_id": "ST-CAPABILITY-DISCOVERY",
+    "requirement_ids": [
+      "REQ-CAPABILITY-DISCOVERY"
+    ],
+    "phase": "implementation",
+    "scope": "project"
+  },
+  "application_profile": {},
+  "detected_stack": [
+    {
+      "name": "package-json",
+      "type": "node",
+      "source_path": "package.json"
+    },
+    {
+      "name": "npm-scripts",
+      "type": "automation",
+      "source_path": "package.json",
+      "scripts": [
+        "check",
+        "smoke",
+        "test"
+      ]
+    }
+  ],
+  "constraints": [
+    "Plugin behavior must stay project-agnostic and use canonical JSON instead of language keyword rules."
+  ],
+  "integrations": [],
+  "evidence": [
+    {
+      "type": "context_file",
+      "path": "package.json",
+      "sha256": "fd911d37831d28f204897ac566d1563ea5ec470aea3e3c1cdcba43a0f6b2eee5",
+      "size_bytes": 541,
+      "excerpt": "name agentic-sdlc-codex-plugin version 0.2.0 description Codex plugin for contract-driven agentic SDLC with a shared Git-first knowledge base. type module bin agentic-sdlc ./bin/agentic-sdlc.mjs scripts check node --check bin/agentic-sdlc.mjs smoke node bin/agentic-sdlc.mjs --help test node --test test/*.mjs keywords codex sdlc agentic knowledge-base author Antonio Antenore license MIT"
+    },
+    {
+      "type": "context_file",
+      "path": "README.md",
+      "sha256": "e534022a95aebd0fc0e067024b8f514ca6877b0c818a6ea4d294b304b8f40fdf",
+      "size_bytes": 13663,
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven agent-legible operating system. The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The CLI creates a shared `.sdlc/` knowledge base inside the target project so teams and agents can work in parallel through Git branches and pull requests. ## What It Implements - Phase contracts for Discovery Analysis Design Implementation Validation and Release. - A Git-first knowledge base for requirements stories decisions assumptions risks tests trac"
+    },
+    {
+      "type": "context_file",
+      "path": "docs/architecture.md",
+      "sha256": "9f3110c9d45b4c871b9a0266698c025bcaa7d4c5ea2742eaec5c162b56eca9b0",
+      "size_bytes": 13299,
+      "excerpt": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> contracts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target proje"
+    },
+    {
+      "type": "context_file",
+      "path": "skills/agentic-sdlc/SKILL.md",
+      "sha256": "03bd11f327ea8a4c735dcd4bd7040c3b7fde40444eeb510b308b0ca272f785e1",
+      "size_bytes": 9688,
+      "excerpt": "--- name agentic-sdlc description Use this skill when a user wants to run a contract-driven agentic SDLC in Codex initialize or maintain a shared project knowledge base create SDLC phase contracts split work into story-scoped parallel tracks validate gates capture decisions/tests/traces or use the Agentic SDLC plugin in a software project. --- # Agentic SDLC ## Purpose Use this skill to operate a stateless contract-driven SDLC for a target project. The plugin contains process templates schemas and CLI automation; all contracts output contracts traces and knowledge base artifacts must be saved "
+    },
+    {
+      "type": "detected_stack",
+      "path": "package.json",
+      "summary": "node:package-json"
+    },
+    {
+      "type": "detected_stack",
+      "path": "package.json",
+      "summary": "automation:npm-scripts"
+    }
+  ],
+  "confidence": 0.7,
+  "source_paths": [
+    "README.md",
+    "docs/architecture.md",
+    "package.json",
+    "skills/agentic-sdlc/SKILL.md"
+  ],
+  "source_hashes": {
+    "README.md": "e534022a95aebd0fc0e067024b8f514ca6877b0c818a6ea4d294b304b8f40fdf",
+    "docs/architecture.md": "9f3110c9d45b4c871b9a0266698c025bcaa7d4c5ea2742eaec5c162b56eca9b0",
+    "package.json": "fd911d37831d28f204897ac566d1563ea5ec470aea3e3c1cdcba43a0f6b2eee5",
+    "skills/agentic-sdlc/SKILL.md": "03bd11f327ea8a4c735dcd4bd7040c3b7fde40444eeb510b308b0ca272f785e1"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260701112512-dfd35f",
+      "profile_id": "CAP-PROFILE-ST-CAPABILITY-DISCOVERY",
+      "status": "approved",
+      "summary": "Approved plugin self-dogfooding capability profile.",
+      "approved_content_hash": "c865ef8c25e4aec549ae26bf92fa6ee65b3ac430ecaf2f8a7388bd39629020a4",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "antonioantenore",
+        "type": "human",
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it",
+        "source": "environment"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "main",
+        "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.2.0"
+      },
+      "created_at": "2026-07-01T11:25:12.726Z"
+    }
+  ],
+  "created_at": "2026-07-01T11:25:12.561Z",
+  "updated_at": "2026-07-01T11:25:12.726Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.2.0"
+    },
+    "approved_by": {
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "environment"
+    }
+  }
+}

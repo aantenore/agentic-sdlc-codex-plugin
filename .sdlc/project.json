@@ -1,0 +1,64 @@
+{
+  "project_id": "agentic-sdlc-codex-plugin",
+  "project_name": "Agentic SDLC Codex Plugin",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.1.0",
+  "created_at": "2026-07-01T11:12:46.831Z",
+  "knowledge_base": {
+    "storage": "git",
+    "canonical_path": ".sdlc",
+    "stateless_plugin": true,
+    "concurrency_model": "story-scoped workspaces with append-only traces",
+    "source_of_truth": "JSON and Markdown files under .sdlc",
+    "derived_artifacts": [
+      "cache",
+      "indexes"
+    ],
+    "output_contracts_registry": ".sdlc/output-contracts/registry.json",
+    "cache_policy_path": ".sdlc/cache/kb-cache.json"
+  },
+  "phase_order": [
+    "discovery",
+    "analysis",
+    "design",
+    "implementation",
+    "validation",
+    "release"
+  ],
+  "audit": {
+    "created_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "updated_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Antonio Antenore",
+      "email": "a.antenore@reply.it",
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+      "is_dirty": false,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.1.0"
+    }
+  }
+}
