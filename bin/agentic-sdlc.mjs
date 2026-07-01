@@ -18,6 +18,41 @@ const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "impleme
 const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
 const LOCK_STATUSES = new Set(["active", "released", "cancelled", "expired"]);
 const HANDOFF_STATUSES = new Set(["open", "accepted", "closed", "rejected", "cancelled"]);
+const ROUTE_REQUIRED_INTENT_FIELDS = [
+  "requested_action",
+  "confidence",
+  "referenced_entities",
+  "provided_artifacts",
+  "missing_context",
+  "proposed_phase",
+  "artifact_type",
+  "skip_phases",
+];
+const ROUTE_DEFAULT_CONFIDENCE = {
+  auto_route_min: 0.85,
+  confirm_min: 0.7,
+  ask_below: 0.5,
+  always_confirm: [
+    "skip_phase",
+    "create_story",
+    "start_implementation",
+    "create_canonical_artifact",
+    "new_output_template",
+    "duplicate_output",
+  ],
+};
+const ROUTE_DEFAULT_ROUTES = new Set([
+  "init_project",
+  "ask_clarification",
+  "intake_requirement",
+  "classify_artifact",
+  "decompose_stories",
+  "create_contract",
+  "confirm_phase_skip",
+  "claim_and_implement",
+  "validate_story",
+  "release_story",
+]);
 
 const TRACE_TYPES = new Set([
   "assumption",
@@ -152,6 +187,10 @@ function main() {
       showOrchestrationPlan(context, parsed.options);
       return;
     }
+    if (command === "route" && (!subcommand || subcommand === "decide")) {
+      decideRoute(context, parsed.options);
+      return;
+    }
     if (command === "status") {
       showStatus(context, parsed.options);
       return;
@@ -247,6 +286,7 @@ function validateSdlcConfig(config) {
   validateSdlcDirectoryList(config.kb_directories, "kb_directories");
   validateSdlcDirectoryList(config.cache_policy?.source_of_truth_dirs, "cache_policy.source_of_truth_dirs");
   validateSdlcDirectoryList(config.cache_policy?.derived_directories, "cache_policy.derived_directories");
+  validateRoutingPolicy(config.routing_policy);
   return config;
 }
 
@@ -271,6 +311,1017 @@ function assertSafeSdlcRelativeDirectory(value, field) {
   if (normalized.split("/").includes("..")) {
     fail(`${field} contains unsafe .sdlc-relative directory '${value}'`);
   }
+}
+
+function validateRoutingPolicy(policy) {
+  if (policy === undefined) {
+    return;
+  }
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    fail("routing_policy must be a JSON object");
+  }
+  if (policy.routes !== undefined && !Array.isArray(policy.routes)) {
+    fail("routing_policy.routes must be an array");
+  }
+  if (policy.canonical_actions !== undefined && (!policy.canonical_actions || typeof policy.canonical_actions !== "object" || Array.isArray(policy.canonical_actions))) {
+    fail("routing_policy.canonical_actions must be an object");
+  }
+  const confidence = policy.confidence;
+  if (confidence !== undefined) {
+    if (!confidence || typeof confidence !== "object" || Array.isArray(confidence)) {
+      fail("routing_policy.confidence must be an object");
+    }
+    for (const key of ["auto_route_min", "confirm_min", "ask_below"]) {
+      if (confidence[key] !== undefined) {
+        const value = Number(confidence[key]);
+        if (!Number.isFinite(value) || value < 0 || value > 1) {
+          fail(`routing_policy.confidence.${key} must be a number between 0 and 1`);
+        }
+      }
+    }
+    if (confidence.always_confirm !== undefined && !Array.isArray(confidence.always_confirm)) {
+      fail("routing_policy.confidence.always_confirm must be an array");
+    }
+  }
+}
+
+function decideRoute(context, options) {
+  const decision = buildRouteDecision(context, options);
+  output(options, decision, formatRouteDecision(decision));
+}
+
+function buildRouteDecision(context, options) {
+  const policy = getRoutingPolicy(context);
+  const intentLoad = loadRouteIntent(context, options);
+  const decision = createRouteDecision(context, {
+    intent_source: intentLoad.source,
+    confidence: intentLoad.intent?.confidence,
+  });
+
+  if (intentLoad.parse_error) {
+    addRouteCheck(decision, "canonical_intent", "failed", intentLoad.parse_error);
+    return finalizeAskRoute(decision, {
+      status: "needs_normalization",
+      blocking_reasons: ["invalid_intent_json"],
+      questions: [canonicalIntentQuestion()],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  if (!intentLoad.intent) {
+    addRouteCheck(decision, "canonical_intent", "failed", "No --intent-json or --intent-file provided");
+    if (options.text !== undefined) {
+      addRouteCheck(decision, "raw_text", "ignored", "Raw text is untrusted and is not classified by the router");
+    }
+    return finalizeAskRoute(decision, {
+      status: "needs_normalization",
+      blocking_reasons: ["needs_normalization"],
+      questions: [canonicalIntentQuestion()],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  const normalized = normalizeRouteIntent(intentLoad.intent, policy, context);
+  decision.intent = normalized.intent;
+  decision.confidence = normalized.intent.confidence;
+  addRouteCheck(
+    decision,
+    "canonical_intent",
+    normalized.errors.length ? "failed" : "passed",
+    normalized.errors.length ? normalized.errors.join("; ") : "Canonical JSON intent accepted",
+  );
+  if (options.text !== undefined) {
+    addRouteCheck(decision, "raw_text", "ignored", "Raw text is untrusted; canonical JSON controls routing");
+  }
+  if (normalized.errors.length) {
+    return finalizeAskRoute(decision, {
+      status: "needs_normalization",
+      blocking_reasons: ["invalid_canonical_intent"],
+      questions: normalized.questions.length ? normalized.questions : [canonicalIntentQuestion()],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  const confidenceOutcome = applyRouteConfidenceGate(decision, policy);
+  if (confidenceOutcome === "ask") {
+    return finalizeAskRoute(decision, {
+      status: "low_confidence",
+      blocking_reasons: ["low_confidence"],
+      questions: ["Confirm the canonical intent with higher confidence before routing."],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  const kbInitialized = isKbInitialized(context);
+  addRouteCheck(
+    decision,
+    "kb_initialized",
+    kbInitialized ? "passed" : "failed",
+    kbInitialized ? `${SDLC_DIR}/project.json exists` : `${SDLC_DIR}/project.json is missing`,
+  );
+  if (!kbInitialized) {
+    decision.route = "init_project";
+    decision.next_commands.push(`agentic-sdlc init --root ${context.root}`);
+    return finalizeConcreteRoute(decision, policy, routeActionConfig(policy, "init_project"), confidenceOutcome);
+  }
+
+  if (decision.intent.missing_context.length > 0) {
+    return finalizeAskRoute(decision, {
+      status: "needs_clarification",
+      blocking_reasons: ["missing_context"],
+      questions: decision.intent.missing_context.map(routeQuestionFromContext),
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  if (decision.intent.skip_phases.length > 0) {
+    decision.route = "confirm_phase_skip";
+    decision.requires_confirmation = true;
+    decision.next_commands.push(
+      `agentic-sdlc trace append --type decision --summary "Approved phase skip: ${decision.intent.skip_phases.join(", ")}" --actor-type human`,
+    );
+    return finalizeConcreteRoute(decision, policy, { confirmation_key: "skip_phase" }, confidenceOutcome);
+  }
+
+  const actionConfig = routeActionConfig(policy, decision.intent.requested_action);
+  if (!actionConfig) {
+    return finalizeAskRoute(decision, {
+      status: "needs_normalization",
+      blocking_reasons: ["unknown_requested_action"],
+      questions: [`Use one of the configured requested_action values: ${Object.keys(policy.canonical_actions).sort().join(", ")}.`],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  switch (actionConfig.route) {
+    case "init_project":
+      return decideInitProjectRoute(decision, policy, actionConfig, confidenceOutcome);
+    case "intake_requirement":
+      return decideIntakeRequirementRoute(decision, policy, actionConfig, confidenceOutcome);
+    case "decompose_stories":
+      return decideDecomposeStoriesRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "create_contract":
+      return decideCreateContractRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "claim_and_implement":
+      return decideClaimAndImplementRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "classify_artifact":
+      return decideClassifyArtifactRoute(context, decision, policy, actionConfig, confidenceOutcome);
+    case "validate_story":
+      return decideStoryGateRoute(context, decision, policy, actionConfig, confidenceOutcome, "validate_story");
+    case "release_story":
+      return decideStoryGateRoute(context, decision, policy, actionConfig, confidenceOutcome, "release_story");
+    case "confirm_phase_skip":
+      decision.route = "confirm_phase_skip";
+      decision.requires_confirmation = true;
+      decision.next_commands.push(
+        `agentic-sdlc trace append --type decision --summary "Approved phase skip" --actor-type human`,
+      );
+      return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+    default:
+      return finalizeAskRoute(decision, {
+        status: "needs_normalization",
+        blocking_reasons: ["unknown_route"],
+        questions: [`Configured route '${actionConfig.route}' is not supported by this CLI version.`],
+        next_commands: [canonicalIntentCommand()],
+      });
+  }
+}
+
+function getRoutingPolicy(context) {
+  const template = context.templateConfig.routing_policy || {};
+  const project = context.config.routing_policy || {};
+  const confidence = normalizeRoutingConfidence({
+    ...ROUTE_DEFAULT_CONFIDENCE,
+    ...(template.confidence || {}),
+    ...(project.confidence || {}),
+  });
+  return {
+    routes: new Set([
+      ...ROUTE_DEFAULT_ROUTES,
+      ...normalizeStringArray(template.routes),
+      ...normalizeStringArray(project.routes),
+    ]),
+    confidence,
+    canonical_actions: {
+      ...defaultRouteActions(),
+      ...normalizeRouteActionMap(template.canonical_actions || template.action_routes),
+      ...normalizeRouteActionMap(project.canonical_actions || project.action_routes),
+    },
+    entity_types: {
+      story: ["story"],
+      contract: ["contract"],
+      requirement: ["requirement"],
+      template: ["template", "output_template"],
+      ...(template.entity_types || {}),
+      ...(project.entity_types || {}),
+    },
+  };
+}
+
+function normalizeRoutingConfidence(confidence) {
+  const normalized = {
+    auto_route_min: Number(confidence.auto_route_min),
+    confirm_min: Number(confidence.confirm_min),
+    ask_below: Number(confidence.ask_below),
+    always_confirm: normalizeStringArray(confidence.always_confirm).map(normalizeRouteToken),
+  };
+  if (!Number.isFinite(normalized.auto_route_min)) {
+    normalized.auto_route_min = ROUTE_DEFAULT_CONFIDENCE.auto_route_min;
+  }
+  if (!Number.isFinite(normalized.confirm_min)) {
+    normalized.confirm_min = ROUTE_DEFAULT_CONFIDENCE.confirm_min;
+  }
+  if (!Number.isFinite(normalized.ask_below)) {
+    normalized.ask_below = ROUTE_DEFAULT_CONFIDENCE.ask_below;
+  }
+  normalized.ask_below = clamp01(normalized.ask_below);
+  normalized.confirm_min = clamp01(normalized.confirm_min);
+  normalized.auto_route_min = clamp01(normalized.auto_route_min);
+  if (normalized.confirm_min < normalized.ask_below) {
+    normalized.confirm_min = normalized.ask_below;
+  }
+  if (normalized.auto_route_min < normalized.confirm_min) {
+    normalized.auto_route_min = normalized.confirm_min;
+  }
+  return normalized;
+}
+
+function defaultRouteActions() {
+  return {
+    initialize_project: { route: "init_project" },
+    init_project: { route: "init_project" },
+    intake_requirement: { route: "intake_requirement" },
+    classify_artifact: { route: "classify_artifact", requires_artifact_type: true },
+    decompose_stories: { route: "decompose_stories", confirmation_key: "create_story" },
+    create_story: { route: "decompose_stories", confirmation_key: "create_story" },
+    create_contract: { route: "create_contract" },
+    implement_story: {
+      route: "claim_and_implement",
+      confirmation_key: "start_implementation",
+      requires_story: true,
+      requires_contract: true,
+    },
+    start_implementation: {
+      route: "claim_and_implement",
+      confirmation_key: "start_implementation",
+      requires_story: true,
+      requires_contract: true,
+    },
+    validate_story: { route: "validate_story", requires_story: true },
+    release_story: { route: "release_story", requires_story: true },
+    skip_phase: { route: "confirm_phase_skip", confirmation_key: "skip_phase" },
+    functional_analysis: {
+      route: "classify_artifact",
+      confirmation_key: "create_canonical_artifact",
+      default_artifact_type: "functional-analysis",
+      requires_artifact_type: true,
+    },
+    technical_analysis: {
+      route: "classify_artifact",
+      confirmation_key: "create_canonical_artifact",
+      default_artifact_type: "technical-analysis",
+      requires_artifact_type: true,
+    },
+    create_canonical_artifact: {
+      route: "classify_artifact",
+      confirmation_key: "create_canonical_artifact",
+      requires_artifact_type: true,
+    },
+    new_output_template: {
+      route: "classify_artifact",
+      confirmation_key: "new_output_template",
+      requires_artifact_type: true,
+    },
+    duplicate_output: {
+      route: "classify_artifact",
+      confirmation_key: "duplicate_output",
+      requires_artifact_type: true,
+    },
+  };
+}
+
+function normalizeRouteActionMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const result = {};
+  for (const [rawAction, rawConfig] of Object.entries(value)) {
+    const action = normalizeRouteToken(rawAction);
+    if (!action) {
+      continue;
+    }
+    if (typeof rawConfig === "string") {
+      result[action] = { route: normalizeRouteToken(rawConfig) };
+    } else if (rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)) {
+      result[action] = {
+        ...rawConfig,
+        route: normalizeRouteToken(rawConfig.route),
+        confirmation_key: rawConfig.confirmation_key ? normalizeRouteToken(rawConfig.confirmation_key) : undefined,
+        default_artifact_type: rawConfig.default_artifact_type
+          ? normalizeRouteArtifactTypeValue(rawConfig.default_artifact_type)
+          : undefined,
+      };
+    }
+  }
+  return result;
+}
+
+function routeActionConfig(policy, action) {
+  const config = policy.canonical_actions[normalizeRouteToken(action)] || null;
+  if (!config || !policy.routes.has(config.route)) {
+    return null;
+  }
+  return config;
+}
+
+function loadRouteIntent(context, options) {
+  const inline = getOptionString(options, "intent-json");
+  const file = getOptionString(options, "intent-file");
+  if (inline && file) {
+    return { source: "conflict", intent: null, parse_error: "Use only one of --intent-json or --intent-file" };
+  }
+  if (!inline && !file) {
+    return { source: options.text !== undefined ? "raw_text" : "none", intent: null, parse_error: null };
+  }
+  try {
+    if (file) {
+      const intentPath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
+      assertNotDerivedArtifact(context, intentPath, "Route intent file");
+      return {
+        source: toProjectPath(context, intentPath),
+        intent: JSON.parse(fs.readFileSync(intentPath, "utf8")),
+        parse_error: null,
+      };
+    }
+    return {
+      source: "inline",
+      intent: JSON.parse(inline),
+      parse_error: null,
+    };
+  } catch (error) {
+    return {
+      source: file ? "file" : "inline",
+      intent: null,
+      parse_error: error.message,
+    };
+  }
+}
+
+function normalizeRouteIntent(rawIntent, policy, context) {
+  const errors = [];
+  const questions = [];
+  const intent = rawIntent && typeof rawIntent === "object" && !Array.isArray(rawIntent) ? rawIntent : null;
+  if (!intent) {
+    return {
+      intent: emptyRouteIntent(),
+      errors: ["Canonical intent must be a JSON object"],
+      questions: [canonicalIntentQuestion()],
+    };
+  }
+
+  for (const field of ROUTE_REQUIRED_INTENT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(intent, field)) {
+      errors.push(`Missing canonical field '${field}'`);
+    }
+  }
+
+  const requestedAction = normalizeRouteToken(intent.requested_action);
+  if (!requestedAction) {
+    errors.push("requested_action must be a configured enum value");
+  } else if (!policy.canonical_actions[requestedAction]) {
+    errors.push(`requested_action '${intent.requested_action}' is not configured`);
+  }
+
+  const confidence = Number(intent.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    errors.push("confidence must be a number between 0 and 1");
+  }
+
+  const proposedPhase = nullableRoutePhase(intent.proposed_phase);
+  if (proposedPhase && !context.config.phases[proposedPhase]) {
+    errors.push(`proposed_phase '${intent.proposed_phase}' is not configured`);
+  }
+
+  const actionConfig = policy.canonical_actions[requestedAction] || null;
+  const artifactType = normalizeIntentArtifactType(
+    intent.artifact_type || actionConfig?.default_artifact_type || null,
+    errors,
+  );
+  if (actionConfig?.requires_artifact_type && !artifactType) {
+    errors.push("artifact_type is required for this requested_action");
+  }
+
+  const allowedArtifactTypes = new Set(collectOutputArtifactTypes(context, null));
+  if (artifactType && allowedArtifactTypes.size > 0 && !allowedArtifactTypes.has(artifactType)) {
+    errors.push(`artifact_type '${artifactType}' is not configured`);
+  }
+
+  const skipPhases = normalizeIntentArray(intent.skip_phases, "skip_phases", errors)
+    .map((phase) => normalizeRoutePhase(phase))
+    .filter(Boolean);
+  for (const phase of skipPhases) {
+    if (!context.config.phases[phase]) {
+      errors.push(`skip_phases includes unknown phase '${phase}'`);
+    }
+  }
+
+  const missingContext = normalizeIntentArray(intent.missing_context, "missing_context", errors);
+  if (missingContext.length > 0) {
+    questions.push(...missingContext.map(routeQuestionFromContext));
+  }
+
+  return {
+    intent: {
+      ...intent,
+      requested_action: requestedAction,
+      confidence: Number.isFinite(confidence) ? confidence : 0,
+      referenced_entities: normalizeIntentArray(intent.referenced_entities, "referenced_entities", errors),
+      provided_artifacts: normalizeIntentArray(intent.provided_artifacts, "provided_artifacts", errors),
+      missing_context: missingContext,
+      proposed_phase: proposedPhase,
+      artifact_type: artifactType,
+      skip_phases: Array.from(new Set(skipPhases)),
+    },
+    errors: Array.from(new Set(errors)),
+    questions: Array.from(new Set(questions)),
+  };
+}
+
+function emptyRouteIntent() {
+  return {
+    requested_action: null,
+    confidence: 0,
+    referenced_entities: [],
+    provided_artifacts: [],
+    missing_context: [],
+    proposed_phase: null,
+    artifact_type: null,
+    skip_phases: [],
+  };
+}
+
+function decideInitProjectRoute(decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "init_project";
+  decision.next_commands.push(`agentic-sdlc init --root ${decision.root}`);
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideIntakeRequirementRoute(decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "intake_requirement";
+  decision.next_commands.push("agentic-sdlc contract create --phase discovery --context-summary <summary>");
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideDecomposeStoriesRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "decompose_stories";
+  const storyId = routeStoryId(decision.intent, policy);
+  if (storyId) {
+    const story = readStory(context, storyId);
+    addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+    if (story) {
+      decision.next_commands.push(`agentic-sdlc story create --id <new-story-id> --title <title> --acceptance <criterion>`);
+      return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+    }
+  }
+  decision.next_commands.push("agentic-sdlc story create --id <story-id> --title <title> --acceptance <criterion>");
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideCreateContractRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  decision.route = "create_contract";
+  const storyId = routeStoryId(decision.intent, policy);
+  const phase = decision.intent.proposed_phase || "design";
+  if (storyId) {
+    const story = readStory(context, storyId);
+    addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+    if (!story) {
+      return finalizeAskRoute(decision, {
+        status: "blocked",
+        blocking_reasons: ["story_not_found"],
+        questions: [`Create story ${storyId} or provide an existing story reference before creating its contract.`],
+        next_commands: [`agentic-sdlc story create --id ${storyId} --title <title> --acceptance <criterion>`],
+      });
+    }
+    decision.next_commands.push(`agentic-sdlc contract create --phase ${phase} --story ${storyId} --id contract-${storyId}-${phase}`);
+  } else {
+    decision.next_commands.push(`agentic-sdlc contract create --phase ${phase} --context-summary <summary>`);
+  }
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideClaimAndImplementRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  const storyId = routeStoryId(decision.intent, policy);
+  if (!storyId) {
+    return finalizeAskRoute(decision, {
+      status: "needs_clarification",
+      blocking_reasons: ["story_reference_required"],
+      questions: ["Provide a referenced_entities item with type 'story' and the story id."],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+
+  const story = readStory(context, storyId);
+  addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+  if (!story) {
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["story_not_found"],
+      questions: [`Create story ${storyId} before implementation, or reference an existing story.`],
+      next_commands: [`agentic-sdlc story create --id ${storyId} --title <title> --acceptance <criterion>`],
+    });
+  }
+
+  const acceptanceReady = Array.isArray(story.acceptance_criteria) && story.acceptance_criteria.length > 0;
+  addRouteCheck(
+    decision,
+    "story_acceptance_criteria",
+    acceptanceReady ? "passed" : "failed",
+    acceptanceReady ? `${story.acceptance_criteria.length} criteria` : "No acceptance criteria",
+  );
+  if (!acceptanceReady) {
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["missing_acceptance_criteria"],
+      questions: [`Add acceptance criteria to story ${storyId} before implementation.`],
+      next_commands: [`agentic-sdlc story create --id ${storyId} --title "${story.title || "<title>"}" --acceptance <criterion> --force`],
+    });
+  }
+
+  const contractState = inspectStoryContract(context, story);
+  addRouteCheck(
+    decision,
+    "story_contract_exists",
+    contractState.exists ? "passed" : "failed",
+    contractState.message,
+  );
+  if (!contractState.exists) {
+    decision.route = "create_contract";
+    decision.blocking_reasons.push("story_contract_missing");
+    decision.next_commands.push(
+      `agentic-sdlc contract create --phase ${story.phase || "implementation"} --story ${storyId} --id contract-${storyId}-${story.phase || "implementation"}`,
+    );
+    return finalizeConcreteRoute(decision, policy, { confirmation_key: "create_contract" }, confidenceOutcome);
+  }
+
+  addRouteCheck(
+    decision,
+    "story_contract_approved",
+    contractState.approved ? "passed" : "failed",
+    contractState.approved ? contractState.contract.id : `${contractState.contract.id} is not freshly approved`,
+  );
+  if (!contractState.approved) {
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["contract_needs_approval"],
+      questions: [`Approve or refresh contract ${contractState.contract.id} before implementation.`],
+      next_commands: [`agentic-sdlc contract approve --id ${contractState.contract.id} --actor-type human`],
+    });
+  }
+
+  addOutputRefChecks(context, decision, story, contractState.contract);
+
+  const claim = readStoryClaim(context, storyId);
+  if (claim?.status === "active" && !isExpired(claim.expires_at)) {
+    addRouteCheck(decision, "active_claim", "failed", `${storyId} is already claimed by ${claim.agent || "unknown"}`);
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["active_claim_exists"],
+      questions: [`Coordinate with ${claim.agent || "the current claimant"} before implementation.`],
+      next_commands: [`agentic-sdlc story release --id ${storyId} --agent ${claim.agent || "<agent>"} --reason <reason>`],
+    });
+  }
+  if (claim?.status === "active" && isExpired(claim.expires_at)) {
+    addRouteCheck(decision, "active_claim", "failed", `${storyId} has an expired active claim`);
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["active_claim_expired"],
+      questions: [`Release or renew the expired claim for story ${storyId}.`],
+      next_commands: [`agentic-sdlc story release --id ${storyId} --force --reason "Expired claim cleanup"`],
+    });
+  }
+
+  addRouteCheck(decision, "active_claim", "passed", "No active claim blocks implementation");
+  decision.route = "claim_and_implement";
+  decision.next_commands.push(`agentic-sdlc story claim --id ${storyId} --agent <agent> --branch feature/${storyId}`);
+  decision.next_commands.push(`agentic-sdlc gate check --story ${storyId} --strict`);
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideClassifyArtifactRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+  const artifactType = decision.intent.artifact_type || actionConfig.default_artifact_type || null;
+  if (!artifactType) {
+    return finalizeAskRoute(decision, {
+      status: "needs_clarification",
+      blocking_reasons: ["artifact_type_required"],
+      questions: ["Provide artifact_type as a configured output artifact enum."],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+  decision.route = "classify_artifact";
+  const storyId = routeStoryId(decision.intent, policy);
+  if (storyId) {
+    const story = readStory(context, storyId);
+    addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+    if (!story) {
+      return finalizeAskRoute(decision, {
+        status: "blocked",
+        blocking_reasons: ["story_not_found"],
+        questions: [`Create story ${storyId} or reference an existing story before linking ${artifactType}.`],
+        next_commands: [`agentic-sdlc story create --id ${storyId} --title <title> --acceptance <criterion>`],
+      });
+    }
+  }
+
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const approvedTemplates = (registry?.templates || []).filter(
+    (template) => template.type === artifactType && template.status === "approved",
+  );
+  addRouteCheck(
+    decision,
+    "approved_template",
+    approvedTemplates.length > 0 ? "passed" : "failed",
+    approvedTemplates.length > 0 ? approvedTemplates.map((template) => template.id).join(", ") : `No approved ${artifactType} template`,
+  );
+
+  if (decision.intent.requested_action === "new_output_template") {
+    decision.next_commands.push(`agentic-sdlc output template propose --type ${artifactType} --summary <summary>`);
+    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human`);
+    return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+  }
+
+  if (approvedTemplates.length === 0) {
+    decision.blocking_reasons.push("approved_template_missing");
+    decision.next_commands.push(`agentic-sdlc output template propose --type ${artifactType} --summary <summary>`);
+    decision.next_commands.push(`agentic-sdlc output template approve --id ${artifactType}-v1 --actor-type human`);
+    return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+  }
+
+  if (storyId) {
+    const links = (registry?.links || []).filter((link) => link.story_id === storyId && link.artifact_type === artifactType);
+    addRouteCheck(
+      decision,
+      "output_link",
+      links.length > 0 ? "passed" : "warning",
+      links.length > 0 ? `${links.length} existing link(s)` : "No existing output link for this story/artifact type",
+    );
+    if (links.length > 0 && decision.intent.requested_action !== "duplicate_output") {
+      decision.blocking_reasons.push("output_already_linked");
+      decision.questions.push(`Confirm whether ${storyId}/${artifactType} should reuse, delta, or duplicate the existing output.`);
+      decision.next_commands.push(`agentic-sdlc output status --story ${storyId} --type ${artifactType}`);
+      return finalizeConcreteRoute(decision, policy, { ...actionConfig, confirmation_key: "duplicate_output" }, confidenceOutcome);
+    }
+    decision.next_commands.push(
+      `agentic-sdlc output resolve --story ${storyId} --type ${artifactType}`,
+    );
+    decision.next_commands.push(
+      `agentic-sdlc output link --story ${storyId} --type ${artifactType} --artifact <artifact-path> --template ${approvedTemplates[0].id} --mode new`,
+    );
+  } else {
+    decision.next_commands.push(`agentic-sdlc output template propose --type ${artifactType} --summary <summary>`);
+  }
+
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function decideStoryGateRoute(context, decision, policy, actionConfig, confidenceOutcome, route) {
+  const storyId = routeStoryId(decision.intent, policy);
+  if (!storyId) {
+    return finalizeAskRoute(decision, {
+      status: "needs_clarification",
+      blocking_reasons: ["story_reference_required"],
+      questions: ["Provide a referenced_entities item with type 'story' and the story id."],
+      next_commands: [canonicalIntentCommand()],
+    });
+  }
+  const story = readStory(context, storyId);
+  addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+  if (!story) {
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["story_not_found"],
+      questions: [`Create story ${storyId}, or reference an existing story before ${route}.`],
+      next_commands: [`agentic-sdlc story create --id ${storyId} --title <title> --acceptance <criterion>`],
+    });
+  }
+  decision.route = route;
+  if (route === "validate_story") {
+    const hasTestTrace = readTraceEvents(context, storyId).some((event) => event.type === "test");
+    addRouteCheck(decision, "test_trace", hasTestTrace ? "passed" : "warning", hasTestTrace ? "Test trace exists" : "No test trace yet");
+    decision.next_commands.push(`agentic-sdlc gate check --story ${storyId} --strict`);
+  } else {
+    const hasReleaseTrace = readTraceEvents(context, storyId).some((event) => event.type === "release");
+    addRouteCheck(
+      decision,
+      "release_trace",
+      hasReleaseTrace ? "passed" : "warning",
+      hasReleaseTrace ? "Release trace exists" : "No release trace yet",
+    );
+    decision.next_commands.push(`agentic-sdlc trace append --story ${storyId} --type release --summary <summary> --evidence <path>`);
+    decision.next_commands.push(`agentic-sdlc gate check --story ${storyId} --strict`);
+  }
+  return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+}
+
+function inspectStoryContract(context, story) {
+  if (!story.contract_id) {
+    return { exists: false, approved: false, contract: null, message: "Story has no contract_id" };
+  }
+  const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
+  if (!fs.existsSync(contractPath)) {
+    return { exists: false, approved: false, contract: null, message: `Missing contract ${story.contract_id}` };
+  }
+  const contract = readJson(contractPath);
+  return {
+    exists: true,
+    approved: contract.status === "approved" && hasFreshApprovedContractApproval(contract),
+    contract,
+    message: story.contract_id,
+  };
+}
+
+function addOutputRefChecks(context, decision, story, contract) {
+  const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
+  addRouteCheck(
+    decision,
+    "contract_output_refs",
+    refs.length > 0 ? "passed" : "warning",
+    refs.length > 0 ? `${refs.length} output ref(s)` : "No output refs on the story contract",
+  );
+  if (refs.length === 0) {
+    return;
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  for (const ref of refs) {
+    const template = (registry?.templates || []).find((candidate) => candidate.id === ref.template_id);
+    addRouteCheck(
+      decision,
+      `output_ref_template:${ref.artifact_type}`,
+      template?.status === "approved" ? "passed" : "failed",
+      template ? `${template.id} is ${template.status}` : `Missing template ${ref.template_id}`,
+    );
+    const link = (registry?.links || []).find(
+      (candidate) =>
+        candidate.story_id === story.id &&
+        candidate.artifact_type === ref.artifact_type &&
+        candidate.template_id === ref.template_id &&
+        candidate.mode === ref.mode,
+    );
+    addRouteCheck(
+      decision,
+      `output_ref_link:${ref.artifact_type}`,
+      link ? "passed" : "warning",
+      link ? link.artifact_path : `No output link satisfies ${ref.artifact_type}:${ref.template_id}:${ref.mode}`,
+    );
+  }
+}
+
+function readStoryClaim(context, storyId) {
+  const claimPath = path.join(context.sdlcRoot, "stories", storyId, "claim.json");
+  return fs.existsSync(claimPath) ? readJson(claimPath) : null;
+}
+
+function routeStoryId(intent, policy) {
+  const direct = routeScalar(intent.story_id);
+  if (direct) {
+    return normalizeRouteId(direct);
+  }
+  return routeEntityId(intent, policy, "story");
+}
+
+function routeEntityId(intent, policy, type) {
+  const aliases = new Set(normalizeStringArray(policy.entity_types[type] || [type]).map(normalizeRouteToken));
+  for (const entity of intent.referenced_entities || []) {
+    if (!entity || typeof entity !== "object" || Array.isArray(entity)) {
+      continue;
+    }
+    const entityType = normalizeRouteToken(entity.type || entity.entity_type || entity.kind || entity.role);
+    if (!aliases.has(entityType)) {
+      continue;
+    }
+    const id = routeScalar(entity.id || entity.identifier || entity.value || entity[`${type}_id`]);
+    if (id) {
+      return normalizeRouteId(id);
+    }
+  }
+  return null;
+}
+
+function normalizeRouteId(value) {
+  try {
+    return normalizeId(value);
+  } catch {
+    return null;
+  }
+}
+
+function createRouteDecision(context, options = {}) {
+  return {
+    schema_version: context.config.schema_version || context.templateConfig.schema_version,
+    sdlc_version: VERSION,
+    decided_at: now(),
+    root: context.root,
+    intent_source: options.intent_source || "unknown",
+    route: "ask_clarification",
+    status: "needs_clarification",
+    confidence: Number.isFinite(Number(options.confidence)) ? Number(options.confidence) : 0,
+    requires_confirmation: false,
+    blocking_reasons: [],
+    questions: [],
+    deterministic_checks: [],
+    next_commands: [],
+  };
+}
+
+function addRouteCheck(decision, check, status, details = null) {
+  decision.deterministic_checks.push({
+    check,
+    status,
+    details,
+  });
+}
+
+function applyRouteConfidenceGate(decision, policy) {
+  const confidence = Number(decision.confidence);
+  addRouteCheck(
+    decision,
+    "confidence_policy",
+    confidence >= policy.confidence.confirm_min ? "passed" : "failed",
+    `confidence=${confidence.toFixed(2)}, ask_below=${policy.confidence.ask_below}, confirm_min=${policy.confidence.confirm_min}, auto_route_min=${policy.confidence.auto_route_min}`,
+  );
+  if (confidence < policy.confidence.ask_below || confidence < policy.confidence.confirm_min) {
+    return "ask";
+  }
+  if (confidence < policy.confidence.auto_route_min) {
+    return "confirm";
+  }
+  return "auto";
+}
+
+function finalizeAskRoute(decision, updates = {}) {
+  decision.route = "ask_clarification";
+  decision.status = updates.status || decision.status || "needs_clarification";
+  pushAllUnique(decision.blocking_reasons, updates.blocking_reasons || []);
+  pushAllUnique(decision.questions, updates.questions || []);
+  pushAllUnique(decision.next_commands, updates.next_commands || []);
+  decision.requires_confirmation = false;
+  dedupeRouteDecision(decision);
+  return decision;
+}
+
+function finalizeConcreteRoute(decision, policy, actionConfig = {}, confidenceOutcome = "auto") {
+  const confirmationKey = normalizeRouteToken(actionConfig?.confirmation_key || decision.intent?.requested_action || decision.route);
+  const alwaysConfirm = policy.confidence.always_confirm.includes(confirmationKey);
+  if (confidenceOutcome === "confirm" || alwaysConfirm || decision.route === "confirm_phase_skip") {
+    decision.requires_confirmation = true;
+  }
+  decision.status = decision.requires_confirmation ? "needs_confirmation" : "ready";
+  if (decision.blocking_reasons.length > 0 && !decision.requires_confirmation) {
+    decision.status = "blocked";
+  }
+  dedupeRouteDecision(decision);
+  return decision;
+}
+
+function dedupeRouteDecision(decision) {
+  decision.blocking_reasons = Array.from(new Set(decision.blocking_reasons));
+  decision.questions = Array.from(new Set(decision.questions));
+  decision.next_commands = Array.from(new Set(decision.next_commands));
+}
+
+function formatRouteDecision(decision) {
+  const lines = [
+    `Route: ${decision.route}`,
+    `Status: ${decision.status}`,
+    `Confidence: ${Number(decision.confidence).toFixed(2)}`,
+    `Requires confirmation: ${decision.requires_confirmation ? "yes" : "no"}`,
+  ];
+  lines.push(
+    decision.blocking_reasons.length
+      ? `Blocking reasons: ${decision.blocking_reasons.join(", ")}`
+      : "Blocking reasons: none",
+  );
+  if (decision.questions.length > 0) {
+    lines.push("Questions:");
+    lines.push(...decision.questions.map((question) => `- ${question}`));
+  }
+  if (decision.deterministic_checks.length > 0) {
+    lines.push("Deterministic checks:");
+    lines.push(
+      ...decision.deterministic_checks.map((check) =>
+        `- ${check.check}: ${check.status}${check.details ? ` (${check.details})` : ""}`,
+      ),
+    );
+  }
+  if (decision.next_commands.length > 0) {
+    lines.push("Next commands:");
+    lines.push(...decision.next_commands.map((command) => `- ${command}`));
+  }
+  return lines;
+}
+
+function canonicalIntentQuestion() {
+  return `Provide canonical intent JSON with fields: ${ROUTE_REQUIRED_INTENT_FIELDS.join(", ")}.`;
+}
+
+function canonicalIntentCommand() {
+  return "agentic-sdlc route decide --intent-json '<canonical-intent-json>'";
+}
+
+function isKbInitialized(context) {
+  return fs.existsSync(path.join(context.sdlcRoot, "project.json"));
+}
+
+function normalizeIntentArray(value, field, errors) {
+  if (!Array.isArray(value)) {
+    errors.push(`${field} must be an array`);
+    return [];
+  }
+  return value;
+}
+
+function normalizeIntentArtifactType(value, errors) {
+  const raw = routeScalar(value);
+  if (!raw) {
+    return null;
+  }
+  try {
+    return normalizeArtifactType(raw);
+  } catch (error) {
+    errors.push(error.message);
+    return null;
+  }
+}
+
+function normalizeRouteArtifactTypeValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+function routeQuestionFromContext(item) {
+  if (typeof item === "string") {
+    return `Provide missing context: ${item}.`;
+  }
+  if (item && typeof item === "object") {
+    return routeScalar(item.question || item.prompt || item.label || item.id) || "Provide the missing canonical context.";
+  }
+  return "Provide the missing canonical context.";
+}
+
+function nullableRouteToken(value) {
+  const scalar = routeScalar(value);
+  return scalar ? normalizeRouteToken(scalar) : null;
+}
+
+function nullableRoutePhase(value) {
+  const scalar = routeScalar(value);
+  return scalar ? normalizeRoutePhase(scalar) : null;
+}
+
+function normalizeRouteToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeRoutePhase(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function routeScalar(value) {
+  if (value === undefined || value === null || value === true) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 1 ? routeScalar(value[0]) : null;
+  }
+  const text = String(value).trim();
+  return text || null;
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function pushAllUnique(target, values) {
+  for (const value of values) {
+    if (value && !target.includes(value)) {
+      target.push(value);
+    }
+  }
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number(value)));
 }
 
 function initProject(context, options) {
@@ -3769,6 +4820,8 @@ Usage:
       --artifact path --template template-id --mode reuse|delta|new
       [--base-artifact path] [--requirement REQ-001]
   agentic-sdlc output status --story ST-001 [--type artifact-type]
+  agentic-sdlc route decide --intent-json json [--text raw] [--json]
+  agentic-sdlc route --intent-file path [--text raw] [--json]
   agentic-sdlc cache rebuild
   agentic-sdlc cache status
   agentic-sdlc cache clear
@@ -3842,6 +4895,12 @@ Output consistency options:
   --requirement id       Requirement covered by this output. Repeatable.
   --decision-id id       Approved decision justifying a duplicate/new structure.
   --rationale text       Short rationale for the link.
+
+Route options:
+  --intent-json json     Canonical normalized route intent JSON.
+  --intent-file path     Read canonical route intent JSON from a project file.
+  --text raw             Raw user text. The router records it as untrusted and
+                         never classifies it without canonical intent JSON.
 
 Gate options:
   --scope story|all      With --story, defaults to story-scoped validation.
