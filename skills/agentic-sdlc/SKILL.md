@@ -91,7 +91,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs approval requests --root <target-project> --story ST-001
    ```
 
-10. Create or update a phase contract before doing phase work. Normal contract creation must include enough agreed context to guide the phase, zero unresolved open questions, and `--output-ref` for story contracts that produce durable outputs. Creating a draft contract is a proposal, not approval to proceed. After creating or finding an unapproved contract, summarize it to the user through `approval requests` and stop until the user explicitly approves or requests changes. Do not produce technical/functional analysis, implementation outputs, tests, or release evidence for that phase before the contract is approved:
+10. Create or update a phase contract before doing phase work. Normal contract creation must include enough agreed context to guide the phase, zero unresolved open questions, and `--output-ref` for story contracts that produce durable outputs. Story contract creation auto-populates `story.contract_id`; use `--replace-story-contract` only for explicit renegotiation or recovery. Creating a draft contract is a proposal, not approval to proceed. After creating or finding an unapproved contract, summarize it to the user through `approval requests` and stop until the user explicitly approves or requests changes. Do not produce technical/functional analysis, implementation outputs, tests, or release evidence for that phase before the contract is approved:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs contract create \
@@ -118,7 +118,7 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs output template approve --root <target-project> --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "<user-approved template>"
    ```
 
-12. Link every durable output back to story, requirement, approved template, and mode. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
+12. Link every durable output back to story, requirement, approved template, and mode. `output link` requires the story contract to be approved and fresh unless `--allow-unapproved-contract-output` is being used for explicit migration/recovery. The CLI records fingerprints, and strict gates fail if the artifact, base artifact, or approved template changes after linking:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -155,7 +155,7 @@ Never store project contracts or project KB state inside the plugin installation
 
    Keep `actor` as the executor. When an agent acts because a human or another system requested it, record `requested_by`; when execution was explicitly authorized, record `authorized_by`. This lets reports answer both "what did Codex execute?" and "what was done on Antonio's request?" without rewriting attribution.
 
-16. When a phase lane is complete, record the step with hashed evidence. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
+16. When a phase lane is complete, record the step with hashed evidence. `story complete-step` requires the story contract to be approved and fresh unless `--allow-unapproved-contract-output` is being used for explicit migration/recovery. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs story complete-step \
