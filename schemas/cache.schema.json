@@ -54,7 +54,17 @@
       "type": "object"
     },
     "kb_summaries": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "source_paths",
+          "source_hashes",
+          "generated_at",
+          "schema_version"
+        ],
+        "additionalProperties": true
+      }
     },
     "dependency_graph": {
       "type": "object"

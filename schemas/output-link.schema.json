@@ -64,6 +64,34 @@
         "type": "string"
       }
     },
+    "fingerprints": {
+      "type": "object",
+      "required": [
+        "artifact_sha256",
+        "hash_algorithm"
+      ],
+      "properties": {
+        "artifact_sha256": {
+          "type": "string"
+        },
+        "base_artifact_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash_algorithm": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
     "audit": {
       "type": "object",
       "additionalProperties": true

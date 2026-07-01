@@ -11,7 +11,13 @@ const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
+const PROJECT_CONFIG_FILE_NAME = "config.json";
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
+const BOOLEAN_OPTIONS = new Set(["force", "help", "json", "preserve-status", "strict", "version"]);
+const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
+const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
+const LOCK_STATUSES = new Set(["active", "released", "cancelled", "expired"]);
+const HANDOFF_STATUSES = new Set(["open", "accepted", "closed", "rejected", "cancelled"]);
 
 const TRACE_TYPES = new Set([
   "assumption",
@@ -30,12 +36,12 @@ const TRACE_TYPES = new Set([
 function main() {
   try {
     const parsed = parseArgs(process.argv.slice(2));
-    if (parsed.help || parsed.positionals.length === 0) {
-      printHelp();
-      return;
-    }
     if (parsed.version) {
       console.log(VERSION);
+      return;
+    }
+    if (parsed.help || parsed.positionals.length === 0) {
+      printHelp();
       return;
     }
 
@@ -66,8 +72,16 @@ function main() {
       releaseStoryClaim(context, parsed.options);
       return;
     }
+    if (command === "story" && subcommand === "handoff" && rest[0] === "close") {
+      closeHandoff(context, parsed.options);
+      return;
+    }
     if (command === "story" && subcommand === "handoff") {
       createStoryHandoff(context, parsed.options);
+      return;
+    }
+    if (command === "handoff" && subcommand === "close") {
+      closeHandoff(context, parsed.options);
       return;
     }
     if (command === "phase" && subcommand === "lock") {
@@ -174,9 +188,13 @@ function parseArgs(argv) {
     }
     if (arg.startsWith("--")) {
       const raw = arg.slice(2);
-      const [key, inlineValue] = raw.split("=", 2);
+      const equalsIndex = raw.indexOf("=");
+      const key = equalsIndex >= 0 ? raw.slice(0, equalsIndex) : raw;
+      const inlineValue = equalsIndex >= 0 ? raw.slice(equalsIndex + 1) : undefined;
       let value = inlineValue;
-      if (value === undefined) {
+      if (value === undefined && BOOLEAN_OPTIONS.has(key)) {
+        value = true;
+      } else if (value === undefined) {
         const next = argv[index + 1];
         if (next !== undefined && !next.startsWith("-")) {
           value = next;
@@ -208,12 +226,51 @@ function addOption(options, key, value) {
 function buildContext(options) {
   const root = path.resolve(String(options.root || process.cwd()));
   const templateDir = path.resolve(String(options["template-dir"] || DEFAULT_TEMPLATE_DIR));
+  const templateConfig = validateSdlcConfig(readJson(path.join(templateDir, "sdlc-config.json")));
+  const projectConfigPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
+  const selectedConfig = fs.existsSync(projectConfigPath)
+    ? validateSdlcConfig(readJson(projectConfigPath))
+    : templateConfig;
   return {
     root,
     sdlcRoot: path.join(root, SDLC_DIR),
     templateDir,
-    config: readJson(path.join(templateDir, "sdlc-config.json")),
+    config: selectedConfig,
+    templateConfig,
   };
+}
+
+function validateSdlcConfig(config) {
+  if (!config || typeof config !== "object") {
+    fail("SDLC config must be a JSON object");
+  }
+  validateSdlcDirectoryList(config.kb_directories, "kb_directories");
+  validateSdlcDirectoryList(config.cache_policy?.source_of_truth_dirs, "cache_policy.source_of_truth_dirs");
+  validateSdlcDirectoryList(config.cache_policy?.derived_directories, "cache_policy.derived_directories");
+  return config;
+}
+
+function validateSdlcDirectoryList(values, field) {
+  if (values === undefined) {
+    return;
+  }
+  if (!Array.isArray(values)) {
+    fail(`${field} must be an array`);
+  }
+  for (const value of values) {
+    assertSafeSdlcRelativeDirectory(value, field);
+  }
+}
+
+function assertSafeSdlcRelativeDirectory(value, field) {
+  const raw = String(value || "").trim();
+  const normalized = path.posix.normalize(raw.replaceAll("\\", "/"));
+  if (!raw || raw === "." || normalized === "." || normalized.startsWith("../") || normalized === ".." || path.isAbsolute(raw)) {
+    fail(`${field} contains unsafe .sdlc-relative directory '${value}'`);
+  }
+  if (normalized.split("/").includes("..")) {
+    fail(`${field} contains unsafe .sdlc-relative directory '${value}'`);
+  }
 }
 
 function initProject(context, options) {
@@ -221,11 +278,14 @@ function initProject(context, options) {
   const projectId = String(options["project-id"] || slugify(projectName));
   const force = Boolean(options.force);
   const attribution = buildAttribution(context, options, "project.init");
+  const config = context.templateConfig || context.config;
+  context.config = config;
 
   ensureDir(context.sdlcRoot);
   for (const directory of context.config.kb_directories) {
     ensureDir(path.join(context.sdlcRoot, directory));
   }
+  writeJsonFile(path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME), config, { force });
 
   const projectPath = path.join(context.sdlcRoot, "project.json");
   const project = {
@@ -327,6 +387,7 @@ function createContract(context, options) {
     assumptions: normalizeListOption(options.assumption),
     inputs: normalizeListOption(options.input),
     outputs: normalizeListOption(options.output),
+    output_refs: normalizeRawListOption(options["output-ref"]),
     validation: normalizeListOption(options.validation),
     allowed_tools: normalizeListOption(options.tool),
     kb_writes: normalizeListOption(options["kb-write"]),
@@ -356,6 +417,7 @@ function approveContract(context, options) {
   const contract = readJson(contractPath);
   const attribution = buildAttribution(context, options, "contract.approve");
   const approvalStatus = normalizeApprovalStatus(options.status || "approved");
+  const approvedContentHash = approvalStatus === "approved" ? hashApprovalSubject(contract) : null;
   if (contract.human_gate === true && !["human", "ci"].includes(attribution.actor.type)) {
     fail("Human-gated contracts require --actor-type human or an approved CI actor.");
   }
@@ -365,6 +427,9 @@ function approveContract(context, options) {
     status: approvalStatus,
     summary: options.summary ? String(options.summary) : null,
     scope: String(options.scope || "contract"),
+    evidence: buildApprovalEvidence(context, options),
+    approved_content_hash: approvedContentHash,
+    hash_algorithm: approvedContentHash ? "sha256:stable-json:v1" : null,
     approved_by: attribution.actor,
     git: attribution.git,
     run: attribution.run,
@@ -432,6 +497,7 @@ function buildContract(context, phase, overrides = {}) {
     owner_agent: String(overrides.owner_agent || template.owner_agent),
     inputs: mergeList(template.inputs, overrides.inputs),
     outputs: mergeList(template.outputs, overrides.outputs),
+    output_contract_refs: buildOutputContractRefs(overrides.output_refs || []),
     validation: mergeList(template.validation, overrides.validation),
     allowed_tools: mergeList(template.allowed_tools, overrides.allowed_tools),
     kb_writes: mergeList(template.kb_writes, overrides.kb_writes),
@@ -513,6 +579,51 @@ function buildAttribution(context, options = {}, action = "unknown") {
     run: buildRunMetadata(options),
     recorded_at: now(),
   };
+}
+
+function buildApprovalEvidence(context, options = {}) {
+  return normalizeListOption(options["approval-evidence"]).map((rawPath) => {
+    const evidencePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, evidencePath, "Approval evidence");
+    return {
+      path: toProjectPath(context, evidencePath),
+      sha256: hashFile(evidencePath),
+    };
+  });
+}
+
+function hashApprovalSubject(value) {
+  return shortHashFull(stableJson(stripApprovalVolatileFields(value)));
+}
+
+function stripApprovalVolatileFields(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripApprovalVolatileFields);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const stripped = {};
+  const volatile = new Set(["approvals", "audit", "created_at", "updated_at", "approved_at", "approved_by", "status"]);
+  for (const key of Object.keys(value).sort()) {
+    if (!volatile.has(key)) {
+      stripped[key] = stripApprovalVolatileFields(value[key]);
+    }
+  }
+  return stripped;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  if (!value || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+    .join(",")}}`;
 }
 
 function buildActor(options = {}, root = process.cwd()) {
@@ -646,16 +757,7 @@ function readProjectSafe(context) {
 
 function buildContextSources(context, contextFiles) {
   return contextFiles.map((rawPath) => {
-    const resolved = path.resolve(context.root, rawPath);
-    if (!isInsidePath(context.root, resolved)) {
-      fail(`Context file must stay inside the target project root: ${rawPath}`);
-    }
-    if (!fs.existsSync(resolved)) {
-      fail(`Context file does not exist: ${rawPath}`);
-    }
-    if (!fs.statSync(resolved).isFile()) {
-      fail(`Context path is not a file: ${rawPath}`);
-    }
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
     const content = fs.readFileSync(resolved);
     const text = content.toString("utf8");
     return {
@@ -685,6 +787,21 @@ function buildQuestionRecords(questions, qaItems) {
   return records.filter((record) => record.question);
 }
 
+function buildOutputContractRefs(rawRefs) {
+  return rawRefs.map((rawRef) => {
+    const parts = String(rawRef).split(":").map((part) => part.trim());
+    if (parts.length !== 3 || parts.some((part) => !part)) {
+      fail("Output refs must use --output-ref artifact-type:template-id:reuse|delta|new");
+    }
+    const [artifactType, templateId, mode] = parts;
+    return {
+      artifact_type: normalizeArtifactType(artifactType),
+      template_id: normalizeId(templateId),
+      mode: normalizeOutputMode(mode),
+    };
+  });
+}
+
 function mergeList(base, additions = []) {
   const merged = [...base];
   for (const item of additions) {
@@ -703,6 +820,7 @@ function createStory(context, options) {
   if (!context.config.phases[phase]) {
     fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
   }
+  const status = normalizeStoryStatus(options.status || "draft");
   const storyDir = path.join(context.sdlcRoot, "stories", id);
   ensureDir(storyDir);
 
@@ -712,7 +830,7 @@ function createStory(context, options) {
     id,
     title,
     schema_version: context.config.schema_version,
-    status: String(options.status || "draft"),
+    status,
     phase,
     contract_id: options.contract ? String(options.contract) : null,
     acceptance_criteria: acceptanceCriteria,
@@ -758,35 +876,44 @@ function claimStory(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const agent = requireOption(options, "agent");
+  const expiresAt = options["expires-at"] ? normalizeOptionalDateTime(options["expires-at"], "expires-at") : null;
   const storyDir = path.join(context.sdlcRoot, "stories", id);
   if (!fs.existsSync(path.join(storyDir, "story.json"))) {
     fail(`Story ${id} does not exist. Create it with 'story create' first.`);
   }
 
   const claimPath = path.join(storyDir, "claim.json");
-  if (fs.existsSync(claimPath) && !options.force) {
-    const existing = readJson(claimPath);
-    if (existing.status === "active") {
-      fail(`Story ${id} already has an active claim by ${existing.agent}. Release it first or use --force after coordination.`);
+  const releaseLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+  let claim;
+  let attribution;
+  try {
+    const claimExists = fs.existsSync(claimPath);
+    if (claimExists && !options.force) {
+      const existing = readJson(claimPath);
+      if (existing.status === "active") {
+        fail(`Story ${id} already has an active claim by ${existing.agent}. Release it first or use --force after coordination.`);
+      }
     }
-  }
 
-  const attribution = buildAttribution(context, options, "story.claim");
-  const claim = {
-    story_id: id,
-    agent: String(agent),
-    branch: String(options.branch || `feature/${id}`),
-    status: "active",
-    claimed_at: now(),
-    expires_at: options["expires-at"] ? String(options["expires-at"]) : null,
-    notes: options.notes ? String(options.notes) : null,
-    audit: {
-      claimed_by: attribution.actor,
-      git: attribution.git,
-      run: attribution.run,
-    },
-  };
-  writeJsonFile(claimPath, claim, { force: true });
+    attribution = buildAttribution(context, options, "story.claim");
+    claim = {
+      story_id: id,
+      agent: String(agent),
+      branch: String(options.branch || `feature/${id}`),
+      status: "active",
+      claimed_at: now(),
+      expires_at: expiresAt,
+      notes: options.notes ? String(options.notes) : null,
+      audit: {
+        claimed_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+    writeJsonFile(claimPath, claim, { force: Boolean(options.force || claimExists) });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, id, {
     type: "claim",
     summary: `Story ${id} claimed by ${agent}`,
@@ -814,7 +941,7 @@ function releaseStoryClaim(context, options) {
     fail(`Story ${id} is claimed by ${claim.agent}, not ${requestedAgent}. Use --force only after coordination.`);
   }
   const attribution = buildAttribution(context, options, "story.release");
-  claim.status = String(options.status || "released");
+  claim.status = normalizeClaimStatus(options.status || "released");
   claim.released_at = now();
   claim.release_reason = options.reason ? String(options.reason) : null;
   claim.audit = {
@@ -878,30 +1005,84 @@ function createStoryHandoff(context, options) {
   output(options, { status: "created", handoff_path: handoffPath, handoff }, [`Created handoff ${handoffId}`]);
 }
 
+function closeHandoff(context, options) {
+  ensureInitialized(context);
+  const handoffId = normalizeId(requireOption(options, "id"));
+  const handoffPath = path.join(context.sdlcRoot, "handoffs", `${handoffId}.json`);
+  if (!fs.existsSync(handoffPath)) {
+    fail(`Handoff ${handoffId} does not exist`);
+  }
+  const handoff = readJson(handoffPath);
+  const status = normalizeHandoffCloseStatus(options.status || "closed");
+  const attribution = buildAttribution(context, options, "handoff.close");
+  handoff.status = status;
+  handoff.closed_at = now();
+  handoff.close_summary = getOptionString(options, "summary") || null;
+  handoff.open_items = normalizeListOption(options["open-item"]);
+  handoff.audit = {
+    ...(handoff.audit || {}),
+    closed_by: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
+  };
+  writeJsonFile(handoffPath, handoff, { force: true });
+  appendTraceEvent(context, handoff.story_id || null, {
+    type: "handoff",
+    summary: handoff.close_summary || `Handoff ${handoffId} ${status}`,
+    action: "handoff.close",
+    actor: attribution.actor,
+    evidence: [path.relative(context.root, handoffPath)],
+    related: [handoff.story_id, handoffId].filter(Boolean),
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status, handoff_path: handoffPath, handoff }, [`Handoff ${handoffId} ${status}`]);
+}
+
 function lockPhase(context, options) {
   ensureInitialized(context);
   const phase = String(requireOption(options, "phase"));
   if (!context.config.phases[phase]) {
     fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
   }
-  const attribution = buildAttribution(context, options, "phase.lock");
-  const lockId = normalizeId(String(options.id || `LOCK-${phase}-${compactTimestamp()}`));
-  const lockPath = path.join(context.sdlcRoot, "locks", `${lockId}.json`);
-  const lock = {
-    id: lockId,
-    phase,
-    scope: String(options.scope || phase),
-    status: "active",
-    reason: options.reason ? String(options.reason) : null,
-    expires_at: options["expires-at"] ? String(options["expires-at"]) : null,
-    created_at: now(),
-    audit: {
-      locked_by: attribution.actor,
-      git: attribution.git,
-      run: attribution.run,
-    },
-  };
-  writeJsonFile(lockPath, lock, { force: Boolean(options.force) });
+  const scope = String(options.scope || phase);
+  const expiresAt = options["expires-at"] ? normalizeOptionalDateTime(options["expires-at"], "expires-at") : null;
+  const lockMutexPath = path.join(context.sdlcRoot, "locks", `.phase-${shortHash(`${phase}:${scope}`)}.lock`);
+  const releaseLock = acquireFileLock(lockMutexPath);
+  let lock;
+  let lockPath;
+  let lockId;
+  let attribution;
+  try {
+    const conflictingLock = readActiveLocks(context).find(
+      (candidate) => candidate.phase === phase && String(candidate.scope || candidate.phase) === scope,
+    );
+    if (conflictingLock && !options.force) {
+      fail(
+        `Phase ${phase} scope ${scope} already has active lock ${conflictingLock.id}. Release it first or use --force after coordination.`,
+      );
+    }
+    attribution = buildAttribution(context, options, "phase.lock");
+    lockId = normalizeId(String(options.id || `LOCK-${phase}-${compactTimestamp()}`));
+    lockPath = path.join(context.sdlcRoot, "locks", `${lockId}.json`);
+    lock = {
+      id: lockId,
+      phase,
+      scope,
+      status: "active",
+      reason: options.reason ? String(options.reason) : null,
+      expires_at: expiresAt,
+      created_at: now(),
+      audit: {
+        locked_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+    writeJsonFile(lockPath, lock, { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, null, {
     type: "lock",
     summary: `Phase ${phase} locked: ${lock.reason || lock.scope}`,
@@ -924,7 +1105,7 @@ function releasePhaseLock(context, options) {
   }
   const lock = readJson(lockPath);
   const attribution = buildAttribution(context, options, "phase.release");
-  lock.status = String(options.status || "released");
+  lock.status = normalizeLockStatus(options.status || "released");
   lock.released_at = now();
   lock.release_reason = options.reason ? String(options.reason) : null;
   lock.audit = {
@@ -1047,6 +1228,7 @@ function initializeOutputContracts(context, options = {}) {
 
 function proposeOutputTemplate(context, options) {
   ensureInitialized(context);
+  return withOutputRegistryLock(context, () => {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const id = normalizeId(options.id || `${artifactType}-v1`);
   const registry = readOutputRegistry(context, { create: true, options, action: "output.template.propose" });
@@ -1105,10 +1287,12 @@ function proposeOutputTemplate(context, options) {
       `Approve it with: agentic-sdlc output template approve --id ${id}`,
     ],
   );
+  });
 }
 
 function approveOutputTemplate(context, options) {
   ensureInitialized(context);
+  return withOutputRegistryLock(context, () => {
   const id = normalizeId(requireOption(options, "id"));
   const registry = readOutputRegistry(context, { create: true, options, action: "output.template.approve" });
   const template = findOutputTemplate(registry, id);
@@ -1122,10 +1306,16 @@ function approveOutputTemplate(context, options) {
   }
 
   const decisionId = normalizeId(String(options["decision-id"] || `DEC-output-template-${id}-${compactTimestamp()}`));
+  const templatePath = resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true });
+  assertNotDerivedArtifact(context, templatePath, "Output template");
+  const approvedContentHash = hashFile(templatePath);
   template.status = "approved";
   template.approved_at = now();
   template.approved_by = attribution.actor;
   template.approval_summary = getOptionString(options, "summary") || template.approval_summary || null;
+  template.approved_content_hash = approvedContentHash;
+  template.hash_algorithm = "sha256:file:v1";
+  template.approval_evidence = buildApprovalEvidence(context, options);
   template.audit = {
     ...(template.audit || {}),
     approved_by: attribution.actor,
@@ -1140,6 +1330,9 @@ function approveOutputTemplate(context, options) {
     artifact_type: template.type,
     summary: template.approval_summary,
     status: "approved",
+    evidence: template.approval_evidence,
+    approved_content_hash: approvedContentHash,
+    hash_algorithm: "sha256:file:v1",
     created_at: now(),
     audit: {
       decided_by: attribution.actor,
@@ -1168,6 +1361,7 @@ function approveOutputTemplate(context, options) {
   });
 
   output(options, { status: "approved", template, decision }, [`Approved output template ${id}`]);
+  });
 }
 
 function resolveOutput(context, options) {
@@ -1176,20 +1370,20 @@ function resolveOutput(context, options) {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const explicitRequirements = normalizeListOption(options.requirement);
   const cacheStatus = getCacheStatus(context);
-  let resolution;
+  const canonicalResolution = buildOutputResolution(context, storyId, artifactType, {
+    requirements: explicitRequirements,
+    cache_used: false,
+  });
+  let resolution = canonicalResolution;
 
   if (explicitRequirements.length === 0 && cacheStatus.valid && cacheStatus.cache?.output_resolutions) {
-    resolution = cacheStatus.cache.output_resolutions[outputResolutionKey(storyId, artifactType)] || null;
-    if (resolution) {
-      resolution = { ...resolution, cache_used: true };
+    const cachedResolution = cacheStatus.cache.output_resolutions[outputResolutionKey(storyId, artifactType)] || null;
+    if (cachedResolution) {
+      if (outputResolutionFingerprint(cachedResolution) !== outputResolutionFingerprint(canonicalResolution)) {
+        fail("Local cache output resolution differs from canonical KB files. Run 'agentic-sdlc cache rebuild'.");
+      }
+      resolution = { ...canonicalResolution, cache_used: true };
     }
-  }
-
-  if (!resolution) {
-    resolution = buildOutputResolution(context, storyId, artifactType, {
-      requirements: explicitRequirements,
-      cache_used: false,
-    });
   }
 
   output(
@@ -1204,6 +1398,12 @@ function resolveOutput(context, options) {
   );
 }
 
+function outputResolutionFingerprint(resolution) {
+  const comparable = { ...resolution };
+  delete comparable.cache_used;
+  return stableJson(comparable);
+}
+
 function linkOutputArtifact(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "story"));
@@ -1211,6 +1411,7 @@ function linkOutputArtifact(context, options) {
   if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
+  return withOutputRegistryLock(context, () => {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const mode = normalizeOutputMode(requireOption(options, "mode"));
   const templateId = normalizeId(requireOption(options, "template"));
@@ -1249,10 +1450,26 @@ function linkOutputArtifact(context, options) {
   const relativeBaseArtifact = baseArtifact ? toProjectPath(context, baseArtifact) : null;
   const attribution = buildAttribution(context, options, "output.link");
   const decisionId = getOptionString(options, "decision-id");
+  const existingDecision = decisionId
+    ? (registry.decisions || []).find((decision) => decision.id === normalizeId(decisionId))
+    : null;
+  if (existingDecision && !hasApprovedOutputDecision(registry.decisions || [], decisionId)) {
+    fail(`Decision ${decisionId} already exists but is not an approved output override decision.`);
+  }
   if (decisionId && !hasApprovedOutputDecision(registry.decisions || [], decisionId)) {
     if (!["human", "ci"].includes(attribution.actor.type)) {
       fail("Creating an output override decision requires --actor-type human or an approved CI actor.");
     }
+    const decisionSubject = buildOutputLinkDecisionSubject({
+      story_id: storyId,
+      artifact_type: artifactType,
+      artifact_path: relativeArtifactPath,
+      template_id: templateId,
+      mode,
+      base_artifact: relativeBaseArtifact,
+      requirements: linkedRequirements,
+      rationale: getOptionString(options, "rationale") || null,
+    });
     const decision = {
       id: normalizeId(decisionId),
       type: "output_link_override",
@@ -1260,6 +1477,10 @@ function linkOutputArtifact(context, options) {
       artifact_type: artifactType,
       status: "approved",
       summary: getOptionString(options, "rationale") || `Approved output override for ${storyId}/${artifactType}`,
+      subject: decisionSubject,
+      evidence: buildApprovalEvidence(context, options),
+      approved_content_hash: hashApprovalSubject(decisionSubject),
+      hash_algorithm: "sha256:stable-json:v1",
       created_at: now(),
       audit: {
         decided_by: attribution.actor,
@@ -1285,6 +1506,14 @@ function linkOutputArtifact(context, options) {
     decision_id: decisionId ? normalizeId(decisionId) : null,
     rationale: getOptionString(options, "rationale") || null,
     source_paths: [relativeArtifactPath, relativeBaseArtifact, template.path].filter(Boolean),
+    fingerprints: {
+      artifact_sha256: hashFile(artifactPath),
+      base_artifact_sha256: baseArtifact ? hashFile(baseArtifact) : null,
+      template_sha256: template.path
+        ? hashFile(resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true }))
+        : null,
+      hash_algorithm: "sha256:file:v1",
+    },
     created_at: existing?.created_at || now(),
     updated_at: now(),
     audit: {
@@ -1294,6 +1523,14 @@ function linkOutputArtifact(context, options) {
       run: attribution.run,
     },
   };
+
+  const duplicateHints = findRelatedOutputLinks(registry, link).filter((related) => related.id !== id);
+  if (mode === "new" && duplicateHints.length > 0 && !outputLinkHasMatchingApprovedDecision(registry.decisions || [], link)) {
+    const related = duplicateHints.map((item) => `${item.story_id}:${item.artifact_path}`).join(", ");
+    fail(
+      `Output ${storyId}/${artifactType} duplicates requirements already covered by ${related}. Use --mode delta/reuse or pass an approved --decision-id.`,
+    );
+  }
 
   upsertById(registry.links, link);
   registry.updated_at = now();
@@ -1315,7 +1552,6 @@ function linkOutputArtifact(context, options) {
     run: attribution.run,
   });
 
-  const duplicateHints = findRelatedOutputLinks(registry, link).filter((related) => related.id !== id);
   output(
     options,
     { status: "linked", link, related_outputs: duplicateHints },
@@ -1326,6 +1562,7 @@ function linkOutputArtifact(context, options) {
         : "No related outputs found",
     ],
   );
+  });
 }
 
 function showOutputStatus(context, options) {
@@ -1551,6 +1788,10 @@ function buildCache(context) {
       path: entry.path,
       title: entry.title,
       snippet: entry.snippet,
+      source_paths: entry.source_paths,
+      source_hashes: entry.source_hashes,
+      generated_at: entry.generated_at,
+      schema_version: entry.schema_version,
     })),
     dependency_graph: dependencyGraph,
     output_resolutions: outputResolutions,
@@ -1617,7 +1858,8 @@ function getCacheStatus(context) {
     }
   }
   const schemaMismatch = cache.schema_version !== context.config.schema_version;
-  const valid = changed.length === 0 && missing.length === 0 && added.length === 0 && !schemaMismatch;
+  const structureErrors = validateCacheMetadata(context, cache);
+  const valid = changed.length === 0 && missing.length === 0 && added.length === 0 && !schemaMismatch && structureErrors.length === 0;
   return {
     exists: true,
     valid,
@@ -1627,9 +1869,43 @@ function getCacheStatus(context) {
     missing,
     added,
     schema_mismatch: schemaMismatch,
+    structure_errors: structureErrors,
     generated_at: cache.generated_at || null,
     cache,
   };
+}
+
+function validateCacheMetadata(context, cache) {
+  const errors = [];
+  const required = context.config.cache_policy?.required_entry_metadata || [
+    "source_paths",
+    "source_hashes",
+    "generated_at",
+    "schema_version",
+  ];
+  for (const [collectionName, entries] of Object.entries({
+    full_text_index: cache.full_text_index,
+    kb_summaries: cache.kb_summaries,
+  })) {
+    if (!Array.isArray(entries)) {
+      errors.push(`${collectionName} must be an array`);
+      continue;
+    }
+    entries.forEach((entry, index) => {
+      for (const field of required) {
+        if (entry[field] === undefined || entry[field] === null) {
+          errors.push(`${collectionName}[${index}] is missing ${field}`);
+        }
+      }
+      for (const sourcePath of entry.source_paths || []) {
+        const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+        if (isDerivedArtifactPath(context, resolved)) {
+          errors.push(`${collectionName}[${index}] uses derived source ${sourcePath}`);
+        }
+      }
+    });
+  }
+  return errors;
 }
 
 function outputContractsRoot(context) {
@@ -1663,6 +1939,15 @@ function readOutputRegistry(context, options = {}) {
 
 function writeOutputRegistry(context, registry) {
   writeJsonFile(outputRegistryPath(context), registry, { force: true });
+}
+
+function withOutputRegistryLock(context, callback) {
+  const releaseLock = acquireFileLock(path.join(outputContractsRoot(context), "registry.lock"));
+  try {
+    return callback();
+  } finally {
+    releaseLock();
+  }
 }
 
 function findOutputTemplate(registry, id) {
@@ -1711,8 +1996,27 @@ function resolveProjectFilePath(context, rawPath, options = {}) {
     if (options.directoryOnly && !stat.isDirectory()) {
       fail(`Path is not a directory: ${value}`);
     }
+  } else {
+    const nearestParent = nearestExistingParent(resolved);
+    const realRoot = fs.realpathSync.native(context.root);
+    const realParent = fs.realpathSync.native(nearestParent);
+    if (!isInsidePath(realRoot, realParent)) {
+      fail(`Path parent resolves outside the target project root: ${value}`);
+    }
   }
   return resolved;
+}
+
+function nearestExistingParent(filePath) {
+  let current = path.dirname(path.resolve(filePath));
+  while (!fs.existsSync(current)) {
+    const next = path.dirname(current);
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+  return current;
 }
 
 function assertPathInsideRoot(context, resolvedPath, label) {
@@ -1938,7 +2242,12 @@ function hasApprovedOutputDecision(decisions, decisionId) {
   if (!decisionId) {
     return false;
   }
-  return decisions.some((decision) => decision.id === decisionId && decision.status === "approved");
+  return decisions.some(
+    (decision) =>
+      decision.id === decisionId &&
+      decision.status === "approved" &&
+      ["output_link_override", "duplicate_output_approved"].includes(decision.type),
+  );
 }
 
 function findUnlinkedStoryOutputCandidates(context, storyId) {
@@ -1957,6 +2266,10 @@ function findUnlinkedStoryOutputCandidates(context, storyId) {
 
 function shortHash(value) {
   return crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 8);
+}
+
+function shortHashFull(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
 }
 
 function hashFile(filePath) {
@@ -2007,8 +2320,8 @@ function searchKnowledgeBase(context, options, rest) {
     fail("Provide a query with 'kb search <query>' or --query.");
   }
   const limit = Number(options.limit || 10);
-  const indexPath = path.join(context.sdlcRoot, "indexes", "kb-index.json");
-  const index = fs.existsSync(indexPath) ? readJson(indexPath) : buildIndex(context);
+  const indexStatus = getIndexStatus(context);
+  const index = indexStatus.valid ? indexStatus.index : buildIndex(context);
   const terms = tokenize(query);
   const results = index.entries
     .map((entry) => ({ entry, score: scoreEntry(entry, terms) }))
@@ -2018,7 +2331,7 @@ function searchKnowledgeBase(context, options, rest) {
 
   output(
     options,
-    { query, results },
+    { query, index_status: indexStatus.valid ? "valid" : "rebuilt_in_memory", results },
     results.length
       ? results.map(({ entry, score }) => `${score.toFixed(2)} ${entry.path}: ${entry.snippet}`)
       : [`No KB results for '${query}'`],
@@ -2027,18 +2340,24 @@ function searchKnowledgeBase(context, options, rest) {
 
 function gateCheck(context, options) {
   ensureInitialized(context);
+  const attribution = buildAttribution(context, options, "gate.check");
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const scope = String(options.scope || (storyId ? "story" : "all"));
   const report = {
     status: "passed",
     strict: Boolean(options.strict),
+    scope,
+    story_id: storyId,
     checked_at: now(),
     root: context.root,
+    actor: attribution.actor,
+    git: attribution.git,
+    run: attribution.run,
     errors: [],
     warnings: [],
     checked: [],
   };
 
-  const storyId = options.story ? normalizeId(String(options.story)) : null;
-  const scope = String(options.scope || (storyId ? "story" : "all"));
   if (!["story", "all"].includes(scope)) {
     fail("Gate scope must be 'story' or 'all'.");
   }
@@ -2054,11 +2373,13 @@ function gateCheck(context, options) {
       validateContracts(context, report, new Set([story.contract_id]));
     }
     validateTraces(context, report, storyId);
+    validateHandoffs(context, report, storyId);
     validateStory(context, storyId, report);
     validateOutputContracts(context, report, storyId);
   } else {
     validateContracts(context, report);
     validateTraces(context, report);
+    validateHandoffs(context, report);
     const storiesRoot = path.join(context.sdlcRoot, "stories");
     for (const entry of safeReadDir(storiesRoot)) {
       const storyJson = path.join(storiesRoot, entry, "story.json");
@@ -2072,6 +2393,9 @@ function gateCheck(context, options) {
   if (report.errors.length > 0) {
     report.status = "failed";
     process.exitCode = 1;
+  }
+  if (options.out) {
+    writeGateReport(context, report, options);
   }
 
   output(
@@ -2091,6 +2415,40 @@ function gateCheck(context, options) {
 function readStory(context, storyId) {
   const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
   return fs.existsSync(storyPath) ? readJson(storyPath) : null;
+}
+
+function writeGateReport(context, report, options) {
+  const reportPath = resolveProjectFilePath(context, options.out, { mustExist: false });
+  assertNotDerivedArtifact(context, reportPath, "Gate report");
+  const extension = path.extname(reportPath).toLowerCase();
+  if (extension === ".md") {
+    writeTextFile(reportPath, renderGateReportMarkdown(report), { force: Boolean(options.force) });
+    return;
+  }
+  writeJsonFile(reportPath, report, { force: Boolean(options.force) });
+}
+
+function renderGateReportMarkdown(report) {
+  return [
+    `# SDLC Gate Report`,
+    "",
+    `- Status: ${report.status}`,
+    `- Strict: ${report.strict}`,
+    `- Scope: ${report.scope}`,
+    `- Story: ${report.story_id || "all"}`,
+    `- Checked at: ${report.checked_at}`,
+    `- Checked items: ${report.checked.length}`,
+    "",
+    "## Errors",
+    ...(report.errors.length ? report.errors.map((item) => `- ${item}`) : ["- None"]),
+    "",
+    "## Warnings",
+    ...(report.warnings.length ? report.warnings.map((item) => `- ${item}`) : ["- None"]),
+    "",
+    "## Checked",
+    ...(report.checked.length ? report.checked.map((item) => `- ${item}`) : ["- None"]),
+    "",
+  ].join("\n");
 }
 
 function showStatus(context, options) {
@@ -2168,6 +2526,7 @@ function buildOrchestrationSnapshot(context) {
         return null;
       }
       const story = readJson(storyPath);
+      story.__folder_id = entry;
       const claimPath = path.join(storiesRoot, entry, "claim.json");
       const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
       const lastTrace = readLastTraceEvent(context, entry);
@@ -2214,6 +2573,9 @@ function inferStoryOrchestrationState(context, story, claim) {
 
 function inferStoryBlockers(context, story, claim) {
   const blockers = [];
+  if (story.id && story.__folder_id && story.id !== story.__folder_id) {
+    blockers.push(`story id ${story.id} does not match folder ${story.__folder_id}`);
+  }
   if (!Array.isArray(story.acceptance_criteria) || story.acceptance_criteria.length === 0) {
     blockers.push("missing acceptance criteria");
   }
@@ -2279,16 +2641,62 @@ function validateProject(context, report) {
 }
 
 function validateLocks(context, report) {
+  const activeScopes = new Map();
   for (const lock of readLocks(context)) {
     const label = `lock ${lock.id || "unknown"}`;
     if (!lock.id || !lock.phase || !lock.status) {
       report.errors.push(`${label} is missing id, phase, or status`);
     }
+    if (!LOCK_STATUSES.has(String(lock.status || "").toLowerCase())) {
+      report.errors.push(`${label} has unknown status '${lock.status}'`);
+    }
+    if (lock.expires_at && !Number.isFinite(Date.parse(String(lock.expires_at)))) {
+      report.errors.push(`${label} has invalid expires_at '${lock.expires_at}'`);
+    }
     if (lock.status === "active" && isExpired(lock.expires_at)) {
       const severity = report.strict ? "errors" : "warnings";
       report[severity].push(`${label} expired at ${lock.expires_at}`);
     } else if (lock.status === "active") {
+      const scopeKey = `${lock.phase}:${lock.scope || lock.phase}`;
+      const existing = activeScopes.get(scopeKey);
+      if (existing) {
+        const severity = report.strict ? "errors" : "warnings";
+        report[severity].push(`${label} conflicts with active ${existing} on ${scopeKey}`);
+      } else {
+        activeScopes.set(scopeKey, label);
+      }
       report.warnings.push(`${label} is active for phase ${lock.phase}`);
+    }
+    report.checked.push(label);
+  }
+}
+
+function validateHandoffs(context, report, storyId = null) {
+  const handoffs = readHandoffs(context).filter((handoff) => !storyId || handoff.story_id === storyId);
+  for (const handoff of handoffs) {
+    const label = `handoff ${handoff.id || "unknown"}`;
+    if (!handoff.id || !handoff.story_id || !handoff.status || !handoff.to_agent) {
+      report.errors.push(`${label} is missing id, story_id, status, or to_agent`);
+    }
+    if (handoff.story_id && !readStory(context, handoff.story_id)) {
+      report.errors.push(`${label} references missing story ${handoff.story_id}`);
+    }
+    for (const artifact of handoff.required_artifacts || []) {
+      const artifactPath = resolveProjectFilePath(context, artifact, { mustExist: false });
+      if (!fs.existsSync(artifactPath)) {
+        report.errors.push(`${label} references missing required artifact ${artifact}`);
+      } else if (isDerivedArtifactPath(context, artifactPath)) {
+        report.errors.push(`${label} uses derived cache/index artifact ${artifact} as handoff evidence`);
+      }
+    }
+    const openItems = Array.isArray(handoff.open_items) ? handoff.open_items.filter(Boolean) : [];
+    if (openItems.length > 0) {
+      const severity = report.strict && context.config.handoff_policy?.open_items_block_strict_gate !== false ? "errors" : "warnings";
+      report[severity].push(`${label} has open items: ${openItems.join("; ")}`);
+    }
+    if (handoff.status === "open") {
+      const severity = report.strict && context.config.handoff_policy?.open_items_block_strict_gate !== false ? "warnings" : "warnings";
+      report[severity].push(`${label} is still open`);
     }
     report.checked.push(label);
   }
@@ -2339,6 +2747,17 @@ function validateOutputContracts(context, report, storyId = null) {
     if (isDerivedArtifactPath(context, templatePath)) {
       report.errors.push(`${label} cannot live under cache or indexes`);
     }
+    if (template.status === "approved") {
+      if (!template.approved_by || !["human", "ci"].includes(template.approved_by.type)) {
+        report.errors.push(`${label} approved template is missing human/CI approval attribution`);
+      }
+      if (!template.approved_content_hash) {
+        const severity = report.strict ? "errors" : "warnings";
+        report[severity].push(`${label} is approved but has no approved_content_hash; re-approve the template`);
+      } else if (fs.existsSync(templatePath) && hashFile(templatePath) !== template.approved_content_hash) {
+        report.errors.push(`${label} changed after approval; re-approve the template`);
+      }
+    }
     if (Array.isArray(template.source_paths)) {
       for (const sourcePath of template.source_paths) {
         const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
@@ -2348,6 +2767,10 @@ function validateOutputContracts(context, report, storyId = null) {
       }
     }
     report.checked.push(label);
+  }
+
+  for (const decision of decisions) {
+    validateOutputDecision(context, report, decision);
   }
 
   for (const link of linksToValidate) {
@@ -2362,6 +2785,38 @@ function validateOutputContracts(context, report, storyId = null) {
       report[severity].push(`Story ${storyId} output candidate ${candidate} is not linked in output-contracts registry`);
     }
   }
+}
+
+function validateOutputDecision(context, report, decision) {
+  const label = `output decision ${decision.id || "unknown"}`;
+  if (!decision.id || !decision.status) {
+    report.errors.push(`${label} is missing id or status`);
+  }
+  if (decision.status === "approved") {
+    const actor = decision.audit?.decided_by;
+    if (!actor || !["human", "ci"].includes(actor.type)) {
+      report.errors.push(`${label} approved decision is missing human/CI attribution`);
+    }
+    for (const evidence of decision.evidence || []) {
+      const evidencePath = resolveProjectFilePath(context, evidence.path || evidence, { mustExist: false });
+      if (!fs.existsSync(evidencePath)) {
+        report.errors.push(`${label} references missing approval evidence ${evidence.path || evidence}`);
+      } else if (isDerivedArtifactPath(context, evidencePath)) {
+        report.errors.push(`${label} uses derived cache/index evidence ${evidence.path || evidence}`);
+      } else if (evidence.sha256 && evidence.sha256 !== hashFile(evidencePath)) {
+        report.errors.push(`${label} approval evidence changed after decision: ${evidence.path || evidence}`);
+      }
+    }
+    if (decision.subject && decision.approved_content_hash) {
+      const currentHash = hashApprovalSubject(decision.subject);
+      if (currentHash !== decision.approved_content_hash) {
+        report.errors.push(`${label} subject changed after approval`);
+      }
+    } else if (report.strict && decision.type === "output_link_override") {
+      report.errors.push(`${label} override approval must include subject and approved_content_hash`);
+    }
+  }
+  report.checked.push(label);
 }
 
 function validateOutputLink(context, report, registry, templateById, decisions, link, label) {
@@ -2398,6 +2853,11 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
     if (isDerivedArtifactPath(context, artifactPath)) {
       report.errors.push(`${label} uses derived cache/index artifact ${link.artifact_path} as canonical output`);
     }
+    if (fs.existsSync(artifactPath) && link.fingerprints?.artifact_sha256 && hashFile(artifactPath) !== link.fingerprints.artifact_sha256) {
+      report.errors.push(`${label} artifact ${link.artifact_path} changed after it was linked`);
+    } else if (report.strict && fs.existsSync(artifactPath) && !link.fingerprints?.artifact_sha256) {
+      report.errors.push(`${label} is missing artifact fingerprint; re-link the output artifact`);
+    }
   }
 
   if (link.mode === "delta") {
@@ -2411,17 +2871,99 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
       if (isDerivedArtifactPath(context, basePath)) {
         report.errors.push(`${label} uses derived cache/index base artifact ${link.base_artifact}`);
       }
+      if (
+        fs.existsSync(basePath) &&
+        link.fingerprints?.base_artifact_sha256 &&
+        hashFile(basePath) !== link.fingerprints.base_artifact_sha256
+      ) {
+        report.errors.push(`${label} base artifact ${link.base_artifact} changed after it was linked`);
+      } else if (report.strict && fs.existsSync(basePath) && !link.fingerprints?.base_artifact_sha256) {
+        report.errors.push(`${label} is missing base artifact fingerprint; re-link the output artifact`);
+      }
     }
   }
 
+  if (template?.path) {
+    const templatePath = resolveProjectFilePath(context, template.path, { mustExist: false });
+    if (
+      fs.existsSync(templatePath) &&
+      link.fingerprints?.template_sha256 &&
+      hashFile(templatePath) !== link.fingerprints.template_sha256
+    ) {
+      report.errors.push(`${label} template ${link.template_id} changed after the artifact was linked`);
+    }
+  }
+
+  const requirements = Array.isArray(link.requirements) ? link.requirements.filter(Boolean) : [];
+  if (requirements.length === 0) {
+    const severity = report.strict ? "errors" : "warnings";
+    report[severity].push(`${label} has no linked requirements; duplicate detection and reuse/delta resolution are unsafe`);
+  }
+
+  const matchingDecision = validateOutputLinkDecision(context, report, decisions, link, label);
   const duplicateLinks = findRelatedOutputLinks(registry, link).filter((related) => related.id !== link.id);
-  if (link.mode === "new" && duplicateLinks.length > 0 && !hasApprovedOutputDecision(decisions, link.decision_id)) {
+  if (link.mode === "new" && duplicateLinks.length > 0 && !matchingDecision) {
     const related = duplicateLinks.map((item) => `${item.story_id}:${item.artifact_path}`).join(", ");
     const severity = report.strict ? "errors" : "warnings";
     report[severity].push(
       `${label} creates a new ${link.artifact_type} for requirements already covered by ${related}; use reuse/delta or record an approved decision`,
     );
   }
+}
+
+function validateOutputLinkDecision(context, report, decisions, link, label) {
+  if (!link.decision_id) {
+    return null;
+  }
+  const decision = decisions.find((candidate) => candidate.id === link.decision_id) || null;
+  if (!decision) {
+    report.errors.push(`${label} references missing decision ${link.decision_id}`);
+    return null;
+  }
+  if (!hasApprovedOutputDecision(decisions, link.decision_id)) {
+    report.errors.push(`${label} decision ${link.decision_id} is not an approved output override decision`);
+    return null;
+  }
+  const expectedSubject = buildOutputLinkDecisionSubject(link);
+  const expectedHash = hashApprovalSubject(expectedSubject);
+  if (!decision.subject || !decision.approved_content_hash) {
+    const severity = report.strict ? "errors" : "warnings";
+    report[severity].push(`${label} decision ${link.decision_id} must include subject and approved_content_hash`);
+    return null;
+  }
+  if (decision.approved_content_hash !== expectedHash || stableJson(decision.subject) !== stableJson(expectedSubject)) {
+    report.errors.push(`${label} decision ${link.decision_id} was approved for a different output link subject`);
+    return null;
+  }
+  return decision;
+}
+
+function outputLinkHasMatchingApprovedDecision(decisions, link) {
+  if (!link.decision_id || !hasApprovedOutputDecision(decisions, link.decision_id)) {
+    return false;
+  }
+  const decision = decisions.find((candidate) => candidate.id === link.decision_id);
+  if (!decision || !decision.subject || !decision.approved_content_hash) {
+    return false;
+  }
+  const expectedSubject = buildOutputLinkDecisionSubject(link);
+  return (
+    decision.approved_content_hash === hashApprovalSubject(expectedSubject) &&
+    stableJson(decision.subject) === stableJson(expectedSubject)
+  );
+}
+
+function buildOutputLinkDecisionSubject(link) {
+  return {
+    story_id: link.story_id,
+    artifact_type: link.artifact_type,
+    artifact_path: link.artifact_path,
+    template_id: link.template_id,
+    mode: link.mode,
+    base_artifact: link.base_artifact || null,
+    requirements: Array.isArray(link.requirements) ? link.requirements : [],
+    rationale: link.rationale || null,
+  };
 }
 
 function validateContracts(context, report, contractIds = null) {
@@ -2468,9 +3010,17 @@ function validateContracts(context, report, contractIds = null) {
         report.errors.push(`${label} strict gate blocks open contract questions`);
       }
     }
+    validateContractApprovals(context, report, contract, label);
+    if (report.strict && contract.human_gate === true && contract.status !== "approved") {
+      report.errors.push(`${label} strict gate requires contract.status to be approved`);
+    }
     if (report.strict && contract.human_gate === true && !hasApprovedContractApproval(contract)) {
       report.errors.push(`${label} strict gate requires an approved human gate record`);
     }
+    if (report.strict && contract.human_gate === true && !hasFreshApprovedContractApproval(contract)) {
+      report.errors.push(`${label} approved human gate is stale or missing approved_content_hash; re-approve the contract`);
+    }
+    validateContractOutputRefs(context, report, contract, label);
     validateExecutionPolicy(context, contract, label, report);
     report.checked.push(label);
   }
@@ -2485,6 +3035,96 @@ function hasApprovedContractApproval(contract) {
     .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
     .at(-1);
   return latest?.status === "approved";
+}
+
+function validateContractApprovals(context, report, contract, label) {
+  for (const approval of contract.approvals || []) {
+    const approvalLabel = `${label} approval ${approval.id || "unknown"}`;
+    if (approval.status === "approved") {
+      const actor = approval.approved_by;
+      if (!actor || !["human", "ci"].includes(actor.type)) {
+        report.errors.push(`${approvalLabel} is missing human/CI approval attribution`);
+      }
+      for (const evidence of approval.evidence || []) {
+        const evidencePath = resolveProjectFilePath(context, evidence.path || evidence, { mustExist: false });
+        if (!fs.existsSync(evidencePath)) {
+          report.errors.push(`${approvalLabel} references missing approval evidence ${evidence.path || evidence}`);
+        } else if (isDerivedArtifactPath(context, evidencePath)) {
+          report.errors.push(`${approvalLabel} uses derived cache/index evidence ${evidence.path || evidence}`);
+        } else if (evidence.sha256 && evidence.sha256 !== hashFile(evidencePath)) {
+          report.errors.push(`${approvalLabel} approval evidence changed after approval: ${evidence.path || evidence}`);
+        }
+      }
+    }
+  }
+}
+
+function hasFreshApprovedContractApproval(contract) {
+  if (!Array.isArray(contract.approvals) || contract.approvals.length === 0) {
+    return false;
+  }
+  const latest = latestContractApproval(contract);
+  if (!latest || latest.status !== "approved" || !latest.approved_content_hash) {
+    return false;
+  }
+  return latest.approved_content_hash === hashApprovalSubject(contract);
+}
+
+function latestContractApproval(contract) {
+  return [...(contract.approvals || [])]
+    .filter((approval) => approval && approval.status)
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .at(-1);
+}
+
+function validateContractOutputRefs(context, report, contract, label) {
+  const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
+  const requiresCoverage = context.config.gate_policy?.strict_mode?.requires_output_contract_coverage !== false;
+  if (report.strict && requiresCoverage && contract.story_id && refs.length === 0) {
+    report.errors.push(`${label} strict gate requires output_contract_refs for story output coverage`);
+    return;
+  }
+  if (refs.length === 0) {
+    return;
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
+  const links = registry?.links || [];
+  for (const ref of refs) {
+    const refLabel = `${label} output ref ${ref.artifact_type || "unknown"}`;
+    if (!ref.artifact_type || !ref.template_id || !ref.mode) {
+      report.errors.push(`${refLabel} is missing artifact_type, template_id, or mode`);
+      continue;
+    }
+    if (!OUTPUT_LINK_MODES.has(ref.mode)) {
+      report.errors.push(`${refLabel} has invalid mode '${ref.mode}'`);
+    }
+    const template = templates.get(ref.template_id);
+    if (!template) {
+      report.errors.push(`${refLabel} references missing output template ${ref.template_id}`);
+    } else {
+      if (template.type !== ref.artifact_type) {
+        report.errors.push(`${refLabel} template ${ref.template_id} type '${template.type}' does not match '${ref.artifact_type}'`);
+      }
+      if (report.strict && template.status !== "approved") {
+        report.errors.push(`${refLabel} template ${ref.template_id} is not approved`);
+      }
+    }
+    if (report.strict && requiresCoverage && contract.story_id) {
+      const matchingLink = links.find(
+        (link) =>
+          link.story_id === contract.story_id &&
+          link.artifact_type === ref.artifact_type &&
+          link.template_id === ref.template_id &&
+          link.mode === ref.mode,
+      );
+      if (!matchingLink) {
+        report.errors.push(
+          `${refLabel} is not satisfied by an output link for story ${contract.story_id}; run output link with the approved template and mode`,
+        );
+      }
+    }
+  }
 }
 
 function validateExecutionPolicy(context, contract, label, report) {
@@ -2565,8 +3205,27 @@ function validateTraces(context, report, storyId = null) {
       if (!event.run || typeof event.run !== "object") {
         report.errors.push(`${label}:${index + 1} is missing run metadata`);
       }
+      if (report.strict && ["test", "release"].includes(event.type)) {
+        validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
+      }
     });
     report.checked.push(label);
+  }
+}
+
+function validateTraceEvidence(context, report, event, label) {
+  const evidence = Array.isArray(event.evidence) ? event.evidence.filter(Boolean) : [];
+  if (evidence.length === 0) {
+    report.errors.push(`${label} ${event.type} trace requires at least one evidence path`);
+    return;
+  }
+  for (const evidencePathValue of evidence) {
+    const evidencePath = resolveProjectFilePath(context, evidencePathValue, { mustExist: false });
+    if (!fs.existsSync(evidencePath)) {
+      report.errors.push(`${label} references missing evidence ${evidencePathValue}`);
+    } else if (isDerivedArtifactPath(context, evidencePath)) {
+      report.errors.push(`${label} uses derived cache/index evidence ${evidencePathValue}`);
+    }
   }
 }
 
@@ -2590,6 +3249,15 @@ function validateStory(context, storyId, report) {
       report.errors.push(`Story ${storyId} is missing required field '${field}'`);
     }
   }
+  if (story.id !== storyId) {
+    report.errors.push(`Story ${storyId} story.json id '${story.id}' must match its folder id`);
+  }
+  if (!STORY_STATUSES.has(String(story.status || "").toLowerCase())) {
+    report.errors.push(`Story ${storyId} has unknown status '${story.status}'`);
+  }
+  if (!context.config.phases[story.phase]) {
+    report.errors.push(`Story ${storyId} has unknown phase '${story.phase}'`);
+  }
   if (!Array.isArray(story.acceptance_criteria) || story.acceptance_criteria.length === 0) {
     const severity = story.status === "draft" ? "warnings" : "errors";
     report[severity].push(`Story ${storyId} has no acceptance criteria`);
@@ -2610,9 +3278,15 @@ function validateStory(context, storyId, report) {
     const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
     if (!fs.existsSync(contractPath)) {
       report.errors.push(`Story ${storyId} references missing contract ${story.contract_id}`);
+    } else {
+      const contract = readJson(contractPath);
+      if (contract.story_id && contract.story_id !== storyId) {
+        report.errors.push(`Story ${storyId} contract ${story.contract_id} is bound to story ${contract.story_id}`);
+      }
     }
   } else {
-    report.warnings.push(`Story ${storyId} has no contract_id`);
+    const severity = report.strict ? "errors" : "warnings";
+    report[severity].push(`Story ${storyId} has no contract_id`);
   }
   const traceEvents = readTraceEvents(context, storyId);
   if ((story.phase === "validation" || story.status === "validation") && !traceEvents.some((event) => event.type === "test")) {
@@ -2628,6 +3302,9 @@ function validateClaim(context, storyId, claim, report) {
   if (claim.story_id !== storyId) {
     report.errors.push(`Story ${storyId} claim.story_id must match story id`);
   }
+  if (!CLAIM_STATUSES.has(String(claim.status || "").toLowerCase())) {
+    report.errors.push(`Story ${storyId} claim has unknown status '${claim.status}'`);
+  }
   if (claim.status !== "active") {
     report.errors.push(`Story ${storyId} requires an active claim, found '${claim.status}'`);
   }
@@ -2639,8 +3316,12 @@ function validateClaim(context, storyId, claim, report) {
   } else {
     const expectedBranch = String(context.config.parallel_work?.branch_pattern || "feature/<story-id>").replace("<story-id>", storyId);
     if (claim.branch !== expectedBranch) {
-      report.warnings.push(`Story ${storyId} claim branch '${claim.branch}' does not match expected '${expectedBranch}'`);
+      const severity = report.strict && context.config.claim_policy?.require_branch_pattern !== false ? "errors" : "warnings";
+      report[severity].push(`Story ${storyId} claim branch '${claim.branch}' does not match expected '${expectedBranch}'`);
     }
+  }
+  if (claim.expires_at && !Number.isFinite(Date.parse(String(claim.expires_at)))) {
+    report.errors.push(`Story ${storyId} active claim has invalid expires_at '${claim.expires_at}'`);
   }
   if (isExpired(claim.expires_at)) {
     report.errors.push(`Story ${storyId} active claim expired at ${claim.expires_at}`);
@@ -2670,15 +3351,15 @@ function readTraceEvents(context, storyId) {
 }
 
 function buildIndex(context) {
+  const sourceFiles = collectKnowledgeSourceFiles(context);
+  const sourceHashes = {};
   const entries = [];
-  for (const filePath of walkFiles(context.sdlcRoot)) {
-    if (!shouldIndexFile(context, filePath)) {
-      continue;
-    }
-    const relativePath = path.relative(context.root, filePath);
+  for (const filePath of sourceFiles) {
+    const relativePath = toProjectPath(context, filePath);
     const extension = path.extname(filePath);
     const raw = fs.readFileSync(filePath, "utf8");
     const text = normalizeText(raw);
+    sourceHashes[relativePath] = hashBuffer(Buffer.from(raw, "utf8"));
     entries.push({
       path: relativePath,
       title: inferTitle(filePath, raw),
@@ -2692,8 +3373,33 @@ function buildIndex(context) {
     schema_version: context.config.schema_version,
     generated_at: now(),
     root: context.root,
+    source_paths: Object.keys(sourceHashes).sort(),
+    source_hashes: sourceHashes,
     entries,
   };
+}
+
+function getIndexStatus(context) {
+  const indexPath = path.join(context.sdlcRoot, "indexes", "kb-index.json");
+  if (!fs.existsSync(indexPath)) {
+    return { exists: false, valid: false, index_path: indexPath, index: null };
+  }
+  let index;
+  try {
+    index = readJson(indexPath);
+  } catch {
+    return { exists: true, valid: false, index_path: indexPath, index: null };
+  }
+  const currentHashes = {};
+  for (const filePath of collectKnowledgeSourceFiles(context)) {
+    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
+  }
+  const cachedHashes = index.source_hashes || {};
+  const valid =
+    index.schema_version === context.config.schema_version &&
+    Object.keys(currentHashes).length === Object.keys(cachedHashes).length &&
+    Object.entries(currentHashes).every(([sourcePath, hash]) => cachedHashes[sourcePath] === hash);
+  return { exists: true, valid, index_path: indexPath, index };
 }
 
 function scoreEntry(entry, terms) {
@@ -2762,7 +3468,11 @@ function writeJsonFile(filePath, value, options = {}) {
 }
 
 function writeTextFile(filePath, content, options = {}) {
+  assertNoSymlinkPathSegments(filePath);
   if (fs.existsSync(filePath) && !options.force) {
+    if (fs.lstatSync(filePath).isSymbolicLink()) {
+      fail(`Refusing to write through symlink: ${filePath}`);
+    }
     const existing = fs.readFileSync(filePath, "utf8");
     if (existing === content) {
       return false;
@@ -2782,8 +3492,48 @@ function writeTextFile(filePath, content, options = {}) {
 }
 
 function appendJsonLine(filePath, value) {
+  assertNoSymlinkPathSegments(filePath);
   ensureDir(path.dirname(filePath));
   fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
+}
+
+function acquireFileLock(lockPath) {
+  assertNoSymlinkPathSegments(lockPath);
+  ensureDir(path.dirname(lockPath));
+  try {
+    const fd = fs.openSync(lockPath, "wx");
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, created_at: now() }));
+    fs.closeSync(fd);
+  } catch (error) {
+    if (error && error.code === "EEXIST") {
+      fail(`Resource is locked by another SDLC operation: ${lockPath}`);
+    }
+    throw error;
+  }
+  return () => {
+    try {
+      fs.rmSync(lockPath, { force: true });
+    } catch {
+      // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
+    }
+  };
+}
+
+function assertNoSymlinkPathSegments(filePath) {
+  const resolved = path.resolve(filePath);
+  const root = path.parse(resolved).root;
+  const parts = path.relative(root, resolved).split(path.sep).filter(Boolean);
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    current = path.join(current, part);
+    if (index === 0) {
+      continue;
+    }
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      fail(`Refusing to follow symlink while writing: ${current}`);
+    }
+  }
 }
 
 function ensureDir(dirPath) {
@@ -2892,6 +3642,48 @@ function normalizeGitEvent(value) {
   return normalized;
 }
 
+function normalizeHandoffCloseStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const allowed = ["accepted", "closed", "cancelled"];
+  if (!allowed.includes(normalized)) {
+    fail(`Unknown handoff status '${value}'. Valid values: ${allowed.join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeStoryStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!STORY_STATUSES.has(normalized)) {
+    fail(`Unknown story status '${value}'. Valid values: ${Array.from(STORY_STATUSES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeClaimStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!CLAIM_STATUSES.has(normalized)) {
+    fail(`Unknown claim status '${value}'. Valid values: ${Array.from(CLAIM_STATUSES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeLockStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!LOCK_STATUSES.has(normalized)) {
+    fail(`Unknown lock status '${value}'. Valid values: ${Array.from(LOCK_STATUSES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalDateTime(value, label) {
+  const text = String(value || "").trim();
+  const timestamp = Date.parse(text);
+  if (!text || !Number.isFinite(timestamp)) {
+    fail(`Invalid --${label} '${value}'. Use an ISO-8601 date-time.`);
+  }
+  return text;
+}
+
 function normalizeId(value) {
   const normalized = String(value).trim().replace(/\s+/g, "-");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
@@ -2956,12 +3748,14 @@ Usage:
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
+      [--output-ref artifact-type:template-id:mode]
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
-  agentic-sdlc contract approve --id contract-id [--summary text]
+  agentic-sdlc contract approve --id contract-id [--summary text] [--approval-evidence path]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]
+  agentic-sdlc story handoff close --id handoff-id [--status closed|accepted|cancelled]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -2969,7 +3763,7 @@ Usage:
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
   agentic-sdlc output template propose --type artifact-type [--id id]
       [--from path | --body text] [--summary text]
-  agentic-sdlc output template approve --id template-id [--summary text]
+  agentic-sdlc output template approve --id template-id [--summary text] [--approval-evidence path]
   agentic-sdlc output resolve --story ST-001 --type artifact-type
   agentic-sdlc output link --story ST-001 --type artifact-type
       --artifact path --template template-id --mode reuse|delta|new
@@ -2980,7 +3774,7 @@ Usage:
   agentic-sdlc cache clear
   agentic-sdlc orchestrate status [--json]
   agentic-sdlc orchestrate plan [--limit n] [--json]
-  agentic-sdlc gate check [--story ST-001] [--scope story|all] [--strict] [--json]
+  agentic-sdlc gate check [--story ST-001] [--scope story|all] [--strict] [--out path] [--json]
   agentic-sdlc index rebuild
   agentic-sdlc kb search <query>
   agentic-sdlc status
@@ -3012,6 +3806,8 @@ Contract context options:
   --validation text      Add validation criteria.
   --tool text            Add an allowed tool class.
   --kb-write text        Add a required KB write target.
+  --output-ref ref       Link a contract to expected output coverage.
+                         Format: artifact-type:template-id:reuse|delta|new.
 
 Contract execution policy options:
   --model model-id       Override the Codex model for agents using this contract.
@@ -3020,6 +3816,10 @@ Contract execution policy options:
                          Built-in levels: inherit, minimal, low, medium, high.
   --execution-note text  Record a note about model or reasoning selection.
                          Repeatable.
+  --approval-evidence path
+                         Attach canonical approval evidence and content hash.
+                         Repeatable. Must not point to cache/indexes.
+  --preserve-status      Record an approval without changing contract.status.
 
 Trace options:
   --git-event event      Classify a sync trace as push, commit, merge, pull,
@@ -3049,6 +3849,7 @@ Gate options:
                          no blocking open questions, active claims,
                          attributed traces, approved output templates, and
                          no canonical outputs under cache/indexes.
+  --out path             Persist a gate report as JSON or Markdown.
 
 Principle:
   The plugin is stateless. Contracts, traces, and KB artifacts are written only
