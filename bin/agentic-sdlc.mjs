@@ -245,6 +245,9 @@ function createContract(context, options) {
     allowed_tools: normalizeListOption(options.tool),
     kb_writes: normalizeListOption(options["kb-write"]),
     metrics: normalizeListOption(options.metric),
+    model: options.model,
+    reasoning: options.reasoning,
+    execution_notes: normalizeRawListOption(options["execution-note"]),
   });
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
@@ -285,6 +288,7 @@ function buildContract(context, phase, overrides = {}) {
     kb_writes: mergeList(template.kb_writes, overrides.kb_writes),
     human_gate: Boolean(template.human_gate),
     metrics: mergeList(template.metrics, overrides.metrics),
+    execution_policy: buildExecutionPolicy(context, overrides),
     contextualization: {
       summary: overrides.context_summary ? String(overrides.context_summary) : null,
       context_sources: contextSources,
@@ -296,6 +300,53 @@ function buildContract(context, phase, overrides = {}) {
     approvals: [],
     created_at: now(),
     updated_at: now(),
+  };
+}
+
+function buildExecutionPolicy(context, overrides = {}) {
+  const config = context.config.execution_policy || {};
+  const runtime = String(config.runtime || "codex");
+  const allowedReasoningLevels = normalizeReasoningLevels(config.reasoning_levels);
+  const rawModel = normalizeScalarOption(
+    overrides.model === undefined ? config.default_model : overrides.model,
+    "model",
+  );
+  const rawReasoning = normalizeScalarOption(
+    overrides.reasoning === undefined ? config.default_reasoning : overrides.reasoning,
+    "reasoning",
+  );
+  const model = buildExecutionPolicySelection(rawModel, "value");
+  const reasoning = buildExecutionPolicySelection(rawReasoning, "level", {
+    allowedValues: allowedReasoningLevels,
+    optionName: "reasoning",
+  });
+
+  return {
+    runtime,
+    model,
+    reasoning,
+    notes: [...(overrides.execution_notes || [])],
+  };
+}
+
+function buildExecutionPolicySelection(rawValue, valueKey, options = {}) {
+  if (!rawValue || rawValue.toLowerCase() === "inherit") {
+    return {
+      mode: "inherit",
+      [valueKey]: null,
+    };
+  }
+
+  const value = valueKey === "level" ? rawValue.toLowerCase() : rawValue;
+  if (options.allowedValues && !options.allowedValues.includes(value)) {
+    fail(
+      `Unknown --${options.optionName} '${rawValue}'. Valid values: ${options.allowedValues.join(", ")}`,
+    );
+  }
+
+  return {
+    mode: "override",
+    [valueKey]: value,
   };
 }
 
@@ -608,7 +659,45 @@ function validateContracts(context, report) {
     if (!contract.contextualization || typeof contract.contextualization !== "object") {
       report.errors.push(`${label} must include contextualization metadata`);
     }
+    validateExecutionPolicy(context, contract, label, report);
     report.checked.push(label);
+  }
+}
+
+function validateExecutionPolicy(context, contract, label, report) {
+  const policy = contract.execution_policy;
+  if (!policy || typeof policy !== "object") {
+    return;
+  }
+  if (policy.runtime !== "codex") {
+    report.errors.push(`${label} execution_policy.runtime must be 'codex'`);
+  }
+  validateExecutionPolicySelection(policy.model, "model", "value", label, report);
+  validateExecutionPolicySelection(policy.reasoning, "reasoning", "level", label, report, {
+    allowedValues: normalizeReasoningLevels(context.config.execution_policy?.reasoning_levels),
+  });
+  if (!Array.isArray(policy.notes)) {
+    report.errors.push(`${label} execution_policy.notes must be an array`);
+  }
+}
+
+function validateExecutionPolicySelection(selection, name, valueKey, label, report, options = {}) {
+  if (!selection || typeof selection !== "object") {
+    report.errors.push(`${label} execution_policy.${name} must be an object`);
+    return;
+  }
+  if (!["inherit", "override"].includes(selection.mode)) {
+    report.errors.push(`${label} execution_policy.${name}.mode must be 'inherit' or 'override'`);
+  }
+  const value = selection[valueKey];
+  if (selection.mode === "override") {
+    if (typeof value !== "string" || value.trim() === "") {
+      report.errors.push(`${label} execution_policy.${name}.${valueKey} is required when mode is 'override'`);
+    } else if (options.allowedValues && !options.allowedValues.includes(value)) {
+      report.errors.push(
+        `${label} execution_policy.${name}.${valueKey} '${value}' is not allowed. Valid values: ${options.allowedValues.join(", ")}`,
+      );
+    }
   }
 }
 
@@ -849,6 +938,26 @@ function normalizeRawListOption(value) {
   return values.map((item) => String(item).trim()).filter(Boolean);
 }
 
+function normalizeScalarOption(value, key) {
+  if (value === undefined || value === null || value === true) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 1) {
+      fail(`Option --${key} can be used only once`);
+    }
+    return normalizeScalarOption(value[0], key);
+  }
+  const text = String(value).trim();
+  return text || null;
+}
+
+function normalizeReasoningLevels(value) {
+  const fallback = ["inherit", "minimal", "low", "medium", "high"];
+  const levels = Array.isArray(value) && value.length > 0 ? value : fallback;
+  return levels.map((level) => String(level).trim().toLowerCase()).filter(Boolean);
+}
+
 function normalizeId(value) {
   return String(value).trim().replace(/\s+/g, "-");
 }
@@ -904,6 +1013,7 @@ Usage:
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
+      [--model model-id] [--reasoning inherit|minimal|low|medium|high]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -930,6 +1040,14 @@ Contract context options:
   --validation text      Add validation criteria.
   --tool text            Add an allowed tool class.
   --kb-write text        Add a required KB write target.
+
+Contract execution policy options:
+  --model model-id       Override the Codex model for agents using this contract.
+                         Omit or pass "inherit" to reuse the main thread model.
+  --reasoning level      Override agent reasoning level. Defaults to "inherit".
+                         Built-in levels: inherit, minimal, low, medium, high.
+  --execution-note text  Record a note about model or reasoning selection.
+                         Repeatable.
 
 Principle:
   The plugin is stateless. Contracts, traces, and KB artifacts are written only

@@ -57,6 +57,19 @@
       "contextualization.assumptions"
     ]
   },
+  "execution_policy": {
+    "principle": "Contracts run inside Codex. If a contract does not explicitly override model or reasoning, spawned agents should inherit the main Codex thread configuration.",
+    "runtime": "codex",
+    "default_model": "inherit",
+    "default_reasoning": "inherit",
+    "reasoning_levels": [
+      "inherit",
+      "minimal",
+      "low",
+      "medium",
+      "high"
+    ]
+  },
   "phases": {
     "discovery": {
       "purpose": "Understand the problem, target users, market context, constraints, and value hypothesis before solution design.",
@@ -326,6 +339,7 @@
       "allowed_tools",
       "kb_writes",
       "human_gate",
+      "execution_policy",
       "contextualization"
     ],
     "story_required_fields": [

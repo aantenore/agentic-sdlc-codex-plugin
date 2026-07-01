@@ -37,6 +37,19 @@ node bin/agentic-sdlc.mjs contract create \
   --constraint "Provider-specific logic must stay behind an adapter"
 ```
 
+By default, the contract execution policy inherits the main Codex thread model and reasoning level. Override them only when needed:
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --root <project> \
+  --phase implementation \
+  --model codex-model-id \
+  --reasoning high \
+  --execution-note "Use higher reasoning for a high-risk architecture change"
+```
+
+Supported default reasoning levels are `inherit`, `minimal`, `low`, `medium`, and `high`. Teams can change the allowed levels in `templates/sdlc-config.json`.
+
 ## Create And Claim Story
 
 ```bash

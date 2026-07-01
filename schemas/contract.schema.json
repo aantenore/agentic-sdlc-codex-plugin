@@ -16,6 +16,7 @@
     "allowed_tools",
     "kb_writes",
     "human_gate",
+    "execution_policy",
     "contextualization"
   ],
   "properties": {
@@ -88,6 +89,71 @@
     },
     "human_gate": {
       "type": "boolean"
+    },
+    "execution_policy": {
+      "type": "object",
+      "required": [
+        "runtime",
+        "model",
+        "reasoning",
+        "notes"
+      ],
+      "properties": {
+        "runtime": {
+          "const": "codex"
+        },
+        "model": {
+          "type": "object",
+          "required": [
+            "mode",
+            "value"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "inherit",
+                "override"
+              ]
+            },
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "reasoning": {
+          "type": "object",
+          "required": [
+            "mode",
+            "level"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "inherit",
+                "override"
+              ]
+            },
+            "level": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
     },
     "contextualization": {
       "type": "object",

@@ -79,6 +79,20 @@ Every generated contract is bound to the current project and records contextuali
     "project_name": "TravelOps"
   },
   "phase": "analysis",
+  "execution_policy": {
+    "runtime": "codex",
+    "model": {
+      "mode": "inherit",
+      "value": null
+    },
+    "reasoning": {
+      "mode": "override",
+      "level": "high"
+    },
+    "notes": [
+      "Higher reasoning requested for integration-risk analysis"
+    ]
+  },
   "contextualization": {
     "summary": "Analyze the TravelOps MVP around disruption-aware travel replanning.",
     "context_sources": [

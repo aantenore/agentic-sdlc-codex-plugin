@@ -70,6 +70,18 @@ node bin/agentic-sdlc.mjs contract create \
 
 The resulting contract stores project identity, context source references, answered/open questions, assumptions, and constraints under `contextualization`.
 
+Contracts also carry an `execution_policy`. By default, generated contracts tell spawned Codex agents to inherit the model and reasoning level from the main Codex thread. Override them only when a phase needs a different execution profile:
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --phase implementation \
+  --model codex-model-id \
+  --reasoning high \
+  --execution-note "Use higher reasoning for risky architecture changes"
+```
+
+Model identifiers are stored as free-form Codex model IDs so the plugin does not need hardcoded model catalogs. Reasoning levels are configurable in `templates/sdlc-config.json`.
+
 ## How Agents Interact
 
 The SDLC is designed as a handoff chain. Each phase agent reads the previous phase artifacts, works under a contract, writes evidence to the project KB, and leaves the next phase with structured inputs.
