@@ -1781,6 +1781,15 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(outputTemplateRequest.review_items.some((item) => /Approval scope:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Sections to approve:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Template content to review:/.test(item)));
+  const outputTemplateDeliveryIds = outputTemplateRequest.delivery_format_options.map((option) => option.id);
+  assert.ok(outputTemplateDeliveryIds.includes("chat-summary"));
+  assert.ok(outputTemplateDeliveryIds.includes("canonical-document"));
+  assert.ok(outputTemplateDeliveryIds.includes("document-plus-chat-summary"));
+  assert.ok(outputTemplateDeliveryIds.includes("detailed-findings"));
+  assert.match(outputTemplateRequest.recommended_delivery_format, /document-plus-chat-summary/);
+  assert.match(outputTemplateRequest.delivery_question, /How should Codex present/);
+  const contractApprovalRequest = requests.requests.find((request) => request.type === "contract_approval");
+  assert.ok(contractApprovalRequest.delivery_format_options.some((option) => option.id === "executive-summary"));
 
   assert.equal(requests.assistant_message_source_language, "en");
   assert.equal(requests.assistant_message_presentation.translate_to_chat_language, true);
@@ -1791,6 +1800,7 @@ test("contract create requires agreed output templates and approval requests sum
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
   assert.match(plainRequests, /I am stopping here/);
   assert.match(plainRequests, /What to review/);
+  assert.match(plainRequests, /Delivery \/ presentation options/);
   assert.match(plainRequests, /What approval means/);
   assert.match(plainRequests, /Question:/);
 
@@ -1807,6 +1817,37 @@ test("contract create requires agreed output templates and approval requests sum
   assert.equal(gate.assistant_message_source_language, "en");
   assert.equal(gate.assistant_message_presentation.translate_to_chat_language, true);
   assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
+});
+
+test("implementation output template approvals include code review delivery choices", () => {
+  const project = tmpProject("implementation-output-delivery-options");
+  initProject(project);
+  story(project, "ST-001");
+  mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "implementation-summary",
+    "--summary",
+    "Implementation summary format",
+  ]);
+
+  const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--json"]).stdout);
+  const request = requests.requests.find((item) => item.type === "output_template_approval" && item.subject_id === "implementation-summary-v1");
+  assert.ok(request, "implementation output template approval request missing");
+  const deliveryIds = request.delivery_format_options.map((option) => option.id);
+  assert.ok(deliveryIds.includes("changed-files-summary"));
+  assert.ok(deliveryIds.includes("modified-classes-components"));
+  assert.ok(deliveryIds.includes("diff-review"));
+  assert.ok(deliveryIds.includes("key-code-snippets"));
+  assert.ok(deliveryIds.includes("tests-and-verification"));
+  assert.ok(deliveryIds.includes("no-code-summary"));
+  assert.match(request.recommended_delivery_format, /changed-files-summary/);
+  assert.match(request.delivery_question, /changed-files-summary/);
+  assert.match(request.delivery_question, /diff-review/);
 });
 
 test("trace attribution separates executor requester and authorizer in report queries", () => {

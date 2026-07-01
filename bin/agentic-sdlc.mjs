@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.10";
+const VERSION = "0.4.11";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -883,7 +883,7 @@ function isTaskContractApproved(contract) {
 function contractNegotiationQuestion(phase, storyId) {
   const subject = storyId ? `story ${storyId}` : "this project";
   const phaseLabel = phase || "the requested phase";
-  return `No approved ${phaseLabel} contract is ready for ${subject}. Confirm the expected output, boundaries, constraints, and approval rules before work starts.`;
+  return `No approved ${phaseLabel} contract is ready for ${subject}. Confirm the expected output, delivery/presentation format, boundaries, constraints, and approval rules before work starts.`;
 }
 
 function contractNegotiationCommands(phase, storyId, contractId = null, options = {}) {
@@ -2471,7 +2471,7 @@ function assistantMessagePresentationFields() {
         "schema keys",
       ],
       instruction:
-        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Do not collapse the message into a bare approval question: show the review items and enough template or contract structure for the user to understand what they are approving.",
+        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Do not collapse the message into a bare approval question: show the review items, delivery/presentation options, and enough template or contract structure for the user to understand what they are approving.",
     },
   };
 }
@@ -2550,6 +2550,9 @@ function collectOutputTemplateApprovalRequests(context, storyId = null) {
             template.path ? `Template file: ${template.path}` : null,
             `Template content to review: ${templateExcerpt || "unavailable"}`,
           ],
+          delivery_format_options: deliveryFormatOptionsForOutput(template.type),
+          recommended_delivery_format: recommendedDeliveryFormatForOutput(template.type),
+          delivery_question: deliveryQuestionForOutput(template.type),
           approval_meaning: "If you approve it, this template becomes the official reusable format for that output type; final outputs still need their own review and gate evidence.",
           approve_if: "Approve only if the sections, required evidence, and detail level are the structure you want agents to use repeatedly.",
           change_if: "Ask for changes if you want different sections, more detail, less detail, a different format, or more template content before deciding.",
@@ -2581,6 +2584,9 @@ function collectContractApprovalRequests(context, storyId = null) {
         title: `${capitalizeLabel(contract.phase)} contract ${contract.id}`,
         why_needed: "The contract defines what the agent may do in this phase, the boundaries, expected outputs, and validation criteria.",
         review_items: describeContractForHuman(contract),
+        delivery_format_options: deliveryFormatOptionsForContract(contract),
+        recommended_delivery_format: recommendedDeliveryFormatForContract(contract),
+        delivery_question: deliveryQuestionForContract(contract),
         approval_meaning: "If you approve it, you authorize the agent to proceed under this contract. You are not automatically approving final outputs.",
         approve_if: "Approve if the objective, context, boundaries, tools, and expected outputs match what you want the agent to do.",
         change_if: "Ask for changes if the scope is ambiguous, criteria are missing, outputs are not what you want, or you want to change how the work is done.",
@@ -2693,6 +2699,9 @@ function humanApprovalFields(fields = {}) {
     title: fields.title || null,
     why_needed: fields.why_needed || null,
     review_items: reviewItems,
+    delivery_format_options: normalizeDeliveryFormatOptions(fields.delivery_format_options || []),
+    recommended_delivery_format: fields.recommended_delivery_format || null,
+    delivery_question: fields.delivery_question || null,
     approval_meaning: fields.approval_meaning || null,
     approve_if: fields.approve_if || null,
     change_if: fields.change_if || null,
@@ -2702,6 +2711,249 @@ function humanApprovalFields(fields = {}) {
   };
 }
 
+function normalizeDeliveryFormatOptions(options = []) {
+  const rawOptions = Array.isArray(options) ? options : [];
+  return rawOptions
+    .map((option) => {
+      if (typeof option === "string") {
+        const label = option.trim();
+        return label ? { id: slugify(label), label, description: null } : null;
+      }
+      if (!option || typeof option !== "object") {
+        return null;
+      }
+      const label = String(option.label || option.id || "").trim();
+      const id = slugify(option.id || label);
+      if (!id || !label) {
+        return null;
+      }
+      return {
+        id,
+        label,
+        description: option.description ? String(option.description).trim() : null,
+        when_to_use: option.when_to_use ? String(option.when_to_use).trim() : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function formatDeliveryFormatOption(option) {
+  return [
+    `${option.id}: ${option.label}`,
+    option.description ? ` - ${option.description}` : null,
+    option.when_to_use ? ` Use when: ${option.when_to_use}` : null,
+  ].filter(Boolean).join("");
+}
+
+function deliveryFormatOptionsForOutput(artifactType = "", phase = null) {
+  const normalized = String(artifactType || phase || "").toLowerCase();
+  const options = [
+    {
+      id: "chat-summary",
+      label: "Chat summary",
+      description: "A concise answer in chat with key points, decisions, risks, and next steps.",
+    },
+    {
+      id: "canonical-document",
+      label: "Canonical document",
+      description: "A durable Markdown artifact under .sdlc/ that follows the approved template and can be linked in gates.",
+    },
+    {
+      id: "document-plus-chat-summary",
+      label: "Canonical document plus chat summary",
+      description: "Create the durable artifact and also explain the outcome briefly in chat.",
+    },
+    {
+      id: "decision-risk-action-list",
+      label: "Decision, risk, and action list",
+      description: "A compact list of decisions made, risks found, owners or follow-up actions, and open questions.",
+    },
+  ];
+
+  if (matchesAny(normalized, ["analysis", "assessment", "discovery", "research", "requirement"])) {
+    options.push(
+      {
+        id: "executive-summary",
+        label: "Executive summary",
+        description: "A short stakeholder-friendly summary before the detailed analysis.",
+      },
+      {
+        id: "detailed-findings",
+        label: "Detailed findings",
+        description: "Findings with evidence, impact, recommendation, confidence, and affected areas.",
+      },
+      {
+        id: "comparison-table",
+        label: "Comparison table",
+        description: "Options or alternatives compared by criteria, tradeoffs, risks, and recommendation.",
+      },
+      {
+        id: "architecture-or-flow-view",
+        label: "Architecture or flow view",
+        description: "A diagram-ready architecture, flow, or component view when the output benefits from structure.",
+      },
+    );
+  }
+
+  if (matchesAny(normalized, ["design", "architecture", "api", "ux", "ui"])) {
+    options.push(
+      {
+        id: "design-rationale",
+        label: "Design rationale",
+        description: "Design decisions, rejected alternatives, constraints, and tradeoffs.",
+      },
+      {
+        id: "interface-contracts",
+        label: "Interface contracts",
+        description: "API, component, data, event, or integration contracts that implementation should follow.",
+      },
+      {
+        id: "diagram-ready-summary",
+        label: "Diagram-ready summary",
+        description: "A concise structure suitable for Mermaid, architecture diagrams, or sequence flows.",
+      },
+    );
+  }
+
+  if (matchesAny(normalized, ["implementation", "code", "patch", "change", "class", "component"])) {
+    options.push(
+      {
+        id: "changed-files-summary",
+        label: "Changed files summary",
+        description: "List changed files with why each changed and what behavior changed.",
+      },
+      {
+        id: "modified-classes-components",
+        label: "Modified classes or components",
+        description: "List the important classes, modules, functions, components, routes, or screens touched.",
+      },
+      {
+        id: "diff-review",
+        label: "Diff or patch review",
+        description: "Show a focused diff-style explanation for review instead of pasting full files.",
+      },
+      {
+        id: "key-code-snippets",
+        label: "Key code snippets",
+        description: "Show only the most relevant snippets needed to understand the change.",
+      },
+      {
+        id: "tests-and-verification",
+        label: "Tests and verification",
+        description: "Report commands run, evidence, failures, skipped checks, and residual risk.",
+      },
+      {
+        id: "no-code-summary",
+        label: "No-code summary",
+        description: "Summarize behavior and changed areas without showing code unless requested.",
+      },
+    );
+  }
+
+  if (matchesAny(normalized, ["validation", "test", "qa", "verification"])) {
+    options.push(
+      {
+        id: "test-evidence",
+        label: "Test evidence",
+        description: "Commands, results, evidence paths, failing cases, and logs or reports.",
+      },
+      {
+        id: "regression-risk-summary",
+        label: "Regression risk summary",
+        description: "What was covered, what was not covered, likely regressions, and manual checks.",
+      },
+      {
+        id: "failure-triage",
+        label: "Failure triage",
+        description: "Failures grouped by root cause, severity, owner, and next action.",
+      },
+    );
+  }
+
+  if (matchesAny(normalized, ["release", "deploy", "deployment", "handoff"])) {
+    options.push(
+      {
+        id: "release-notes",
+        label: "Release notes",
+        description: "User-visible changes, technical changes, migrations, and known issues.",
+      },
+      {
+        id: "deployment-checklist",
+        label: "Deployment checklist",
+        description: "Pre-release checks, deploy steps, post-release verification, and rollback criteria.",
+      },
+      {
+        id: "handoff-summary",
+        label: "Handoff summary",
+        description: "What is done, what is pending, evidence links, risks, and next owner.",
+      },
+    );
+  }
+
+  return dedupeDeliveryFormatOptions(options);
+}
+
+function matchesAny(value, terms) {
+  return terms.some((term) => value.includes(term));
+}
+
+function dedupeDeliveryFormatOptions(options) {
+  const seen = new Set();
+  const result = [];
+  for (const option of normalizeDeliveryFormatOptions(options)) {
+    if (seen.has(option.id)) {
+      continue;
+    }
+    seen.add(option.id);
+    result.push(option);
+  }
+  return result;
+}
+
+function recommendedDeliveryFormatForOutput(artifactType = "", phase = null) {
+  const normalized = String(artifactType || phase || "").toLowerCase();
+  if (matchesAny(normalized, ["implementation", "code", "patch", "change"])) {
+    return "changed-files-summary + modified-classes-components + tests-and-verification; include diff-review or key-code-snippets only when the user asks for code-level review.";
+  }
+  if (matchesAny(normalized, ["validation", "test", "qa", "verification"])) {
+    return "test-evidence + regression-risk-summary, with failure-triage when checks fail.";
+  }
+  if (matchesAny(normalized, ["release", "deploy", "deployment", "handoff"])) {
+    return "release-notes + deployment-checklist + handoff-summary.";
+  }
+  if (matchesAny(normalized, ["design", "architecture", "api", "ux", "ui"])) {
+    return "canonical-document + chat-summary, with design-rationale and interface-contracts when implementation will follow.";
+  }
+  return "document-plus-chat-summary: create the canonical artifact and also provide a concise chat summary.";
+}
+
+function deliveryQuestionForOutput(artifactType = "", phase = null) {
+  const label = artifactType || phase || "this output";
+  const optionIds = deliveryFormatOptionsForOutput(artifactType, phase).map((option) => option.id).join(", ");
+  return `How should Codex present ${label} results to you? Choose one option or combine several: ${optionIds}. You can also ask for a custom delivery format.`;
+}
+
+function contractDeliveryDescriptor(contract) {
+  const outputTypes = Array.isArray(contract.output_contract_refs)
+    ? contract.output_contract_refs.map((ref) => ref.artifact_type).filter(Boolean)
+    : [];
+  return [contract.phase, ...outputTypes].filter(Boolean).join(" ");
+}
+
+function deliveryFormatOptionsForContract(contract) {
+  return deliveryFormatOptionsForOutput(contractDeliveryDescriptor(contract), contract.phase);
+}
+
+function recommendedDeliveryFormatForContract(contract) {
+  return recommendedDeliveryFormatForOutput(contractDeliveryDescriptor(contract), contract.phase);
+}
+
+function deliveryQuestionForContract(contract) {
+  const subject = contract.story_id || "this project";
+  const optionIds = deliveryFormatOptionsForContract(contract).map((option) => option.id).join(", ");
+  return `How should Codex present the ${contract.phase} result for ${subject}? Choose one option or combine several: ${optionIds}. You can also ask for a custom delivery format.`;
+}
+
 function formatHumanApprovalRequest(request, index = null) {
   const prefix = index === null ? "-" : `${index}.`;
   const lines = [
@@ -2709,6 +2961,10 @@ function formatHumanApprovalRequest(request, index = null) {
     request.why_needed ? `   Why: ${request.why_needed}` : null,
     request.review_items?.length ? "   What to review:" : null,
     ...(request.review_items || []).slice(0, 6).map((item) => `   - ${item}`),
+    request.delivery_format_options?.length ? "   Delivery / presentation options:" : null,
+    ...(request.delivery_format_options || []).slice(0, 10).map((option) => `   - ${formatDeliveryFormatOption(option)}`),
+    request.recommended_delivery_format ? `   Recommended delivery: ${request.recommended_delivery_format}` : null,
+    request.delivery_question ? `   Delivery question: ${request.delivery_question}` : null,
     request.approval_meaning ? `   What approval means: ${request.approval_meaning}` : null,
     request.approve_if ? `   Approve if: ${request.approve_if}` : null,
     request.change_if ? `   Ask for changes if: ${request.change_if}` : null,
@@ -8643,6 +8899,10 @@ function formatMarkdownApprovalRequest(request, index = null) {
     request.why_needed ? `   - Why: ${request.why_needed}` : null,
     request.review_items?.length ? "   - What to review:" : null,
     ...(request.review_items || []).slice(0, 6).map((item) => `     - ${item}`),
+    request.delivery_format_options?.length ? "   - Delivery / presentation options:" : null,
+    ...(request.delivery_format_options || []).slice(0, 10).map((option) => `     - ${formatDeliveryFormatOption(option)}`),
+    request.recommended_delivery_format ? `   - Recommended delivery: ${request.recommended_delivery_format}` : null,
+    request.delivery_question ? `   - Delivery question: ${request.delivery_question}` : null,
     request.approval_meaning ? `   - What approval means: ${request.approval_meaning}` : null,
     request.user_prompt ? `   - Question: ${request.user_prompt}` : null,
     request.suggested_command ? `   - Command: \`${request.suggested_command}\`` : null,
