@@ -30,13 +30,15 @@ The CLI has no runtime dependencies beyond Node.js.
 ```bash
 node bin/agentic-sdlc.mjs init --project-name "My Product"
 node bin/agentic-sdlc.mjs contract create --phase discovery
-node bin/agentic-sdlc.mjs story create --id ST-001 --title "Let users manage notification preferences"
+node bin/agentic-sdlc.mjs story create --id ST-001 --title "Replan an activity when weather changes"
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
-node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Use an adapter for notification delivery providers"
+node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep weather-provider logic behind an adapter"
 node bin/agentic-sdlc.mjs gate check --story ST-001
 node bin/agentic-sdlc.mjs index rebuild
-node bin/agentic-sdlc.mjs kb search "notification preferences"
+node bin/agentic-sdlc.mjs kb search "weather replanning"
 ```
+
+The examples use a travel-planning product as sample project context. The plugin itself is domain-agnostic.
 
 ## Collaboration Model
 
@@ -51,6 +53,22 @@ Recommended workflow:
 5. Merge code and `.sdlc/` artifacts together.
 
 Derived indexes under `.sdlc/indexes/` can be regenerated and do not need to be treated as the source of truth.
+
+## Contextual Contract Generation
+
+Contract templates are generic, but generated contracts are project-specific. The agent should inspect `.sdlc/`, read user-provided files, and ask targeted questions before creating or revising a contract.
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --phase analysis \
+  --context-file .sdlc/requirements/REQ-001.md \
+  --context-summary "Analyze the MVP around disruption-aware travel replanning." \
+  --qa "Who approves this phase?|Product owner" \
+  --question "Which weather provider is authoritative for MVP?" \
+  --constraint "Provider-specific logic must stay behind an adapter"
+```
+
+The resulting contract stores project identity, context source references, answered/open questions, assumptions, and constraints under `contextualization`.
 
 ## How Agents Interact
 

@@ -233,6 +233,18 @@ function createContract(context, options) {
     story_id: storyId,
     owner_agent: options["owner-agent"],
     status: String(options.status || "draft"),
+    context_summary: options["context-summary"],
+    context_files: normalizeRawListOption(options["context-file"]),
+    questions: normalizeRawListOption(options.question),
+    qa: normalizeRawListOption(options.qa),
+    constraints: normalizeListOption(options.constraint),
+    assumptions: normalizeListOption(options.assumption),
+    inputs: normalizeListOption(options.input),
+    outputs: normalizeListOption(options.output),
+    validation: normalizeListOption(options.validation),
+    allowed_tools: normalizeListOption(options.tool),
+    kb_writes: normalizeListOption(options["kb-write"]),
+    metrics: normalizeListOption(options.metric),
   });
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
@@ -248,26 +260,99 @@ function buildContract(context, phase, overrides = {}) {
   if (!template) {
     fail(`Unknown phase '${phase}'`);
   }
+  const project = readProjectSafe(context);
+  const contextSources = buildContextSources(context, overrides.context_files || []);
+  const questions = buildQuestionRecords(overrides.questions || [], overrides.qa || []);
   return {
     id: overrides.id,
     schema_version: context.config.schema_version,
     sdlc_version: VERSION,
+    project: project
+      ? {
+          project_id: project.project_id,
+          project_name: project.project_name,
+        }
+      : null,
     phase,
     story_id: overrides.story_id || null,
     status: overrides.status || "draft",
     purpose: template.purpose,
     owner_agent: String(overrides.owner_agent || template.owner_agent),
-    inputs: [...template.inputs],
-    outputs: [...template.outputs],
-    validation: [...template.validation],
-    allowed_tools: [...template.allowed_tools],
-    kb_writes: [...template.kb_writes],
+    inputs: mergeList(template.inputs, overrides.inputs),
+    outputs: mergeList(template.outputs, overrides.outputs),
+    validation: mergeList(template.validation, overrides.validation),
+    allowed_tools: mergeList(template.allowed_tools, overrides.allowed_tools),
+    kb_writes: mergeList(template.kb_writes, overrides.kb_writes),
     human_gate: Boolean(template.human_gate),
-    metrics: [...template.metrics],
+    metrics: mergeList(template.metrics, overrides.metrics),
+    contextualization: {
+      summary: overrides.context_summary ? String(overrides.context_summary) : null,
+      context_sources: contextSources,
+      questions,
+      constraints: [...(overrides.constraints || [])],
+      assumptions: [...(overrides.assumptions || [])],
+      open_questions: questions.filter((question) => question.status !== "answered").length,
+    },
     approvals: [],
     created_at: now(),
     updated_at: now(),
   };
+}
+
+function readProjectSafe(context) {
+  const projectPath = path.join(context.sdlcRoot, "project.json");
+  if (!fs.existsSync(projectPath)) {
+    return null;
+  }
+  return readJson(projectPath);
+}
+
+function buildContextSources(context, contextFiles) {
+  return contextFiles.map((rawPath) => {
+    const resolved = path.resolve(context.root, rawPath);
+    if (!fs.existsSync(resolved)) {
+      fail(`Context file does not exist: ${rawPath}`);
+    }
+    if (!fs.statSync(resolved).isFile()) {
+      fail(`Context path is not a file: ${rawPath}`);
+    }
+    const content = fs.readFileSync(resolved);
+    const text = content.toString("utf8");
+    return {
+      path: path.relative(context.root, resolved),
+      sha256: crypto.createHash("sha256").update(content).digest("hex"),
+      size_bytes: content.length,
+      excerpt: normalizeText(text).slice(0, 1200),
+    };
+  });
+}
+
+function buildQuestionRecords(questions, qaItems) {
+  const records = questions.map((question) => ({
+    question,
+    answer: null,
+    status: "open",
+  }));
+  for (const item of qaItems) {
+    const [question, ...answerParts] = String(item).split("|");
+    const answer = answerParts.join("|").trim();
+    records.push({
+      question: question.trim(),
+      answer: answer || null,
+      status: answer ? "answered" : "open",
+    });
+  }
+  return records.filter((record) => record.question);
+}
+
+function mergeList(base, additions = []) {
+  const merged = [...base];
+  for (const item of additions) {
+    if (!merged.includes(item)) {
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 function createStory(context, options) {
@@ -517,6 +602,12 @@ function validateContracts(context, report) {
     if (!context.config.phases[contract.phase]) {
       report.errors.push(`${label} has unknown phase '${contract.phase}'`);
     }
+    if (!contract.project || !contract.project.project_id || !contract.project.project_name) {
+      report.errors.push(`${label} must be bound to a project with project_id and project_name`);
+    }
+    if (!contract.contextualization || typeof contract.contextualization !== "object") {
+      report.errors.push(`${label} must include contextualization metadata`);
+    }
     report.checked.push(label);
   }
 }
@@ -750,6 +841,14 @@ function normalizeListOption(value) {
     .filter(Boolean);
 }
 
+function normalizeRawListOption(value) {
+  if (value === undefined || value === null || value === true) {
+    return [];
+  }
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((item) => String(item).trim()).filter(Boolean);
+}
+
 function normalizeId(value) {
   return String(value).trim().replace(/\s+/g, "-");
 }
@@ -803,6 +902,8 @@ function printHelp() {
 Usage:
   agentic-sdlc init [--project-name name] [--project-id id] [--root path]
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
+      [--context-file path] [--context-summary text] [--question text]
+      [--qa "question|answer"] [--constraint text] [--assumption text]
   agentic-sdlc story create --id ST-001 --title title [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -816,6 +917,19 @@ Global options:
   --template-dir path    Template directory. Defaults to this plugin's templates.
   --json                 Print JSON output where supported.
   --force                Overwrite generated files where supported.
+
+Contract context options:
+  --context-file path    Attach a target-project file as contract context.
+                         Repeatable. Stores relative path, hash, size, excerpt.
+  --context-summary text Summarize project-specific context for this contract.
+  --question text        Record an open question the agent/user must resolve.
+  --qa "q|a"             Record an answered question. Repeatable.
+  --constraint text      Record a project-specific constraint. Repeatable.
+  --assumption text      Record a project-specific assumption. Repeatable.
+  --input/--output text  Add project-specific contract inputs/outputs.
+  --validation text      Add validation criteria.
+  --tool text            Add an allowed tool class.
+  --kb-write text        Add a required KB write target.
 
 Principle:
   The plugin is stateless. Contracts, traces, and KB artifacts are written only
