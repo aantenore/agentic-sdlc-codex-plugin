@@ -8,6 +8,7 @@ Agentic SDLC keeps the classic SDLC sequence, but each phase is governed by an e
    - Define the problem, target users, constraints, competitors, process gaps, value hypothesis, and success metrics.
 2. Analysis
    - Produce functional analysis, technical analysis, integration boundaries, API or mock strategy, edge cases, and risks.
+   - When technical choices depend on stack, integrations, skills, MCPs, tools, models, or external targets, produce and approve capability profiles/recommendations before applying them to contracts.
 3. Design
    - Convert analysis into stories, task decomposition, acceptance criteria, test strategy, UX notes, and architecture decisions.
 4. Implementation

@@ -10,9 +10,10 @@ Codex plugin
   -> cross-platform CLI
 
 Target project
-  -> .sdlc/
-     -> contracts
-     -> output-contracts
+     -> .sdlc/
+        -> contracts
+        -> capability-discovery
+        -> output-contracts
      -> work-items
      -> work-breakdown
      -> dependencies
@@ -39,6 +40,7 @@ flowchart TB
 
   subgraph Project["Target project"]
     KB[".sdlc source of truth"]
+    Capabilities["Capability discovery"]
     OutputRegistry["Output contracts registry"]
     Breakdown["Work breakdown agreements"]
     Dependencies["Dependency graph"]
@@ -51,11 +53,13 @@ flowchart TB
   Templates --> CLI
   Schemas --> CLI
   CLI --> KB
+  CLI --> Capabilities
   CLI --> OutputRegistry
   CLI --> Breakdown
   CLI --> Dependencies
   CLI --> Traces
   KB --> Cache
+  Capabilities --> Cache
   KB --> Indexes
   OutputRegistry --> Cache
   Cache -.-> CLI
@@ -108,7 +112,7 @@ This keeps agent work bounded and reviewable.
 
 Story-specific contracts can also declare `output_contract_refs`. In strict mode, each declared output ref must be satisfied by a linked artifact in `.sdlc/output-contracts/registry.json`. Contract approvals store a stable hash of the approved contract content; changing the contract after approval requires a new approval.
 
-Contracts can declare `capability_policy` and `capability_bindings` to record agreed skills, MCPs, tools, concrete targets, permissions, and actions that require approval. Strict gates reject invalid policies and required MCP/tool capabilities that have neither a binding nor an explicit open contract question.
+Contracts can declare `capability_policy`, `capability_bindings`, and `capability_recommendation_refs` to record agreed skills, MCPs, tools, concrete targets, permissions, source recommendations, and actions that require approval. Strict gates reject invalid policies, required MCP/tool capabilities that have neither a binding nor an explicit open contract question, stale recommendation refs, and install-required capabilities without install approval.
 
 ```mermaid
 flowchart LR
@@ -125,6 +129,33 @@ flowchart LR
   Trace --> Gate
   Contract --> Gate
 ```
+
+## Capability Discovery Layer
+
+Capability discovery is a project-specific architect step before technical analysis or high-impact contract creation. The plugin stays agnostic: Codex or another LLM can normalize context into profile and recommendation JSON, while the CLI only validates and persists canonical records with evidence and approvals.
+
+`.sdlc/capability-discovery/` stores approved profiles and recommendations:
+
+- profiles describe the story/project subject, detected stack, constraints, integrations, evidence, confidence, source paths, and source hashes;
+- recommendations describe skills, MCPs, tools, plugins, connectors, models, bindings, decision matrices, open questions, install requirements, and execution-policy suggestions;
+- contract refs store the approved recommendation hash, so changing a recommendation after approval makes downstream gates fail.
+
+```mermaid
+flowchart TB
+  Inputs["Repo manifests, .sdlc, user files"] --> Profile["capability profile propose"]
+  Profile --> ProfileApproval["Human/CI profile approval"]
+  Available["Available skills, MCPs, tools, models"] --> Recommend["capability recommend"]
+  ProfileApproval --> Recommend
+  Recommend --> RecApproval["Recommendation approval"]
+  RecApproval --> InstallGate{"Install required?"}
+  InstallGate -->|yes| InstallApproval["approve --approve-install"]
+  InstallGate -->|no| Contract["contract create --capability-recommendation"]
+  InstallApproval --> Contract
+  Contract --> CapabilityPolicy["capability_policy + bindings + execution_policy"]
+  CapabilityPolicy --> Gate["gate check --strict"]
+```
+
+The deterministic detector can read project manifests such as `package.json`, `tsconfig.json`, `pyproject.toml`, `Dockerfile`, `go.mod`, `Cargo.toml`, `Package.swift`, Gradle, Maven, and common frontend config files. Richer app understanding should be provided as canonical profile JSON by Codex, then reviewed and approved. This avoids language-specific routing and avoids hardcoding product domains into the plugin.
 
 ## Work Breakdown And Dependencies
 

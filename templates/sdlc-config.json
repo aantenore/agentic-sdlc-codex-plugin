@@ -2,6 +2,7 @@
   "schema_version": "0.1.0",
   "kb_directories": [
     "contracts",
+    "capability-discovery",
     "output-contracts",
     "requirements",
     "stories",
@@ -117,6 +118,7 @@
     "artifact_types": [
       "functional-analysis",
       "technical-analysis",
+      "technical-decision-matrix",
       "test-strategy",
       "test-plan",
       "implementation-summary",
@@ -146,6 +148,8 @@
       "classify_artifact",
       "decompose_stories",
       "create_contract",
+      "discover_capabilities",
+      "technical_decision",
       "confirm_phase_skip",
       "claim_and_implement",
       "validate_story",
@@ -204,6 +208,19 @@
       "create_contract": {
         "route": "create_contract"
       },
+      "discover_capabilities": {
+        "route": "discover_capabilities",
+        "confirmation_key": "discover_capabilities"
+      },
+      "capability_discovery": {
+        "route": "discover_capabilities",
+        "confirmation_key": "discover_capabilities"
+      },
+      "technical_decision": {
+        "route": "technical_decision",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-decision-matrix"
+      },
       "implement_story": {
         "route": "claim_and_implement",
         "confirmation_key": "start_implementation",
@@ -257,6 +274,29 @@
       }
     }
   },
+  "capability_discovery_policy": {
+    "principle": "Capability discovery is contextual and technology-agnostic. Codex or another LLM proposes canonical profiles and recommendations; the CLI validates, persists, approves, and applies only structured JSON with evidence.",
+    "registry_path": ".sdlc/capability-discovery",
+    "default_auto_use_installed": true,
+    "default_auto_install": false,
+    "require_approval_for_install": true,
+    "require_approval_for_external_access": true,
+    "require_approval_for_write_access": true,
+    "require_approval_for_production": true,
+    "source_priorities": [
+      "project repository files",
+      ".sdlc canonical knowledge base",
+      "user-provided files",
+      "official documentation",
+      "approved connector responses"
+    ],
+    "agent_rules": [
+      "Profile the project or story before technical analysis when the stack, integrations, or useful capabilities are unclear.",
+      "Recommend skills, MCPs, tools, models, and bindings from evidence, not from language keywords.",
+      "Ask for approval before installing missing capabilities or using external/write/production targets.",
+      "Apply approved recommendations to contracts instead of duplicating capability decisions in chat."
+    ]
+  },
   "cache_policy": {
     "principle": "Cache and index files are local, derived, and regenerable optimizations. They can accelerate lookup and context assembly, but they must never be used as the canonical source for approvals, requirements, decisions, or story outputs.",
     "cache_path": ".sdlc/cache/kb-cache.json",
@@ -266,6 +306,7 @@
     ],
     "source_of_truth_dirs": [
       "contracts",
+      "capability-discovery",
       "requirements",
       "stories",
       "work-items",

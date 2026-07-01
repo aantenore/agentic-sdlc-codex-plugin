@@ -259,6 +259,35 @@
         "additionalProperties": true
       }
     },
+    "capability_recommendation_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "approved_content_hash"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "approved_content_hash": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "contextualization": {
       "type": "object",
       "properties": {

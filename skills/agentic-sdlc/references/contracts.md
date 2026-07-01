@@ -21,6 +21,7 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `execution_policy`: Codex runtime policy for model and reasoning inheritance or override.
 - `capability_policy`: Skills, MCPs, tools, and approval-required actions agreed for the step.
 - `capability_bindings`: Concrete project-local targets and permissions for required MCP/tool usage.
+- `capability_recommendation_refs`: Approved capability recommendations that supplied policy, bindings, open questions, or execution-policy suggestions.
 - `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
 - `audit`: Actor, Git, and run metadata for contract creation and updates.
 - `approvals`: Human or CI gate decisions. The latest approved decision controls strict gate status only while its content hash still matches the contract.
@@ -50,7 +51,7 @@ Use `execution_policy` to make agent execution settings explicit:
 
 ## Capability Policy
 
-Use `capability_policy` and `capability_bindings` when a step needs specific skills, MCPs, tools, endpoints, repositories, environments, or permissions. Required MCP/tool capabilities must have a binding or an explicit open contract question. Do not store external tracker mappings as source of truth; keep the authoritative contract data in `.sdlc/`.
+Use `capability_policy`, `capability_bindings`, and `capability_recommendation_refs` when a step needs specific skills, MCPs, tools, endpoints, repositories, environments, models, or permissions. Required MCP/tool capabilities must have a binding or an explicit open contract question. Capability recommendations must be approved and fresh, and install-required capabilities require explicit install approval before a contract can use them. Do not store external tracker mappings as source of truth; keep the authoritative contract data in `.sdlc/`.
 
 ## Phase Contracts Vs Output Contracts
 
@@ -88,6 +89,7 @@ Reject or revise a contract when:
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
 - required capabilities have no binding and no open question;
+- referenced capability recommendations are stale, unapproved, or missing install approval;
 - execution policy overrides are present without rationale or user/project backing;
 - linked output artifacts do not use approved output templates;
 - duplicate outputs are created without an approved decision;
