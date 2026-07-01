@@ -52,6 +52,48 @@
     },
     "notes": []
   },
+  "capability_policy": {
+    "skills": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "approval_required_for": []
+  },
+  "capability_bindings": [
+    {
+      "type": "mcp",
+      "name": "<capability-name>",
+      "binding_id": "<binding-id>",
+      "target": {
+        "workspace": "<project-local-target>"
+      },
+      "permissions": [
+        "read"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    }
+  ],
+  "capability_recommendation_refs": [
+    {
+      "id": "<approved-recommendation-id>",
+      "profile_id": "<approved-profile-id>",
+      "path": ".sdlc/capability-discovery/recommendations/<id>.json",
+      "approved_content_hash": "<approved-content-hash>"
+    }
+  ],
   "contextualization": {
     "summary": "Project-specific context used to build this contract.",
     "context_sources": [

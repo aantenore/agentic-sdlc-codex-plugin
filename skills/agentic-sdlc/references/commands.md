@@ -63,6 +63,17 @@ node bin/agentic-sdlc.mjs contract create \
 
 Binding files must be canonical project files, never `.sdlc/cache/` or `.sdlc/indexes/`.
 
+Approved capability recommendations can also be applied to a contract. This pulls in the agreed capability policy, bindings, open questions, and model/reasoning suggestions:
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --root <project> \
+  --phase analysis \
+  --story ST-001 \
+  --context-summary "Technical analysis for the approved workflow." \
+  --capability-recommendation CAP-REC-ST-001
+```
+
 ## Create And Claim Story
 
 ```bash
@@ -87,6 +98,35 @@ node bin/agentic-sdlc.mjs story deps --root <project> --id ST-002
 ```
 
 Breakdowns and dependencies are proposed first, then approved by human or CI before they become canonical. Hard dependency scopes block orchestration and strict gates; soft dependencies remain visible as warnings. When upstream artifacts change, record a `dependency.revalidate` trace on downstream stories after review.
+
+## Capability Discovery
+
+```bash
+node bin/agentic-sdlc.mjs capability profile propose \
+  --root <project> \
+  --id CAP-PROFILE-ST-001 \
+  --story ST-001 \
+  --phase analysis \
+  --context-file .sdlc/requirements/REQ-001.md
+node bin/agentic-sdlc.mjs capability profile approve --root <project> --id CAP-PROFILE-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability recommend \
+  --root <project> \
+  --id CAP-REC-ST-001 \
+  --profile CAP-PROFILE-ST-001 \
+  --available-capabilities-file .sdlc/decisions/available-capabilities.json
+node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability status --root <project> --story ST-001 --json
+```
+
+Use profile records to capture project/story context, detected stack, constraints, integrations, evidence, source paths, and source hashes. Use recommendation records to capture skills, MCPs, tools, connectors, plugins, models, concrete bindings, decision matrices, open questions, and execution-policy suggestions.
+
+If a recommendation requires installing a missing skill/plugin/connector or using a new external/write/production target, approval is separate:
+
+```bash
+node bin/agentic-sdlc.mjs capability approve --root <project> --id CAP-REC-ST-001 --actor-type human --approve-install
+```
+
+Without install approval, the recommendation can be stored but cannot be applied to a contract. Strict gates also fail when a contract references stale or modified capability recommendations.
 
 ## Orchestrate Parallel Work
 
@@ -121,7 +161,7 @@ Minimum canonical intent:
 }
 ```
 
-The decision output contains the selected route, confidence result, deterministic checks, blocking reasons, questions for the user, and suggested next CLI commands. Low confidence, missing context, phase skips, implementation starts, new templates, and duplicate outputs require confirmation or clarification according to `routing_policy`.
+The decision output contains the selected route, confidence result, deterministic checks, blocking reasons, questions for the user, and suggested next CLI commands. Low confidence, missing context, phase skips, implementation starts, new templates, duplicate outputs, and missing capability profiles for technical analysis require confirmation or clarification according to `routing_policy`.
 
 ## Handoff And Locks
 

@@ -10,6 +10,7 @@ The sample records below use neutral placeholders. The structure is generic and 
     project.json
     README.md
     contracts/
+    capability-discovery/
     output-contracts/
     requirements/
     work-items/
@@ -44,6 +45,7 @@ Cache and indexes are derived artifacts. They can be rebuilt from source files a
 flowchart TB
   Source["Source of truth"]
   Source --> Contracts["contracts"]
+  Source --> Capabilities["capability-discovery"]
   Source --> OutputContracts["output-contracts"]
   Source --> Requirements["requirements"]
   Source --> WorkItems["work-items"]
@@ -56,6 +58,7 @@ flowchart TB
   Source --> Reports["reports as evidence"]
 
   Contracts --> Cache["cache"]
+  Capabilities --> Cache
   OutputContracts --> Cache
   Requirements --> Cache
   WorkItems --> Cache
@@ -169,6 +172,73 @@ Every generated contract is bound to the current project and records contextuali
 ```
 
 Contracts may also include `capability_policy` and `capability_bindings` so the user and agent agree which skills, MCPs, tools, concrete targets, permissions, and approval-required actions are allowed for the step.
+
+Contracts may also include `capability_recommendation_refs[]`. These references point to approved records under `.sdlc/capability-discovery/recommendations/` and store the approved content hash. If a recommendation, its source files, or its upstream profile changes after approval, strict gates require a refreshed recommendation and contract approval.
+
+## `capability-discovery/`
+
+Capability discovery records the technical architect context used to choose skills, MCPs, tools, models, connectors, and bindings without hardcoding technologies into the plugin.
+
+Examples:
+
+```text
+.sdlc/capability-discovery/profiles/CAP-PROFILE-ST-001.json
+.sdlc/capability-discovery/recommendations/CAP-REC-ST-001.json
+```
+
+A profile is proposed from repo files, `.sdlc/` context, user-provided files, or canonical JSON normalized by Codex:
+
+```json
+{
+  "id": "CAP-PROFILE-ST-001",
+  "status": "approved",
+  "subject": {
+    "story_id": "ST-001",
+    "requirement_ids": ["REQ-001"],
+    "phase": "analysis",
+    "scope": "project"
+  },
+  "detected_stack": [
+    {
+      "name": "package-json",
+      "type": "node",
+      "source_path": "package.json"
+    }
+  ],
+  "source_paths": ["package.json"],
+  "source_hashes": {
+    "package.json": "content-hash"
+  }
+}
+```
+
+A recommendation consumes an approved profile plus an optional available-capabilities snapshot:
+
+```json
+{
+  "id": "CAP-REC-ST-001",
+  "status": "approved",
+  "profile_id": "CAP-PROFILE-ST-001",
+  "recommendations": [
+    {
+      "type": "skill",
+      "name": "agentic-sdlc",
+      "availability": "available",
+      "install_required": false
+    }
+  ],
+  "policy_patch": {
+    "skills": {
+      "required": ["agentic-sdlc"],
+      "allowed": [],
+      "forbidden": []
+    }
+  },
+  "bindings": []
+}
+```
+
+Install-required capabilities are not usable by a contract until a human or CI approval records `--approve-install`. Recommendation records are canonical KB artifacts; cache may index them but must never be the source of approval.
 
 ## `work-items/`, `work-breakdown/`, And `dependencies/`
 
