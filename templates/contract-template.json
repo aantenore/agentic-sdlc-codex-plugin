@@ -33,6 +33,18 @@
   "metrics": [
     "phase_specific_metric"
   ],
+  "execution_policy": {
+    "runtime": "codex",
+    "model": {
+      "mode": "inherit",
+      "value": null
+    },
+    "reasoning": {
+      "mode": "inherit",
+      "level": null
+    },
+    "notes": []
+  },
   "contextualization": {
     "summary": "Project-specific context used to build this contract.",
     "context_sources": [

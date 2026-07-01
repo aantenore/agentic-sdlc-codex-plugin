@@ -17,7 +17,31 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `allowed_tools`: Tool classes allowed for the phase.
 - `kb_writes`: Knowledge base sections that must be updated.
 - `human_gate`: Whether human approval is required.
+- `execution_policy`: Codex runtime policy for model and reasoning inheritance or override.
 - `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
+
+## Execution Policy
+
+Use `execution_policy` to make agent execution settings explicit:
+
+```json
+{
+  "execution_policy": {
+    "runtime": "codex",
+    "model": {
+      "mode": "inherit",
+      "value": null
+    },
+    "reasoning": {
+      "mode": "inherit",
+      "level": null
+    },
+    "notes": []
+  }
+}
+```
+
+`inherit` means spawned agents should reuse the main Codex thread settings. Use `override` only when the user or project KB has selected a specific Codex model or reasoning level for the contract.
 
 ## Template Source
 
@@ -36,5 +60,6 @@ Reject or revise a contract when:
 - outputs are not testable;
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
+- execution policy overrides are present without rationale or user/project backing;
 - human approval is missing for high-impact actions;
 - KB writes are missing for decisions, assumptions, risks, or tests.
