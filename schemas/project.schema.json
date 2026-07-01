@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/travelops-sdlc-codex-plugin/schemas/project.schema.json",
+  "title": "TravelOps SDLC Project",
+  "type": "object",
+  "required": [
+    "project_id",
+    "project_name",
+    "schema_version",
+    "sdlc_version",
+    "knowledge_base"
+  ],
+  "properties": {
+    "project_id": {
+      "type": "string"
+    },
+    "project_name": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "sdlc_version": {
+      "type": "string"
+    },
+    "knowledge_base": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

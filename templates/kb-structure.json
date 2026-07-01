@@ -1,0 +1,40 @@
+{
+  "root": ".sdlc",
+  "stateless_plugin": true,
+  "source_of_truth": [
+    "project.json",
+    "contracts/**/*.json",
+    "requirements/**/*",
+    "stories/**/*",
+    "decisions/**/*",
+    "assumptions/**/*",
+    "risks/**/*",
+    "tests/**/*",
+    "traces/**/*.jsonl",
+    "releases/**/*"
+  ],
+  "derived_artifacts": [
+    "indexes/**/*",
+    "reports/**/*"
+  ],
+  "directories": {
+    "contracts": "Phase and story contracts.",
+    "requirements": "User, product, business, and non-functional requirements.",
+    "stories": "Story-scoped workspaces, claims, plans, logs, and evidence.",
+    "decisions": "Architecture and product decision records.",
+    "assumptions": "Explicit assumptions with review status.",
+    "risks": "Delivery, technical, operational, and product risks.",
+    "tests": "Test plans, test reports, coverage notes, and evidence.",
+    "traces": "Append-only JSONL event logs.",
+    "releases": "Release notes, rollout evidence, observability, and feedback loops.",
+    "indexes": "Regenerable search indexes.",
+    "reports": "Generated gate, audit, and quality reports."
+  },
+  "parallel_work_policy": {
+    "unit_of_parallelism": "story",
+    "claim_file": ".sdlc/stories/<story-id>/claim.json",
+    "trace_file": ".sdlc/traces/<story-id>.jsonl",
+    "branch_pattern": "feature/<story-id>",
+    "merge_rule": "Review code changes and .sdlc artifacts together."
+  }
+}
