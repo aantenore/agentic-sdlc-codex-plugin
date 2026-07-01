@@ -18,9 +18,10 @@ phase contract
   -> next agent receives structured inputs
 ```
 
-The model is not "agents freely coding." It is bounded execution:
+The operating model is not "agents freely coding." It is bounded execution:
 
 - contracts define the work;
+- execution policy defines model/reasoning inheritance or overrides;
 - the KB stores the durable context;
 - traces explain what happened;
 - gates catch missing evidence;
@@ -34,7 +35,8 @@ The contract-building agent is generic. It does not know the project domain in a
 2. Search or inspect relevant `.sdlc/` artifacts.
 3. Read user-provided files when the user points to them.
 4. Ask concise questions for missing critical context.
-5. Store the evidence, answers, assumptions, constraints, and open questions inside the generated contract.
+5. Confirm whether the contract should inherit the main Codex thread model/reasoning or store an explicit override.
+6. Store the evidence, answers, assumptions, constraints, execution policy, and open questions inside the generated contract.
 
 Example:
 
@@ -45,7 +47,9 @@ node bin/agentic-sdlc.mjs contract create \
   --context-summary "Analyze the TravelOps MVP around disruption-aware travel replanning." \
   --qa "Who approves this phase?|Product owner" \
   --question "Which weather provider is authoritative for MVP?" \
-  --constraint "Provider-specific logic must stay behind an adapter"
+  --constraint "Provider-specific logic must stay behind an adapter" \
+  --reasoning high \
+  --execution-note "Higher reasoning requested for integration-risk analysis"
 ```
 
 ## Example 1: Discovery Agent

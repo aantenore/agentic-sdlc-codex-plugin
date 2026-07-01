@@ -39,6 +39,7 @@ Every SDLC phase is governed by a contract. A contract defines:
 - allowed tools;
 - required knowledge base writes;
 - human approval gate;
+- Codex execution policy for model and reasoning inheritance or override;
 - operational metrics.
 
 This keeps agent work bounded and reviewable.
