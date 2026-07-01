@@ -290,6 +290,43 @@ If a cached output resolution differs from canonical KB files, the CLI rejects i
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view business --out .sdlc/reports/activity.md
 node bin/agentic-sdlc.mjs report activity --root <project> --since 3d --view dev --json
 node bin/agentic-sdlc.mjs report activity --root <project> --since 12h --view agent-verbose --story ST-001
+node bin/agentic-sdlc.mjs report query --root <project> --text "dimmi tutte le modifiche fatte da me" --json
+node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical-report-query-json>' --json
 ```
 
 Activity reports reconstruct what happened from canonical trace files only. Business view focuses on decisions, validation, risk, handoffs, implementation, and release. Dev view includes evidence, branch/SHA, related IDs, and source lines. Agent-verbose view includes raw trace, git, and run metadata for audit.
+
+Use `report query` for broader natural-language history questions. Codex or another LLM should normalize the user request into `schemas/report-query.schema.json`; the CLI then filters canonical KB records deterministically. Supported subjects are `activity`, `stories`, `story_steps`, `outputs`, `contracts`, `handoffs`, `work_items`, `approvals`, `tests`, and `all`.
+
+Example normalized query for "tutte le modifiche fatte da me":
+
+```json
+{
+  "intent": "find_changes_by_actor",
+  "confidence": 0.95,
+  "subjects": ["activity", "stories", "outputs", "contracts", "approvals"],
+  "filters": {
+    "actor": ["<current-user-id-or-email>"]
+  },
+  "sort": "created_at_desc"
+}
+```
+
+Example normalized query for "tutte le storie funzionali nuove degli ultimi 10 giorni":
+
+```json
+{
+  "intent": "find_new_functional_stories",
+  "confidence": 0.95,
+  "subjects": ["stories"],
+  "time": {
+    "since": "10d",
+    "until": "now",
+    "field": "created_at"
+  },
+  "filters": {
+    "text": ["functional"]
+  },
+  "sort": "created_at_desc"
+}
+```

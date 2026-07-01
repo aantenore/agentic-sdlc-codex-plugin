@@ -184,10 +184,11 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs kb search --root <target-project> "query"
    ```
 
-20. Use activity reports when the user asks what happened in a recent period. Reports must cite trace source files and must not infer unstored history:
+20. Use activity reports or report queries when the user asks what happened, who changed something, which stories were created, which outputs changed, or similar history questions. For raw natural language, normalize the request into canonical report query JSON first; do not keyword-match the user's language in the CLI. Reports must cite canonical source files and must not infer unstored history:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs report activity --root <target-project> --since 3d --view business --out .sdlc/reports/activity.md
+   node <plugin-root>/bin/agentic-sdlc.mjs report query --root <target-project> --query-json '<canonical-report-query-json>' --json
    ```
 
 ## References

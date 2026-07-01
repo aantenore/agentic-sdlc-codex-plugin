@@ -1208,6 +1208,118 @@ test("activity reports summarize only canonical trace events inside the selected
   assert.match(fs.readFileSync(path.join(project, ".sdlc", "reports", "activity.md"), "utf8"), /Recent product decision/);
 });
 
+test("report query requires canonical normalization for raw natural language", () => {
+  const project = tmpProject("report-query-normalize");
+  initProject(project);
+  const guidance = JSON.parse(mustRun([
+    "report",
+    "query",
+    "--root",
+    project,
+    "--text",
+    "dimmi tutte le modifiche fatte da me",
+    "--json",
+  ]).stdout);
+  assert.equal(guidance.status, "needs_normalization");
+  assert.match(guidance.rule, /never keyword-matches/);
+  assert.ok(guidance.examples.some((example) => example.query.subjects.includes("activity")));
+});
+
+test("report query filters canonical records by actor and source", () => {
+  const project = tmpProject("report-query-actor");
+  initProject(project);
+  story(project, "ST-001");
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "implementation",
+    "--summary",
+    "Implemented actor scoped change",
+    "--actor",
+    "antonio",
+  ]);
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "decision",
+    "--summary",
+    "Other actor change",
+    "--actor",
+    "codex",
+  ]);
+  const query = JSON.stringify({
+    intent: "find_changes_by_actor",
+    confidence: 0.96,
+    subjects: ["activity"],
+    filters: { actor: ["antonio"] },
+    sort: "created_at_desc",
+  });
+  const report = JSON.parse(mustRun(["report", "query", "--root", project, "--query-json", query, "--json"]).stdout);
+  assert.equal(report.summary.result_count, 1);
+  assert.equal(report.results[0].summary, "Implemented actor scoped change");
+  assert.equal(report.results[0].sources[0].path, ".sdlc/traces/ST-001.jsonl");
+
+  const queryPath = path.join(project, ".sdlc", "cache", "report-query.json");
+  fs.mkdirSync(path.dirname(queryPath), { recursive: true });
+  fs.writeFileSync(queryPath, query);
+  mustFail(["report", "query", "--root", project, "--query-file", ".sdlc/cache/report-query.json"], /derived artifacts/);
+});
+
+test("report query finds new functional stories from canonical story records", () => {
+  const project = tmpProject("report-query-stories");
+  initProject(project);
+  mustRun([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-FUNC-001",
+    "--title",
+    "Functional onboarding flow",
+    "--acceptance",
+    "Functional flow is observable",
+    "--requirement",
+    "REQ-FUNC",
+  ]);
+  mustRun([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-TECH-001",
+    "--title",
+    "Technical runtime setup",
+    "--acceptance",
+    "Runtime setup is observable",
+    "--requirement",
+    "REQ-TECH",
+  ]);
+  const query = JSON.stringify({
+    intent: "find_new_functional_stories",
+    confidence: 0.94,
+    subjects: ["stories"],
+    time: { since: "10d", until: "now", field: "created_at" },
+    filters: { text: ["functional"] },
+    sort: "created_at_desc",
+  });
+  const report = JSON.parse(mustRun(["report", "query", "--root", project, "--query-json", query, "--json"]).stdout);
+  assert.equal(report.summary.result_count, 1);
+  assert.equal(report.results[0].id, "ST-FUNC-001");
+  assert.equal(report.results[0].kind, "stories");
+});
+
 test("manifests, trace compaction, and archive plans scale the KB without using cache as truth", () => {
   const project = tmpProject("kb-scale");
   initProject(project);

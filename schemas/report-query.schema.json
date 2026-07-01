@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/agentic-sdlc/report-query.schema.json",
+  "title": "Agentic SDLC Report Query",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "intent": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "subjects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "activity",
+          "stories",
+          "story_steps",
+          "outputs",
+          "contracts",
+          "handoffs",
+          "work_items",
+          "approvals",
+          "tests",
+          "all"
+        ]
+      },
+      "minItems": 1
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "since": {
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string",
+          "enum": ["created_at", "updated_at", "any"]
+        }
+      }
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/stringList"
+        },
+        "story_id": {
+          "$ref": "#/$defs/stringList"
+        },
+        "story": {
+          "$ref": "#/$defs/stringList"
+        },
+        "requirement": {
+          "$ref": "#/$defs/stringList"
+        },
+        "requirements": {
+          "$ref": "#/$defs/stringList"
+        },
+        "artifact_type": {
+          "$ref": "#/$defs/stringList"
+        },
+        "output_type": {
+          "$ref": "#/$defs/stringList"
+        },
+        "event_type": {
+          "$ref": "#/$defs/stringList"
+        },
+        "type": {
+          "$ref": "#/$defs/stringList"
+        },
+        "action": {
+          "$ref": "#/$defs/stringList"
+        },
+        "phase": {
+          "$ref": "#/$defs/stringList"
+        },
+        "status": {
+          "$ref": "#/$defs/stringList"
+        },
+        "kind": {
+          "$ref": "#/$defs/stringList"
+        },
+        "path": {
+          "$ref": "#/$defs/stringList"
+        },
+        "text": {
+          "$ref": "#/$defs/stringList"
+        },
+        "contains": {
+          "$ref": "#/$defs/stringList"
+        }
+      }
+    },
+    "sort": {
+      "type": "string",
+      "enum": ["created_at_desc", "created_at_asc", "updated_at_desc", "updated_at_asc", "kind_asc"]
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  }
+}

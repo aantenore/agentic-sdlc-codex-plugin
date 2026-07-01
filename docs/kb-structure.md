@@ -672,6 +672,16 @@ node bin/agentic-sdlc.mjs cache status --root <target-project>
 
 The cache may contain full-text lookup entries, story-requirement graphs, artifact fingerprints, template resolution, compact summaries, dependency graphs, and previous `output resolve` results. Each cache build records source hashes so a changed requirement, story, output registry, or trace makes the cache stale. Stale cache is a warning; using cache or index files as canonical output evidence is a strict gate error. Cached output resolution is verified against canonical KB files before use, so a cache entry cannot override the registry or story files by itself.
 
+## Query Reports
+
+`report query` filters canonical KB records after Codex or another LLM normalizes a natural-language request into `schemas/report-query.schema.json`. It can query activity traces, stories, completed steps, outputs, contracts, handoffs, work items, approvals, and tests.
+
+```bash
+node bin/agentic-sdlc.mjs report query --root <target-project> --query-json '<canonical-report-query-json>' --json
+```
+
+Raw `--text` is accepted only for audit/debug and returns a normalization request when no canonical query is provided. The CLI does not keyword-match raw language.
+
 ## `indexes/`
 
 Generated search indexes.

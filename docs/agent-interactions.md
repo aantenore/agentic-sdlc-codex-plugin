@@ -88,9 +88,18 @@ Activity reports reconstruct the real timeline from trace files:
 ```bash
 node bin/agentic-sdlc.mjs report activity --since 3d --view business
 node bin/agentic-sdlc.mjs report activity --since 3d --view dev --story ST-001
+node bin/agentic-sdlc.mjs report query --query-json '<canonical-report-query-json>' --json
 ```
 
-Each report item cites the trace file and line that produced it. If a decision, test, push, or handoff was not recorded in the KB, the report will not invent it.
+Each report item cites the source file and line that produced it. If a decision, test, push, handoff, story, output, contract, approval, or test evidence was not recorded in the KB, the report will not invent it.
+
+```mermaid
+flowchart LR
+  Human["Natural-language history question"] --> Codex["Normalize to report query JSON"]
+  Codex --> Query["report query"]
+  Query --> KB["Canonical .sdlc records"]
+  KB --> Result["Cited report results"]
+```
 
 ## Request Router Behavior
 
