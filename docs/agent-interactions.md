@@ -2,6 +2,8 @@
 
 Agentic SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory.
 
+The examples below use a TravelOps-style travel-planning product as sample context. The plugin behavior is not tied to that domain.
+
 ## Interaction Pattern
 
 Each phase follows the same loop:
@@ -24,12 +26,34 @@ The model is not "agents freely coding." It is bounded execution:
 - gates catch missing evidence;
 - humans approve important transitions.
 
+## Contract Builder Behavior
+
+The contract-building agent is generic. It does not know the project domain in advance. Before creating a contract it should:
+
+1. Read `.sdlc/project.json`.
+2. Search or inspect relevant `.sdlc/` artifacts.
+3. Read user-provided files when the user points to them.
+4. Ask concise questions for missing critical context.
+5. Store the evidence, answers, assumptions, constraints, and open questions inside the generated contract.
+
+Example:
+
+```bash
+node bin/agentic-sdlc.mjs contract create \
+  --phase analysis \
+  --context-file .sdlc/requirements/REQ-001.md \
+  --context-summary "Analyze the TravelOps MVP around disruption-aware travel replanning." \
+  --qa "Who approves this phase?|Product owner" \
+  --question "Which weather provider is authoritative for MVP?" \
+  --constraint "Provider-specific logic must stay behind an adapter"
+```
+
 ## Example 1: Discovery Agent
 
 The Discovery Agent starts from an idea or product request.
 
 ```bash
-node bin/agentic-sdlc.mjs init --project-name "Example Product"
+node bin/agentic-sdlc.mjs init --project-name "TravelOps"
 node bin/agentic-sdlc.mjs contract create --phase discovery
 ```
 
@@ -56,7 +80,7 @@ Trace example:
 ```bash
 node bin/agentic-sdlc.mjs trace append \
   --type decision \
-  --summary "Target the MVP on notification preferences instead of a broad account settings redesign."
+  --summary "Target the MVP on disruption-aware travel replanning instead of generic itinerary generation."
 ```
 
 Handoff to Analysis:
@@ -89,8 +113,8 @@ Produces:
 ```text
 .sdlc/requirements/functional-analysis.md
 .sdlc/requirements/integration-map.md
-.sdlc/risks/RISK-002-email-provider-availability.md
-.sdlc/decisions/ADR-0002-notification-channel-strategy.md
+.sdlc/risks/RISK-002-weather-api-availability.md
+.sdlc/decisions/ADR-0002-weather-provider-strategy.md
 ```
 
 Trace example:
@@ -98,7 +122,7 @@ Trace example:
 ```bash
 node bin/agentic-sdlc.mjs trace append \
   --type assumption \
-  --summary "Email delivery can be abstracted behind a provider adapter for MVP."
+  --summary "Weather data can be refreshed at itinerary checkpoint granularity for MVP."
 ```
 
 Handoff to Design:
@@ -115,9 +139,9 @@ The Design Agent converts analysis into story workspaces and acceptance criteria
 node bin/agentic-sdlc.mjs contract create --phase design
 node bin/agentic-sdlc.mjs story create \
   --id ST-001 \
-  --title "Let users manage notification preferences" \
+  --title "Replan a trekking activity when rain is forecast" \
   --phase design \
-  --acceptance "Given a user disables email notifications, the system does not send non-critical email updates."
+  --acceptance "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
 ```
 
 Reads:
@@ -136,7 +160,7 @@ Produces:
 .sdlc/stories/ST-001/plan.md
 .sdlc/stories/ST-001/implementation-log.md
 .sdlc/tests/ST-001-test-strategy.md
-.sdlc/decisions/ADR-0003-notification-preferences-scope.md
+.sdlc/decisions/ADR-0003-replanning-scope.md
 ```
 
 Handoff to Implementation:
@@ -187,12 +211,12 @@ Trace examples:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type implementation \
-  --summary "Added notification preference persistence and delivery-provider adapter."
+  --summary "Added weather-triggered replanning service and fallback activity selector."
 
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type test \
-  --summary "Unit and integration tests passed for notification opt-out rules."
+  --summary "Unit and integration tests passed for rain-triggered replanning."
 ```
 
 Handoff to Validation:
@@ -272,7 +296,7 @@ Trace example:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type release \
-  --summary "Released notification preferences MVP with delivery status monitoring."
+  --summary "Released disruption-aware replanning MVP with weather signal monitoring."
 ```
 
 ## Parallel Agent Example

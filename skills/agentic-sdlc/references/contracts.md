@@ -2,10 +2,13 @@
 
 A contract is the operational descriptor for an SDLC phase or story. It tells Codex and human reviewers how the step must be executed, produced, validated, and traced.
 
+Contracts are project-bound. The templates are generic, but generated contracts must include the target project identity and contextualization metadata captured from the project KB, user input, files, and open questions.
+
 ## Required Fields
 
 - `id`: Stable contract identifier.
 - `phase`: One of `discovery`, `analysis`, `design`, `implementation`, `validation`, `release`.
+- `project`: Target project identity.
 - `purpose`: Why this phase exists.
 - `owner_agent`: Default agent role responsible for the phase.
 - `inputs`: Required source material.
@@ -14,6 +17,7 @@ A contract is the operational descriptor for an SDLC phase or story. It tells Co
 - `allowed_tools`: Tool classes allowed for the phase.
 - `kb_writes`: Knowledge base sections that must be updated.
 - `human_gate`: Whether human approval is required.
+- `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
 
 ## Template Source
 
@@ -27,6 +31,8 @@ node <plugin-root>/bin/agentic-sdlc.mjs --template-dir <dir> ...
 
 Reject or revise a contract when:
 
+- it is not bound to a project;
+- it does not record context sources or questions;
 - outputs are not testable;
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
