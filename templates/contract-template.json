@@ -1,0 +1,35 @@
+{
+  "id": "contract-<phase>-v1",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.1.0",
+  "phase": "<discovery|analysis|design|implementation|validation|release>",
+  "story_id": null,
+  "status": "draft",
+  "purpose": "Describe why this phase exists and what decision it enables.",
+  "owner_agent": "phase-agent",
+  "inputs": [
+    "Required input artifact or context"
+  ],
+  "outputs": [
+    "Required output artifact"
+  ],
+  "validation": [
+    "Observable validation criterion"
+  ],
+  "allowed_tools": [
+    "knowledge-base",
+    "repo-read"
+  ],
+  "kb_writes": [
+    "decisions",
+    "assumptions",
+    "traces"
+  ],
+  "human_gate": true,
+  "metrics": [
+    "phase_specific_metric"
+  ],
+  "approvals": [],
+  "created_at": "<iso-8601>",
+  "updated_at": "<iso-8601>"
+}

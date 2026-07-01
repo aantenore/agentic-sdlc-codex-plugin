@@ -1,0 +1,38 @@
+{
+  "name": "travelops-sdlc-codex-plugin",
+  "version": "0.1.0",
+  "description": "A Codex plugin for contract-driven agentic SDLC execution with a shared Git-first project knowledge base.",
+  "author": {
+    "name": "Antonio Antenore",
+    "url": "https://github.com/aantenore"
+  },
+  "homepage": "https://github.com/aantenore/travelops-sdlc-codex-plugin",
+  "repository": "https://github.com/aantenore/travelops-sdlc-codex-plugin",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "sdlc",
+    "agentic-development",
+    "knowledge-base",
+    "contracts"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "TravelOps SDLC",
+    "shortDescription": "Contract-driven agentic SDLC for Codex.",
+    "longDescription": "TravelOps SDLC turns a classic software development life cycle into an agent-legible operating system: each phase is governed by a contract, validated by gates, and recorded in a Git-first knowledge base that teams and agents can share in parallel.",
+    "developerName": "Antonio Antenore",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Automation"
+    ],
+    "defaultPrompt": [
+      "Use TravelOps SDLC to initialize this project.",
+      "Create an SDLC contract for the next phase.",
+      "Check the SDLC gate for my active story."
+    ],
+    "brandColor": "#0EA5E9"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/travelops-sdlc-codex-plugin/schemas/contract.schema.json",
+  "title": "TravelOps SDLC Contract",
+  "type": "object",
+  "required": [
+    "id",
+    "schema_version",
+    "phase",
+    "purpose",
+    "owner_agent",
+    "inputs",
+    "outputs",
+    "validation",
+    "allowed_tools",
+    "kb_writes",
+    "human_gate"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "discovery",
+        "analysis",
+        "design",
+        "implementation",
+        "validation",
+        "release"
+      ]
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "owner_agent": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "kb_writes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "human_gate": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}

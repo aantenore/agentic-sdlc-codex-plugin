@@ -1,0 +1,313 @@
+{
+  "schema_version": "0.1.0",
+  "kb_directories": [
+    "contracts",
+    "requirements",
+    "stories",
+    "decisions",
+    "assumptions",
+    "risks",
+    "tests",
+    "traces",
+    "releases",
+    "indexes",
+    "reports"
+  ],
+  "indexable_extensions": [
+    ".json",
+    ".jsonl",
+    ".md",
+    ".txt",
+    ".yaml",
+    ".yml"
+  ],
+  "phase_order": [
+    "discovery",
+    "analysis",
+    "design",
+    "implementation",
+    "validation",
+    "release"
+  ],
+  "phases": {
+    "discovery": {
+      "purpose": "Understand the problem, target users, market context, constraints, and value hypothesis before solution design.",
+      "owner_agent": "discovery-agent",
+      "inputs": [
+        "initial idea or business problem",
+        "target user assumptions",
+        "known constraints",
+        "available reference material"
+      ],
+      "outputs": [
+        "problem statement",
+        "target users",
+        "competitor and alternative analysis",
+        "process gaps",
+        "feature proposal",
+        "success metrics"
+      ],
+      "validation": [
+        "problem statement is specific",
+        "target users are explicit",
+        "constraints and non-goals are captured",
+        "feature proposal links to user value"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "web-research",
+        "document-analysis"
+      ],
+      "kb_writes": [
+        "requirements",
+        "assumptions",
+        "risks",
+        "decisions"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "open_questions_count",
+        "validated_requirements_count",
+        "discarded_alternatives_count"
+      ]
+    },
+    "analysis": {
+      "purpose": "Translate approved discovery output into functional and technical analysis with integrations, APIs, mocks, and system boundaries.",
+      "owner_agent": "analysis-agent",
+      "inputs": [
+        "approved requirements",
+        "feature proposal",
+        "constraints",
+        "known integrations"
+      ],
+      "outputs": [
+        "functional analysis",
+        "technical analysis",
+        "integration map",
+        "API or mock strategy",
+        "edge cases",
+        "risk register"
+      ],
+      "validation": [
+        "must-have requirements are covered",
+        "user flows include inputs and outputs",
+        "edge cases are testable",
+        "integration strategy is explicit"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "api-docs",
+        "mock-generation"
+      ],
+      "kb_writes": [
+        "decisions",
+        "assumptions",
+        "risks",
+        "requirements"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "covered_requirements_count",
+        "integration_risks_count",
+        "mocked_services_count"
+      ]
+    },
+    "design": {
+      "purpose": "Convert analysis into user stories, task decomposition, acceptance criteria, test strategy, and UX or architecture decisions.",
+      "owner_agent": "design-agent",
+      "inputs": [
+        "functional analysis",
+        "technical analysis",
+        "integration map",
+        "risk register"
+      ],
+      "outputs": [
+        "user stories",
+        "task decomposition",
+        "acceptance criteria",
+        "test strategy",
+        "UX or UI notes",
+        "architecture decisions"
+      ],
+      "validation": [
+        "stories are independently deliverable",
+        "acceptance criteria are observable",
+        "test strategy maps to acceptance criteria",
+        "architecture decisions include rationale"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "design-docs",
+        "test-planning"
+      ],
+      "kb_writes": [
+        "stories",
+        "decisions",
+        "tests",
+        "risks"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "stories_ready_count",
+        "acceptance_criteria_count",
+        "decision_records_count"
+      ]
+    },
+    "implementation": {
+      "purpose": "Implement story-scoped changes on dedicated branches using the approved contract, tests, and knowledge base context.",
+      "owner_agent": "implementation-agent",
+      "inputs": [
+        "approved story",
+        "contract",
+        "acceptance criteria",
+        "test strategy",
+        "active claim"
+      ],
+      "outputs": [
+        "code changes",
+        "implementation log",
+        "test evidence",
+        "review notes",
+        "updated knowledge base"
+      ],
+      "validation": [
+        "branch is story-scoped",
+        "acceptance criteria are addressed",
+        "blocking tests pass",
+        "decision and assumption changes are recorded",
+        "no unauthorized tool or resource use"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "repo-write",
+        "test-runner",
+        "code-review"
+      ],
+      "kb_writes": [
+        "traces",
+        "tests",
+        "decisions",
+        "stories"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "tests_run_count",
+        "blocking_failures_count",
+        "review_findings_count"
+      ]
+    },
+    "validation": {
+      "purpose": "Validate implementation against contracts, acceptance criteria, tests, observability needs, and release readiness.",
+      "owner_agent": "validation-agent",
+      "inputs": [
+        "implementation output",
+        "acceptance criteria",
+        "test evidence",
+        "risk register",
+        "release target"
+      ],
+      "outputs": [
+        "test report",
+        "coverage notes",
+        "unresolved risks",
+        "fix list",
+        "gate decision"
+      ],
+      "validation": [
+        "blocking tests pass",
+        "known risks are accepted or mitigated",
+        "test evidence is linked",
+        "gate decision is recorded"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "test-runner",
+        "observability-check"
+      ],
+      "kb_writes": [
+        "tests",
+        "risks",
+        "traces",
+        "reports"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "blocking_tests_passed",
+        "open_risks_count",
+        "evidence_links_count"
+      ]
+    },
+    "release": {
+      "purpose": "Package the validated work with documentation, observability, feedback loop, and updated project context.",
+      "owner_agent": "release-agent",
+      "inputs": [
+        "validated implementation",
+        "gate decision",
+        "test report",
+        "deployment target",
+        "feedback channels"
+      ],
+      "outputs": [
+        "release notes",
+        "deployment or delivery notes",
+        "observability plan",
+        "feedback loop",
+        "updated app context"
+      ],
+      "validation": [
+        "release notes describe user-visible changes",
+        "deployment notes include rollback or recovery path",
+        "observability signals are defined",
+        "feedback loop has an owner"
+      ],
+      "allowed_tools": [
+        "knowledge-base",
+        "repo-read",
+        "release-management",
+        "observability-check"
+      ],
+      "kb_writes": [
+        "releases",
+        "decisions",
+        "traces",
+        "reports"
+      ],
+      "human_gate": true,
+      "metrics": [
+        "release_evidence_count",
+        "observability_signals_count",
+        "feedback_items_count"
+      ]
+    }
+  },
+  "gate_policy": {
+    "contract_required_fields": [
+      "id",
+      "phase",
+      "purpose",
+      "owner_agent",
+      "inputs",
+      "outputs",
+      "validation",
+      "allowed_tools",
+      "kb_writes",
+      "human_gate"
+    ],
+    "story_required_fields": [
+      "id",
+      "title",
+      "status",
+      "phase",
+      "acceptance_criteria"
+    ],
+    "implementation_requires_claim": true,
+    "implementation_requires_acceptance_criteria": true,
+    "validation_requires_test_trace": true,
+    "release_requires_release_trace": true
+  }
+}
