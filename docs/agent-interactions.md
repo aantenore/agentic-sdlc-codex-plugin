@@ -2,7 +2,7 @@
 
 Agentic SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory.
 
-The examples below use a TravelOps-style travel-planning product as sample context. The plugin behavior is not tied to that domain.
+The examples below use neutral product placeholders. The plugin behavior is not tied to any domain.
 
 ## Interaction Pattern
 
@@ -11,18 +11,44 @@ Each phase follows the same loop:
 ```text
 phase contract
   -> agent reads required inputs from .sdlc/
+  -> agent resolves approved output contracts
+  -> agent proposes reuse, delta, or new output structure
+  -> user approves new templates or structural changes
   -> agent produces phase outputs
+  -> agent links outputs in .sdlc/output-contracts/registry.json
   -> agent appends trace evidence
   -> gate check validates required artifacts
   -> human approves or sends the phase back for repair
   -> next agent receives structured inputs
 ```
 
+```mermaid
+sequenceDiagram
+  participant Human as Human owner
+  participant Agent as Phase agent
+  participant KB as SDLC KB
+  participant Registry as Output registry
+  participant Gate as Gate check
+
+  Human->>Agent: Goal, files, constraints
+  Agent->>KB: Read project context
+  Agent->>Registry: Resolve output type
+  Registry-->>Agent: Template and reuse recommendation
+  Agent-->>Human: Ask only blocking questions
+  Human-->>Agent: Approve answers or structure
+  Agent->>KB: Write outputs and trace evidence
+  Agent->>Registry: Link artifacts
+  Agent->>Gate: Run validation
+  Gate-->>Human: Pass, warning, or repair needed
+```
+
 The operating model is not "agents freely coding." It is bounded execution:
 
 - contracts define the work;
 - execution policy defines model/reasoning inheritance or overrides;
+- output contracts keep generated artifact structures consistent;
 - the KB stores the durable context;
+- local cache speeds lookup but is never source of truth;
 - traces explain what happened;
 - gates catch missing evidence;
 - humans approve important transitions.
@@ -44,12 +70,68 @@ Example:
 node bin/agentic-sdlc.mjs contract create \
   --phase analysis \
   --context-file .sdlc/requirements/REQ-001.md \
-  --context-summary "Analyze the TravelOps MVP around disruption-aware travel replanning." \
+  --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
-  --question "Which weather provider is authoritative for MVP?" \
+  --question "Which external provider is authoritative for MVP?" \
   --constraint "Provider-specific logic must stay behind an adapter" \
   --reasoning high \
   --execution-note "Higher reasoning requested for integration-risk analysis"
+```
+
+## Output Contract Behavior
+
+Before generating a durable output, an agent checks `.sdlc/output-contracts/registry.json`:
+
+```bash
+node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
+```
+
+If no approved template exists, the agent proposes one and waits for user approval:
+
+```bash
+node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
+node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human
+```
+
+If a related story already covers the same requirement, the agent reuses the base artifact and creates only a delta:
+
+```bash
+node bin/agentic-sdlc.mjs output link \
+  --story ST-002 \
+  --type functional-analysis \
+  --artifact .sdlc/requirements/ST-002-functional-analysis-delta.md \
+  --template functional-analysis-v1 \
+  --mode delta \
+  --base-artifact .sdlc/requirements/functional-analysis.md \
+  --requirement REQ-001
+```
+
+New templates, duplicate new outputs, and incompatible structures are human decisions, not silent agent choices.
+
+```mermaid
+sequenceDiagram
+  participant Agent as Agent
+  participant Cache as Local cache
+  participant Registry as Output registry
+  participant Human as Human owner
+  participant KB as SDLC source files
+
+  Agent->>Cache: Try valid output resolution
+  alt Cache valid
+    Cache-->>Agent: Cached recommendation
+  else Cache missing or stale
+    Agent->>Registry: Read templates and links
+    Agent->>KB: Read story and requirements
+    Registry-->>Agent: Approved templates and related artifacts
+  end
+  alt New template or structure change
+    Agent-->>Human: Propose template or override
+    Human-->>Registry: Approve decision
+  else Related artifact exists
+    Registry-->>Agent: Reuse base artifact plus delta
+  end
+  Agent->>KB: Write canonical artifact
+  Agent->>Registry: Link story, requirement, template, and mode
 ```
 
 ## Example 1: Discovery Agent
@@ -57,7 +139,7 @@ node bin/agentic-sdlc.mjs contract create \
 The Discovery Agent starts from an idea or product request.
 
 ```bash
-node bin/agentic-sdlc.mjs init --project-name "TravelOps"
+node bin/agentic-sdlc.mjs init --project-name "My Product"
 node bin/agentic-sdlc.mjs contract create --phase discovery
 ```
 
@@ -84,7 +166,7 @@ Trace example:
 ```bash
 node bin/agentic-sdlc.mjs trace append \
   --type decision \
-  --summary "Target the MVP on disruption-aware travel replanning instead of generic itinerary generation."
+  --summary "Target the MVP on the approved business workflow instead of a generic process."
 ```
 
 Handoff to Analysis:
@@ -117,8 +199,8 @@ Produces:
 ```text
 .sdlc/requirements/functional-analysis.md
 .sdlc/requirements/integration-map.md
-.sdlc/risks/RISK-002-weather-api-availability.md
-.sdlc/decisions/ADR-0002-weather-provider-strategy.md
+.sdlc/risks/RISK-002-provider-api-availability.md
+.sdlc/decisions/ADR-0002-provider-strategy.md
 ```
 
 Trace example:
@@ -126,7 +208,7 @@ Trace example:
 ```bash
 node bin/agentic-sdlc.mjs trace append \
   --type assumption \
-  --summary "Weather data can be refreshed at itinerary checkpoint granularity for MVP."
+  --summary "Provider data can be refreshed at workflow checkpoint granularity for MVP."
 ```
 
 Handoff to Design:
@@ -143,9 +225,9 @@ The Design Agent converts analysis into story workspaces and acceptance criteria
 node bin/agentic-sdlc.mjs contract create --phase design
 node bin/agentic-sdlc.mjs story create \
   --id ST-001 \
-  --title "Replan a trekking activity when rain is forecast" \
+  --title "Implement the approved workflow trigger" \
   --phase design \
-  --acceptance "Given rain during trekking, the itinerary proposes a compatible indoor alternative."
+  --acceptance "Given the approved trigger, the system proposes the expected alternative workflow."
 ```
 
 Reads:
@@ -164,7 +246,7 @@ Produces:
 .sdlc/stories/ST-001/plan.md
 .sdlc/stories/ST-001/implementation-log.md
 .sdlc/tests/ST-001-test-strategy.md
-.sdlc/decisions/ADR-0003-replanning-scope.md
+.sdlc/decisions/ADR-0003-workflow-scope.md
 ```
 
 Handoff to Implementation:
@@ -215,12 +297,12 @@ Trace examples:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type implementation \
-  --summary "Added weather-triggered replanning service and fallback activity selector."
+  --summary "Added domain-event workflow service and fallback selector."
 
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type test \
-  --summary "Unit and integration tests passed for rain-triggered replanning."
+  --summary "Unit and integration tests passed for the trigger-driven workflow."
 ```
 
 Handoff to Validation:
@@ -300,7 +382,7 @@ Trace example:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type release \
-  --summary "Released disruption-aware replanning MVP with weather signal monitoring."
+  --summary "Released workflow MVP with provider signal monitoring."
 ```
 
 ## Parallel Agent Example
@@ -320,6 +402,66 @@ Agent B
 ```
 
 They share global context through `.sdlc/requirements`, `.sdlc/decisions`, and `.sdlc/risks`, but their active work and evidence stay story-scoped.
+
+```mermaid
+flowchart TB
+  Parent["Parent orchestrator chat"] --> Status["orchestrate status"]
+  Status --> LaneA["Available lane ST-001"]
+  Status --> LaneB["Available lane ST-002"]
+
+  LaneA --> ClaimA["Agent A claim"]
+  LaneB --> ClaimB["Agent B claim"]
+
+  ClaimA --> BranchA["feature/ST-001"]
+  ClaimB --> BranchB["feature/ST-002"]
+
+  BranchA --> TraceA[".sdlc/traces/ST-001.jsonl"]
+  BranchB --> TraceB[".sdlc/traces/ST-002.jsonl"]
+
+  TraceA --> GateA["Story gate ST-001"]
+  TraceB --> GateB["Story gate ST-002"]
+  GateA --> ProjectGate["Project gate"]
+  GateB --> ProjectGate
+```
+
+## Multiple Codex Chats
+
+Use this when separate Codex chats work on separate stories:
+
+```bash
+node bin/agentic-sdlc.mjs orchestrate status --json
+node bin/agentic-sdlc.mjs story claim --id ST-001 --agent analysis-chat --branch feature/ST-001 --thread-id codex-thread-a
+node bin/agentic-sdlc.mjs story claim --id ST-002 --agent implementation-chat --branch feature/ST-002 --thread-id codex-thread-b
+```
+
+Each chat records its own evidence:
+
+```bash
+node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Functional flow accepted" --actor analysis-chat --actor-type agent
+node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed analysis artifacts"
+node bin/agentic-sdlc.mjs story handoff --id ST-001 --to-agent implementation-agent --artifact .sdlc/requirements/functional-analysis.md
+node bin/agentic-sdlc.mjs gate check --story ST-001 --strict
+```
+
+When output resolution becomes slow or the KB grows, each chat can rebuild a local cache:
+
+```bash
+node bin/agentic-sdlc.mjs cache rebuild
+node bin/agentic-sdlc.mjs cache status
+```
+
+The cache accelerates lookup only. Agents must still cite canonical `.sdlc/` source artifacts in links, traces, and gates.
+
+## Parent Orchestrator Chat
+
+A parent chat coordinates available lanes without taking over worker claims:
+
+```bash
+node bin/agentic-sdlc.mjs orchestrate plan --json
+node bin/agentic-sdlc.mjs phase lock --phase analysis --reason "Updating shared integration map"
+node bin/agentic-sdlc.mjs phase release --id LOCK-analysis-20260701123000 --reason "Integration map stable"
+node bin/agentic-sdlc.mjs gate check --scope all --strict
+```
 
 ## Human Governance
 

@@ -13,12 +13,15 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `owner_agent`: Default agent role responsible for the phase.
 - `inputs`: Required source material.
 - `outputs`: Required artifacts.
+- `output_contract_refs`: Optional references to approved output templates and reuse mode.
 - `validation`: Gate criteria.
 - `allowed_tools`: Tool classes allowed for the phase.
 - `kb_writes`: Knowledge base sections that must be updated.
 - `human_gate`: Whether human approval is required.
 - `execution_policy`: Codex runtime policy for model and reasoning inheritance or override.
 - `contextualization`: Project-specific summary, source files, questions, assumptions, and constraints.
+- `audit`: Actor, Git, and run metadata for contract creation and updates.
+- `approvals`: Human or CI gate decisions. The latest decision controls strict gate status.
 
 ## Execution Policy
 
@@ -43,6 +46,20 @@ Use `execution_policy` to make agent execution settings explicit:
 
 `inherit` means spawned agents should reuse the main Codex thread settings. Use `override` only when the user or project KB has selected a specific Codex model or reasoning level for the contract.
 
+## Phase Contracts Vs Output Contracts
+
+Phase/story contracts define the work boundary: inputs, outputs, validation, allowed tools, KB writes, human gate, and execution policy.
+
+Output contracts define the project-approved artifact structure for a specific output type. They live in `.sdlc/output-contracts/registry.json` and are linked with:
+
+- `artifact_type`;
+- approved `template_id`;
+- story and requirement links;
+- `mode`: `reuse`, `delta`, or `new`;
+- optional base artifact for deltas.
+
+Do not duplicate template structure inside every phase contract. Let the phase contract say which artifact must be produced, and let the output registry say how that artifact is structured and whether an existing artifact should be reused.
+
 ## Template Source
 
 The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template directory through:
@@ -61,5 +78,9 @@ Reject or revise a contract when:
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
 - execution policy overrides are present without rationale or user/project backing;
+- linked output artifacts do not use approved output templates;
+- duplicate outputs are created without an approved decision;
+- the latest human gate decision is not `approved` before phase exit;
+- audit metadata is missing for contract updates;
 - human approval is missing for high-impact actions;
 - KB writes are missing for decisions, assumptions, risks, or tests.
