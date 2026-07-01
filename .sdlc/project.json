@@ -2,7 +2,7 @@
   "project_id": "agentic-sdlc-codex-plugin",
   "project_name": "Agentic SDLC Codex Plugin",
   "schema_version": "0.1.0",
-  "sdlc_version": "0.4.6",
+  "sdlc_version": "0.4.7",
   "created_at": "2026-07-01T11:12:46.831Z",
   "knowledge_base": {
     "storage": "git",

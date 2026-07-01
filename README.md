@@ -250,7 +250,7 @@ Recommended workflow:
 8. Run `gate check --story <id> --strict` before review or merge.
 9. Release claims and locks when work is done.
 
-Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If there is no approved output template for that type, propose one and stop for user agreement before creating a contract that references it. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts must include `--output-ref artifact-type:template-id:mode` by default; `contract create` rejects missing story output refs and refs to draft or missing templates unless an explicit migration/clarification override is used. Strict gates require those refs to be satisfied by output links.
+Before producing a durable artifact, run `output resolve --story <id> --type <artifact-type>`. If there is no approved output template for that type, propose one and stop for user agreement before creating a contract that references it. If another story already covered the same requirement, the default is to reuse the approved base artifact and create only a delta. New templates, duplicate new outputs, or structure changes require user approval and an auditable registry decision. Story-specific contracts must include `--output-ref artifact-type:template-id:mode` by default; `contract create` rejects missing story output refs and refs to draft or missing templates unless an explicit migration/clarification override is used. `output link` requires the story contract to be approved and fresh. Strict gates require those refs to be satisfied by output links.
 
 Use `approval requests --story <id>` whenever a gate or route needs human input. It returns the pending baseline, output-template, contract clarification, contract approval, and output-link actions with a summary and suggested command. Agents should show this summary to the user and stop until the user approves, answers, or requests changes.
 
@@ -258,7 +258,7 @@ Derived cache and indexes under `.sdlc/cache/` and `.sdlc/indexes/` can be regen
 
 ## Activity, Handoff, And KB Scale
 
-`story complete-step` creates a story-local completion record under `.sdlc/stories/<story-id>/steps/`, appends a `story.complete-step` trace, and verifies linked output artifacts when `--type` is supplied. `story prepare-handoff` writes a handoff package with the story state, claim, completed steps, output links, dependencies, handoffs, and recent traces, then can release the active claim so another chat or machine can continue.
+`story complete-step` creates a story-local completion record under `.sdlc/stories/<story-id>/steps/`, requires an approved fresh story contract, appends a `story.complete-step` trace, and verifies linked output artifacts when `--type` is supplied. `story prepare-handoff` writes a handoff package with the story state, claim, completed steps, output links, dependencies, handoffs, and recent traces, then can release the active claim so another chat or machine can continue.
 
 ```mermaid
 flowchart LR
@@ -340,7 +340,8 @@ node bin/agentic-sdlc.mjs contract create \
 ```
 
 The resulting contract stores project identity, context source references, answered/open questions, assumptions, and constraints under `contextualization`.
-If a question is still open, ask the user before normal contract creation. `--allow-incomplete-contract` is only for explicit clarification, migration, or recovery drafts and must not be used to start phase work.
+If a question is still open, ask the user before normal contract creation. `--allow-incomplete-contract` is only for explicit clarification, migration, or recovery drafts and must not be used to start phase work. Story contracts automatically populate `story.contract_id`; replacing a different story contract requires explicit `--replace-story-contract`.
+Durable phase outputs are blocked until the story contract is approved and fresh: `output link` and `story complete-step` reject draft contracts unless `--allow-unapproved-contract-output` is used for explicit migration or recovery.
 
 Contracts also carry an `execution_policy`. By default, generated contracts tell spawned Codex agents to inherit the model and reasoning level from the main Codex thread. Override them only when a phase needs a different execution profile:
 
