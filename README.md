@@ -7,6 +7,7 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 ## What It Implements
 
 - Phase contracts for Discovery, Analysis, Design, Implementation, Validation, and Release.
+- Existing-project onboarding with an inferred baseline that must be confirmed before it becomes canonical.
 - A Git-first knowledge base for requirements, stories, decisions, assumptions, risks, tests, traces, and releases.
 - Story-scoped workspaces so multiple agents can work in parallel without overwriting each other.
 - Work breakdown agreements for project-local epics, stories, tasks, and approved decomposition choices.
@@ -18,6 +19,7 @@ The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The 
 - Output consistency registry for approved artifact templates, story-artifact links, and reuse/delta decisions.
 - Local regenerable cache for faster KB lookup, dependency graphs, artifact fingerprints, and output resolution.
 - Language-agnostic request routing: Codex normalizes user intent to canonical JSON, then the CLI deterministically decides the SDLC route from project state and policy.
+- Formal approval governance that separates implementation permission from approved SDLC artifacts.
 - Gate checks that validate contract completeness, story readiness, and traceability.
 - A regenerable search index over `.sdlc/` content.
 
@@ -86,20 +88,22 @@ The CLI has no runtime dependencies beyond Node.js.
 
 ```bash
 node bin/agentic-sdlc.mjs init --project-name "My Product"
+node bin/agentic-sdlc.mjs onboard existing-project --project-name "Legacy Product" --document README.md
+node bin/agentic-sdlc.mjs baseline approve --id BASELINE-INITIAL --actor-type human --approval-source explicit-user --summary "Confirmed current baseline"
 node bin/agentic-sdlc.mjs contract create --phase discovery
 node bin/agentic-sdlc.mjs story create --id ST-001 --title "Implement a business workflow"
 node bin/agentic-sdlc.mjs work item create --type epic --id EP-001 --title "Business workflow"
 node bin/agentic-sdlc.mjs breakdown propose --id BD-REQ-001 --requirement REQ-001 --item story:ST-001
-node bin/agentic-sdlc.mjs breakdown approve --id BD-REQ-001 --actor-type human
+node bin/agentic-sdlc.mjs breakdown approve --id BD-REQ-001 --actor-type human --approval-source explicit-user --summary "Approved breakdown"
 node bin/agentic-sdlc.mjs dependency propose --id DEP-001 --edge ST-002:ST-001:requires_artifact:validation:artifact_linked
-node bin/agentic-sdlc.mjs dependency approve --id DEP-001 --actor-type human
+node bin/agentic-sdlc.mjs dependency approve --id DEP-001 --actor-type human --approval-source explicit-user --summary "Approved dependency graph"
 node bin/agentic-sdlc.mjs capability profile propose --id CAP-PROFILE-ST-001 --story ST-001 --phase analysis --context-file .sdlc/requirements/REQ-001.md
-node bin/agentic-sdlc.mjs capability profile approve --id CAP-PROFILE-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability profile approve --id CAP-PROFILE-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability profile"
 node bin/agentic-sdlc.mjs capability recommend --id CAP-REC-ST-001 --profile CAP-PROFILE-ST-001 --available-capabilities-file .sdlc/decisions/available-capabilities.json
-node bin/agentic-sdlc.mjs capability approve --id CAP-REC-ST-001 --actor-type human
+node bin/agentic-sdlc.mjs capability approve --id CAP-REC-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability recommendation"
 node bin/agentic-sdlc.mjs story claim --id ST-001 --agent codex --branch feature/ST-001
 node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
-node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human
+node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --actor-type human --approval-source explicit-user --summary "Approved output template"
 node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
@@ -130,6 +134,34 @@ node bin/agentic-sdlc.mjs route decide --json --intent-json '{
 Raw text passed with `--text` is treated only as untrusted context. The CLI never keyword-matches natural language; low confidence, missing context, phase skips, new templates, duplicate outputs, and implementation starts are routed to confirmation or clarification.
 
 For technical analysis, the route layer also checks whether an approved capability profile exists. If it does not, the returned next commands point to `capability profile propose` before contract creation, so architecture decisions can use project-specific evidence and approved skill/MCP/tool choices.
+
+## Existing Project Onboarding
+
+For an existing repository, use onboarding instead of pretending the SDLC knows the past history:
+
+```bash
+node bin/agentic-sdlc.mjs onboard existing-project \
+  --project-name "Existing Product" \
+  --document README.md \
+  --source docs \
+  --question "Which inferred facts are canonical?"
+```
+
+This initializes `.sdlc/` when needed and writes `.sdlc/baseline/BASELINE-INITIAL.json` plus a readable current-state report. The baseline is `proposed` by default: detected stack, key files, documents, assumptions, and open questions are evidence, not confirmed truth. Approve it only after the user confirms what is canonical.
+
+## Approval Governance
+
+Approvals are formal SDLC events, not a side effect of telling an agent to implement or push. Human approvals must include an explicit source and a summary or evidence:
+
+```bash
+node bin/agentic-sdlc.mjs contract approve \
+  --id contract-ST-001-analysis \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approved analysis contract and output structure"
+```
+
+Use `--approval-source bootstrap` only for migration or provisional records. Bootstrap approvals are marked provisional and do not satisfy strict gates by default.
 
 ## Collaboration Model
 

@@ -40,9 +40,14 @@ flowchart LR
 
 The model proposes and executes bounded work. The harness, CLI, schemas, contracts, and human gates enforce the process. Human owners keep responsibility for objectives, architecture, trade-offs, and approvals.
 
+For existing projects, start with `onboard existing-project` when there is useful code, documentation, or configuration to inspect. The resulting baseline is proposed context, not approved history, until the user explicitly confirms it.
+
+Implementation permission is not formal approval. Any approve command that represents a human decision must include `--approval-source explicit-user` plus a summary or evidence for the specific artifact being approved.
+
 ## Phase Entry Checklist
 
 - Current phase contract exists.
+- Existing-project baseline is reviewed when the project predates the SDLC KB.
 - Required inputs are present or missing inputs are logged as assumptions.
 - Human gate expectations are explicit.
 - KB writes for the phase are known.
@@ -57,6 +62,7 @@ The model proposes and executes bounded work. The harness, CLI, schemas, contrac
 - Related-story outputs use reuse plus delta unless a duplicate/new structure decision was approved.
 - Validation criteria are satisfied or failures are recorded.
 - Decisions, assumptions, risks, and evidence are traceable.
+- Formal approvals include approval source, summary/evidence, approver attribution, and fresh content hashes.
 - Cache/index files are not cited as canonical evidence.
 - Handoffs are recorded when another agent or chat takes over.
 - Push, merge, and release sync events are recorded.
