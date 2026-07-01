@@ -1,6 +1,6 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "A Codex plugin for contract-driven agentic SDLC execution with a shared Git-first project knowledge base.",
   "author": {
     "name": "Antonio Antenore",
