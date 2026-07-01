@@ -305,16 +305,37 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   ]).stdout);
   assert.equal(onboard.initialized, true);
   assert.equal(onboard.baseline.status, "proposed");
+  assert.match(onboard.assistant_message, /Project context \(BASELINE-INITIAL\)/);
+  assert.match(onboard.assistant_message, /Documents I read: README\.md/);
+  assert.match(onboard.assistant_message, /Current-state summary to approve/);
+  assert.match(onboard.assistant_message, /not homework for you/);
+  assert.match(onboard.assistant_message, /approval applies only to the item or items shown/);
+  assert.ok(onboard.approval_request.review_items.some((item) => /Project summary I inferred:/.test(item)));
+  assert.ok(onboard.approval_request.review_items.some((item) => /Current-state summary to approve:/.test(item)));
+  assert.equal(onboard.approval_request.approval_scope.applies_only_to_presented_item, true);
+  assert.equal(onboard.approval_request.approval_scope.cannot_approve_future_artifacts, true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "project.json")), true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json")), true);
   assert.ok(onboard.baseline.imported_documents.some((document) => document.path === "README.md"));
   assert.ok(onboard.baseline.repository_snapshot.detected_stack.some((item) => item.name === "package-json"));
+
+  const pendingApprovals = JSON.parse(mustRun(["approval", "requests", "--root", project, "--json"]).stdout);
+  const baselineRequest = pendingApprovals.requests.find((request) => request.type === "baseline_approval");
+  assert.ok(baselineRequest);
+  assert.ok(baselineRequest.review_items.some((item) => /Documents I read: README\.md/.test(item)));
+  assert.ok(baselineRequest.review_items.some((item) => /Current-state report covers:/.test(item)));
+  assert.equal(baselineRequest.approval_scope.requires_fresh_confirmation_for_new_artifacts, true);
+  assert.match(pendingApprovals.assistant_message, /I will summarize the relevant file contents here/);
+  assert.match(pendingApprovals.assistant_message, /Current-state summary to approve/);
+  assert.match(pendingApprovals.assistant_message, /Scope of your answer: it applies only to Project context/);
 
   mustFail(["baseline", "approve", "--root", project, "--id", "BASELINE-INITIAL", "--actor-type", "human"], /requires --approval-source/);
   mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-INITIAL", ...humanApproval("Confirmed baseline for existing project")]);
   const approved = readJson(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json"));
   assert.equal(approved.status, "approved");
   assert.equal(approved.approvals.at(-1).approval_source, "explicit-user");
+  assert.equal(approved.approvals.at(-1).scope.applies_only_to_presented_subject, true);
+  assert.equal(approved.approvals.at(-1).scope.does_not_approve_future_artifacts, true);
 
   fs.appendFileSync(path.join(project, "README.md"), "\nChanged after baseline.\n");
   const status = JSON.parse(mustRun(["baseline", "status", "--root", project, "--id", "BASELINE-INITIAL", "--json"]).stdout);
@@ -697,7 +718,7 @@ test("capability profiles and recommendations can be approved and applied to con
   fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
   story(project, "ST-001");
   createApprovedTemplate(project, "technical-analysis");
-  mustRun([
+  const proposedProfile = JSON.parse(mustRun([
     "capability",
     "profile",
     "propose",
@@ -711,7 +732,19 @@ test("capability profiles and recommendations can be approved and applied to con
     "analysis",
     "--context-file",
     "package.json",
-  ]);
+    "--json",
+  ]).stdout);
+  assert.match(proposedProfile.assistant_message, /Tools and permissions profile/);
+  assert.equal(proposedProfile.approval_request.type, "capability_profile_approval");
+  assert.ok(proposedProfile.approval_request.review_items.some((item) => /What this is: a proposal for the kinds of tools/.test(item)));
+  const profileRequests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
+  const profileRequest = profileRequests.requests.find((request) => request.type === "capability_profile_approval");
+  assert.ok(profileRequest, "capability profile approval request missing");
+  assert.equal(profileRequest.subject_id, "CAP-PROFILE-ST-001");
+  assert.match(profileRequests.assistant_message, /Tools and permissions profile/);
+  assert.ok(profileRequest.review_items.some((item) => /What this is: a proposal for the kinds of tools/.test(item)));
+  assert.ok(profileRequest.review_items.some((item) => /Project signals found:/.test(item)));
+  assert.match(profileRequest.approval_meaning, /separate approval for the concrete tool recommendation/);
   mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   const recommendation = JSON.stringify({
     recommendations: [
@@ -730,7 +763,7 @@ test("capability profiles and recommendations can be approved and applied to con
     execution_policy_suggestions: { reasoning: "high", notes: ["Use high reasoning for architecture tradeoffs"] },
     decision_matrix: [{ option: "local repo", recommendation: "use" }]
   });
-  mustRun([
+  const proposedRecommendation = JSON.parse(mustRun([
     "capability",
     "recommend",
     "--root",
@@ -741,7 +774,19 @@ test("capability profiles and recommendations can be approved and applied to con
     "CAP-PROFILE-ST-001",
     "--recommendation-json",
     recommendation,
-  ]);
+    "--json",
+  ]).stdout);
+  assert.match(proposedRecommendation.assistant_message, /Tool choices for this work/);
+  assert.equal(proposedRecommendation.approval_request.type, "capability_recommendation_approval");
+  assert.ok(proposedRecommendation.approval_request.review_items.some((item) => /Recommended capabilities:/.test(item)));
+  const recommendationRequests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
+  const recommendationRequest = recommendationRequests.requests.find((request) => request.type === "capability_recommendation_approval");
+  assert.ok(recommendationRequest, "capability recommendation approval request missing");
+  assert.equal(recommendationRequest.subject_id, "CAP-REC-ST-001");
+  assert.match(recommendationRequests.assistant_message, /Tool choices for this work/);
+  assert.ok(recommendationRequest.review_items.some((item) => /What this is: a tool and permission choice/.test(item)));
+  assert.ok(recommendationRequest.review_items.some((item) => /Recommended capabilities:/.test(item)));
+  assert.match(recommendationRequest.approval_meaning, /separate approval for the brief itself/);
   mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", ...humanApproval("Approved capability recommendation")]);
   const contract = JSON.parse(mustRun([
     "contract",
@@ -913,6 +958,31 @@ test("technical analysis route suggests capability discovery when no profile exi
   });
   assert.ok(decision.blocking_reasons.includes("capability_profile_missing"));
   assert.ok(decision.next_commands.some((command) => command.includes("capability profile propose")));
+});
+
+test("technical assessment aliases route through the contract front door", () => {
+  const project = tmpProject("technical-assessment-alias");
+  initProject(project);
+  const decision = routeDecision(project, {
+    requested_action: "technical_assessment",
+    proposed_phase: "analysis",
+    artifact_type: "technical-analysis",
+  });
+  assert.equal(decision.route, "classify_artifact");
+  assert.equal(decision.status, "needs_confirmation");
+  assert.equal(decision.requires_confirmation, true);
+  assert.ok(decision.blocking_reasons.includes("capability_profile_missing"));
+
+  const start = routeDecision(project, {
+    requested_action: "initial_technical_assessment",
+    proposed_phase: "analysis",
+    artifact_type: "technical-analysis",
+  }, ["task", "start"]);
+  assert.equal(start.status, "needs_user_input");
+  assert.equal(start.execution_allowed, false);
+  assert.notEqual(start.contract_action, "normalize_request");
+  assert.ok(start.blocking_reasons.includes("contract_incomplete"));
+  assert.equal(start.contract_id, "contract-analysis-v1");
 });
 
 test("cache rebuild includes capability discovery sources", () => {
@@ -1501,7 +1571,7 @@ test("contract create asks before missing guidance or story output agreement", (
     "contract-ST-001-analysis",
     "--context-summary",
     "Analysis contract",
-  ], /missing agreed story output format/i);
+  ], /missing agreed output format for this story/i);
 
   mustFail([
     "contract",
@@ -1717,7 +1787,7 @@ test("contract create requires agreed output templates and approval requests sum
   const project = tmpProject("human-consent-gates");
   initProject(project);
   story(project, "ST-001");
-  mustRun([
+  const proposedTemplate = JSON.parse(mustRun([
     "output",
     "template",
     "propose",
@@ -1729,7 +1799,11 @@ test("contract create requires agreed output templates and approval requests sum
     "technical-analysis-v1",
     "--summary",
     "Technical analysis format",
-  ]);
+    "--json",
+  ]).stdout);
+  assert.match(proposedTemplate.assistant_message, /Assessment format \(technical-analysis-v1\)/);
+  assert.equal(proposedTemplate.approval_request.type, "output_template_approval");
+  assert.ok(proposedTemplate.approval_request.review_items.some((item) => /What this is: the proposed structure/.test(item)));
 
   mustFail([
     "contract",
@@ -1766,7 +1840,11 @@ test("contract create requires agreed output templates and approval requests sum
 
   const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
   assert.equal(requests.status, "needs_user_input");
-  assert.match(requests.assistant_message, /You do not need to know SDLC internals/);
+  assert.match(requests.assistant_message, /Plainly:/);
+  assert.match(requests.assistant_message, /workflow terms/);
+  assert.match(requests.assistant_message, /I will summarize the relevant file contents here/);
+  assert.match(requests.assistant_message, /approval applies only to the item or items shown/);
+  assert.doesNotMatch(requests.assistant_message, /blocking_reasons/);
   assert.match(requests.assistant_message, /You can answer in natural language/);
   assert.ok(requests.requests.some((request) => request.type === "output_template_approval" && request.subject_id === "technical-analysis-v1"));
   assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-001-analysis"));
@@ -1775,19 +1853,20 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(requests.requests.every((request) => request.title));
   assert.ok(requests.requests.every((request) => request.why_needed));
   assert.ok(requests.requests.every((request) => request.user_prompt));
+  assert.ok(requests.requests.every((request) => request.approval_scope?.cannot_approve_future_artifacts === true));
   assert.ok(requests.requests.every((request) => Array.isArray(request.review_items) && request.review_items.length > 0));
   assert.ok(requests.requests.some((request) => request.type === "contract_approval" && /Context:/.test(request.review_items.join(" "))));
   const outputTemplateRequest = requests.requests.find((request) => request.type === "output_template_approval");
-  assert.ok(outputTemplateRequest.review_items.some((item) => /Approval scope:/.test(item)));
-  assert.ok(outputTemplateRequest.review_items.some((item) => /Sections to approve:/.test(item)));
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Decision scope:/.test(item)));
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Assessment sections:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Template content to review:/.test(item)));
   const outputTemplateDeliveryIds = outputTemplateRequest.delivery_format_options.map((option) => option.id);
   assert.ok(outputTemplateDeliveryIds.includes("chat-summary"));
   assert.ok(outputTemplateDeliveryIds.includes("canonical-document"));
   assert.ok(outputTemplateDeliveryIds.includes("document-plus-chat-summary"));
   assert.ok(outputTemplateDeliveryIds.includes("detailed-findings"));
-  assert.match(outputTemplateRequest.recommended_delivery_format, /document-plus-chat-summary/);
-  assert.match(outputTemplateRequest.delivery_question, /How should Codex present/);
+  assert.match(outputTemplateRequest.recommended_delivery_format, /Project document plus chat summary/);
+  assert.match(outputTemplateRequest.delivery_question, /How should I present/);
   const contractApprovalRequest = requests.requests.find((request) => request.type === "contract_approval");
   assert.ok(contractApprovalRequest.delivery_format_options.some((option) => option.id === "executive-summary"));
 
@@ -1795,14 +1874,18 @@ test("contract create requires agreed output templates and approval requests sum
   assert.equal(requests.assistant_message_presentation.translate_to_chat_language, true);
   assert.equal(requests.assistant_message_presentation.presenter, "codex");
   assert.ok(requests.assistant_message_presentation.preserve_literals.includes("CLI commands"));
-  assert.match(requests.assistant_message_presentation.instruction, /Do not collapse/);
+  assert.match(requests.assistant_message_presentation.instruction, /plain product/);
+  assert.match(requests.assistant_message_presentation.instruction, /summarize the relevant contents/);
+  assert.match(requests.assistant_message_presentation.instruction, /Never reuse that approval/);
 
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
-  assert.match(plainRequests, /I am stopping here/);
-  assert.match(plainRequests, /What to review/);
-  assert.match(plainRequests, /Delivery \/ presentation options/);
-  assert.match(plainRequests, /What approval means/);
-  assert.match(plainRequests, /Question:/);
+  assert.match(plainRequests, /I need your decision/);
+  assert.match(plainRequests, /What I will use or produce/);
+  assert.match(plainRequests, /Scope of your answer:/);
+  assert.match(plainRequests, /How I can present the result/);
+  assert.match(plainRequests, /If you say yes/);
+  assert.match(plainRequests, /Decision needed:/);
+  assert.doesNotMatch(plainRequests, /Agent command/);
 
   const gate = JSON.parse(mustRun([
     "gate",
@@ -1813,7 +1896,7 @@ test("contract create requires agreed output templates and approval requests sum
     "ST-001",
     "--json",
   ]).stdout);
-  assert.match(gate.assistant_message, /You do not need to know SDLC internals/);
+  assert.match(gate.assistant_message, /Plainly:/);
   assert.equal(gate.assistant_message_source_language, "en");
   assert.equal(gate.assistant_message_presentation.translate_to_chat_language, true);
   assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
@@ -1846,8 +1929,8 @@ test("implementation output template approvals include code review delivery choi
   assert.ok(deliveryIds.includes("tests-and-verification"));
   assert.ok(deliveryIds.includes("no-code-summary"));
   assert.match(request.recommended_delivery_format, /changed-files-summary/);
-  assert.match(request.delivery_question, /changed-files-summary/);
-  assert.match(request.delivery_question, /diff-review/);
+  assert.match(request.delivery_question, /Changed files summary/);
+  assert.match(request.delivery_question, /Diff or patch review/);
 });
 
 test("trace attribution separates executor requester and authorizer in report queries", () => {

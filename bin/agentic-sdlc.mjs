@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.11";
+const VERSION = "0.4.18";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -917,19 +917,81 @@ function renderTaskStartAssistantMessage(decision) {
       decision.contract_id ? `Contract: ${decision.contract_id}.` : null,
     ].filter(Boolean).join("\n");
   }
+  const explanations = Array.from(new Set((decision.blocking_reasons || []).map(userFriendlyBlockingReason))).filter(Boolean);
   const lines = [
-    "I am stopping here because I need your confirmation or clarification before proceeding.",
-    "You do not need to know SDLC internals: I will explain what is missing and what you can answer.",
+    "I need one quick decision before I continue.",
+    userFriendlyTaskStartIntro(decision),
     "",
-    decision.questions?.length ? "What I need:" : null,
+    explanations.length ? "In plain language:" : null,
+    ...explanations.map((explanation) => `- ${explanation}`),
+    decision.questions?.length ? "What I need from you:" : null,
     ...(decision.questions || []).map((question) => `- ${question}`),
-    decision.blocking_reasons?.length ? `Blocking reason(s): ${decision.blocking_reasons.join(", ")}.` : null,
-    decision.next_commands?.length ? "Useful commands for the agent:" : null,
+    decision.next_commands?.length ? "Agent command hints, not something you need to run:" : null,
     ...(decision.next_commands || []).map((command) => `- ${command}`),
     "",
-    'You can answer naturally, for example "proceed", "I approve", or "change this point...".',
+    'You can answer naturally, for example "use README.md and src/ as context", "the proposed format is fine", or "change the scope to include X".',
   ];
   return lines.filter(Boolean).join("\n");
+}
+
+function userFriendlyTaskStartIntro(decision) {
+  switch (decision.contract_action) {
+    case "normalize_request":
+      return "I need to translate the request into a precise action before using the project workflow.";
+    case "initialize_sdlc":
+      return "This project has not been prepared yet, so I need to create or confirm its starting context first.";
+    case "create_or_revise_contract":
+    case "create_contract":
+      return "There is no agreed work brief for this step yet, so I need to confirm what I am allowed to do and what I should produce.";
+    case "clarify_contract":
+      return "The work brief is incomplete, so I need the project context or files that should guide the work before I produce an output.";
+    case "approve_contract":
+      return "I found a work brief, but you have not confirmed that it matches what you want me to do.";
+    case "confirm_start":
+      return "The work is defined, but I need your explicit go-ahead before starting it.";
+    case "revise_contract":
+      return "The work brief needs to be changed before this task can start.";
+    default:
+      return "I am pausing so I do not invent context, choose an output format, or start work without your decision.";
+  }
+}
+
+function userFriendlyBlockingReason(code) {
+  const explanations = {
+    active_claim_exists: "Someone or another agent is already working on the same story, so I should not edit over them.",
+    active_claim_expired: "A previous work claim is still recorded but expired; it needs cleanup before new work starts.",
+    approved_template_missing: "The structure of the output is not agreed yet. For an assessment, this means confirming the sections and level of detail before I write it.",
+    artifact_type_required: "I need to know what kind of output I should create, for example a technical assessment, test plan, or release note.",
+    capability_profile_missing: "I have not confirmed which project files, tools, skills, and external access are appropriate for this work.",
+    contract_incomplete: "The work brief is missing project-specific context, such as which files are trusted inputs or what boundaries I must respect.",
+    contract_needs_approval: "The work brief exists, but it has not been approved for execution.",
+    contract_negotiation_required: "I need an agreed work brief before producing durable work.",
+    contract_not_approved: "The work brief exists, but you still need to confirm it or ask for changes.",
+    contract_phase_mismatch: "The selected work brief is for a different kind of work, so it needs to be revised or replaced.",
+    contract_revision_requested: "You asked to revise the work brief before starting.",
+    invalid_canonical_intent: "The request was not normalized into a supported action.",
+    invalid_intent_json: "The structured request could not be read safely.",
+    kb_not_initialized: "The project context store has not been initialized yet.",
+    low_confidence: "The request is ambiguous enough that I should ask instead of guessing.",
+    missing_acceptance_criteria: "The story does not yet define observable success criteria.",
+    missing_context: "Important context is missing, so I need your answer before continuing.",
+    missing_contract: "There is no work brief for this step yet.",
+    needs_normalization: "The request is still raw natural language and needs to be normalized before the workflow can route it.",
+    output_already_linked: "An output already exists for this story and type; I need to know whether to reuse it, update it, or create a separate one.",
+    phase_skip_requires_confirmation: "Skipping a phase is a deliberate choice and needs explicit confirmation.",
+    route_requires_confirmation: "The requested action is clear, but starting it still needs your go-ahead.",
+    story_contract_missing: "The story does not yet have an agreed work brief.",
+    story_not_found: "The referenced story does not exist yet.",
+    story_reference_required: "I need to know which story this work belongs to.",
+    unknown_requested_action: "The normalized action is not one of the supported workflow actions.",
+    unknown_route: "The workflow could not map this request to a supported route.",
+  };
+  if (explanations[code]) {
+    return explanations[code];
+  }
+  return String(code || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function formatTaskStartDecision(decision) {
@@ -1173,6 +1235,12 @@ function normalizeRoutingConfidence(confidence) {
 }
 
 function defaultRouteActions() {
+  const technicalAnalysisAction = () => ({
+    route: "classify_artifact",
+    confirmation_key: "create_canonical_artifact",
+    default_artifact_type: "technical-analysis",
+    requires_artifact_type: true,
+  });
   return {
     initialize_project: { route: "init_project" },
     init_project: { route: "init_project" },
@@ -1218,12 +1286,13 @@ function defaultRouteActions() {
       default_artifact_type: "functional-analysis",
       requires_artifact_type: true,
     },
-    technical_analysis: {
-      route: "classify_artifact",
-      confirmation_key: "create_canonical_artifact",
-      default_artifact_type: "technical-analysis",
-      requires_artifact_type: true,
-    },
+    technical_analysis: technicalAnalysisAction(),
+    technical_assessment: technicalAnalysisAction(),
+    initial_technical_assessment: technicalAnalysisAction(),
+    project_technical_assessment: technicalAnalysisAction(),
+    project_assessment: technicalAnalysisAction(),
+    architecture_assessment: technicalAnalysisAction(),
+    technical_review: technicalAnalysisAction(),
     create_canonical_artifact: {
       route: "classify_artifact",
       confirmation_key: "create_canonical_artifact",
@@ -2213,6 +2282,8 @@ function onboardExistingProject(context, options) {
     id: options.id || "BASELINE-INITIAL",
     kind: options.kind || "existing-project",
   });
+  const baselineApprovalRequest = buildBaselineApprovalRequest(context, baseline.baseline);
+  const assistantMessage = renderApprovalRequestsAssistantMessage([baselineApprovalRequest]);
 
   output(
     options,
@@ -2223,6 +2294,9 @@ function onboardExistingProject(context, options) {
       baseline_path: baseline.baseline_path,
       report_path: baseline.report_path,
       baseline: baseline.baseline,
+      assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
+      approval_request: baselineApprovalRequest,
       next_commands: [
         `agentic-sdlc baseline status --id ${baseline.baseline.id}`,
         `agentic-sdlc baseline approve --id ${baseline.baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
@@ -2231,8 +2305,8 @@ function onboardExistingProject(context, options) {
     [
       initializedBefore ? "Existing SDLC KB found." : "Initialized SDLC KB.",
       `Proposed baseline ${baseline.baseline.id}`,
-      `Review: ${toProjectPath(context, baseline.report_path)}`,
-      "Approve only after the user confirms what is canonical.",
+      "",
+      ...assistantMessage.split("\n"),
     ],
   );
 }
@@ -2240,13 +2314,23 @@ function onboardExistingProject(context, options) {
 function proposeBaseline(context, options) {
   ensureInitialized(context);
   const result = createBaselineProposal(context, options);
+  const baselineApprovalRequest = buildBaselineApprovalRequest(context, result.baseline);
+  const assistantMessage = renderApprovalRequestsAssistantMessage([baselineApprovalRequest]);
   output(
     options,
-    { status: "proposed", baseline_path: result.baseline_path, report_path: result.report_path, baseline: result.baseline },
+    {
+      status: "proposed",
+      baseline_path: result.baseline_path,
+      report_path: result.report_path,
+      baseline: result.baseline,
+      assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
+      approval_request: baselineApprovalRequest,
+    },
     [
       `Proposed baseline ${result.baseline.id}`,
-      `Review: ${toProjectPath(context, result.report_path)}`,
-      `Approve with: agentic-sdlc baseline approve --id ${result.baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
+      "",
+      ...assistantMessage.split("\n"),
     ],
   );
 }
@@ -2427,6 +2511,8 @@ function collectApprovalRequests(context, options = {}) {
   const storyId = options.storyId || null;
   return [
     ...collectBaselineApprovalRequests(context),
+    ...collectCapabilityProfileApprovalRequests(context, storyId),
+    ...collectCapabilityRecommendationApprovalRequests(context, storyId),
     ...collectOutputTemplateApprovalRequests(context, storyId),
     ...collectContractClarificationRequests(context, storyId),
     ...collectContractApprovalRequests(context, storyId),
@@ -2442,14 +2528,16 @@ function renderApprovalRequestsAssistantMessage(requests) {
     ].join("\n");
   }
   return [
-    "I am stopping here because I need your explicit decision before proceeding.",
-    "You do not need to know SDLC internals: below I explain what I am asking for, why it matters, what approval means, and when you should ask for changes instead.",
+    "I need your decision before I continue.",
+    "Plainly: I am checking that I use the right project context, produce the output in the right format, and stay inside the work you actually want. You do not need to know the workflow terms; answer the questions in normal language.",
+    "I will summarize the relevant file contents here. Links and file paths are supporting evidence, not homework for you.",
+    "Important: your approval applies only to the item or items shown in this message. If I create a new template, capability profile, recommendation, work brief, or start confirmation later, I must show it and ask again.",
     "",
     ...requests.flatMap((request, index) => formatHumanApprovalRequest(request, index + 1)),
     "You can answer in natural language, for example:",
-    '- "I approve item 1"',
-    '- "change the contract: I also want X"',
-    '- "I do not approve yet; first clarify Y"',
+    '- "Use README.md, package.json, and src/ as the trusted context; the proposed assessment format is fine."',
+    '- "The sections are fine, but also include deployment risks."',
+    '- "Do not start yet; first explain item 2 in simpler terms."',
   ].join("\n");
 }
 
@@ -2471,7 +2559,7 @@ function assistantMessagePresentationFields() {
         "schema keys",
       ],
       instruction:
-        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Do not collapse the message into a bare approval question: show the review items, delivery/presentation options, and enough template or contract structure for the user to understand what they are approving.",
+        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Explain the decision in plain product/work terms first. Do not expose blocking_reasons, status codes, or schema keys as the primary message; keep them only as technical detail if needed. Do not send the user to inspect files manually as the main path: summarize the relevant contents of baseline reports, templates, contracts, and source lists directly in chat, then provide file paths only as supporting evidence. Do not collapse the message into a bare approval question: show what will be used as context, what output format is being agreed, what work is being authorized, and what the user can answer naturally. Approval scope is strict: a user's yes, ok, or approval applies only to the artifact or decision that was just shown and summarized. Never reuse that approval for later artifacts, capability profiles, recommendations, templates, contracts, or task start confirmations; show each new item and ask again.",
     },
   };
 }
@@ -2484,38 +2572,319 @@ function attachAssistantMessagePresentation(payload) {
 function collectBaselineApprovalRequests(context) {
   return readBaselines(context)
     .filter((baseline) => !["approved"].includes(String(baseline.status || "").toLowerCase()))
-    .map((baseline) => ({
-      id: `approve-baseline-${baseline.id}`,
-      type: "baseline_approval",
-      status: "needs_explicit_user_approval",
-      summary: `Approve or revise baseline ${baseline.id} before treating inferred project facts as canonical.`,
-      subject_id: baseline.id,
-      subject_status: baseline.status || null,
-      sources: [
-        `.sdlc/baseline/${baseline.id}.json`,
-        `.sdlc/baseline/${baseline.id}-current-state.md`,
-      ].filter((source) => fs.existsSync(path.join(context.root, source))),
-      ...humanApprovalFields({
-        title: `Initial baseline ${baseline.id}`,
-        why_needed: "The baseline turns the observed project state into trusted context for later SDLC steps.",
-        review_items: [
-          baseline.summary ? `Summary: ${baseline.summary}` : null,
-          baseline.repository_snapshot?.detected_stack?.length
-            ? `Detected stack: ${baseline.repository_snapshot.detected_stack.map((item) => item.name || item.type).filter(Boolean).join(", ")}`
-            : null,
-          baseline.source_paths?.length ? `Sources reviewed: ${baseline.source_paths.join(", ")}` : null,
-          baseline.open_questions?.length ? `Open questions: ${baseline.open_questions.join(" ")}` : null,
-        ],
-        approval_meaning: "If you approve it, these inferred facts can be used as canonical context by the plugin and agents.",
-        approve_if: "Approve only if the project description and sources are accurate enough to guide the work.",
-        change_if: "Ask for changes if important sources are missing, the stack is wrong, or you do not want this state treated as canonical.",
-        after_approval: `Then the approval can be recorded with baseline approve for ${baseline.id}.`,
-        user_prompt: `Do you approve baseline ${baseline.id} as the initial canonical project state, or should anything be corrected first?`,
-        approval_phrase: `I approve baseline ${baseline.id} as the canonical project state.`,
-      }),
-      suggested_question: `Review baseline ${baseline.id}. Do you approve it as canonical, or should it be revised?`,
-      suggested_command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`,
-    }));
+    .map((baseline) => buildBaselineApprovalRequest(context, baseline));
+}
+
+function collectCapabilityProfileApprovalRequests(context, storyId = null) {
+  return readCapabilityProfiles(context)
+    .filter((profile) => profile.status !== "approved")
+    .filter((profile) => capabilityRecordMatchesStory(context, profile, storyId))
+    .map((profile) => buildCapabilityProfileApprovalRequest(context, profile));
+}
+
+function buildCapabilityProfileApprovalRequest(context, profile) {
+  const profilePath = toProjectPath(context, capabilityProfilePath(context, profile.id));
+  return {
+    id: `approve-capability-profile-${profile.id}`,
+    type: "capability_profile_approval",
+    status: "needs_explicit_user_approval",
+    summary: `Approve or revise capability profile ${profile.id} before choosing tools and permissions for the work.`,
+    subject_id: profile.id,
+    subject_status: profile.status || null,
+    story_id: profile.subject?.story_id || null,
+    phase: profile.subject?.phase || null,
+    sources: [profilePath, ...(profile.source_paths || [])].filter(Boolean),
+    ...humanApprovalFields({
+      title: `Tools and permissions profile (${profile.id})`,
+      why_needed: "Before I choose tools for the assessment, I need you to confirm the boundaries: which project evidence I can rely on and what kind of local checks are acceptable.",
+      review_items: [
+        "What this is: a proposal for the kinds of tools, files, and local checks I may use. It is not the assessment content and it does not approve the final work brief.",
+        `Work scope: ${formatCapabilitySubject(profile.subject)}`,
+        profile.detected_stack?.length ? `Project signals found: ${formatDetectedStackForUser(profile.detected_stack)}` : null,
+        profile.evidence?.length ? `Evidence I used to build this profile: ${formatCapabilityEvidenceForUser(profile.evidence)}` : null,
+        profile.constraints?.length ? `Boundaries already recorded: ${profile.constraints.join("; ")}` : null,
+        profile.source_paths?.length ? `Source files behind this proposal: ${formatLimitedList(profile.source_paths, 10)}` : null,
+        profile.confidence !== undefined ? `Confidence: ${profile.confidence}` : null,
+      ],
+      approval_meaning: "If you approve it, I can use this as the agreed boundary for tool selection. I still need a separate approval for the concrete tool recommendation and for the work brief.",
+      approve_if: "Approve if local repo/document reading and the detected project signals are accurate enough for this assessment.",
+      change_if: "Ask for changes if I should not run tests, should not use certain files, should include a Word/document skill, or should avoid any tool category.",
+      after_approval: `Then I can create or approve a concrete tool recommendation based on ${profile.id}.`,
+      user_prompt: `Can I use this tools-and-permissions profile ${profile.id}, or should I change the allowed evidence, checks, or tool boundaries first?`,
+      approval_phrase: `Use tools-and-permissions profile ${profile.id}.`,
+    }),
+    suggested_question: `After reading the explanation above, do you approve tools-and-permissions profile ${profile.id}, or should it be revised?`,
+    suggested_command: `agentic-sdlc capability profile approve --id ${profile.id} --actor-type human --approval-source explicit-user --summary "<user-approved capability profile>"`,
+  };
+}
+
+function collectCapabilityRecommendationApprovalRequests(context, storyId = null) {
+  return readCapabilityRecommendations(context)
+    .filter((recommendation) => recommendation.status !== "approved" || capabilityRecommendationNeedsInstallApproval(recommendation))
+    .filter((recommendation) => capabilityRecommendationMatchesStory(context, recommendation, storyId))
+    .map((recommendation) => buildCapabilityRecommendationApprovalRequest(context, recommendation));
+}
+
+function buildCapabilityRecommendationApprovalRequest(context, recommendation) {
+  const recommendationPath = toProjectPath(context, capabilityRecommendationPath(context, recommendation.id));
+  const needsInstallApproval = capabilityRecommendationNeedsInstallApproval(recommendation);
+  return {
+    id: `approve-capability-recommendation-${recommendation.id}`,
+    type: "capability_recommendation_approval",
+    status: needsInstallApproval ? "needs_install_approval" : "needs_explicit_user_approval",
+    summary: `Approve or revise capability recommendation ${recommendation.id} before applying tools and permissions to a contract.`,
+    subject_id: recommendation.id,
+    subject_status: recommendation.status || null,
+    sources: [recommendationPath, ...(recommendation.source_paths || [])].filter(Boolean),
+    ...humanApprovalFields({
+      title: `Tool choices for this work (${recommendation.id})`,
+      why_needed: "This is the concrete list of skills, tools, connectors, models, permissions, and installs I would be allowed to use for the work.",
+      review_items: [
+        "What this is: a tool and permission choice. It does not approve the assessment format, the work brief, the final document, or task start.",
+        recommendation.profile_id ? `Based on tools-and-permissions profile: ${recommendation.profile_id}` : null,
+        recommendation.recommendations?.length ? `Recommended capabilities: ${formatCapabilityRecommendationsForUser(recommendation.recommendations)}` : null,
+        formatCapabilityPolicyPatchForUser(recommendation.policy_patch),
+        recommendation.bindings?.length ? `Specific bindings or targets: ${formatCapabilityBindingsForUser(recommendation.bindings)}` : null,
+        recommendation.open_questions?.length ? `Questions I still need answered: ${recommendation.open_questions.join(" ")}` : "Missing information: none listed; this is waiting for approval or requested changes.",
+        needsInstallApproval ? `Install decision needed: ${formatCapabilityInstallNeeds(recommendation.recommendations)}` : "Install decision: no new installation approval is needed.",
+      ],
+      approval_meaning: "If you approve it, I can attach these tool and permission choices to the work brief. I still need a separate approval for the brief itself before producing the assessment.",
+      approve_if: "Approve if the listed tools, permissions, targets, and install choices are acceptable for this work.",
+      change_if: "Ask for changes if you want to remove a tool, forbid installs, avoid running tests, add Word document generation, or restrict local filesystem access.",
+      after_approval: `Then I can use ${recommendation.id} when creating or updating the work brief.`,
+      user_prompt: `Can I use these tool choices ${recommendation.id}, or should I change tools, permissions, installs, or targets first?`,
+      approval_phrase: `Use tool choices ${recommendation.id}.`,
+    }),
+    suggested_question: `After reading the explanation above, do you approve tool choices ${recommendation.id}, or should they be revised?`,
+    suggested_command: `agentic-sdlc capability approve --id ${recommendation.id} --actor-type human --approval-source explicit-user --summary "<user-approved capability recommendation>"${needsInstallApproval ? " --approve-install" : ""}`,
+  };
+}
+
+function capabilityRecordMatchesStory(context, record, storyId = null) {
+  if (!storyId) {
+    return true;
+  }
+  return !record.subject?.story_id || record.subject.story_id === storyId || record.subject?.scope === "project";
+}
+
+function capabilityRecommendationMatchesStory(context, recommendation, storyId = null) {
+  if (!storyId) {
+    return true;
+  }
+  try {
+    const profile = readCapabilityProfile(context, recommendation.profile_id);
+    return capabilityRecordMatchesStory(context, profile, storyId);
+  } catch {
+    return true;
+  }
+}
+
+function capabilityRecommendationNeedsInstallApproval(recommendation) {
+  return (recommendation.recommendations || []).some((item) => item.install_required && !item.install_approved);
+}
+
+function buildBaselineApprovalRequest(context, baseline) {
+  const baselinePath = `.sdlc/baseline/${baseline.id}.json`;
+  const reportPath = `.sdlc/baseline/${baseline.id}-current-state.md`;
+  const reportHeadings = readProjectMarkdownHeadings(context, reportPath, 8);
+  const reportExcerpt = readProjectFileExcerpt(context, reportPath, 900);
+  const currentStateSummary = formatBaselineCurrentStateSummary(baseline, reportExcerpt);
+  const sources = [baselinePath, reportPath].filter((source) => fs.existsSync(path.join(context.root, source)));
+  return {
+    id: `approve-baseline-${baseline.id}`,
+    type: "baseline_approval",
+    status: "needs_explicit_user_approval",
+    summary: `Approve or revise baseline ${baseline.id} before treating inferred project facts as canonical.`,
+    subject_id: baseline.id,
+    subject_status: baseline.status || null,
+    sources,
+    ...humanApprovalFields({
+      title: `Project context (${baseline.id})`,
+      why_needed: "I inspected the project and inferred some facts. Before I rely on them, you should confirm they are accurate enough for this work.",
+      review_items: [
+        baseline.summary ? `Project summary I inferred: ${baseline.summary}` : null,
+        formatBaselineDetectedStack(baseline),
+        formatBaselineImportedDocuments(baseline),
+        formatBaselineKeyFiles(baseline),
+        reportHeadings.length ? `Current-state report covers: ${reportHeadings.join(", ")}` : null,
+        currentStateSummary ? `Current-state summary to approve: ${currentStateSummary}` : null,
+        baseline.source_paths?.length ? `Evidence files used: ${formatLimitedList(baseline.source_paths, 12)}` : null,
+        baseline.assumptions?.length ? `Assumptions I recorded: ${baseline.assumptions.join(" ")}` : null,
+        baseline.open_questions?.length ? `Open questions before approval: ${baseline.open_questions.join(" ")}` : null,
+      ],
+      approval_meaning: "If you approve it, I can use these project facts as trusted context instead of asking again or guessing.",
+      approve_if: "Approve if the project summary, stack, documents, important files, assumptions, and open questions are accurate enough for the work you requested.",
+      change_if: "Ask for changes if sources are missing, the inferred stack is wrong, the project description is misleading, or you want to add or remove canonical facts.",
+      after_approval: `Then I can treat ${baseline.id} as trusted project context.`,
+      user_prompt: `Can I use the inferred project context ${baseline.id}, or should I correct it first?`,
+      approval_phrase: `Use project context ${baseline.id}.`,
+    }),
+    suggested_question: `After reading the summary above, do you approve baseline ${baseline.id} as canonical, or should it be revised?`,
+    suggested_command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`,
+  };
+}
+
+function formatBaselineCurrentStateSummary(baseline, fallback = null) {
+  const stack = (baseline.repository_snapshot?.detected_stack || [])
+    .slice(0, 6)
+    .map((item) => item.name || item.type)
+    .filter(Boolean);
+  const keyFiles = (baseline.repository_snapshot?.key_files || [])
+    .slice(0, 8)
+    .map((item) => item.path)
+    .filter(Boolean);
+  const documents = (baseline.imported_documents || [])
+    .slice(0, 5)
+    .map((item) => item.path)
+    .filter(Boolean);
+  const caveats = normalizeListValue(baseline.inferred_context?.caveats || [], []).slice(0, 2);
+  const questions = normalizeListValue(baseline.open_questions || [], []).slice(0, 3);
+  const parts = [
+    baseline.summary ? `summary: ${baseline.summary}` : null,
+    stack.length ? `detected stack: ${stack.join(", ")}` : null,
+    keyFiles.length ? `key files: ${keyFiles.join(", ")}` : null,
+    documents.length ? `documents: ${documents.join(", ")}` : null,
+    questions.length ? `open questions: ${questions.join(" ")}` : null,
+    caveats.length ? `caveats: ${caveats.join(" ")}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+function formatBaselineDetectedStack(baseline) {
+  const stack = baseline.repository_snapshot?.detected_stack || [];
+  if (!stack.length) {
+    return null;
+  }
+  const entries = stack
+    .slice(0, 8)
+    .map((item) => [item.name || item.type, item.source_path ? `from ${item.source_path}` : null].filter(Boolean).join(" "))
+    .filter(Boolean);
+  return entries.length ? `Technology signals I found: ${formatLimitedList(entries, 8)}` : null;
+}
+
+function formatBaselineImportedDocuments(baseline) {
+  const documents = Array.isArray(baseline.imported_documents) ? baseline.imported_documents : [];
+  if (!documents.length) {
+    return null;
+  }
+  const entries = documents
+    .slice(0, 5)
+    .map((document) => document.excerpt ? `${document.path}: ${compactText(document.excerpt, 180)}` : document.path)
+    .filter(Boolean);
+  return entries.length ? `Documents I read: ${formatLimitedList(entries, 5)}` : null;
+}
+
+function formatBaselineKeyFiles(baseline) {
+  const keyFiles = baseline.repository_snapshot?.key_files || [];
+  if (!keyFiles.length) {
+    return null;
+  }
+  const entries = keyFiles.slice(0, 10).map((item) => item.path).filter(Boolean);
+  return entries.length ? `Important project files or folders detected: ${formatLimitedList(entries, 10)}` : null;
+}
+
+function formatLimitedList(values, maxItems = 8) {
+  const items = normalizeListValue(values, []).filter(Boolean);
+  const visible = items.slice(0, maxItems);
+  const hidden = Math.max(0, items.length - visible.length);
+  return `${visible.join(", ")}${hidden ? `, plus ${hidden} more` : ""}`;
+}
+
+function formatCapabilitySubject(subject = {}) {
+  const parts = [
+    subject.scope ? `scope ${subject.scope}` : null,
+    subject.phase ? `phase ${subject.phase}` : null,
+    subject.story_id ? `work item ${subject.story_id}` : null,
+    subject.requirement_ids?.length ? `requirements ${subject.requirement_ids.join(", ")}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "project-level work";
+}
+
+function formatDetectedStackForUser(stack = []) {
+  const entries = stack
+    .slice(0, 10)
+    .map((item) => [item.name || item.type, item.source_path ? `from ${item.source_path}` : null].filter(Boolean).join(" "))
+    .filter(Boolean);
+  return entries.length ? formatLimitedList(entries, 10) : "none detected";
+}
+
+function formatCapabilityEvidenceForUser(evidence = []) {
+  const entries = evidence
+    .slice(0, 10)
+    .map((item) => {
+      const label = [item.type || "evidence", item.path ? `from ${item.path}` : null].filter(Boolean).join(" ");
+      return item.summary ? `${label}: ${compactText(item.summary, 140)}` : label;
+    })
+    .filter(Boolean);
+  return entries.length ? formatLimitedList(entries, 10) : "no evidence listed";
+}
+
+function formatCapabilityRecommendationsForUser(recommendations = []) {
+  const entries = recommendations
+    .slice(0, 10)
+    .map((item) => {
+      const permissionText = item.permissions?.length ? ` permissions ${item.permissions.join("/")}` : "";
+      const installText = item.install_required ? " requires install approval" : " no install";
+      const purposeText = item.purpose ? ` - ${compactText(item.purpose, 120)}` : "";
+      return `${item.type}:${item.name} (${item.availability || "unknown"};${permissionText}${installText})${purposeText}`;
+    })
+    .filter(Boolean);
+  return entries.length ? formatLimitedList(entries, 10) : "no concrete capabilities listed";
+}
+
+function formatCapabilityPolicyPatchForUser(policy = null) {
+  const normalized = buildCapabilityPolicy(policy);
+  const group = (name) => normalized[name] || emptyCapabilitySet();
+  const required = [
+    ...group("skills").required.map((name) => `skill:${name}`),
+    ...group("mcp").required.map((name) => `mcp:${name}`),
+    ...group("tools").required.map((name) => `tool:${name}`),
+    ...group("plugins").required.map((name) => `plugin:${name}`),
+    ...group("connectors").required.map((name) => `connector:${name}`),
+    ...group("models").required.map((name) => `model:${name}`),
+  ];
+  const allowed = [
+    ...group("skills").allowed.map((name) => `skill:${name}`),
+    ...group("mcp").allowed.map((name) => `mcp:${name}`),
+    ...group("tools").allowed.map((name) => `tool:${name}`),
+    ...group("plugins").allowed.map((name) => `plugin:${name}`),
+    ...group("connectors").allowed.map((name) => `connector:${name}`),
+    ...group("models").allowed.map((name) => `model:${name}`),
+  ];
+  const forbidden = [
+    ...group("skills").forbidden.map((name) => `skill:${name}`),
+    ...group("mcp").forbidden.map((name) => `mcp:${name}`),
+    ...group("tools").forbidden.map((name) => `tool:${name}`),
+    ...group("plugins").forbidden.map((name) => `plugin:${name}`),
+    ...group("connectors").forbidden.map((name) => `connector:${name}`),
+    ...group("models").forbidden.map((name) => `model:${name}`),
+  ];
+  return [
+    required.length ? `Required tools/capabilities: ${formatLimitedList(required, 8)}` : null,
+    allowed.length ? `Allowed tools/capabilities: ${formatLimitedList(allowed, 8)}` : null,
+    forbidden.length ? `Forbidden tools/capabilities: ${formatLimitedList(forbidden, 8)}` : null,
+    normalized.approval_required_for.length ? `Extra approval required for: ${formatLimitedList(normalized.approval_required_for, 8)}` : null,
+  ].filter(Boolean).join(" | ") || null;
+}
+
+function formatCapabilityBindingsForUser(bindings = []) {
+  const entries = bindings
+    .slice(0, 8)
+    .map((binding) => {
+      const permissions = binding.permissions?.length ? ` permissions ${binding.permissions.join("/")}` : "";
+      const target = binding.target && Object.keys(binding.target).length ? ` target ${compactText(JSON.stringify(binding.target), 120)}` : "";
+      return `${binding.type}:${binding.name}${binding.binding_id ? ` (${binding.binding_id})` : ""}${permissions}${target}`;
+    })
+    .filter(Boolean);
+  return entries.length ? formatLimitedList(entries, 8) : "no specific bindings";
+}
+
+function formatCapabilityInstallNeeds(recommendations = []) {
+  const installs = (recommendations || [])
+    .filter((item) => item.install_required && !item.install_approved)
+    .map((item) => `${item.type}:${item.name}`)
+    .filter(Boolean);
+  return installs.length ? formatLimitedList(installs, 8) : "no pending installs";
 }
 
 function collectOutputTemplateApprovalRequests(context, storyId = null) {
@@ -2527,43 +2896,46 @@ function collectOutputTemplateApprovalRequests(context, storyId = null) {
   return (registry.templates || [])
     .filter((template) => !relevantTemplateIds || relevantTemplateIds.has(template.id) || template.status !== "approved")
     .filter((template) => template.status !== "approved")
-    .map((template) => {
-      const templateExcerpt = template.path ? readProjectFileExcerpt(context, template.path, 1200) : null;
-      const templateHeadings = template.path ? readProjectMarkdownHeadings(context, template.path, 10) : [];
-      return {
-        id: `approve-output-template-${template.id}`,
-        type: "output_template_approval",
-        status: "needs_explicit_user_approval",
-        summary: `Agree output format ${template.id} for ${template.type} before using it as a contract output.`,
-        subject_id: template.id,
-        subject_status: template.status || null,
-        artifact_type: template.type || null,
-        sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
-        ...humanApprovalFields({
-          title: `Output format ${template.id}`,
-          why_needed: "Before durable outputs are produced or linked, we need to agree on the format agents will use.",
-          review_items: [
-            `Approval scope: you are approving the reusable document structure for ${template.type || "this"} outputs, not approving the final content of any analysis.`,
-            `Output type: ${template.type || "unknown"}`,
-            template.summary ? `Summary: ${template.summary}` : null,
-            templateHeadings.length ? `Sections to approve: ${templateHeadings.join(" > ")}` : null,
-            template.path ? `Template file: ${template.path}` : null,
-            `Template content to review: ${templateExcerpt || "unavailable"}`,
-          ],
-          delivery_format_options: deliveryFormatOptionsForOutput(template.type),
-          recommended_delivery_format: recommendedDeliveryFormatForOutput(template.type),
-          delivery_question: deliveryQuestionForOutput(template.type),
-          approval_meaning: "If you approve it, this template becomes the official reusable format for that output type; final outputs still need their own review and gate evidence.",
-          approve_if: "Approve only if the sections, required evidence, and detail level are the structure you want agents to use repeatedly.",
-          change_if: "Ask for changes if you want different sections, more detail, less detail, a different format, or more template content before deciding.",
-          after_approval: `Then contracts can reference ${template.id} as an approved output format.`,
-          user_prompt: `After reviewing the structure above, do you approve output format ${template.id} for ${template.type} outputs, or should the structure change?`,
-          approval_phrase: `I approve output format ${template.id} for ${template.type}.`,
-        }),
-        suggested_question: `After reviewing the template structure, do you approve output format ${template.id} for ${template.type}?`,
-        suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
-      };
-    });
+    .map((template) => buildOutputTemplateApprovalRequest(context, template));
+}
+
+function buildOutputTemplateApprovalRequest(context, template) {
+  const templateExcerpt = template.path ? readProjectFileExcerpt(context, template.path, 1200) : null;
+  const templateHeadings = template.path ? readProjectMarkdownHeadings(context, template.path, 10) : [];
+  return {
+    id: `approve-output-template-${template.id}`,
+    type: "output_template_approval",
+    status: "needs_explicit_user_approval",
+    summary: `Agree output format ${template.id} for ${template.type} before using it as a contract output.`,
+    subject_id: template.id,
+    subject_status: template.status || null,
+    artifact_type: template.type || null,
+    sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
+    ...humanApprovalFields({
+      title: `Assessment format (${template.id})`,
+      why_needed: "Before I write the assessment, I need to confirm what sections and level of detail you expect.",
+      review_items: [
+        "What this is: the proposed structure and delivery style for the assessment. It does not approve the final assessment content or the work brief.",
+        `Decision scope: this only approves the document structure for ${template.type || "this"} outputs. It does not approve the final assessment content.`,
+        `Output type: ${template.type || "unknown"}`,
+        template.summary ? `Summary: ${template.summary}` : null,
+        templateHeadings.length ? `Assessment sections: ${templateHeadings.join(" > ")}` : null,
+        template.path ? `Template file: ${template.path}` : null,
+        `Template content to review: ${templateExcerpt || "unavailable"}`,
+      ],
+      delivery_format_options: deliveryFormatOptionsForOutput(template.type),
+      recommended_delivery_format: recommendedDeliveryFormatForOutput(template.type),
+      delivery_question: deliveryQuestionForOutput(template.type),
+      approval_meaning: "If you approve it, I can write the assessment using this structure. You will still be able to review the actual content afterwards.",
+      approve_if: "Approve if these sections match the assessment you expect.",
+      change_if: "Ask for changes if you want different sections, more detail, less detail, or a different presentation.",
+      after_approval: `Then I can use ${template.id} as the assessment format.`,
+      user_prompt: `Is this assessment format OK, or should I change the sections before writing it?`,
+      approval_phrase: `The assessment format ${template.id} is OK.`,
+    }),
+    suggested_question: `After reviewing the template structure, do you approve output format ${template.id} for ${template.type}?`,
+    suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
+  };
 }
 
 function collectContractApprovalRequests(context, storyId = null) {
@@ -2581,18 +2953,18 @@ function collectContractApprovalRequests(context, storyId = null) {
       phase: contract.phase || null,
       sources: [contract.__relative_path],
       ...humanApprovalFields({
-        title: `${capitalizeLabel(contract.phase)} contract ${contract.id}`,
-        why_needed: "The contract defines what the agent may do in this phase, the boundaries, expected outputs, and validation criteria.",
+        title: `Work brief (${contract.id})`,
+        why_needed: "This is the short operating brief for the work: what I should do, what context to use, what output to produce, and what boundaries to respect.",
         review_items: describeContractForHuman(contract),
         delivery_format_options: deliveryFormatOptionsForContract(contract),
         recommended_delivery_format: recommendedDeliveryFormatForContract(contract),
         delivery_question: deliveryQuestionForContract(contract),
-        approval_meaning: "If you approve it, you authorize the agent to proceed under this contract. You are not automatically approving final outputs.",
-        approve_if: "Approve if the objective, context, boundaries, tools, and expected outputs match what you want the agent to do.",
-        change_if: "Ask for changes if the scope is ambiguous, criteria are missing, outputs are not what you want, or you want to change how the work is done.",
+        approval_meaning: "If you approve it, I can start the work under this brief. You are not approving the final result yet.",
+        approve_if: "Approve if the objective, context, boundaries, tools, and expected output match what you want.",
+        change_if: "Ask for changes if the scope is unclear, important files are missing, or the output is not what you want.",
         after_approval: `Then the step can start, and outputs must still follow the approved template.`,
-        user_prompt: `Do you approve contract ${contract.id} for the ${contract.phase} phase, or should scope, outputs, or criteria change?`,
-        approval_phrase: `I approve contract ${contract.id} for the ${contract.phase} phase.`,
+        user_prompt: `Can I use this work brief, or should I change scope, context, output, or criteria first?`,
+        approval_phrase: `Use work brief ${contract.id}.`,
       }),
       suggested_question: `Review contract ${contract.id}. Do you approve this phase contract, or should it be changed?`,
       suggested_command: `agentic-sdlc contract approve --id ${contract.id} --actor-type human --approval-source explicit-user --summary "<user-approved contract>"`,
@@ -2619,17 +2991,17 @@ function collectContractClarificationRequests(context, storyId = null) {
       gaps: gaps.map((gap) => gap.code),
       sources: [contract.__relative_path],
       ...humanApprovalFields({
-        title: `Missing information for ${contract.id}`,
-        why_needed: "The contract does not yet have enough context to guide the phase without inventing details.",
+        title: `Missing context for the work brief (${contract.id})`,
+        why_needed: "The brief does not yet say enough about the project context. I need that before I can produce useful work without inventing details.",
         review_items: [
           ...describeContractForHuman(contract),
-          ...gaps.map((gap) => `Clarify: ${gap.summary}`),
+          ...gaps.map((gap) => `Missing: ${gap.summary}`),
         ],
-        approval_meaning: "This is not an approval yet: it needs an answer or a contract change.",
+        approval_meaning: "This is not an approval yet. It is a request for missing context.",
         approve_if: null,
-        change_if: "Answer the missing questions or ask the agent to rewrite the contract with more context.",
+        change_if: "Answer with the files or facts I should use, or ask me to rewrite the brief with different context.",
         after_approval: "After clarification, the contract can be proposed again for explicit approval.",
-        user_prompt: `Before approving ${contract.id}, please clarify: ${gaps.map((gap) => gap.question).join(" ")}`,
+        user_prompt: `Which files, facts, constraints, or decisions should guide this work? ${gaps.map((gap) => gap.question).join(" ")}`,
       }),
       suggested_question: `Before approving ${contract.id}, please provide: ${gaps.map((gap) => gap.question).join(" ")}`,
     }));
@@ -2703,11 +3075,21 @@ function humanApprovalFields(fields = {}) {
     recommended_delivery_format: fields.recommended_delivery_format || null,
     delivery_question: fields.delivery_question || null,
     approval_meaning: fields.approval_meaning || null,
+    approval_scope: normalizeApprovalRequestScope(fields.approval_scope),
     approve_if: fields.approve_if || null,
     change_if: fields.change_if || null,
     after_approval: fields.after_approval || null,
     user_prompt: fields.user_prompt || null,
     approval_phrase: fields.approval_phrase || null,
+  };
+}
+
+function normalizeApprovalRequestScope(scope = null) {
+  return {
+    applies_only_to_presented_item: true,
+    cannot_approve_future_artifacts: true,
+    requires_fresh_confirmation_for_new_artifacts: true,
+    ...(scope && typeof scope === "object" ? scope : {}),
   };
 }
 
@@ -2739,7 +3121,7 @@ function normalizeDeliveryFormatOptions(options = []) {
 
 function formatDeliveryFormatOption(option) {
   return [
-    `${option.id}: ${option.label}`,
+    option.label,
     option.description ? ` - ${option.description}` : null,
     option.when_to_use ? ` Use when: ${option.when_to_use}` : null,
   ].filter(Boolean).join("");
@@ -2755,13 +3137,13 @@ function deliveryFormatOptionsForOutput(artifactType = "", phase = null) {
     },
     {
       id: "canonical-document",
-      label: "Canonical document",
-      description: "A durable Markdown artifact under .sdlc/ that follows the approved template and can be linked in gates.",
+      label: "Project document",
+      description: "A saved Markdown document that can be reviewed and reused later.",
     },
     {
       id: "document-plus-chat-summary",
-      label: "Canonical document plus chat summary",
-      description: "Create the durable artifact and also explain the outcome briefly in chat.",
+      label: "Project document plus chat summary",
+      description: "Create the saved document and also explain the outcome briefly in chat.",
     },
     {
       id: "decision-risk-action-list",
@@ -2922,15 +3304,15 @@ function recommendedDeliveryFormatForOutput(artifactType = "", phase = null) {
     return "release-notes + deployment-checklist + handoff-summary.";
   }
   if (matchesAny(normalized, ["design", "architecture", "api", "ux", "ui"])) {
-    return "canonical-document + chat-summary, with design-rationale and interface-contracts when implementation will follow.";
+    return "Project document plus chat summary, with design rationale and interface contracts when implementation will follow.";
   }
-  return "document-plus-chat-summary: create the canonical artifact and also provide a concise chat summary.";
+  return "Project document plus chat summary: save the assessment and provide a concise chat summary.";
 }
 
 function deliveryQuestionForOutput(artifactType = "", phase = null) {
-  const label = artifactType || phase || "this output";
-  const optionIds = deliveryFormatOptionsForOutput(artifactType, phase).map((option) => option.id).join(", ");
-  return `How should Codex present ${label} results to you? Choose one option or combine several: ${optionIds}. You can also ask for a custom delivery format.`;
+  const label = humanOutputLabel(artifactType || phase || "this output");
+  const optionLabels = deliveryFormatOptionsForOutput(artifactType, phase).map((option) => option.label).join(", ");
+  return `How should I present ${label} results to you? Choose one option or combine several: ${optionLabels}. You can also ask for a custom delivery format.`;
 }
 
 function contractDeliveryDescriptor(contract) {
@@ -2950,31 +3332,157 @@ function recommendedDeliveryFormatForContract(contract) {
 
 function deliveryQuestionForContract(contract) {
   const subject = contract.story_id || "this project";
-  const optionIds = deliveryFormatOptionsForContract(contract).map((option) => option.id).join(", ");
-  return `How should Codex present the ${contract.phase} result for ${subject}? Choose one option or combine several: ${optionIds}. You can also ask for a custom delivery format.`;
+  const optionLabels = deliveryFormatOptionsForContract(contract).map((option) => option.label).join(", ");
+  return `How should I present the ${contract.phase} result for ${subject}? Choose one option or combine several: ${optionLabels}. You can also ask for a custom delivery format.`;
+}
+
+function humanOutputLabel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const labels = {
+    "functional-analysis": "functional analysis",
+    "technical-analysis": "technical assessment",
+    "technical-decision-matrix": "technical decision matrix",
+    "test-strategy": "test strategy",
+    "test-plan": "test plan",
+    "implementation-summary": "implementation summary",
+    "release-evidence": "release evidence",
+  };
+  return labels[normalized] || String(value || "this output").replace(/[-_]+/g, " ");
 }
 
 function formatHumanApprovalRequest(request, index = null) {
   const prefix = index === null ? "-" : `${index}.`;
+  const plain = plainApprovalRequestCopy(request);
+  const reviewItems = userVisibleReviewItems(request);
+  const reviewLimit = request.type === "baseline_approval" ? 8 : 5;
   const lines = [
-    `${prefix} ${request.title || request.summary}`,
-    request.why_needed ? `   Why: ${request.why_needed}` : null,
-    request.review_items?.length ? "   What to review:" : null,
-    ...(request.review_items || []).slice(0, 6).map((item) => `   - ${item}`),
-    request.delivery_format_options?.length ? "   Delivery / presentation options:" : null,
+    `${prefix} ${plain.title}`,
+    plain.explanation ? `   In plain language: ${plain.explanation}` : null,
+    request.why_needed ? `   Why it matters: ${request.why_needed}` : null,
+    reviewItems.length ? "   What I will use or produce:" : null,
+    ...reviewItems.slice(0, reviewLimit).map((item) => `   - ${item}`),
+    request.delivery_format_options?.length ? "   How I can present the result:" : null,
     ...(request.delivery_format_options || []).slice(0, 10).map((option) => `   - ${formatDeliveryFormatOption(option)}`),
-    request.recommended_delivery_format ? `   Recommended delivery: ${request.recommended_delivery_format}` : null,
-    request.delivery_question ? `   Delivery question: ${request.delivery_question}` : null,
-    request.approval_meaning ? `   What approval means: ${request.approval_meaning}` : null,
-    request.approve_if ? `   Approve if: ${request.approve_if}` : null,
+    request.recommended_delivery_format ? `   Suggested presentation: ${request.recommended_delivery_format}` : null,
+    request.delivery_question ? `   Presentation question: ${request.delivery_question}` : null,
+    request.approval_meaning ? `   If you say yes: ${request.approval_meaning}` : null,
+    `   Scope of your answer: it applies only to ${plain.title}. It does not approve later templates, capability decisions, work briefs, or task start confirmations unless I show them and ask again.`,
+    request.approve_if ? `   Say yes if: ${request.approve_if}` : null,
     request.change_if ? `   Ask for changes if: ${request.change_if}` : null,
-    request.after_approval ? `   After: ${request.after_approval}` : null,
-    request.user_prompt ? `   Question: ${request.user_prompt}` : null,
-    request.approval_phrase ? `   Useful approval phrase: "${request.approval_phrase}"` : null,
-    request.suggested_command ? `   Command: ${request.suggested_command}` : null,
+    request.after_approval ? `   After that: ${request.after_approval}` : null,
+    request.user_prompt ? "   What I need from you: approve this item, ask me to change it, or provide missing information." : null,
+    request.user_prompt ? `   Decision needed: ${request.user_prompt}` : null,
+    request.approval_phrase ? `   Example answer: "${plain.example || request.approval_phrase}"` : null,
     "",
   ];
   return lines.filter((line) => line !== null && line !== undefined);
+}
+
+function userVisibleReviewItems(request) {
+  return (request.review_items || [])
+    .map((item) => simplifyReviewItemForUser(request, item))
+    .filter(Boolean);
+}
+
+function simplifyReviewItemForUser(request, item) {
+  const text = String(item || "").trim();
+  if (!text) {
+    return null;
+  }
+  if (request.type === "output_template_approval" && /^(Template file|Template content to review):/.test(text)) {
+    return null;
+  }
+  if (/^Allowed tools:/.test(text)) {
+    return null;
+  }
+  if (/^Decision scope:/.test(text)) {
+    return `Decision scope: this only approves the document structure for ${humanOutputLabel(request.artifact_type || "this output")} work. It does not approve the final content.`;
+  }
+  if (/^Assessment sections:/.test(text)) {
+    const sections = text
+      .replace(/^Assessment sections:\s*/, "")
+      .split(/\s*>\s*/)
+      .filter((section) => section && !/-v\d+$/i.test(section));
+    return `Assessment sections: ${sections.join(", ")}`;
+  }
+  if (/^Output type:/.test(text)) {
+    return `Output: ${humanOutputLabel(text.replace(/^Output type:\s*/, ""))}`;
+  }
+  if (/^Story:/.test(text)) {
+    return `Work item: ${text.replace(/^Story:\s*/, "")}`;
+  }
+  if (/^Purpose: Translate approved discovery output/.test(text)) {
+    return "Goal: produce a clear technical assessment with architecture, boundaries, risks, and recommendations.";
+  }
+  if (/^Expected outputs:/.test(text)) {
+    const outputs = text
+      .replace(/^Expected outputs:\s*/, "")
+      .split(/\s*,\s*/)
+      .map((item) => humanOutputLabel(item.split(":")[0]))
+      .filter(Boolean);
+    return `Expected output: ${outputs.join(", ")}`;
+  }
+  if (/^Missing: missing project-specific context/.test(text)) {
+    return "Missing: I need to know which project files, facts, constraints, or decisions should guide the work.";
+  }
+  if (/^Missing: missing agreed output format/.test(text)) {
+    return "Missing: I need to know what output this work should produce.";
+  }
+  return text
+    .replace(/--[A-Za-z0-9-]+(?:\s+[A-Za-z0-9:|<>\-]+)?/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function plainApprovalRequestCopy(request) {
+  switch (request.type) {
+    case "baseline_approval":
+      return {
+        title: `Project context (${request.subject_id})`,
+        explanation: "I inferred facts about the project. Confirming them lets me use those facts as trusted context instead of guessing.",
+        example: `Use project context ${request.subject_id}.`,
+      };
+    case "output_template_approval":
+      return {
+        title: `Assessment format (${request.subject_id})`,
+        explanation: "This is the structure of the assessment I will write: sections, level of detail, and presentation style.",
+        example: `The assessment format ${request.subject_id} is OK.`,
+      };
+    case "capability_profile_approval":
+      return {
+        title: `Tools and permissions profile (${request.subject_id})`,
+        explanation: "This defines the evidence, local checks, and tool boundaries I may consider for the work. It is not approval of the final assessment or work brief.",
+        example: `Use tools-and-permissions profile ${request.subject_id}.`,
+      };
+    case "capability_recommendation_approval":
+      return {
+        title: `Tool choices for this work (${request.subject_id})`,
+        explanation: "This is the concrete list of skills, tools, connectors, permissions, and installs I would be allowed to use.",
+        example: `Use tool choices ${request.subject_id}.`,
+      };
+    case "contract_clarification":
+      return {
+        title: `Missing work context (${request.subject_id})`,
+        explanation: "I need to know which files, facts, constraints, or decisions should guide the work before I start.",
+        example: "Use the listed files as context and include current architecture, risks, and recommendations.",
+      };
+    case "contract_approval":
+      return {
+        title: `Work brief (${request.subject_id})`,
+        explanation: "This confirms what I am allowed to do and what output I should produce. It is not approval of the final result.",
+        example: `Use work brief ${request.subject_id}.`,
+      };
+    case "output_link_required":
+      return {
+        title: `Official output file (${request.artifact_type || request.subject_id})`,
+        explanation: "I need to know which generated file should be treated as the official result for later checks.",
+      };
+    default:
+      return {
+        title: request.title || request.summary,
+        explanation: null,
+      };
+  }
 }
 
 function describeContractForHuman(contract) {
@@ -3224,8 +3732,8 @@ function collectContractReadinessGaps(context, contract) {
   if (!hasContextAnchor) {
     gaps.push({
       code: "missing_context",
-      summary: "missing project-specific context (--context-summary, --context-file, --qa, or approved --capability-recommendation)",
-      question: "What project-specific context, source file, or answered question should guide this phase?",
+      summary: "missing project-specific context",
+      question: "Which project files, facts, constraints, or prior decisions should guide this work?",
     });
   }
   if (openQuestions.length > 0) {
@@ -3241,8 +3749,8 @@ function collectContractReadinessGaps(context, contract) {
   if (contract.story_id && phaseHasOutputs && requiresOutputCoverage && refs.length === 0) {
     gaps.push({
       code: "missing_output_ref",
-      summary: "missing agreed story output format (--output-ref artifact-type:template-id:reuse|delta|new)",
-      question: "Which approved output template and reuse mode should this story contract use?",
+      summary: "missing agreed output format for this story",
+      question: "What output should this work produce, and should it be a new document or an update to an existing one?",
     });
   }
   return gaps;
@@ -3865,6 +4373,7 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
   const evidence = buildApprovalEvidence(context, options);
   const summary = getOptionString(options, "summary") || null;
   const source = normalizeApprovalSource(context, options, attribution, settings.label || "approval", status);
+  const scope = settings.scope || defaultApprovalRecordScope(source, settings);
   validateApprovalSourceForActor(context, {
     source,
     status,
@@ -3879,7 +4388,7 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
     ...(settings.subject_id_field && settings.subject_id ? { [settings.subject_id_field]: settings.subject_id } : {}),
     status,
     summary,
-    scope: settings.scope || undefined,
+    scope,
     evidence,
     approval_source: source,
     explicit_user_confirmation: source === "explicit-user",
@@ -3890,6 +4399,20 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
     git: attribution.git,
     run: attribution.run,
     created_at: now(),
+  };
+}
+
+function defaultApprovalRecordScope(source, settings = {}) {
+  if (source !== "explicit-user") {
+    return settings.scope || undefined;
+  }
+  return {
+    principle: "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
+    subject_id: settings.subject_id || null,
+    subject_label: settings.label || "approval",
+    applies_only_to_presented_subject: true,
+    does_not_approve_future_artifacts: true,
+    requires_fresh_user_confirmation_for_new_artifacts: true,
   };
 }
 
@@ -4662,7 +5185,20 @@ function proposeCapabilityProfile(context, options) {
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "proposed", profile_path: profilePath, profile }, [`Proposed capability profile ${id}`]);
+  const approvalRequest = buildCapabilityProfileApprovalRequest(context, profile);
+  const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
+  output(
+    options,
+    {
+      status: "proposed",
+      profile_path: profilePath,
+      profile,
+      assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
+      approval_request: approvalRequest,
+    },
+    [`Proposed capability profile ${id}`, "", ...assistantMessage.split("\n")],
+  );
 }
 
 function approveCapabilityProfile(context, options) {
@@ -4776,7 +5312,20 @@ function proposeCapabilityRecommendation(context, options) {
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "proposed", recommendation_path: recommendationPath, recommendation }, [`Proposed capability recommendation ${id}`]);
+  const approvalRequest = buildCapabilityRecommendationApprovalRequest(context, recommendation);
+  const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
+  output(
+    options,
+    {
+      status: "proposed",
+      recommendation_path: recommendationPath,
+      recommendation,
+      assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
+      approval_request: approvalRequest,
+    },
+    [`Proposed capability recommendation ${id}`, "", ...assistantMessage.split("\n")],
+  );
 }
 
 function approveCapabilityRecommendation(context, options) {
@@ -6413,14 +6962,20 @@ function proposeOutputTemplate(context, options) {
     git: attribution.git,
     run: attribution.run,
   });
+  const approvalRequest = buildOutputTemplateApprovalRequest(context, templateRecord);
+  const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
 
   output(
     options,
-    { status: "proposed", template_path: templatePath, template: templateRecord },
-    [
-      `Proposed output template ${id} for ${artifactType}`,
-      `Approve it with: agentic-sdlc output template approve --id ${id} --actor-type human --approval-source explicit-user --summary "<user-approved template>"`,
-    ],
+    {
+      status: "proposed",
+      template_path: templatePath,
+      template: templateRecord,
+      assistant_message: assistantMessage,
+      ...assistantMessagePresentationFields(),
+      approval_request: approvalRequest,
+    },
+    [`Proposed output template ${id} for ${artifactType}`, "", ...assistantMessage.split("\n")],
   );
   });
 }

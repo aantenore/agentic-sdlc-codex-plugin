@@ -271,6 +271,42 @@
         "default_artifact_type": "technical-analysis",
         "requires_artifact_type": true
       },
+      "technical_assessment": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "initial_technical_assessment": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "project_technical_assessment": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "project_assessment": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "architecture_assessment": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
+      "technical_review": {
+        "route": "classify_artifact",
+        "confirmation_key": "create_canonical_artifact",
+        "default_artifact_type": "technical-analysis",
+        "requires_artifact_type": true
+      },
       "create_canonical_artifact": {
         "route": "classify_artifact",
         "confirmation_key": "create_canonical_artifact",
@@ -326,6 +362,7 @@
     "agent_rules": [
       "Do not record --actor-type human unless the user explicitly approved the specific artifact.",
       "Use --approval-source explicit-user only with a summary or canonical evidence of the user's approval.",
+      "A user approval applies only to the artifact or decision just shown and summarized; do not reuse it for future artifacts, templates, capability decisions, contracts, or task start confirmations.",
       "Use --approval-source bootstrap only for migration/provisional records; bootstrap approvals do not satisfy strict gates by default.",
       "Treat permission to implement or push as operational authorization, not as formal SDLC approval."
     ]
