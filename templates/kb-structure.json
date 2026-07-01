@@ -19,7 +19,9 @@
     "risks/**/*",
     "tests/**/*",
     "traces/**/*.jsonl",
-    "releases/**/*"
+    "releases/**/*",
+    "manifests/**/*",
+    "archive/**/*"
   ],
   "derived_artifacts": [
     "cache/**/*",
@@ -43,6 +45,8 @@
     "tests": "Test plans, test reports, coverage notes, and evidence.",
     "traces": "Append-only JSONL event logs.",
     "releases": "Release notes, rollout evidence, observability, and feedback loops.",
+    "manifests": "Shared compact KB manifests generated from canonical source files.",
+    "archive": "Archive plans and applied archive records for old closed reports and trace compactions.",
     "cache": "Local regenerable cache for fast KB lookup, story-requirement graphs, fingerprints, summaries, and output resolution results.",
     "indexes": "Regenerable search indexes.",
     "reports": "Generated gate, audit, and quality reports."

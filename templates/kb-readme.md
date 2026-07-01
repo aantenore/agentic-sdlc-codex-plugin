@@ -23,6 +23,10 @@ It is intentionally stored in the project repository so people and agents can co
 - Resolve story outputs through `.sdlc/output-contracts/registry.json` before generating new durable artifacts.
 - Reuse approved artifacts and create only deltas when related stories cover the same requirement.
 - Ask for user approval before introducing a new output template or changing an approved output structure.
+- Record completed phase lanes with `story complete-step` before handing off work.
+- Use `story prepare-handoff --release-claim` to let another chat or machine continue from the KB.
+- Use `report activity` for recent-history questions; reports must cite trace source files.
+- Use `manifest rebuild`, `trace compact`, and plan-first `archive closed` as the KB grows.
 - Run `agentic-sdlc gate check` before merging implementation work.
 - Rebuild cache and indexes when retrieval speed matters; cache and indexes are derived artifacts, not sources of truth.
 
@@ -46,6 +50,8 @@ risks/          Delivery, technical, product, and operational risks
 tests/          Test plans, test evidence, and coverage notes
 traces/         Append-only event logs
 releases/       Release notes, rollout evidence, feedback loops
+manifests/      Shared compact KB manifests
+archive/        Archive plans and applied archive records
 cache/          Local regenerable lookup cache
 indexes/        Regenerable search indexes
 reports/        Generated gate and audit reports
@@ -57,9 +63,12 @@ flowchart TB
   OutputRegistry["Output registry"] --> Agent
   Agent --> Artifact["Canonical artifact"]
   Agent --> Trace["Trace evidence"]
+  Trace --> Report["activity reports"]
   Artifact --> Gate["gate check"]
   Trace --> Gate
+  Artifact --> Manifest["manifest"]
   Artifact --> Cache["cache and indexes"]
+  Manifest --> Cache
   Cache -.-> Agent
 ```
 

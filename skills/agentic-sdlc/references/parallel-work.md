@@ -10,6 +10,8 @@ Agentic SDLC supports parallel work through story-scoped ownership and append-on
 - Agents should append trace events instead of rewriting shared history.
 - Agents should record actor, run/thread, branch, and head SHA metadata.
 - Pushes, merges, handoffs, and claim changes should be recorded as trace events.
+- Completed functional, technical, implementation, validation, or release lanes should be recorded with `story complete-step`.
+- Cross-chat or cross-machine continuation should use `story prepare-handoff` so the receiving worker gets a story package with steps, outputs, dependencies, and recent traces.
 - Durable outputs should be resolved and linked through the shared output-contract registry before they are treated as canonical.
 - Approved dependency graph entries should be checked before claiming a story; hard blockers stop work lanes, soft dependencies provide context.
 - If upstream artifacts change, downstream stories need a `dependency.revalidate` trace before they are no longer stale.
@@ -25,8 +27,10 @@ Agentic SDLC supports parallel work through story-scoped ownership and append-on
 4. Work only on that story branch and story KB files.
 5. Resolve required outputs with `output resolve`; link artifacts with `output link`.
 6. Append decision, implementation, test, sync, and handoff traces.
-7. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
-8. Release the claim when done or handed off.
+7. Record completed lanes with `story complete-step`.
+8. Prepare cross-lane or cross-machine handoffs with `story prepare-handoff --release-claim`.
+9. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
+10. Release the claim when done or handed off.
 
 ```mermaid
 flowchart TB
@@ -39,8 +43,8 @@ flowchart TB
   ClaimB --> BranchB["feature/ST-002"]
   BranchA --> EvidenceA["Trace and output links"]
   BranchB --> EvidenceB["Trace and output links"]
-  EvidenceA --> GateA["Story gate ST-001"]
-  EvidenceB --> GateB["Story gate ST-002"]
+EvidenceA --> GateA["Story gate ST-001"]
+EvidenceB --> GateB["Story gate ST-002"]
   GateA --> Merge["Project review"]
   GateB --> Merge
 ```
