@@ -5,6 +5,9 @@
     "output-contracts",
     "requirements",
     "stories",
+    "work-items",
+    "work-breakdown",
+    "dependencies",
     "orchestration",
     "locks",
     "handoffs",
@@ -81,6 +84,30 @@
     "branch_pattern": "feature/<story-id>",
     "active_claim_status": "active",
     "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-reclaimed by a human"
+  },
+  "work_breakdown_policy": {
+    "principle": "Work breakdown is agreed with the user and stored in .sdlc. Story remains the main delivery and strict-gate unit; epic and task are optional internal aggregation/operational levels.",
+    "levels": [
+      "requirement",
+      "epic",
+      "story",
+      "task"
+    ],
+    "default_flow": [
+      "requirement",
+      "story"
+    ],
+    "optional_levels": [
+      "epic",
+      "task"
+    ],
+    "delivery_unit": "story",
+    "claimable_units": [
+      "story",
+      "task"
+    ],
+    "strict_gate_unit": "story",
+    "task_gate": "light"
   },
   "output_consistency_policy": {
     "principle": "Every durable story output should resolve an approved project-wide output template before generation. Related stories should reuse the approved base artifact and create only an explicit delta unless the user approves a new structure.",
@@ -241,6 +268,9 @@
       "contracts",
       "requirements",
       "stories",
+      "work-items",
+      "work-breakdown",
+      "dependencies",
       "decisions",
       "tests",
       "traces",

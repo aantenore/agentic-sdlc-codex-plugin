@@ -182,6 +182,83 @@
       },
       "additionalProperties": true
     },
+    "capability_policy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "skills": {
+          "$ref": "#/$defs/capability_set"
+        },
+        "mcp": {
+          "$ref": "#/$defs/capability_set"
+        },
+        "tools": {
+          "$ref": "#/$defs/capability_set"
+        },
+        "approval_required_for": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "capability_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "name",
+          "binding_id",
+          "target"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "skill",
+              "mcp",
+              "tool"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires_approval_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
     "contextualization": {
       "type": "object",
       "properties": {
@@ -273,6 +350,32 @@
           }
         },
         "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "capability_set": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbidden": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   },

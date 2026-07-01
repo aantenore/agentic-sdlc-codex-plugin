@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/work-breakdown.schema.json",
+  "title": "Agentic SDLC Work Breakdown",
+  "type": "object",
+  "required": [
+    "id",
+    "status",
+    "requirement_id",
+    "items"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "approved",
+        "changes_requested",
+        "rejected"
+      ]
+    },
+    "requirement_id": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "requirement",
+              "epic",
+              "story",
+              "task"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "approvals": {
+      "type": "array"
+    }
+  },
+  "additionalProperties": true
+}

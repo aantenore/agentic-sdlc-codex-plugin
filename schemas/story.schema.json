@@ -48,6 +48,12 @@
         "null"
       ]
     },
+    "work_breakdown_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "acceptance_criteria": {
       "type": "array",
       "items": {
