@@ -70,6 +70,32 @@ node bin/agentic-sdlc.mjs orchestrate plan --root <project> --limit 10
 
 Use `status` before opening another Codex chat. Use `plan` to find available story lanes for a parent orchestrator chat.
 
+## Route Intent
+
+```bash
+node bin/agentic-sdlc.mjs route decide --root <project> --json --intent-json '<canonical-route-intent-json>'
+node bin/agentic-sdlc.mjs route --root <project> --json --intent-file .sdlc/requests/ST-001-route-intent.json
+```
+
+The route command is deterministic. Codex or another LLM must first normalize the user's request into `schemas/route-intent.schema.json`; the CLI does not classify raw natural language. `--text` can be provided for audit/debug context, but it is ignored for routing. Intent files cannot live under `.sdlc/cache/` or `.sdlc/indexes/`.
+
+Minimum canonical intent:
+
+```json
+{
+  "requested_action": "implement_story",
+  "confidence": 0.92,
+  "referenced_entities": [{ "type": "story", "id": "ST-001" }],
+  "provided_artifacts": [],
+  "missing_context": [],
+  "proposed_phase": "implementation",
+  "artifact_type": null,
+  "skip_phases": []
+}
+```
+
+The decision output contains the selected route, confidence result, deterministic checks, blocking reasons, questions for the user, and suggested next CLI commands. Low confidence, missing context, phase skips, implementation starts, new templates, and duplicate outputs require confirmation or clarification according to `routing_policy`.
+
 ## Handoff And Locks
 
 ```bash
