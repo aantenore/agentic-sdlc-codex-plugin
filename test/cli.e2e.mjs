@@ -865,17 +865,19 @@ test("capability profiles and recommendations can be approved and applied to con
     "package.json",
     "--json",
   ]).stdout);
-  assert.match(proposedProfile.assistant_message, /Tools and permissions profile/);
+  assert.match(proposedProfile.assistant_message, /Project evidence and boundaries/);
+  assert.doesNotMatch(proposedProfile.assistant_message, /Tools and permissions profile/);
   assert.equal(proposedProfile.approval_request.type, "capability_profile_approval");
-  assert.ok(proposedProfile.approval_request.review_items.some((item) => /What this is: a proposal for the kinds of tools/.test(item)));
+  assert.ok(proposedProfile.approval_request.review_items.some((item) => /What this is: the list of project evidence/.test(item)));
   const profileRequests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
   const profileRequest = profileRequests.requests.find((request) => request.type === "capability_profile_approval");
   assert.ok(profileRequest, "capability profile approval request missing");
   assert.equal(profileRequest.subject_id, "CAP-PROFILE-ST-001");
-  assert.match(profileRequests.assistant_message, /Tools and permissions profile/);
-  assert.ok(profileRequest.review_items.some((item) => /What this is: a proposal for the kinds of tools/.test(item)));
+  assert.match(profileRequests.assistant_message, /Project evidence and boundaries/);
+  assert.doesNotMatch(profileRequests.assistant_message, /capability profile/i);
+  assert.ok(profileRequest.review_items.some((item) => /What this is: the list of project evidence/.test(item)));
   assert.ok(profileRequest.review_items.some((item) => /Project signals found:/.test(item)));
-  assert.match(profileRequest.approval_meaning, /separate approval for the concrete tool recommendation/);
+  assert.match(profileRequest.approval_meaning, /choose the concrete tools/);
   mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
   const recommendation = JSON.stringify({
     recommendations: [
@@ -907,17 +909,19 @@ test("capability profiles and recommendations can be approved and applied to con
     recommendation,
     "--json",
   ]).stdout);
-  assert.match(proposedRecommendation.assistant_message, /Tool choices for this work/);
+  assert.match(proposedRecommendation.assistant_message, /Allowed tools for this work/);
+  assert.doesNotMatch(proposedRecommendation.assistant_message, /capability recommendation/i);
   assert.equal(proposedRecommendation.approval_request.type, "capability_recommendation_approval");
   assert.ok(proposedRecommendation.approval_request.review_items.some((item) => /Recommended capabilities:/.test(item)));
   const recommendationRequests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
   const recommendationRequest = recommendationRequests.requests.find((request) => request.type === "capability_recommendation_approval");
   assert.ok(recommendationRequest, "capability recommendation approval request missing");
   assert.equal(recommendationRequest.subject_id, "CAP-REC-ST-001");
-  assert.match(recommendationRequests.assistant_message, /Tool choices for this work/);
-  assert.ok(recommendationRequest.review_items.some((item) => /What this is: a tool and permission choice/.test(item)));
+  assert.match(recommendationRequests.assistant_message, /Allowed tools for this work/);
+  assert.doesNotMatch(recommendationRequests.assistant_message, /capability recommendation/i);
+  assert.ok(recommendationRequest.review_items.some((item) => /What this is: the concrete list of tools/.test(item)));
   assert.ok(recommendationRequest.review_items.some((item) => /Recommended capabilities:/.test(item)));
-  assert.match(recommendationRequest.approval_meaning, /separate approval for the brief itself/);
+  assert.match(recommendationRequest.approval_meaning, /use these tools and permissions/);
   mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", ...humanApproval("Approved capability recommendation")]);
   const contract = JSON.parse(mustRun([
     "contract",
@@ -942,6 +946,66 @@ test("capability profiles and recommendations can be approved and applied to con
   assert.equal(contract.capability_bindings.some((binding) => binding.name === "repo"), true);
   assert.equal(contract.execution_policy.reasoning.level, "high");
   assert.equal(contract.capability_recommendation_refs[0].id, "CAP-REC-ST-001");
+});
+
+test("capability recommendation stays usable when its profile is approved after recommendation", () => {
+  const project = tmpProject("capability-profile-approval-order");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+  story(project, "ST-001");
+  createApprovedTemplate(project, "technical-analysis");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--phase",
+    "analysis",
+    "--context-file",
+    "package.json",
+  ]);
+  mustRun([
+    "capability",
+    "recommend",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-ST-001",
+    "--profile",
+    "CAP-PROFILE-ST-001",
+  ]);
+  mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved evidence and boundaries")]);
+  mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-ST-001", ...humanApproval("Approved allowed tools")]);
+  const recommendation = readJson(path.join(project, ".sdlc", "capability-discovery", "recommendations", "CAP-REC-ST-001.json"));
+  assert.equal(recommendation.status, "approved");
+  assert.equal(recommendation.profile_ref.path, ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-001.json");
+  assert.ok(recommendation.profile_ref.approved_content_hash);
+  assert.equal(recommendation.source_paths.includes(".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-001.json"), false);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analyze with tools approved after profile approval.",
+    "--qa",
+    "Who approved tool boundaries?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--capability-recommendation",
+    "CAP-REC-ST-001",
+  ]);
 });
 
 test("install-required capability recommendation blocks strict gate without install approval", () => {
@@ -2007,11 +2071,12 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(requests.assistant_message_presentation.preserve_literals.includes("CLI commands"));
   assert.match(requests.assistant_message_presentation.instruction, /plain product/);
   assert.match(requests.assistant_message_presentation.instruction, /summarize the relevant contents/);
-  assert.match(requests.assistant_message_presentation.instruction, /Never reuse that approval/);
+  assert.match(requests.assistant_message_presentation.instruction, /summary must be substantial enough/);
+  assert.match(requests.assistant_message_presentation.instruction, /broader approval level/);
 
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
   assert.match(plainRequests, /I need your decision/);
-  assert.match(plainRequests, /What I will use or produce/);
+  assert.match(plainRequests, /What is inside this item/);
   assert.match(plainRequests, /Scope of your answer:/);
   assert.match(plainRequests, /How I can present the result/);
   assert.match(plainRequests, /If you say yes/);
