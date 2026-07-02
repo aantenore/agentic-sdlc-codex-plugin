@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.19";
+const VERSION = "0.4.20";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -910,11 +910,10 @@ function renderTaskStartAssistantMessage(decision) {
   }
   if (decision.status === "ready_to_execute") {
     return [
-      "The SDLC step is ready to start.",
-      `Route: ${decision.route}.`,
-      decision.phase ? `Phase: ${decision.phase}.` : null,
-      decision.story_id ? `Story: ${decision.story_id}.` : null,
-      decision.contract_id ? `Contract: ${decision.contract_id}.` : null,
+      "The work is ready to start.",
+      decision.phase ? `Work type: ${decision.phase}.` : null,
+      decision.story_id ? `Work item: ${decision.story_id}.` : null,
+      decision.contract_id ? `Work brief: ${decision.contract_id}.` : null,
     ].filter(Boolean).join("\n");
   }
   const explanations = Array.from(new Set((decision.blocking_reasons || []).map(userFriendlyBlockingReason))).filter(Boolean);
@@ -2531,7 +2530,7 @@ function renderApprovalRequestsAssistantMessage(requests) {
     "I need your decision before I continue.",
     "Plainly: I am checking that I use the right project context, produce the output in the right format, and stay inside the work you actually want. You do not need to know the workflow terms; answer the questions in normal language.",
     "I will summarize the relevant file contents here. Links and file paths are supporting evidence, not homework for you.",
-    "Important: your approval applies only to the item or items shown in this message. If I create a new template, capability profile, recommendation, work brief, or start confirmation later, I must show it and ask again.",
+    "Important: your approval applies only to the item or items shown in this message. If I create a new format, evidence/boundary set, tool choice, work brief, or start confirmation later, I must show what is inside it and ask again unless you already gave a broader scope.",
     "",
     ...requests.flatMap((request, index) => formatHumanApprovalRequest(request, index + 1)),
     "You can answer in natural language, for example:",
@@ -2559,7 +2558,7 @@ function assistantMessagePresentationFields() {
         "schema keys",
       ],
       instruction:
-        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Explain the decision in plain product/work terms first. Do not expose blocking_reasons, status codes, or schema keys as the primary message; keep them only as technical detail if needed. Do not send the user to inspect files manually as the main path: summarize the relevant contents of baseline reports, templates, contracts, and source lists directly in chat, then provide file paths only as supporting evidence. Do not collapse the message into a bare approval question: show what will be used as context, what output format is being agreed, what work is being authorized, and what the user can answer naturally. Approval scope is strict: a user's yes, ok, or approval applies only to the artifact or decision that was just shown and summarized. Never reuse that approval for later artifacts, capability profiles, recommendations, templates, contracts, or task start confirmations; show each new item and ask again.",
+        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Explain the decision in plain product/work terms first. Do not expose blocking_reasons, status codes, stale/hash wording, or schema keys as the primary message; keep them only as technical detail if needed. If an internal freshness check needs a refresh but the user-approved scope has not changed, say that you are refreshing the internal reference and continuing inside the approved scope. Do not send the user to inspect files manually as the main path: summarize the relevant contents of baseline reports, templates, contracts, and source lists directly in chat, then provide file paths only as supporting evidence. The summary must be substantial enough for approval: explain what artifact was produced, what is inside it, what decision is needed, and what approval does not cover; avoid one-line or ID-only summaries. Do not collapse the message into a bare approval question: show what will be used as context, what output format is being agreed, what work is being authorized, how the result will be delivered, and what the user can answer naturally. By default, a user's yes, ok, or approval applies only to the artifact or decision that was just shown and summarized. If the user explicitly specifies a broader approval level or autonomy scope, carry it only inside that scope and record later formal approvals as delegated automation, not as direct explicit-user approvals.",
     },
   };
 }
@@ -2588,17 +2587,17 @@ function buildCapabilityProfileApprovalRequest(context, profile) {
     id: `approve-capability-profile-${profile.id}`,
     type: "capability_profile_approval",
     status: "needs_explicit_user_approval",
-    summary: `Approve or revise capability profile ${profile.id} before choosing tools and permissions for the work.`,
+    summary: "Confirm or revise the evidence and boundaries I may use before choosing tools for the work.",
     subject_id: profile.id,
     subject_status: profile.status || null,
     story_id: profile.subject?.story_id || null,
     phase: profile.subject?.phase || null,
     sources: [profilePath, ...(profile.source_paths || [])].filter(Boolean),
     ...humanApprovalFields({
-      title: `Tools and permissions profile (${profile.id})`,
+      title: `Project evidence and boundaries (${profile.id})`,
       why_needed: "Before I choose tools for the assessment, I need you to confirm the boundaries: which project evidence I can rely on and what kind of local checks are acceptable.",
       review_items: [
-        "What this is: a proposal for the kinds of tools, files, and local checks I may use. It is not the assessment content and it does not approve the final work brief.",
+        "What this is: the list of project evidence, local checks, and tool boundaries I may use. It is not the assessment content and it does not approve the final work brief.",
         `Work scope: ${formatCapabilitySubject(profile.subject)}`,
         profile.detected_stack?.length ? `Project signals found: ${formatDetectedStackForUser(profile.detected_stack)}` : null,
         profile.evidence?.length ? `Evidence I used to build this profile: ${formatCapabilityEvidenceForUser(profile.evidence)}` : null,
@@ -2606,14 +2605,14 @@ function buildCapabilityProfileApprovalRequest(context, profile) {
         profile.source_paths?.length ? `Source files behind this proposal: ${formatLimitedList(profile.source_paths, 10)}` : null,
         profile.confidence !== undefined ? `Confidence: ${profile.confidence}` : null,
       ],
-      approval_meaning: "If you approve it, I can use this as the agreed boundary for tool selection. I still need a separate approval for the concrete tool recommendation and for the work brief.",
+      approval_meaning: "If you approve it, I can use these boundaries to choose the concrete tools for the work. I still need approval for the final work brief unless your broader scope already covers it.",
       approve_if: "Approve if local repo/document reading and the detected project signals are accurate enough for this assessment.",
       change_if: "Ask for changes if I should not run tests, should not use certain files, should include a Word/document skill, or should avoid any tool category.",
-      after_approval: `Then I can create or approve a concrete tool recommendation based on ${profile.id}.`,
-      user_prompt: `Can I use this tools-and-permissions profile ${profile.id}, or should I change the allowed evidence, checks, or tool boundaries first?`,
-      approval_phrase: `Use tools-and-permissions profile ${profile.id}.`,
+      after_approval: "Then I can choose the allowed tools based on these boundaries.",
+      user_prompt: "Can I use this evidence and boundary set, or should I change the allowed files, checks, or tool limits first?",
+      approval_phrase: "Use this evidence and boundary set.",
     }),
-    suggested_question: `After reading the explanation above, do you approve tools-and-permissions profile ${profile.id}, or should it be revised?`,
+    suggested_question: "After reading the explanation above, do you approve this evidence and boundary set, or should it be revised?",
     suggested_command: `agentic-sdlc capability profile approve --id ${profile.id} --actor-type human --approval-source explicit-user --summary "<user-approved capability profile>"`,
   };
 }
@@ -2632,30 +2631,30 @@ function buildCapabilityRecommendationApprovalRequest(context, recommendation) {
     id: `approve-capability-recommendation-${recommendation.id}`,
     type: "capability_recommendation_approval",
     status: needsInstallApproval ? "needs_install_approval" : "needs_explicit_user_approval",
-    summary: `Approve or revise capability recommendation ${recommendation.id} before applying tools and permissions to a contract.`,
+    summary: "Confirm or revise the concrete tools and permissions I may use for the work.",
     subject_id: recommendation.id,
     subject_status: recommendation.status || null,
     sources: [recommendationPath, ...(recommendation.source_paths || [])].filter(Boolean),
     ...humanApprovalFields({
-      title: `Tool choices for this work (${recommendation.id})`,
+      title: `Allowed tools for this work (${recommendation.id})`,
       why_needed: "This is the concrete list of skills, tools, connectors, models, permissions, and installs I would be allowed to use for the work.",
       review_items: [
-        "What this is: a tool and permission choice. It does not approve the assessment format, the work brief, the final document, or task start.",
-        recommendation.profile_id ? `Based on tools-and-permissions profile: ${recommendation.profile_id}` : null,
+        "What this is: the concrete list of tools, permissions, targets, and install choices I may use. It does not approve the final document.",
+        recommendation.profile_id ? `Based on approved evidence and boundaries: ${recommendation.profile_id}` : null,
         recommendation.recommendations?.length ? `Recommended capabilities: ${formatCapabilityRecommendationsForUser(recommendation.recommendations)}` : null,
         formatCapabilityPolicyPatchForUser(recommendation.policy_patch),
         recommendation.bindings?.length ? `Specific bindings or targets: ${formatCapabilityBindingsForUser(recommendation.bindings)}` : null,
         recommendation.open_questions?.length ? `Questions I still need answered: ${recommendation.open_questions.join(" ")}` : "Missing information: none listed; this is waiting for approval or requested changes.",
         needsInstallApproval ? `Install decision needed: ${formatCapabilityInstallNeeds(recommendation.recommendations)}` : "Install decision: no new installation approval is needed.",
       ],
-      approval_meaning: "If you approve it, I can attach these tool and permission choices to the work brief. I still need a separate approval for the brief itself before producing the assessment.",
+      approval_meaning: "If you approve it, I can use these tools and permissions in the work brief. I still need approval for the brief itself unless your broader scope already covers it.",
       approve_if: "Approve if the listed tools, permissions, targets, and install choices are acceptable for this work.",
       change_if: "Ask for changes if you want to remove a tool, forbid installs, avoid running tests, add Word document generation, or restrict local filesystem access.",
-      after_approval: `Then I can use ${recommendation.id} when creating or updating the work brief.`,
-      user_prompt: `Can I use these tool choices ${recommendation.id}, or should I change tools, permissions, installs, or targets first?`,
-      approval_phrase: `Use tool choices ${recommendation.id}.`,
+      after_approval: "Then I can use these tool choices when creating or updating the work brief.",
+      user_prompt: "Can I use these tools and permissions, or should I change tools, installs, external access, or targets first?",
+      approval_phrase: "Use these tool choices.",
     }),
-    suggested_question: `After reading the explanation above, do you approve tool choices ${recommendation.id}, or should they be revised?`,
+    suggested_question: "After reading the explanation above, do you approve these tool choices, or should they be revised?",
     suggested_command: `agentic-sdlc capability approve --id ${recommendation.id} --actor-type human --approval-source explicit-user --summary "<user-approved capability recommendation>"${needsInstallApproval ? " --approve-install" : ""}`,
   };
 }
@@ -3354,19 +3353,19 @@ function formatHumanApprovalRequest(request, index = null) {
   const prefix = index === null ? "-" : `${index}.`;
   const plain = plainApprovalRequestCopy(request);
   const reviewItems = userVisibleReviewItems(request);
-  const reviewLimit = request.type === "baseline_approval" ? 8 : 5;
+  const reviewLimit = request.type === "baseline_approval" ? 10 : 8;
   const lines = [
     `${prefix} ${plain.title}`,
     plain.explanation ? `   In plain language: ${plain.explanation}` : null,
     request.why_needed ? `   Why it matters: ${request.why_needed}` : null,
-    reviewItems.length ? "   What I will use or produce:" : null,
+    reviewItems.length ? "   What is inside this item:" : null,
     ...reviewItems.slice(0, reviewLimit).map((item) => `   - ${item}`),
     request.delivery_format_options?.length ? "   How I can present the result:" : null,
     ...(request.delivery_format_options || []).slice(0, 10).map((option) => `   - ${formatDeliveryFormatOption(option)}`),
     request.recommended_delivery_format ? `   Suggested presentation: ${request.recommended_delivery_format}` : null,
     request.delivery_question ? `   Presentation question: ${request.delivery_question}` : null,
     request.approval_meaning ? `   If you say yes: ${request.approval_meaning}` : null,
-    `   Scope of your answer: it applies only to ${plain.title}. It does not approve later templates, capability decisions, work briefs, or task start confirmations unless I show them and ask again.`,
+    `   Scope of your answer: it applies only to ${plain.title}. It does not approve later format, tool, brief, or start decisions unless I show them or you already gave a broader scope.`,
     request.approve_if ? `   Say yes if: ${request.approve_if}` : null,
     request.change_if ? `   Ask for changes if: ${request.change_if}` : null,
     request.after_approval ? `   After that: ${request.after_approval}` : null,
@@ -3450,15 +3449,15 @@ function plainApprovalRequestCopy(request) {
       };
     case "capability_profile_approval":
       return {
-        title: `Tools and permissions profile (${request.subject_id})`,
-        explanation: "This defines the evidence, local checks, and tool boundaries I may consider for the work. It is not approval of the final assessment or work brief.",
-        example: `Use tools-and-permissions profile ${request.subject_id}.`,
+        title: `Project evidence and boundaries (${request.subject_id})`,
+        explanation: "This defines which project evidence, local checks, and tool boundaries I may use. It is not approval of the final assessment or work brief.",
+        example: "Use this evidence and boundary set.",
       };
     case "capability_recommendation_approval":
       return {
-        title: `Tool choices for this work (${request.subject_id})`,
+        title: `Allowed tools for this work (${request.subject_id})`,
         explanation: "This is the concrete list of skills, tools, connectors, permissions, and installs I would be allowed to use.",
-        example: `Use tool choices ${request.subject_id}.`,
+        example: "Use these tool choices.",
       };
     case "contract_clarification":
       return {
@@ -5326,18 +5325,17 @@ function proposeCapabilityRecommendation(context, options) {
     input.policy_patch || input.capability_policy || null,
   );
   const bindings = normalizeCapabilityBindings(input.bindings || input.capability_bindings || []);
-  const sourcePaths = normalizeCapabilitySourcePaths(context, [
-    toProjectPath(context, profilePath),
-    ...normalizeListValue(input.source_paths, []),
-  ]);
+  const profileProjectPath = toProjectPath(context, profilePath);
+  const sourcePaths = normalizeCapabilitySourcePaths(context, normalizeListValue(input.source_paths, []));
   const recommendation = {
     id,
     schema_version: context.config.schema_version,
     status: "proposed",
     profile_id: profileId,
     profile_ref: {
-      path: toProjectPath(context, profilePath),
+      path: profileProjectPath,
       approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
+      current_content_hash: hashApprovalSubject(profile),
     },
     recommendations,
     available_capabilities: normalizeObject(availableCapabilities),
@@ -5406,6 +5404,7 @@ function approveCapabilityRecommendation(context, options) {
   recommendation.profile_ref = {
     path: toProjectPath(context, capabilityProfilePath(context, recommendation.profile_id)),
     approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
+    current_content_hash: hashApprovalSubject(profile),
   };
   const approval = buildApprovalRecord(context, options, attribution, {
     subject: recommendation,
