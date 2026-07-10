@@ -37,6 +37,7 @@ It is intentionally stored in the project repository so people and agents can co
 ```text
 contracts/      Phase contracts and story-specific contracts
 baseline/       Existing-project current-state baselines and approval records
+authorizations/ Explicit action-scoped grants for delegated automation approvals
 output-contracts/ Approved output templates, artifact links, and structure decisions
 requirements/   Product requirements and constraints
 work-items/     Project-local epics and tasks

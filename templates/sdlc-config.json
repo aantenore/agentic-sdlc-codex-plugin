@@ -3,6 +3,7 @@
   "kb_directories": [
     "baseline",
     "contracts",
+    "authorizations",
     "capability-discovery",
     "output-contracts",
     "requirements",
@@ -384,6 +385,7 @@
     "source_of_truth_dirs": [
       "baseline",
       "contracts",
+      "authorizations",
       "capability-discovery",
       "requirements",
       "stories",

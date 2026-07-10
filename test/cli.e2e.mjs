@@ -86,11 +86,51 @@ function humanApproval(summary = "Approved in test") {
   return ["--actor-type", "human", "--approval-source", "explicit-user", "--summary", summary];
 }
 
+const delegatedApprovalScope = "technical assessment workbook, read-only repo analysis";
+
 function delegatedAutomationApproval(
   summary = "Antonio delegated approval for this assessment within read-only repo analysis and local output generation",
-  scope = "technical assessment workbook, read-only repo analysis",
+  scope = delegatedApprovalScope,
+  authorization = null,
 ) {
-  return ["--actor-type", "agent", "--approval-source", "automation", "--scope", scope, "--summary", summary];
+  return [
+    "--actor-type",
+    "agent",
+    "--approval-source",
+    "automation",
+    "--scope",
+    scope,
+    "--summary",
+    summary,
+    ...(authorization ? ["--authorization", authorization] : []),
+  ];
+}
+
+function grantAutomationAuthorization(project, id, actions, options = {}) {
+  const scope = options.scope || delegatedApprovalScope;
+  const artifactTypes = options.artifactTypes || [];
+  const subjects = options.subjects || [];
+  const granted = JSON.parse(mustRun([
+    "authorization",
+    "grant",
+    "--root",
+    project,
+    "--id",
+    id,
+    "--scope",
+    scope,
+    "--summary",
+    options.summary || `Delegate ${actions.join(", ")} within ${scope}`,
+    ...actions.flatMap((action) => ["--allow-action", action]),
+    ...artifactTypes.flatMap((type) => ["--allow-artifact-type", type]),
+    ...subjects.flatMap((subject) => ["--allow-subject", subject]),
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "explicit-user",
+    "--json",
+  ]).stdout);
+  return granted.authorization;
 }
 
 function story(project, id, extra = []) {
@@ -118,6 +158,64 @@ function writeArtifact(project, relativePath, body = "# Artifact\n") {
   const filePath = path.join(project, relativePath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, body);
+  return relativePath;
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeStoredZip(project, relativePath, entries) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+
+  for (const [name, value] of Object.entries(entries)) {
+    const nameBuffer = Buffer.from(name, "utf8");
+    const body = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+    const checksum = crc32(body);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(body.length, 18);
+    localHeader.writeUInt32LE(body.length, 22);
+    localHeader.writeUInt16LE(nameBuffer.length, 26);
+    localParts.push(localHeader, nameBuffer, body);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(body.length, 20);
+    centralHeader.writeUInt32LE(body.length, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, nameBuffer);
+
+    localOffset += localHeader.length + nameBuffer.length + body.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(entries).length, 8);
+  end.writeUInt16LE(Object.keys(entries).length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+
+  const filePath = path.join(project, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, Buffer.concat([...localParts, centralDirectory, end]));
   return relativePath;
 }
 
@@ -348,10 +446,46 @@ test("formal approvals require explicit source and summary or evidence", () => {
   mustRun(["contract", "approve", "--root", project, "--id", "contract-approval-policy", ...humanApproval("Explicitly approved")]);
 });
 
-test("delegated automation approvals honor the user specified approval level", () => {
+test("delegated automation approvals require persistent action and scope authorization", () => {
   const project = tmpProject("delegated-approval");
   initProject(project);
   story(project, "ST-001", ["--contract", "contract-ST-001-implementation"]);
+  const authorization = grantAutomationAuthorization(
+    project,
+    "AUTH-DELEGATED-ASSESSMENT",
+    ["output.template.approve", "contract.approve", "task.start.confirm"],
+    {
+      artifactTypes: ["implementation-summary"],
+      subjects: ["implementation-summary-v1", "contract-ST-001-implementation", "ST-001"],
+    },
+  );
+  const wrongActionAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-CONTRACT-ONLY",
+    ["contract.approve"],
+    { artifactTypes: ["implementation-summary"] },
+  );
+  const wrongSubjectAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-WRONG-SUBJECT",
+    ["output.template.approve"],
+    { artifactTypes: ["implementation-summary"], subjects: ["another-template"] },
+  );
+  const authorizationPath = path.join(project, ".sdlc", "authorizations", "AUTH-DELEGATED-ASSESSMENT.json");
+  assert.equal(fs.existsSync(authorizationPath), true);
+  assert.deepEqual(readJson(authorizationPath), authorization);
+  assert.match(authorization.approved_content_hash, /^[a-f0-9]{64}$/);
+  const authorizationStatus = JSON.parse(mustRun([
+    "authorization",
+    "status",
+    "--root",
+    project,
+    "--id",
+    authorization.id,
+    "--json",
+  ]).stdout);
+  assert.deepEqual(authorizationStatus.authorizations, [authorization]);
+
   mustRun([
     "output",
     "template",
@@ -374,12 +508,78 @@ test("delegated automation approvals honor the user specified approval level", (
       project,
       "--id",
       "implementation-summary-v1",
+      ...delegatedAutomationApproval(),
+    ],
+    /requires --authorization <id>/,
+  );
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
       "--actor-type",
       "agent",
       "--approval-source",
       "automation",
+      "--authorization",
+      authorization.id,
     ],
     /requires --summary or --approval-evidence/,
+  );
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
+      ...delegatedAutomationApproval(
+        "Attempt with an action not covered by the grant",
+        delegatedApprovalScope,
+        wrongActionAuthorization.id,
+      ),
+    ],
+    /does not allow action output\.template\.approve/,
+  );
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
+      ...delegatedAutomationApproval(
+        "Attempt to approve a subject outside the grant",
+        delegatedApprovalScope,
+        wrongSubjectAuthorization.id,
+      ),
+    ],
+    /does not allow subject implementation-summary-v1/,
+  );
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
+      ...delegatedAutomationApproval(
+        "Attempt outside the delegated scope",
+        "unrelated deployment scope",
+        authorization.id,
+      ),
+    ],
+    /does not match authorization AUTH-DELEGATED-ASSESSMENT scope/,
   );
   mustRun([
     "output",
@@ -389,13 +589,15 @@ test("delegated automation approvals honor the user specified approval level", (
     project,
     "--id",
     "implementation-summary-v1",
-    ...delegatedAutomationApproval(),
+    ...delegatedAutomationApproval(undefined, undefined, authorization.id),
   ]);
   const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
   const template = registry.templates.find((item) => item.id === "implementation-summary-v1");
   assert.equal(template.approval_source, "automation");
   assert.equal(template.explicit_user_confirmation, false);
   assert.equal(template.approved_by.type, "agent");
+  assert.equal(template.authorization_ref, authorization.id);
+  assert.equal(template.authorization_action, "output.template.approve");
   assert.equal(template.approval_scope.delegated_approval, true);
   assert.equal(template.approval_scope.approval_level, "technical assessment workbook, read-only repo analysis");
 
@@ -429,6 +631,8 @@ test("delegated automation approvals honor the user specified approval level", (
       "agent",
       "--approval-source",
       "automation",
+      "--authorization",
+      authorization.id,
     ],
     /requires --summary or --approval-evidence/,
   );
@@ -439,7 +643,7 @@ test("delegated automation approvals honor the user specified approval level", (
     project,
     "--id",
     "contract-ST-001-implementation",
-    ...delegatedAutomationApproval(),
+    ...delegatedAutomationApproval(undefined, undefined, authorization.id),
   ]);
   const contract = readJson(path.join(project, ".sdlc", "contracts", "contract-ST-001-implementation.json"));
   const approval = contract.approvals.at(-1);
@@ -447,6 +651,8 @@ test("delegated automation approvals honor the user specified approval level", (
   assert.equal(approval.approval_source, "automation");
   assert.equal(approval.explicit_user_confirmation, false);
   assert.equal(approval.approved_by.type, "agent");
+  assert.equal(approval.authorization_ref, authorization.id);
+  assert.equal(approval.authorization_action, "contract.approve");
   assert.equal(approval.scope.delegated_approval, true);
   assert.equal(approval.scope.approval_level, "technical assessment workbook, read-only repo analysis");
 
@@ -466,10 +672,257 @@ test("delegated automation approvals honor the user specified approval level", (
       proposed_phase: "implementation",
     }),
     "--confirm-start",
+    "--authorization",
+    authorization.id,
   ]).stdout);
   assert.equal(started.status, "ready_to_execute");
   assert.equal(started.execution_allowed, true);
   assert.equal(started.contract_id, "contract-ST-001-implementation");
+
+  const strictGateResult = run(["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--json"]);
+  assert.notEqual(strictGateResult.status, 0, "The output is not linked yet, so the strict gate should still fail.");
+  const strictGate = JSON.parse(strictGateResult.stdout);
+  assert.equal(
+    strictGate.errors.some((error) => error.includes("persistent authorization_ref")),
+    false,
+    `Delegated template approval lost its authorization during gate validation: ${strictGate.errors.join("; ")}`,
+  );
+});
+
+test("output delivery canonicalizes Excel and verifies OOXML evidence before linking", () => {
+  const project = tmpProject("xlsx-delivery");
+  initProject(project);
+  story(project, "ST-XLSX", ["--requirement", "REQ-XLSX"]);
+
+  const proposed = JSON.parse(mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "technical-analysis",
+    "--id",
+    "technical-analysis-v1",
+    "--preset",
+    "technical-assessment",
+    "--format",
+    "Excel",
+    "--delivery",
+    "artifact",
+    "--summary",
+    "Canonical technical assessment workbook",
+    "--json",
+  ]).stdout);
+  const expectedDelivery = {
+    format: "xlsx",
+    label: "Excel workbook",
+    extension: ".xlsx",
+    media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    generator: "spreadsheets",
+    mode: "artifact",
+  };
+  assert.equal(proposed.template.preset, "technical-assessment");
+  assert.deepEqual(proposed.template.delivery, expectedDelivery);
+  assert.equal(
+    fs.readFileSync(path.join(project, proposed.template.path), "utf8"),
+    fs.readFileSync(path.join(repoRoot, "templates", "technical-assessment.md"), "utf8"),
+  );
+
+  const approved = JSON.parse(mustRun([
+    "output",
+    "template",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "technical-analysis-v1",
+    ...humanApproval("Approved canonical workbook delivery"),
+    "--json",
+  ]).stdout);
+  assert.deepEqual(approved.template.delivery, expectedDelivery);
+  assert.match(approved.template.approved_delivery_hash, /^[a-f0-9]{64}$/);
+  assert.equal(approved.decision.approved_delivery_hash, approved.template.approved_delivery_hash);
+  assert.deepEqual(approved.decision.delivery, expectedDelivery);
+
+  createApprovedStoryContract(project, "ST-XLSX", "analysis", "technical-analysis");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-XLSX",
+    "--story",
+    "ST-XLSX",
+    "--phase",
+    "analysis",
+  ]);
+  mustRun([
+    "capability",
+    "profile",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-XLSX",
+    ...humanApproval("Approved workbook assessment capability profile"),
+  ]);
+  const started = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--intent-json",
+    routeIntent({
+      requested_action: "technical_analysis",
+      referenced_entities: [{ type: "story", id: "ST-XLSX" }],
+      proposed_phase: "analysis",
+      artifact_type: "technical-analysis",
+    }),
+    "--confirm-start",
+    "--actor-type",
+    "human",
+    "--json",
+  ]).stdout);
+  assert.equal(started.status, "ready_to_execute");
+  assert.equal(started.task_start_receipt, ".sdlc/stories/ST-XLSX/task-start.json");
+  const wrongExtension = writeArtifact(
+    project,
+    ".sdlc/stories/ST-XLSX/outputs/technical-assessment.md",
+    "# Technical assessment\n",
+  );
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    wrongExtension,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+  ], /requires a \.xlsx canonical artifact/);
+
+  const evidence = writeArtifact(project, ".sdlc/evidence/ST-XLSX-workbook-render.txt", "Workbook rendered and inspected.\n");
+  const fakeWorkbook = writeArtifact(
+    project,
+    ".sdlc/stories/ST-XLSX/outputs/not-a-workbook.xlsx",
+    "This is not an OOXML ZIP container.\n",
+  );
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    fakeWorkbook,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--evidence",
+    evidence,
+  ], /not a valid ZIP container/);
+
+  const workbook = writeStoredZip(
+    project,
+    ".sdlc/stories/ST-XLSX/outputs/technical-assessment.xlsx",
+    {
+      "[Content_Types].xml": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        "</Types>",
+      ].join(""),
+      "_rels/.rels": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+        "</Relationships>",
+      ].join(""),
+      "xl/workbook.xml": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ',
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets/></workbook>',
+      ].join(""),
+      "xl/_rels/workbook.xml.rels": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+      ].join(""),
+    },
+  );
+  const linked = JSON.parse(mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    workbook,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-XLSX",
+    "--evidence",
+    evidence,
+    "--json",
+  ]).stdout);
+  assert.deepEqual(
+    {
+      delivery_format: linked.link.delivery_format,
+      delivery_extension: linked.link.delivery_extension,
+      media_type: linked.link.media_type,
+      generator: linked.link.generator,
+      delivery_mode: linked.link.delivery_mode,
+    },
+    {
+      delivery_format: "xlsx",
+      delivery_extension: ".xlsx",
+      media_type: expectedDelivery.media_type,
+      generator: "spreadsheets",
+      delivery_mode: "artifact",
+    },
+  );
+  assert.equal(linked.link.verification_receipt.status, "passed");
+  assert.equal(linked.link.verification_receipt.verifier, "ooxml-container-v1");
+  assert.equal(linked.link.verification_receipt.format, "xlsx");
+  assert.equal(linked.link.verification_receipt.artifact_sha256, linked.link.fingerprints.artifact_sha256);
+  assert.deepEqual(linked.link.verification_receipt.evidence.map((item) => item.path), [evidence]);
+  assert.ok(linked.link.verification_receipt.checks.some((check) => check.includes("valid OOXML ZIP container")));
+
+  const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
+  const storedLink = registry.links.find((item) => item.id === linked.link.id);
+  assert.deepEqual(storedLink.verification_receipt, linked.link.verification_receipt);
+  const status = JSON.parse(mustRun([
+    "output",
+    "status",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--json",
+  ]).stdout);
+  assert.deepEqual(status.links[0].verification_receipt, linked.link.verification_receipt);
 });
 
 test("onboard existing project initializes KB and proposes approvable baseline", () => {
@@ -531,6 +984,49 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   mustRun(["cache", "rebuild", "--root", project]);
   const cache = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));
   assert.ok(cache.source_paths.includes(".sdlc/baseline/BASELINE-INITIAL.json"));
+});
+
+test("onboard auto-discovers product and architecture evidence for a decision-ready baseline", () => {
+  const project = tmpProject("onboard-semantic-context");
+  fs.mkdirSync(path.join(project, "docs"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, "README.md"),
+    "# Route Planner\nA configurable travel operations product for dispatch teams.\n\n## Users\nDispatch operators.\n",
+  );
+  const lowercaseReadme = path.join(project, "readme.md");
+  if (!fs.existsSync(lowercaseReadme)) {
+    fs.linkSync(path.join(project, "README.md"), lowercaseReadme);
+  }
+  fs.writeFileSync(
+    path.join(project, "docs", "architecture.md"),
+    "# Architecture\n\n## API Gateway\nRoutes requests to modular providers.\n\n## Provider Boundary\nAdapters are replaceable.\n",
+  );
+  fs.writeFileSync(
+    path.join(project, "package.json"),
+    JSON.stringify({ name: "route-planner", description: "Travel operations planning", scripts: { test: "node --test" } }, null, 2),
+  );
+
+  const payload = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Route Planner",
+    "--json",
+  ]).stdout);
+
+  assert.deepEqual(
+    payload.baseline.imported_documents.map((item) => item.path),
+    ["README.md", "docs/architecture.md"],
+  );
+  assert.equal(payload.baseline.inferred_context.product_signal, "Travel operations planning");
+  assert.ok(payload.baseline.inferred_context.architecture_signals.some((item) => item.path === "docs/architecture.md"));
+  assert.match(payload.assistant_message, /product signal: Travel operations planning/i);
+  const report = fs.readFileSync(payload.report_path, "utf8");
+  assert.match(report, /## Product Signal/);
+  assert.match(report, /## Architecture And Component Signals/);
+  assert.match(report, /API Gateway > Provider Boundary/);
 });
 
 test("story approvals and strict gates ignore superseded unreferenced baselines", () => {
@@ -1818,11 +2314,47 @@ test("task start is the SDLC front door before phase work", () => {
     "--intent-json",
     intent,
     "--confirm-start",
+    "--actor-type",
+    "human",
   ]).stdout);
   assert.equal(confirmed.status, "ready_to_execute");
   assert.equal(confirmed.execution_allowed, true);
   assert.equal(confirmed.contract_id, "contract-ST-001-implementation");
   assert.match(confirmed.confirmation_trace_id, /^TR-/);
+
+  const resumeAuthorization = grantAutomationAuthorization(
+    readyProject,
+    "AUTH-RESUME-ST-001",
+    ["task.start.confirm"],
+    { subjects: ["ST-001"] },
+  );
+  mustRun([
+    "story",
+    "claim",
+    "--root",
+    readyProject,
+    "--id",
+    "ST-001",
+    "--agent",
+    "codex",
+  ]);
+  const resumedByClaimant = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--intent-json",
+    intent,
+    "--confirm-start",
+    "--authorization",
+    resumeAuthorization.id,
+  ]).stdout);
+  assert.equal(resumedByClaimant.status, "ready_to_execute");
+  assert.equal(resumedByClaimant.execution_allowed, true);
+  assert.ok(resumedByClaimant.route_decision.deterministic_checks.some(
+    (check) => check.check === "active_claim" && /requesting actor codex/.test(check.details),
+  ));
 
   const revision = JSON.parse(mustRun([
     "task",
@@ -1838,6 +2370,108 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(revision.status, "contract_revision_required");
   assert.equal(revision.execution_allowed, false);
   assert.equal(revision.contract_action, "revise_contract");
+});
+
+test("task start blocks when an approved contract source changes", () => {
+  const project = tmpProject("task-start-stale-contract-source");
+  initProject(project);
+  const contextFile = writeArtifact(
+    project,
+    "requirements/implementation-context.md",
+    "# Implementation context\nUse the approved API boundary.\n",
+  );
+  story(project, "ST-STALE", ["--contract", "contract-ST-STALE-implementation"]);
+  createApprovedTemplate(project, "implementation-summary");
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-STALE",
+    "--id",
+    "contract-ST-STALE-implementation",
+    "--context-summary",
+    "Implement against the approved source snapshot.",
+    "--context-file",
+    contextFile,
+    "--qa",
+    "Which API boundary applies?|The boundary recorded in the context source",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-STALE-implementation",
+    ...humanApproval("Approved source-bound implementation contract"),
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-STALE", "story.json");
+  writeJson(storyPath, { ...readJson(storyPath), status: "ready", phase: "implementation" });
+  const intent = routeIntent({
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-STALE" }],
+    proposed_phase: "implementation",
+  });
+
+  const ready = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--intent-json",
+    intent,
+    "--confirm-start",
+    "--actor-type",
+    "human",
+    "--json",
+  ]).stdout);
+  assert.equal(ready.status, "ready_to_execute");
+  assert.equal(ready.execution_allowed, true);
+
+  fs.appendFileSync(path.join(project, contextFile), "The source changed after approval.\n");
+  const blocked = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--intent-json",
+    intent,
+    "--confirm-start",
+    "--json",
+  ]).stdout);
+  assert.equal(blocked.status, "needs_user_input");
+  assert.equal(blocked.execution_allowed, false);
+  assert.equal(blocked.route, "ask_clarification");
+  assert.equal(blocked.contract_action, "normalize_request");
+  assert.ok(blocked.blocking_reasons.includes("contract_needs_approval"));
+  assert.ok(blocked.route_decision.deterministic_checks.some(
+    (check) => check.check === "story_contract_exists" && check.details.includes("stale context"),
+  ));
+  assert.equal(blocked.confirmation_trace_id, undefined);
+  const queue = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-STALE",
+    "--json",
+  ]).stdout);
+  const clarification = queue.requests.find(
+    (request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-STALE-implementation",
+  );
+  assert.ok(clarification);
+  assert.ok(clarification.gaps.includes("stale_context_source"));
+  assert.match(clarification.summary, new RegExp(contextFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(queue.requests.some(
+    (request) => request.type === "contract_approval" && request.subject_id === "contract-ST-STALE-implementation",
+  ), false);
 });
 
 test("route decide rejects canonical intent files from derived cache directories", () => {
@@ -2435,27 +3069,24 @@ test("contract create requires agreed output templates and approval requests sum
   assert.match(requests.assistant_message, /You can answer in natural language/);
   assert.ok(requests.requests.some((request) => request.type === "output_template_approval" && request.subject_id === "technical-analysis-v1"));
   assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-001-analysis"));
-  assert.ok(requests.requests.some((request) => request.type === "contract_approval" && request.subject_id === "contract-ST-001-analysis"));
+  assert.equal(requests.requests.some((request) => request.type === "contract_approval" && request.subject_id === "contract-ST-001-analysis"), false);
+  assert.equal(requests.requests.some((request) => request.type === "output_link_required"), false);
   assert.ok(requests.requests.every((request) => request.suggested_question));
   assert.ok(requests.requests.every((request) => request.title));
   assert.ok(requests.requests.every((request) => request.why_needed));
   assert.ok(requests.requests.every((request) => request.user_prompt));
   assert.ok(requests.requests.every((request) => request.approval_scope?.cannot_approve_future_artifacts === true));
   assert.ok(requests.requests.every((request) => Array.isArray(request.review_items) && request.review_items.length > 0));
-  assert.ok(requests.requests.some((request) => request.type === "contract_approval" && /Context:/.test(request.review_items.join(" "))));
+  assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && /Context:/.test(request.review_items.join(" "))));
   const outputTemplateRequest = requests.requests.find((request) => request.type === "output_template_approval");
   assert.ok(outputTemplateRequest.review_items.some((item) => /Decision scope:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Assessment sections:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Template content to review:/.test(item)));
   const outputTemplateDeliveryIds = outputTemplateRequest.delivery_format_options.map((option) => option.id);
-  assert.ok(outputTemplateDeliveryIds.includes("chat-summary"));
-  assert.ok(outputTemplateDeliveryIds.includes("canonical-document"));
-  assert.ok(outputTemplateDeliveryIds.includes("document-plus-chat-summary"));
-  assert.ok(outputTemplateDeliveryIds.includes("detailed-findings"));
-  assert.match(outputTemplateRequest.recommended_delivery_format, /Project document plus chat summary/);
-  assert.match(outputTemplateRequest.delivery_question, /How should I present/);
-  const contractApprovalRequest = requests.requests.find((request) => request.type === "contract_approval");
-  assert.ok(contractApprovalRequest.delivery_format_options.some((option) => option.id === "executive-summary"));
+  assert.deepEqual(outputTemplateDeliveryIds.slice(0, 8), ["markdown", "docx", "xlsx", "pdf", "pptx", "html", "json", "csv"]);
+  assert.equal(outputTemplateDeliveryIds.includes("chat-summary"), true);
+  assert.match(outputTemplateRequest.recommended_delivery_format, /Markdown document \(\.md\)/);
+  assert.match(outputTemplateRequest.delivery_question, /canonical result remain Markdown document \(\.md\)/);
 
   assert.equal(requests.assistant_message_source_language, "en");
   assert.equal(requests.assistant_message_presentation.translate_to_chat_language, true);
@@ -2489,10 +3120,98 @@ test("contract create requires agreed output templates and approval requests sum
   assert.match(gate.assistant_message, /Plainly:/);
   assert.equal(gate.assistant_message_source_language, "en");
   assert.equal(gate.assistant_message_presentation.translate_to_chat_language, true);
-  assert.ok(gate.approval_requests.some((request) => request.type === "contract_approval"));
+  assert.ok(gate.approval_requests.some((request) => request.type === "contract_clarification"));
+  assert.equal(gate.approval_requests.some((request) => request.type === "contract_approval"), false);
+
+  mustRun([
+    "output",
+    "template",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "technical-analysis-v1",
+    ...humanApproval("Approved canonical technical analysis format"),
+  ]);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis contract ready for approval",
+    "--qa",
+    "Who reviews the analysis?|Product and engineering owners",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--force",
+  ]);
+  const approvable = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  const contractApprovalRequest = approvable.requests.find(
+    (request) => request.type === "contract_approval" && request.subject_id === "contract-ST-001-analysis",
+  );
+  assert.ok(contractApprovalRequest);
+  assert.equal(approvable.requests.some(
+    (request) => request.type === "contract_clarification" && request.subject_id === "contract-ST-001-analysis",
+  ), false);
+  assert.equal(approvable.requests.some((request) => request.type === "output_link_required"), false);
+  assert.ok(contractApprovalRequest.delivery_format_options.some((option) => option.id === "chat-summary"));
+  assert.ok(contractApprovalRequest.delivery_format_options.some((option) => option.id === "executive-summary"));
+
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-001-analysis",
+    ...humanApproval("Approved complete analysis contract"),
+  ]);
+  const beforeCandidate = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  assert.equal(beforeCandidate.requests.some((request) => request.type === "output_link_required"), false);
+
+  const candidate = writeArtifact(
+    project,
+    ".sdlc/stories/ST-001/outputs/technical-analysis.md",
+    "# Completed technical analysis\n",
+  );
+  const afterCandidate = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  const outputLinkRequest = afterCandidate.requests.find((request) => request.type === "output_link_required");
+  assert.ok(outputLinkRequest);
+  assert.match(outputLinkRequest.suggested_command, new RegExp(candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("implementation output template approvals include code review delivery choices", () => {
+test("implementation contract approvals retain code review delivery choices", () => {
   const project = tmpProject("implementation-output-delivery-options");
   initProject(project);
   story(project, "ST-001");
@@ -2509,8 +3228,55 @@ test("implementation output template approvals include code review delivery choi
   ]);
 
   const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--json"]).stdout);
-  const request = requests.requests.find((item) => item.type === "output_template_approval" && item.subject_id === "implementation-summary-v1");
-  assert.ok(request, "implementation output template approval request missing");
+  const templateRequest = requests.requests.find((item) => item.type === "output_template_approval" && item.subject_id === "implementation-summary-v1");
+  assert.ok(templateRequest, "implementation output template approval request missing");
+  assert.deepEqual(
+    templateRequest.delivery_format_options.slice(0, 8).map((option) => option.id),
+    ["markdown", "docx", "xlsx", "pdf", "pptx", "html", "json", "csv"],
+  );
+  assert.equal(templateRequest.delivery_format_options.some((option) => option.id === "changed-files-summary"), true);
+
+  mustRun([
+    "output",
+    "template",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "implementation-summary-v1",
+    ...humanApproval("Approved implementation summary format"),
+  ]);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-implementation",
+    "--context-summary",
+    "Implement and report the requested change.",
+    "--qa",
+    "What should the summary cover?|Changed files, components, and verification",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+  ]);
+  const contractRequests = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  const request = contractRequests.requests.find(
+    (item) => item.type === "contract_approval" && item.subject_id === "contract-ST-001-implementation",
+  );
+  assert.ok(request, "implementation contract approval request missing");
   const deliveryIds = request.delivery_format_options.map((option) => option.id);
   assert.ok(deliveryIds.includes("changed-files-summary"));
   assert.ok(deliveryIds.includes("modified-classes-components"));
@@ -3171,6 +3937,17 @@ test("schemas and JSON templates parse with portable local references", () => {
   assert.ok(traceSchema.$defs.actor.oneOf.some((branch) => branch.type === "null"));
   const contractSchema = readJson(path.join(repoRoot, "schemas", "contract.schema.json"));
   assert.ok(contractSchema.properties.approvals.items.properties.scope.oneOf.some((branch) => branch.type === "object"));
+  const outputTemplateSchema = readJson(path.join(repoRoot, "schemas", "output-template.schema.json"));
+  assert.equal(outputTemplateSchema.properties.delivery.$ref, "#/$defs/delivery");
+  assert.ok(outputTemplateSchema.$defs.delivery.required.includes("mode"));
+  assert.equal(outputTemplateSchema.properties.approved_delivery_hash.pattern, "^[a-f0-9]{64}$");
+  const outputLinkSchema = readJson(path.join(repoRoot, "schemas", "output-link.schema.json"));
+  assert.equal(outputLinkSchema.properties.delivery_format.description.includes("snapshot"), true);
+  assert.equal(outputLinkSchema.properties.verification_receipt.$ref, "#/$defs/verification_receipt");
+  assert.ok(outputLinkSchema.$defs.verification_receipt.required.includes("artifact_sha256"));
+  const authorizationSchema = readJson(path.join(repoRoot, "schemas", "authorization.schema.json"));
+  assert.ok(authorizationSchema.required.includes("allowed_actions"));
+  assert.equal(authorizationSchema.properties.hash_algorithm.const, "sha256:stable-json:v1");
 });
 
 function collectJsonSchemaReferences(value, references = []) {
