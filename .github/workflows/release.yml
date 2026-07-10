@@ -8,7 +8,25 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18.18.0, 20, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm run check
+      - run: npm test
+      - run: npm run doctor
+      - run: npm pack --dry-run
+
   package:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -19,9 +37,6 @@ jobs:
         shell: bash
         run: |
           test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-          npm run check
-          npm test
-          npm run doctor
       - name: Build package and checksum
         id: package
         shell: bash

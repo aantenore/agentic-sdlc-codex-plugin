@@ -319,6 +319,10 @@ For phase-by-phase examples, see [Agent Interactions](agent-interactions.md).
 
 Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, invalid statuses or expiry dates, unapproved or changed output templates, unjustified duplicate outputs, stale cache warnings, and test/release evidence gaps. Use `gate check --out <path>` to persist JSON or Markdown reports under `.sdlc/reports/`.
 
+Canonical KB and trace paths always use `/` separators so the same records remain stable across Linux, macOS, and Windows. IDs reject names that cannot be represented portably, including Windows device names and trailing periods. Delegated approvals and task-start receipts are revalidated against the current authorization action, subject, artifact types, scope, expiry, and content hash rather than trusting the stored authorization ID alone.
+
+Release tags run the complete Linux, macOS, and Windows matrix for every supported Node line before the package job can publish. The package regression test creates a real tarball, installs it into a clean prefix, and runs the installed CLI doctor so source-tree success cannot hide a missing packaged resource.
+
 ```mermaid
 flowchart TB
   Gate["gate check --strict"] --> Contracts["Contracts approved"]

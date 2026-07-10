@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -22,6 +23,7 @@ EXCLUDED_NAMES = frozenset({".git", ".sdlc", "test", ".DS_Store"})
 EXCLUDED_FILE_SUFFIXES = (".pyc", ".pyo")
 INSTALL_LOCK_WAIT_SECONDS = 30.0
 INSTALL_LOCK_STALE_SECONDS = 300.0
+MINIMUM_PYTHON = (3, 8)
 
 
 class InstallError(RuntimeError):
@@ -30,6 +32,16 @@ class InstallError(RuntimeError):
 
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
+
+
+def _is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if os.name != "nt" or not _lexists(path):
+        return False
+    attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return bool(attributes & reparse_flag)
 
 
 def _home_directory() -> Path:
@@ -49,8 +61,8 @@ def _assert_no_nested_symlinks(base: Path, target: Path, label: str) -> None:
     current = base
     for component in relative.parts:
         current = current / component
-        if _lexists(current) and current.is_symlink():
-            raise InstallError(f"Refusing symlinked {label} path component: {current}")
+        if _lexists(current) and _is_link_like(current):
+            raise InstallError(f"Refusing symlinked or junction {label} path component: {current}")
 
 
 @contextmanager
@@ -190,8 +202,8 @@ def _copy_directory(
                 child, forbidden_roots
             ):
                 continue
-            if child.is_symlink():
-                raise InstallError(f"Refusing allowlisted source symlink: {child}")
+            if _is_link_like(child):
+                raise InstallError(f"Refusing allowlisted source symlink or junction: {child}")
             retained_directories.append(directory_name)
         directory_names[:] = retained_directories
 
@@ -203,8 +215,8 @@ def _copy_directory(
                 child, forbidden_roots
             ):
                 continue
-            if child.is_symlink():
-                raise InstallError(f"Refusing allowlisted source symlink: {child}")
+            if _is_link_like(child):
+                raise InstallError(f"Refusing allowlisted source symlink or junction: {child}")
             if not child.is_file():
                 raise InstallError(f"Refusing non-regular allowlisted source file: {child}")
             _copy_file(child, repo_root, staging_root)
@@ -219,8 +231,8 @@ def _copy_allowlisted_path(
     relative_path = source.relative_to(repo_root)
     if _is_excluded(relative_path) or _is_forbidden_source_path(source, forbidden_roots):
         return
-    if source.is_symlink():
-        raise InstallError(f"Refusing allowlisted source symlink: {source}")
+    if _is_link_like(source):
+        raise InstallError(f"Refusing allowlisted source symlink or junction: {source}")
     if source.is_dir():
         _copy_directory(source, repo_root, staging_root, forbidden_roots)
         return
@@ -283,8 +295,8 @@ def _is_managed_top_level(name: str, allowlist: tuple[str, ...]) -> bool:
 def _validate_destination(
     repo_root: Path, destination: Path, allowlist: tuple[str, ...]
 ) -> None:
-    if destination.is_symlink():
-        raise InstallError(f"Refusing destination symlink: {destination}")
+    if _is_link_like(destination):
+        raise InstallError(f"Refusing destination symlink or junction: {destination}")
 
     if not _lexists(destination):
         return
@@ -320,8 +332,8 @@ def _validate_destination(
 
 
 def _prepare_marketplace_payload(marketplace_path: Path) -> dict:
-    if marketplace_path.is_symlink():
-        raise InstallError(f"Refusing marketplace symlink: {marketplace_path}")
+    if _is_link_like(marketplace_path):
+        raise InstallError(f"Refusing marketplace symlink or junction: {marketplace_path}")
     if _lexists(marketplace_path):
         try:
             payload = json.loads(marketplace_path.read_text(encoding="utf-8"))
@@ -450,6 +462,11 @@ def _remove_backup(backup: Path | None) -> None:
 
 
 def main() -> int:
+    if sys.version_info < MINIMUM_PYTHON:
+        required = ".".join(str(part) for part in MINIMUM_PYTHON)
+        current = ".".join(str(part) for part in sys.version_info[:3])
+        print(f"Install failed: Python {required}+ is required; found {current}.", file=sys.stderr)
+        return 1
     repo_root = Path(__file__).resolve().parents[1]
     manifest = repo_root / ".codex-plugin" / "plugin.json"
     if not manifest.is_file():
