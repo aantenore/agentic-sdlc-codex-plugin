@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
 
 function tmpProject(name) {
@@ -13,21 +14,56 @@ function tmpProject(name) {
 }
 
 function run(args, options = {}) {
+  const env = { ...process.env };
+  for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) {
+    delete env[key];
+  }
+  Object.assign(env, options.env || {});
   return spawnSync(process.execPath, [bin, ...args], {
     cwd: options.cwd || repoRoot,
     encoding: "utf8",
-    env: { ...process.env, ...(options.env || {}) },
+    env,
+    timeout: options.timeout || 30_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+function runAsync(args, options = {}) {
+  const env = { ...process.env };
+  for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) {
+    delete env[key];
+  }
+  Object.assign(env, options.env || {});
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bin, ...args], {
+      cwd: options.cwd || repoRoot,
+      env,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => child.kill("SIGKILL"), options.timeout || 30_000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status, signal) => {
+      clearTimeout(timeout);
+      resolve({ status, signal, stdout, stderr });
+    });
   });
 }
 
 function mustRun(args, options = {}) {
   const result = run(args, options);
+  assert.equal(result.error, undefined, `${args.join(" ")} failed to execute: ${result.error?.message}`);
+  assert.equal(result.signal, null, `${args.join(" ")} terminated by ${result.signal}`);
   assert.equal(result.status, 0, `${args.join(" ")}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
   return result;
 }
 
 function mustFail(args, pattern, options = {}) {
   const result = run(args, options);
+  assert.equal(result.error, undefined, `${args.join(" ")} failed to execute: ${result.error?.message}`);
+  assert.equal(result.signal, null, `${args.join(" ")} terminated by ${result.signal}`);
   assert.notEqual(result.status, 0, `${args.join(" ")} unexpectedly passed\n${result.stdout}`);
   const combined = `${result.stdout}\n${result.stderr}`;
   assert.match(combined, pattern, `${args.join(" ")}\n${combined}`);
@@ -162,6 +198,8 @@ function createStrictReadyStory(project, id, artifactType = "functional-analysis
 test("--version is not shadowed by help and boolean --json does not consume query", () => {
   const version = mustRun(["--version"]);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  assert.equal(version.stdout.trim(), readJson(path.join(repoRoot, "package.json")).version);
+  assert.equal(version.stdout.trim(), readJson(path.join(repoRoot, ".codex-plugin", "plugin.json")).version);
 
   const project = tmpProject("parser");
   initProject(project);
@@ -218,6 +256,22 @@ test("story id mismatch and invalid branch pattern fail strict gate", () => {
   writeJson(storyPath, { ...originalStory, phase: "implementation", status: "implementation" });
   mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex", "--branch", "nope"]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /does not match expected/);
+  mustRun(["story", "release", "--root", project, "--id", "ST-001", "--agent", "codex"]);
+  const defaultClaim = JSON.parse(mustRun([
+    "story",
+    "claim",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--agent",
+    "codex",
+    "--json",
+  ]).stdout);
+  assert.equal(defaultClaim.claim.branch, "codex/ST-001");
+  const validBranchGate = run(["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--json"]);
+  const validBranchReport = JSON.parse(validBranchGate.stdout);
+  assert.equal(validBranchReport.errors.some((error) => error.includes("claim branch")), false);
 });
 
 test("invalid statuses and invalid expiry values are rejected or gated", () => {
@@ -477,6 +531,156 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   assert.ok(cache.source_paths.includes(".sdlc/baseline/BASELINE-INITIAL.json"));
 });
 
+test("story approvals and strict gates ignore superseded unreferenced baselines", () => {
+  const project = tmpProject("active-baseline");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# First snapshot\n");
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-OLD",
+    "--source",
+    "README.md",
+    "--summary",
+    "Historical context",
+  ]);
+  fs.writeFileSync(path.join(project, "README.md"), "# Current snapshot\n");
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-CURRENT",
+    "--source",
+    "README.md",
+    "--summary",
+    "Current context",
+  ]);
+  mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-CURRENT", ...humanApproval("Current context approved")]);
+
+  createStrictReadyStory(project, "ST-001");
+  const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--story", "ST-001", "--json"]).stdout);
+  assert.equal(requests.requests.some((request) => request.subject_id === "BASELINE-OLD"), false);
+  assert.doesNotMatch(requests.assistant_message, /BASELINE-OLD/);
+
+  const gate = JSON.parse(mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--json"]).stdout);
+  assert.equal(gate.status, "passed");
+  assert.equal(gate.errors.some((error) => error.includes("BASELINE-OLD")), false);
+});
+
+test("stale active baselines request a refresh instead of an impossible approval", () => {
+  const project = tmpProject("stale-baseline-refresh");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Proposed context\n");
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-CURRENT",
+    "--source",
+    "README.md",
+    "--summary",
+    "Context to refresh",
+  ]);
+  fs.writeFileSync(path.join(project, "README.md"), "# Changed context\n");
+
+  const requests = JSON.parse(mustRun(["approval", "requests", "--root", project, "--json"]).stdout);
+  const refresh = requests.requests.find((request) => request.subject_id === "BASELINE-CURRENT");
+  assert.equal(refresh.type, "baseline_refresh_required");
+  assert.equal(refresh.status, "needs_refresh");
+  assert.match(refresh.why_needed, /changed after it was prepared/);
+  assert.match(refresh.suggested_command, /baseline propose[\s\S]*--force/);
+  assert.match(requests.assistant_message, /Refresh project context/);
+  assert.doesNotMatch(requests.assistant_message, /Can I use the inferred project context/);
+});
+
+test("strict gates reject missing historical baselines still referenced by contracts", () => {
+  const project = tmpProject("missing-referenced-baseline");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Canonical context\n");
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-USED",
+    "--source",
+    "README.md",
+    "--summary",
+    "Context used by the story contract",
+  ]);
+  mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-USED", ...humanApproval("Approved used baseline")]);
+  story(project, "ST-001", ["--requirement", "REQ-001"]);
+  createApprovedTemplate(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "design",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-design",
+    "--context-summary",
+    "Design from the approved historical baseline",
+    "--context-file",
+    ".sdlc/baseline/BASELINE-USED.json",
+    "--qa",
+    "Which baseline applies?|BASELINE-USED",
+    "--output-ref",
+    "functional-analysis:functional-analysis-v1:new",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-design", ...humanApproval("Approved baseline-bound contract")]);
+  const artifact = writeArtifact(project, ".sdlc/requirements/ST-001-functional-analysis.md");
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "functional-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    "functional-analysis-v1",
+    "--mode",
+    "new",
+  ]);
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-NEWER",
+    "--source",
+    "README.md",
+    "--summary",
+    "Newer unrelated context",
+  ]);
+  mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-NEWER", ...humanApproval("Approved newer baseline")]);
+  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  fs.rmSync(path.join(project, ".sdlc", "baseline", "BASELINE-USED.json"));
+  mustFail(
+    ["gate", "check", "--root", project, "--story", "ST-001", "--strict"],
+    /Referenced baseline BASELINE-USED is missing|context source .*BASELINE-USED\.json is missing/,
+  );
+  const globalGate = run(["gate", "check", "--root", project, "--strict", "--json"]);
+  const globalReport = JSON.parse(globalGate.stdout);
+  assert.ok(globalReport.errors.some((error) => error.includes("Referenced baseline BASELINE-USED is missing")));
+});
+
 test("output duplicate new is blocked before registry write without matching decision", () => {
   const project = tmpProject("duplicate-output");
   initProject(project);
@@ -525,6 +729,30 @@ test("output duplicate new is blocked before registry write without matching dec
       "REQ-001",
     ],
     /duplicates requirements already covered/,
+  );
+  mustFail(
+    [
+      "output",
+      "link",
+      "--root",
+      project,
+      "--story",
+      "ST-002",
+      "--type",
+      "functional-analysis",
+      "--artifact",
+      second,
+      "--template",
+      "functional-analysis-v1",
+      "--mode",
+      "new",
+      "--requirement",
+      "REQ-001",
+      "--decision-id",
+      "DEC-without-rationale",
+      ...humanApproval("Approved output override"),
+    ],
+    /requires --rationale or --approval-evidence/,
   );
   const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
   assert.equal(registry.links.length, 1);
@@ -647,6 +875,39 @@ test("test and release traces require real canonical evidence in strict mode", (
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /release.*requires at least one evidence path/);
 });
 
+test("strict gates use the latest test outcome while retaining failed attempts", () => {
+  const project = tmpProject("trace-latest-outcome");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex"]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyData = readJson(storyPath);
+  writeJson(storyPath, { ...storyData, phase: "validation", status: "validation" });
+  const evidence = writeArtifact(project, ".sdlc/tests/ST-001-test-run.json", "{\"passed\":true}\n");
+  const appendOutcome = (outcome) => mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "test",
+    "--outcome",
+    outcome,
+    "--summary",
+    `Tests ${outcome}`,
+    "--evidence",
+    evidence,
+  ]);
+  appendOutcome("failed");
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /latest test trace outcome must be passed/);
+  appendOutcome("passed");
+  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  appendOutcome("failed");
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /latest test trace outcome must be passed/);
+});
+
 test("handoff open items block strict gate and handoff close clears them", () => {
   const project = tmpProject("handoff");
   initProject(project);
@@ -730,6 +991,28 @@ test("work items and approved breakdown are persisted and indexed as canonical K
   assert.ok(cache.source_paths.includes(".sdlc/dependencies/graph.json"));
 });
 
+test("breakdown policy accepts repeatable hierarchy levels", () => {
+  const project = tmpProject("breakdown-levels");
+  initProject(project);
+  const updated = JSON.parse(mustRun([
+    "breakdown",
+    "policy",
+    "set",
+    "--root",
+    project,
+    "--levels",
+    "requirement",
+    "--levels",
+    "epic",
+    "--levels",
+    "story",
+    "--json",
+  ]).stdout);
+  assert.deepEqual(updated.policy.levels, ["requirement", "epic", "story"]);
+  const shown = JSON.parse(mustRun(["breakdown", "policy", "show", "--root", project, "--json"]).stdout);
+  assert.deepEqual(shown.levels, ["requirement", "epic", "story"]);
+});
+
 test("strict gate blocks story delivery when referenced breakdown is not approved", () => {
   const project = tmpProject("breakdown-gate");
   initProject(project);
@@ -771,7 +1054,7 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     type: "mcp",
     name: "repo",
     binding_id: "repo-main",
-    target: { repo: "local" },
+    target: { root_path: path.join(path.dirname(project), "approved-external-repo") },
     permissions: ["read"],
   });
   mustRun([
@@ -948,6 +1231,38 @@ test("capability profiles and recommendations can be approved and applied to con
   assert.equal(contract.capability_recommendation_refs[0].id, "CAP-REC-ST-001");
 });
 
+test("story approval requests do not leak capability records from another story", () => {
+  const project = tmpProject("capability-approval-scope");
+  initProject(project);
+  story(project, "ST-001");
+  story(project, "ST-002");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+  ]);
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-PROJECT",
+  ]);
+
+  const requests = JSON.parse(
+    mustRun(["approval", "requests", "--root", project, "--story", "ST-002", "--json"]).stdout,
+  ).requests.filter((request) => request.type === "capability_profile_approval");
+  assert.deepEqual(requests.map((request) => request.subject_id), ["CAP-PROFILE-PROJECT"]);
+});
+
 test("capability recommendation stays usable when its profile is approved after recommendation", () => {
   const project = tmpProject("capability-profile-approval-order");
   initProject(project);
@@ -1054,6 +1369,18 @@ test("install-required capability recommendation blocks strict gate without inst
     "--capability-recommendation",
     "CAP-REC-INSTALL",
   ], /without install approval/);
+  mustFail([
+    "capability",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-INSTALL",
+    "--approve-install",
+    ...delegatedAutomationApproval("Delegated analysis approval does not include installing capabilities"),
+  ], /delegated automation cannot expand into installs/);
+  const notInstalled = readJson(path.join(project, ".sdlc", "capability-discovery", "recommendations", "CAP-REC-INSTALL.json"));
+  assert.equal(notInstalled.recommendations[0].install_approved, false);
   mustRun(["capability", "approve", "--root", project, "--id", "CAP-REC-INSTALL", "--approve-install", ...humanApproval("Approved install-required capability")]);
   mustRun([
     "contract",
@@ -1153,6 +1480,49 @@ test("technical analysis route suggests capability discovery when no profile exi
   });
   assert.ok(decision.blocking_reasons.includes("capability_profile_missing"));
   assert.ok(decision.next_commands.some((command) => command.includes("capability profile propose")));
+});
+
+test("technical analysis routing ignores approved profiles whose sources became stale", () => {
+  const project = tmpProject("capability-route-stale-profile");
+  initProject(project);
+  story(project, "ST-001");
+  const source = writeArtifact(project, "package.json", "{\"name\":\"route-test\"}\n");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--phase",
+    "analysis",
+    "--context-file",
+    source,
+  ]);
+  mustRun([
+    "capability",
+    "profile",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    ...humanApproval("Approved routing profile"),
+  ]);
+  const intent = {
+    requested_action: "technical_analysis",
+    proposed_phase: "analysis",
+    artifact_type: "technical-analysis",
+    referenced_entities: [{ type: "story", id: "ST-001" }],
+  };
+  const fresh = routeDecision(project, intent);
+  assert.equal(fresh.blocking_reasons.includes("capability_profile_missing"), false);
+  fs.appendFileSync(path.join(project, source), "\n");
+  const stale = routeDecision(project, intent);
+  assert.ok(stale.blocking_reasons.includes("capability_profile_missing"));
 });
 
 test("technical assessment aliases route through the contract front door", () => {
@@ -1370,6 +1740,25 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(missing.assistant_message_source_language, "en");
   assert.equal(missing.assistant_message_presentation.translate_to_chat_language, true);
   assert.match(missing.assistant_message_presentation.instruction, /active chat language/);
+  const forcedMissing = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    missingProject,
+    "--json",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(forcedMissing.execution_allowed, false);
+  assert.equal(forcedMissing.status, "needs_user_input");
+  const missingTracePath = path.join(missingProject, ".sdlc", "traces", "project.jsonl");
+  const missingTraces = fs.existsSync(missingTracePath) ? fs.readFileSync(missingTracePath, "utf8") : "";
+  assert.doesNotMatch(missingTraces, /task\.start\.confirm/);
 
   const readyProject = tmpProject("task-start-ready");
   initProject(readyProject);
@@ -1431,6 +1820,7 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(confirmed.status, "ready_to_execute");
   assert.equal(confirmed.execution_allowed, true);
   assert.equal(confirmed.contract_id, "contract-ST-001-implementation");
+  assert.match(confirmed.confirmation_trace_id, /^TR-/);
 
   const revision = JSON.parse(mustRun([
     "task",
@@ -2081,6 +2471,8 @@ test("contract create requires agreed output templates and approval requests sum
   assert.match(plainRequests, /How I can present the result/);
   assert.match(plainRequests, /If you say yes/);
   assert.match(plainRequests, /Decision needed:/);
+  assert.match(plainRequests, /Proposed document structure:/);
+  assert.match(plainRequests, /Tools and access being approved:/);
   assert.doesNotMatch(plainRequests, /Agent command/);
 
   const gate = JSON.parse(mustRun([
@@ -2127,6 +2519,26 @@ test("implementation output template approvals include code review delivery choi
   assert.match(request.recommended_delivery_format, /changed-files-summary/);
   assert.match(request.delivery_question, /Changed files summary/);
   assert.match(request.delivery_question, /Diff or patch review/);
+});
+
+test("latest template approval supersedes legacy template decision history", () => {
+  const project = tmpProject("template-approval-history");
+  initProject(project);
+  createStrictReadyStory(project, "ST-001");
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex", "--branch", "feature/ST-001"]);
+
+  const registryPath = path.join(project, ".sdlc", "output-contracts", "registry.json");
+  const registry = readJson(registryPath);
+  const current = registry.decisions.find((decision) => decision.type === "template_approved");
+  registry.decisions.unshift({
+    ...current,
+    id: "DEC-legacy-template-approval",
+    created_at: "2000-01-01T00:00:00.000Z",
+    approval_source: undefined,
+  });
+  writeJson(registryPath, registry);
+
+  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
 });
 
 test("trace attribution separates executor requester and authorizer in report queries", () => {
@@ -2266,6 +2678,417 @@ test("report query finds new functional stories from canonical story records", (
   assert.equal(report.results[0].kind, "stories");
 });
 
+test("CLI rejects unknown, duplicate, and missing option values and honors explicit false", () => {
+  const project = tmpProject("strict-options");
+  initProject(project);
+  mustFail(["status", "--root", project, "--definitely-unknown", "value"], /Unknown option --definitely-unknown/);
+  mustFail([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--id",
+    "ST-002",
+    "--title",
+    "Duplicate id",
+  ], /Option --id may only be provided once/);
+  mustFail(["story", "create", "--root", project, "--id", "ST-001", "--title", "--json"], /Missing value for option --title/);
+  const archive = JSON.parse(mustRun([
+    "archive",
+    "closed",
+    "--root",
+    project,
+    "--before",
+    "now",
+    "--apply=false",
+    "--json",
+  ]).stdout);
+  assert.equal(archive.status, "planned");
+  assert.equal(archive.plan.apply_requested, false);
+  assert.equal(archive.plan.applied, false);
+});
+
+test("filesystem boundaries reject symlinked cache and canonical directories", { skip: process.platform === "win32" }, () => {
+  const project = tmpProject("symlink-boundaries");
+  initProject(project);
+  const externalCache = tmpProject("external-cache");
+  const sentinel = path.join(externalCache, "keep.txt");
+  fs.writeFileSync(sentinel, "keep\n");
+  const cacheRoot = path.join(project, ".sdlc", "cache");
+  fs.rmSync(cacheRoot, { recursive: true, force: true });
+  fs.symlinkSync(externalCache, cacheRoot, "dir");
+  mustFail(["cache", "clear", "--root", project], /symlink|outside the target project root/i);
+  assert.equal(fs.readFileSync(sentinel, "utf8"), "keep\n");
+
+  const externalContracts = tmpProject("external-contracts");
+  const contractsRoot = path.join(project, ".sdlc", "contracts");
+  fs.rmSync(contractsRoot, { recursive: true, force: true });
+  fs.symlinkSync(externalContracts, contractsRoot, "dir");
+  mustFail(["gate", "check", "--root", project, "--strict"], /symlink/i);
+  assert.deepEqual(fs.readdirSync(externalContracts), []);
+
+  const storyProject = tmpProject("symlinked-story-record");
+  initProject(storyProject);
+  story(storyProject, "ST-001");
+  const storyPath = path.join(storyProject, ".sdlc", "stories", "ST-001", "story.json");
+  const externalStory = path.join(tmpProject("external-story"), "story.json");
+  fs.copyFileSync(storyPath, externalStory);
+  fs.rmSync(storyPath);
+  fs.symlinkSync(externalStory, storyPath);
+  mustFail(["gate", "check", "--root", storyProject, "--story", "ST-001", "--strict"], /symlink|outside the target project root/i);
+});
+
+test("contract ids cannot escape the canonical contract directory", () => {
+  const project = tmpProject("contract-id-boundary");
+  initProject(project);
+  story(project, "ST-001");
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
+  const storyRecord = readJson(storyPath);
+  writeJson(storyPath, { ...storyRecord, contract_id: "../../outside" });
+  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /Invalid id/);
+  assert.equal(fs.existsSync(path.join(project, "outside.json")), false);
+});
+
+test("nested decision changes invalidate an existing approval", () => {
+  const project = tmpProject("nested-approval-hash");
+  initProject(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis",
+    "--context-summary",
+    "Analyze the project",
+    "--qa",
+    "Which boundary applies?|Repository only",
+  ]);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-analysis", ...humanApproval("Approved nested decision")]);
+  const contractPath = path.join(project, ".sdlc", "contracts", "contract-analysis.json");
+  const contract = readJson(contractPath);
+  contract.contextualization.questions[0].status = "open";
+  writeJson(contractPath, contract);
+  mustFail(["gate", "check", "--root", project, "--strict"], /stale or missing approved_content_hash/i);
+});
+
+test("parallel contract approvals are serialized without losing records", async () => {
+  const project = tmpProject("parallel-contract-approval");
+  initProject(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis",
+    "--context-summary",
+    "Concurrent approval test",
+  ]);
+  const commands = ["Approval A", "Approval B"].map((summary) => [
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-analysis",
+    ...humanApproval(summary),
+  ]);
+  const results = await Promise.all(commands.map((command) => runAsync(command)));
+  for (const result of results) {
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const contract = readJson(path.join(project, ".sdlc", "contracts", "contract-analysis.json"));
+  assert.deepEqual(new Set(contract.approvals.map((approval) => approval.summary)), new Set(["Approval A", "Approval B"]));
+  assert.equal(contract.approvals.length, 2);
+});
+
+test("parallel contract revision and approval preserve the revised content", async () => {
+  const project = tmpProject("parallel-contract-revision");
+  initProject(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis",
+    "--context-summary",
+    "Original contract content",
+  ]);
+  const revision = [
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis",
+    "--context-summary",
+    "Revised contract content",
+    "--force",
+  ];
+  const approval = [
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-analysis",
+    ...humanApproval("Concurrent approval"),
+  ];
+  const results = await Promise.all([runAsync(revision), runAsync(approval)]);
+  assert.equal(results.find((result) => result.status !== 0), undefined, results.map((result) => result.stderr).join("\n"));
+  const contract = readJson(path.join(project, ".sdlc", "contracts", "contract-analysis.json"));
+  assert.equal(contract.contextualization.summary, "Revised contract content");
+  if (contract.status === "approved") {
+    assert.equal(contract.approvals.length, 1);
+  } else {
+    assert.equal(contract.status, "draft");
+    assert.equal(contract.approvals.length, 0);
+  }
+});
+
+test("parallel claim replacement and release cannot release the replacement claim", async () => {
+  const project = tmpProject("parallel-claim-release");
+  initProject(project);
+  story(project, "ST-001");
+  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "agent-old"]);
+  const replacement = runAsync([
+    "story",
+    "claim",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--agent",
+    "agent-new",
+    "--actor-type",
+    "human",
+    "--force",
+  ]);
+  const release = runAsync([
+    "story",
+    "release",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--agent",
+    "agent-old",
+  ]);
+  const [replacementResult, releaseResult] = await Promise.all([replacement, release]);
+  assert.equal(replacementResult.status, 0, replacementResult.stderr);
+  assert.ok([0, 1].includes(releaseResult.status), releaseResult.stderr);
+  const claim = readJson(path.join(project, ".sdlc", "stories", "ST-001", "claim.json"));
+  assert.equal(claim.agent, "agent-new");
+  assert.equal(claim.status, "active");
+});
+
+test("parallel dependency approvals preserve every graph edge", async () => {
+  const project = tmpProject("parallel-dependency-approval");
+  initProject(project);
+  story(project, "ST-001");
+  story(project, "ST-002");
+  story(project, "ST-003");
+  mustRun(["dependency", "propose", "--root", project, "--id", "DEP-A", "--edge", "ST-002:ST-001:blocks:implementation:done"]);
+  mustRun(["dependency", "propose", "--root", project, "--id", "DEP-B", "--edge", "ST-003:ST-001:blocks:implementation:done"]);
+  const results = await Promise.all([
+    runAsync(["dependency", "approve", "--root", project, "--id", "DEP-A", ...humanApproval("Approve A")]),
+    runAsync(["dependency", "approve", "--root", project, "--id", "DEP-B", ...humanApproval("Approve B")]),
+  ]);
+  for (const result of results) {
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const graph = readJson(path.join(project, ".sdlc", "dependencies", "graph.json"));
+  assert.deepEqual(new Set(graph.edges.map((edge) => edge.proposal_id)), new Set(["DEP-A", "DEP-B"]));
+});
+
+test("stale internal locks are recovered only after owner death and timeout", () => {
+  const project = tmpProject("stale-internal-lock");
+  initProject(project);
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis",
+    "--context-summary",
+    "Stale lock recovery",
+  ]);
+  const contractPath = path.join(project, ".sdlc", "contracts", "contract-analysis.json");
+  const lockPath = `${contractPath}.lock`;
+  writeJson(lockPath, {
+    pid: 2_147_483_647,
+    host: os.hostname(),
+    nonce: "stale",
+    created_at: new Date(Date.now() - 60_000).toISOString(),
+  });
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-analysis", ...humanApproval("Recovered stale lock")]);
+  assert.equal(fs.existsSync(lockPath), false);
+  writeJson(lockPath, {
+    pid: 1,
+    host: "retired-build-host",
+    nonce: "remote-stale",
+    created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+  });
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-analysis", ...humanApproval("Recovered expired remote lease")]);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("archive apply preflights all targets before moving any source", () => {
+  const project = tmpProject("archive-atomic");
+  initProject(project);
+  const reportsRoot = path.join(project, ".sdlc", "reports");
+  fs.mkdirSync(reportsRoot, { recursive: true });
+  const first = path.join(reportsRoot, "a.json");
+  const second = path.join(reportsRoot, "b.json");
+  writeJson(first, { status: "closed" });
+  writeJson(second, { status: "closed" });
+  const old = new Date("2020-01-15T00:00:00.000Z");
+  fs.utimesSync(first, old, old);
+  fs.utimesSync(second, old, old);
+  const conflictingTarget = path.join(project, ".sdlc", "archive", "2020", "01", "reports", "b.json");
+  fs.mkdirSync(path.dirname(conflictingTarget), { recursive: true });
+  writeJson(conflictingTarget, { existing: true });
+  mustFail(["archive", "closed", "--root", project, "--before", "now", "--apply"], /Archive target already exists/);
+  assert.equal(fs.existsSync(first), true);
+  assert.equal(fs.existsSync(second), true);
+  assert.deepEqual(readJson(conflictingTarget), { existing: true });
+
+  const planProject = tmpProject("archive-plan-preflight");
+  initProject(planProject);
+  const source = writeArtifact(planProject, ".sdlc/reports/closed.json", "{}\n");
+  fs.utimesSync(path.join(planProject, source), old, old);
+  const existingPlan = writeArtifact(planProject, ".sdlc/archive/existing-plan.json", "{}\n");
+  mustFail([
+    "archive",
+    "closed",
+    "--root",
+    planProject,
+    "--before",
+    "now",
+    "--apply",
+    "--out",
+    existingPlan,
+  ], /Archive plan already exists/);
+  assert.equal(fs.existsSync(path.join(planProject, source)), true);
+});
+
+test("trace and sync commands reject nonexistent story ids", () => {
+  const project = tmpProject("orphan-traces");
+  initProject(project);
+  mustFail([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-MISSING",
+    "--type",
+    "test",
+    "--summary",
+    "Should not be recorded",
+  ], /does not exist/);
+  mustFail(["sync", "record", "--root", project, "--story", "ST-MISSING", "--event", "push"], /does not exist/);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "traces", "ST-MISSING.jsonl")), false);
+});
+
+test("personal marketplace installer stages only allowlisted plugin files", async () => {
+  const home = tmpProject("personal-installer-home");
+  const python = process.env.PYTHON || "python3";
+  const installer = path.join(repoRoot, "scripts", "install-personal-marketplace.py");
+  const install = () => spawnSync(python, [installer], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home },
+    timeout: 30_000,
+  });
+  const installAsync = () => new Promise((resolve, reject) => {
+    const child = spawn(python, [installer], {
+      cwd: repoRoot,
+      env: { ...process.env, HOME: home },
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 35_000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timeout);
+      resolve({ status, signal, stdout, stderr });
+    });
+  });
+  const first = install();
+  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  const destination = path.join(home, "plugins", "agentic-sdlc-codex-plugin");
+  assert.equal(fs.existsSync(path.join(destination, ".codex-plugin", "plugin.json")), true);
+  for (const excluded of [".git", ".sdlc", "test", ".DS_Store"]) {
+    assert.equal(fs.existsSync(path.join(destination, excluded)), false, `${excluded} leaked into staged plugin`);
+  }
+  const stale = path.join(destination, "docs", "stale.md");
+  fs.writeFileSync(stale, "stale\n");
+  const second = install();
+  assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+  assert.equal(fs.existsSync(stale), false);
+  const marketplace = readJson(path.join(home, ".agents", "plugins", "marketplace.json"));
+  const entry = marketplace.plugins.find((plugin) => plugin.name === "agentic-sdlc-codex-plugin");
+  assert.equal(entry.source.path, "./plugins/agentic-sdlc-codex-plugin");
+  const concurrent = await Promise.all([installAsync(), installAsync()]);
+  for (const result of concurrent) {
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const concurrentMarketplace = readJson(path.join(home, ".agents", "plugins", "marketplace.json"));
+  assert.equal(
+    concurrentMarketplace.plugins.filter((plugin) => plugin.name === "agentic-sdlc-codex-plugin").length,
+    1,
+  );
+  assert.equal(
+    fs.existsSync(path.join(home, ".agents", "plugins", ".agentic-sdlc-codex-plugin.install.lock")),
+    false,
+  );
+
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+    const rollbackSentinel = path.join(destination, "docs", "rollback-sentinel.md");
+    fs.writeFileSync(rollbackSentinel, "restore me\n");
+    const marketplaceDirectory = path.join(home, ".agents", "plugins");
+    fs.chmodSync(marketplaceDirectory, 0o500);
+    let failedMarketplaceUpdate;
+    try {
+      failedMarketplaceUpdate = install();
+    } finally {
+      fs.chmodSync(marketplaceDirectory, 0o700);
+    }
+    assert.notEqual(failedMarketplaceUpdate.status, 0);
+    assert.equal(fs.readFileSync(rollbackSentinel, "utf8"), "restore me\n");
+  }
+
+  fs.writeFileSync(path.join(destination, "unmanaged.txt"), "do not delete\n");
+  const refused = install();
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /unexpected unmanaged top-level entries/);
+  assert.equal(fs.readFileSync(path.join(destination, "unmanaged.txt"), "utf8"), "do not delete\n");
+});
+
 test("manifests, trace compaction, and archive plans scale the KB without using cache as truth", () => {
   const project = tmpProject("kb-scale");
   initProject(project);
@@ -2320,12 +3143,66 @@ test("manifests, trace compaction, and archive plans scale the KB without using 
   assert.equal(fs.existsSync(archivePlan.plan_path), true);
 });
 
-test("schemas and JSON templates parse", () => {
+test("schemas and JSON templates parse with portable local references", () => {
   for (const directory of ["schemas", "templates"]) {
     for (const entry of fs.readdirSync(path.join(repoRoot, directory))) {
       if (entry.endsWith(".json")) {
-        assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(repoRoot, directory, entry), "utf8")), entry);
+        const payload = JSON.parse(fs.readFileSync(path.join(repoRoot, directory, entry), "utf8"));
+        if (directory === "schemas") {
+          assert.equal(payload.$id, entry, `${entry} must resolve relative references from the local schema bundle`);
+          for (const reference of collectJsonSchemaReferences(payload)) {
+            if (reference.startsWith("#")) {
+              continue;
+            }
+            const referencedFile = reference.split("#", 1)[0];
+            assert.equal(path.isAbsolute(referencedFile), false, `${entry} contains absolute reference ${reference}`);
+            assert.equal(fs.existsSync(path.join(repoRoot, directory, referencedFile)), true, `${entry} references missing ${reference}`);
+          }
+        }
       }
     }
   }
+
+  const traceSchema = readJson(path.join(repoRoot, "schemas", "trace.schema.json"));
+  assert.ok(traceSchema.properties.story_id.type.includes("null"));
+  assert.ok(traceSchema.properties.request.type.includes("null"));
+  assert.ok(traceSchema.$defs.actor.oneOf.some((branch) => branch.type === "null"));
+  const contractSchema = readJson(path.join(repoRoot, "schemas", "contract.schema.json"));
+  assert.ok(contractSchema.properties.approvals.items.properties.scope.oneOf.some((branch) => branch.type === "object"));
+});
+
+function collectJsonSchemaReferences(value, references = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectJsonSchemaReferences(item, references);
+    }
+    return references;
+  }
+  if (!value || typeof value !== "object") {
+    return references;
+  }
+  if (typeof value.$ref === "string") {
+    references.push(value.$ref);
+  }
+  for (const item of Object.values(value)) {
+    collectJsonSchemaReferences(item, references);
+  }
+  return references;
+}
+
+test("npm package contains only reusable plugin files", () => {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const packed = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  assert.equal(packed.status, 0, `npm pack failed\nSTDOUT:\n${packed.stdout}\nSTDERR:\n${packed.stderr}`);
+  const payload = JSON.parse(packed.stdout);
+  const files = payload[0].files.map((entry) => entry.path);
+  assert.ok(files.includes(".codex-plugin/plugin.json"));
+  assert.ok(files.includes("bin/agentic-sdlc.mjs"));
+  assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
+  assert.equal(files.some((file) => file === ".sdlc" || file.startsWith(".sdlc/")), false);
+  assert.equal(files.some((file) => file === "test" || file.startsWith("test/")), false);
+  assert.equal(files.some((file) => file.endsWith(".DS_Store")), false);
 });

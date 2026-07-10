@@ -81,28 +81,18 @@ The plugin is portable across Codex installations because the manifest reference
 
 No project knowledge is stored in the plugin installation. Each target project gets its own `.sdlc/` directory, which can be shared through Git.
 
-Recommended local install uses the same personal marketplace flow as other local Codex plugins:
+Install from any source checkout. The checkout can live anywhere except the generated personal-plugin destination:
 
 ```bash
-git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git \
-  "$HOME/plugins/agentic-sdlc-codex-plugin"
-
-cd "$HOME/plugins/agentic-sdlc-codex-plugin"
+cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list | grep agentic-sdlc-codex-plugin
 ```
 
-For development from an existing checkout, expose that checkout under the personal plugin parent before running the installer:
+The installer reads the `package.json` `files` allowlist, adds npm's standard root files, builds a clean sibling staging directory, and replaces `~/plugins/agentic-sdlc-codex-plugin` only when the existing destination is managed and safe to replace. It also creates or updates the machine-local `~/.agents/plugins/marketplace.json` entry while preserving unrelated entries. `HOME` is honored for both paths.
 
-```bash
-mkdir -p "$HOME/plugins"
-ln -s "$(pwd)" "$HOME/plugins/agentic-sdlc-codex-plugin"
-python3 scripts/install-personal-marketplace.py
-codex plugin add agentic-sdlc-codex-plugin@personal
-```
-
-The installer only updates the machine-local `~/.agents/plugins/marketplace.json`; do not commit that file into this repository. Start a new Codex thread after installing or reinstalling so Codex loads the plugin skill and assets from the installed plugin cache.
+Treat `~/plugins/agentic-sdlc-codex-plugin` as generated installation output. Do not clone into it, symlink it to a checkout, or update it with Git. Update the source checkout wherever it lives and rerun the staging script. The installer refuses symlinks, Git checkouts, the source checkout itself, and destinations with unmanaged top-level entries rather than deleting them. Start a new Codex thread after installing or reinstalling so Codex loads the plugin skill and assets from the installed plugin cache.
 
 Validate the portable package before sharing:
 
@@ -147,6 +137,7 @@ node bin/agentic-sdlc.mjs output template approve --id functional-analysis-v1 --
 node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Keep provider-specific logic behind an adapter"
 node bin/agentic-sdlc.mjs trace append --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "Add the requested workflow"
+node bin/agentic-sdlc.mjs trace append --story ST-001 --type test --outcome passed --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
 node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed feature/ST-001"
 node bin/agentic-sdlc.mjs report activity --since 3d --view business --out .sdlc/reports/activity.md
 node bin/agentic-sdlc.mjs report query --text "show all changes made by me" --json

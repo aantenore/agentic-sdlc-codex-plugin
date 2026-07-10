@@ -1,13 +1,26 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.4.20",
+  "version": "0.4.21",
   "description": "Codex plugin for contract-driven agentic SDLC with a shared Git-first knowledge base.",
   "type": "module",
   "bin": {
     "agentic-sdlc": "./bin/agentic-sdlc.mjs"
   },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "files": [
+    ".codex-plugin/",
+    "assets/",
+    "bin/",
+    "docs/",
+    "schemas/",
+    "scripts/",
+    "skills/",
+    "templates/"
+  ],
   "scripts": {
-    "check": "node --check bin/agentic-sdlc.mjs",
+    "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs",
     "smoke": "node bin/agentic-sdlc.mjs --help",
     "test": "node --test test/*.mjs"
   },

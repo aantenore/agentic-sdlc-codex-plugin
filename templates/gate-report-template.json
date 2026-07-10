@@ -1,9 +1,12 @@
 {
   "status": "passed",
   "strict": false,
+  "scope": "all",
+  "story_id": null,
   "checked_at": "<iso-8601>",
   "root": "<target-project>",
   "errors": [],
   "warnings": [],
-  "checked": []
+  "checked": [],
+  "approval_requests": []
 }
