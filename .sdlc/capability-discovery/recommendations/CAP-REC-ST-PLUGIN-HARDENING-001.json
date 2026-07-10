@@ -1,0 +1,409 @@
+{
+  "id": "CAP-REC-ST-PLUGIN-HARDENING-001",
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "profile_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
+  "profile_ref": {
+    "path": ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-PLUGIN-HARDENING-001.json",
+    "approved_content_hash": "08921c062e56b6247d6deb047e38a9226031d4377a4d5f806cea184ff1912906",
+    "current_content_hash": "08921c062e56b6247d6deb047e38a9226031d4377a4d5f806cea184ff1912906"
+  },
+  "recommendations": [
+    {
+      "type": "skill",
+      "name": "agentic-sdlc",
+      "availability": "available",
+      "purpose": "Govern story, delegated approvals, evidence, validation, and release traces.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "write-project-sdlc"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "repo-read",
+      "availability": "available",
+      "purpose": "Inspect every tracked source, schema, template, test, document, script, and Git history entry in scope.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "repo-write",
+      "availability": "available",
+      "purpose": "Apply scoped fixes and regression tests to this repository.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "write-tracked-files",
+        "write-project-sdlc"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "test-runner",
+      "availability": "available",
+      "purpose": "Run syntax, unit, end-to-end, negative-path, package, and installed-plugin checks.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute",
+        "write-temporary-files"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "plugin-validator",
+      "availability": "available",
+      "purpose": "Validate manifest, version consistency, packaged contents, and installed cache behavior.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute",
+        "local-plugin-reinstall"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "skill-validator",
+      "availability": "available",
+      "purpose": "Validate the bundled Agentic SDLC skill and referenced resources.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "multi-agent",
+      "availability": "available",
+      "purpose": "Run independent read-only audit lanes in parallel and return findings for central integration.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "git",
+      "availability": "available",
+      "purpose": "Inspect history, stage scoped changes, commit, and push main to origin after all checks pass.",
+      "rationale": null,
+      "risk": null,
+      "permissions": [
+        "read",
+        "stage",
+        "commit",
+        "push-origin-main"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    }
+  ],
+  "available_capabilities": {},
+  "policy_patch": {
+    "skills": {
+      "required": [
+        "agentic-sdlc"
+      ],
+      "allowed": [
+        "agentic-sdlc"
+      ],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [
+        "repo-read",
+        "repo-write",
+        "test-runner",
+        "plugin-validator",
+        "skill-validator",
+        "git"
+      ],
+      "allowed": [
+        "repo-read",
+        "repo-write",
+        "test-runner",
+        "plugin-validator",
+        "skill-validator",
+        "multi-agent",
+        "git"
+      ],
+      "forbidden": [
+        "production-deploy",
+        "secret-access",
+        "destructive-git-history"
+      ]
+    },
+    "approval_required_for": [
+      "external-service-access",
+      "production-deploy",
+      "secret-access",
+      "destructive-actions",
+      "unrelated-repository-write"
+    ]
+  },
+  "bindings": [
+    {
+      "type": "tool",
+      "name": "repo-read",
+      "binding_id": "repo-read-travelops",
+      "target": {
+        "root_path": "/Users/antonioantenore/Documents/TravelOps"
+      },
+      "permissions": [
+        "read"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    },
+    {
+      "type": "tool",
+      "name": "repo-write",
+      "binding_id": "repo-write-travelops",
+      "target": {
+        "root_path": "/Users/antonioantenore/Documents/TravelOps"
+      },
+      "permissions": [
+        "write-tracked-files",
+        "write-project-sdlc"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    },
+    {
+      "type": "tool",
+      "name": "test-runner",
+      "binding_id": "test-runner-local",
+      "target": {
+        "root_path": "/Users/antonioantenore/Documents/TravelOps",
+        "runtime": "node"
+      },
+      "permissions": [
+        "execute",
+        "write-temporary-files"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    },
+    {
+      "type": "tool",
+      "name": "plugin-validator",
+      "binding_id": "plugin-validator-personal",
+      "target": {
+        "source_path": "/Users/antonioantenore/Documents/TravelOps",
+        "install_path": "/Users/antonioantenore/plugins/agentic-sdlc-codex-plugin",
+        "cache_path": "/Users/antonioantenore/.codex/plugins/cache/personal"
+      },
+      "permissions": [
+        "sync-local-copy",
+        "reinstall-personal-plugin",
+        "verify-installed-cache"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    },
+    {
+      "type": "tool",
+      "name": "skill-validator",
+      "binding_id": "skill-validator-bundled",
+      "target": {
+        "skill_path": "/Users/antonioantenore/Documents/TravelOps/skills/agentic-sdlc/SKILL.md"
+      },
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    },
+    {
+      "type": "tool",
+      "name": "git",
+      "binding_id": "git-origin-main",
+      "target": {
+        "root_path": "/Users/antonioantenore/Documents/TravelOps",
+        "remote": "origin",
+        "branch": "main"
+      },
+      "permissions": [
+        "read",
+        "stage",
+        "commit",
+        "push"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": []
+    }
+  ],
+  "execution_policy_suggestions": {
+    "notes": [
+      "Independent audit lanes inherit the main Codex thread settings."
+    ]
+  },
+  "decision_matrix": [
+    {
+      "decision": "Use local non-destructive checks and temporary directories for destructive-path tests.",
+      "rationale": "The user requested complete testing without risking unrelated data."
+    },
+    {
+      "decision": "Push only after full local and installed-plugin validation.",
+      "rationale": "The user requested a finished, pushed result."
+    }
+  ],
+  "open_questions": [],
+  "source_paths": [
+    ".codex-plugin/plugin.json",
+    "README.md",
+    "bin/agentic-sdlc.mjs",
+    "package.json",
+    "scripts/install-personal-marketplace.py",
+    "skills/agentic-sdlc/SKILL.md",
+    "test/cli.e2e.mjs"
+  ],
+  "source_hashes": {
+    ".codex-plugin/plugin.json": "c946f3798820020cad9be36003f3a10c7af5c0d1b5bd17c6c29d31af13c26caf",
+    "README.md": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+    "bin/agentic-sdlc.mjs": "17b6e0243ff89162432d08c16042b4b3fe877adcfc52899d2ba406ea1fcd031b",
+    "package.json": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
+    "scripts/install-personal-marketplace.py": "5b1a0022ee412b649710040b92fb67ddbf2eeaeb4bf3a2af254d4cc5127b66da",
+    "skills/agentic-sdlc/SKILL.md": "15e620a542b7047cc8112d86dc60b6972c96a7e3b01bead2c7aa95f7f9c87885",
+    "test/cli.e2e.mjs": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260710090649-e7f776",
+      "recommendation_id": "CAP-REC-ST-PLUGIN-HARDENING-001",
+      "status": "approved",
+      "summary": "Antonio delegated autonomous use of the listed local tools, this plugin reinstall, and Git commit/push for the whole-plugin hardening; this seals the final tested bindings without widening permissions.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "CAP-REC-ST-PLUGIN-HARDENING-001",
+        "subject_label": "capability recommendation CAP-REC-ST-PLUGIN-HARDENING-001",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "whole-plugin hardening approved local tools and Git delivery"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "3bbd5d3371e90afbd1cb2e0c707e45f85c2e3f37bc3b05e89952cf8e4bc1e35f",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-PLUGIN-HARDENING-001",
+        "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.4.21"
+      },
+      "created_at": "2026-07-10T09:06:49.128Z"
+    }
+  ],
+  "created_at": "2026-07-10T09:06:48.987Z",
+  "updated_at": "2026-07-10T09:06:49.128Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.21"
+    },
+    "approved_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "id": "TEST-0.4.21-plugin-hardening",
+  "summary": "Whole-plugin hardening and release validation for Agentic SDLC 0.4.21.",
+  "status": "passed",
+  "created_at": "2026-07-10T08:55:54Z",
+  "story_id": "ST-PLUGIN-HARDENING-001",
+  "environment": {
+    "os": "macOS",
+    "node": "v24.14.0",
+    "npm": "11.9.0",
+    "python": "3.9.6",
+    "codex_cli": "0.144.0-alpha.4"
+  },
+  "scope": [
+    "CLI parsing and deterministic routing",
+    "approval scope and human-readable approval requests",
+    "baseline, contract, capability, output, dependency, test, release, and story gates",
+    "filesystem confinement, symlink resistance, descriptor safety, atomicity, and rollback",
+    "parallel writers, claims, dependency approvals, traces, locks, and installer serialization",
+    "schemas, templates, package allowlist, tarball portability, personal-plugin staging, and installed cache"
+  ],
+  "commands": [
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "summary": "CLI and asset-generator syntax checks passed."
+    },
+    {
+      "command": "npm run smoke",
+      "status": "passed",
+      "summary": "CLI help completed and reported version 0.4.21."
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "77 tests passed; 0 failed, skipped, cancelled, or todo."
+    },
+    {
+      "command": "plugin-creator validate_plugin.py <source> and <staged-plugin>",
+      "status": "passed",
+      "summary": "Official Codex plugin validation passed for both trees."
+    },
+    {
+      "command": "skill-creator quick_validate.py <source-skill> and <staged-skill>",
+      "status": "passed",
+      "summary": "Official Codex skill validation passed for both trees."
+    },
+    {
+      "command": "Draft 2020-12 JSON Schema validation",
+      "status": "passed",
+      "summary": "22 schemas, 8 templates, and all applicable canonical records and trace records passed."
+    },
+    {
+      "command": "npm pack --json plus extraction/install in paths containing spaces",
+      "status": "passed",
+      "summary": "The 0.4.21 tarball contained 60 reusable files, installed successfully, and matched the staged tree."
+    },
+    {
+      "command": "source/staging/cache hash and forbidden-path comparison",
+      "status": "passed",
+      "summary": "Active 0.4.21 plugin trees match and contain no project KB, Git metadata, tests, symlinks, or Python cache."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed",
+      "summary": "No whitespace errors were found."
+    }
+  ],
+  "evidence": [
+    ".sdlc/stories/ST-PLUGIN-HARDENING-001/outputs/implementation-summary.md",
+    "bin/agentic-sdlc.mjs",
+    "scripts/install-personal-marketplace.py",
+    "test/cli.e2e.mjs",
+    "schemas/",
+    "templates/",
+    "README.md",
+    "docs/"
+  ],
+  "notes": [
+    "The obsolete 0.4.20 cache, standalone skill references, and pre-0.4.21 backup were absent after reinstall.",
+    "Node 18 compatibility is declared and syntax-compatible, but the available local runtime for this validation was Node 24.14.0."
+  ]
+}

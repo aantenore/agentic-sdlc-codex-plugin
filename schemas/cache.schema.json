@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/cache.schema.json",
+  "$id": "cache.schema.json",
   "title": "Agentic SDLC Local Cache",
   "type": "object",
   "required": [
@@ -14,7 +14,8 @@
       "type": "string"
     },
     "generated_at": {
-      "type": "string"
+      "type": "string",
+      "format": "date-time"
     },
     "root": {
       "type": "string"
@@ -36,12 +37,52 @@
       "items": {
         "type": "object",
         "required": [
+          "path",
+          "title",
+          "extension",
+          "size_bytes",
+          "snippet",
+          "search_text",
           "source_paths",
           "source_hashes",
           "generated_at",
           "schema_version"
         ],
-        "additionalProperties": true
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "extension": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "search_text": {
+            "type": "string"
+          },
+          "source_paths": {
+            "$ref": "#/$defs/source_paths"
+          },
+          "source_hashes": {
+            "$ref": "#/$defs/source_hashes"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema_version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     },
     "story_requirement_graph": {
@@ -58,12 +99,39 @@
       "items": {
         "type": "object",
         "required": [
+          "path",
+          "title",
+          "snippet",
           "source_paths",
           "source_hashes",
           "generated_at",
           "schema_version"
         ],
-        "additionalProperties": true
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "source_paths": {
+            "$ref": "#/$defs/source_paths"
+          },
+          "source_hashes": {
+            "$ref": "#/$defs/source_hashes"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "schema_version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     },
     "dependency_graph": {
@@ -71,6 +139,20 @@
     },
     "output_resolutions": {
       "type": "object"
+    }
+  },
+  "$defs": {
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
     }
   },
   "additionalProperties": true

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/project.schema.json",
+  "$id": "project.schema.json",
   "title": "Agentic SDLC Project",
   "type": "object",
   "required": [
@@ -39,13 +39,17 @@
           "type": "string"
         },
         "source_of_truth": {
-          "type": [
-            "string",
-            "array"
-          ],
-          "items": {
-            "type": "string"
-          }
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "derived_artifacts": {
           "type": "array",

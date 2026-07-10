@@ -17,13 +17,13 @@
       "summary": "Standard implementation summary for plugin changes.",
       "source_paths": [],
       "proposed_at": "2026-07-01T11:26:24.866Z",
-      "approved_at": "2026-07-01T11:26:25.050Z",
+      "approved_at": "2026-07-10T08:50:15.619Z",
       "approved_by": {
-        "id": "antonioantenore",
-        "type": "human",
-        "name": "Antonio Antenore",
-        "email": "a.antenore@reply.it",
-        "source": "environment"
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
       },
       "audit": {
         "proposed_by": {
@@ -35,8 +35,8 @@
         },
         "git": {
           "is_git_repo": true,
-          "branch": "main",
-          "head_sha": "f61c22b365a2bc7c679dc1f5e36c9f52698143b4",
+          "branch": "codex/ST-PLUGIN-HARDENING-001",
+          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
           "is_dirty": true,
           "user": {
             "name": "Antonio Antenore",
@@ -48,23 +48,38 @@
         },
         "run": {
           "run_id": null,
-          "thread_id": "019f1ccf-e463-71e2-a9c1-8c09f332dac7",
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
           "session_id": null,
           "tool": "agentic-sdlc-cli",
-          "version": "0.2.0"
+          "version": "0.4.21"
         },
         "approved_by": {
-          "id": "antonioantenore",
-          "type": "human",
-          "name": "Antonio Antenore",
-          "email": "a.antenore@reply.it",
-          "source": "environment"
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "cli"
         }
       },
-      "approval_summary": "Approved implementation summary template.",
-      "approved_content_hash": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+      "approval_summary": "Antonio delegated autonomous production and approval of the implementation summary; the corrected template now uses real Markdown lines and the agreed Scope, Changes, Verification, and Residual Risks sections.",
+      "approved_content_hash": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
       "hash_algorithm": "sha256:file:v1",
-      "approval_evidence": []
+      "approval_evidence": [],
+      "approval_source": "automation",
+      "approval_scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "implementation-summary-v1",
+        "subject_label": "output template implementation-summary-v1",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "implementation summary format for whole-plugin hardening"
+      },
+      "explicit_user_confirmation": false,
+      "provisional": false
     }
   ],
   "links": [
@@ -287,6 +302,61 @@
           "version": "0.4.6"
         }
       }
+    },
+    {
+      "id": "OUT-ST-PLUGIN-HARDENING-001-implementation-summary-b5b28051",
+      "story_id": "ST-PLUGIN-HARDENING-001",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-PLUGIN-HARDENING-001/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-PLUGIN-HARDENING-001"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "source_paths": [
+        ".sdlc/stories/ST-PLUGIN-HARDENING-001/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "2bc5afe7b6cb8ce851e6ac59e58f4bfc3263a1b5121815788315cd04e6ec458b",
+        "base_artifact_sha256": null,
+        "template_sha256": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-10T09:01:40.717Z",
+      "updated_at": "2026-07-10T09:06:49.568Z",
+      "audit": {
+        "linked_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-PLUGIN-HARDENING-001",
+          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.21"
+        }
+      }
     }
   ],
   "decisions": [
@@ -330,10 +400,122 @@
           "version": "0.2.0"
         }
       }
+    },
+    {
+      "id": "DEC-output-template-implementation-summary-v1-20260710084921788-962f2a",
+      "type": "template_approved",
+      "template_id": "implementation-summary-v1",
+      "artifact_type": "implementation-summary",
+      "summary": "Antonio delegated autonomous production and approval of the implementation summary required by the whole-application audit, correction, test, reinstall, commit, and push request.",
+      "status": "approved",
+      "evidence": [],
+      "approval_source": "automation",
+      "approval_scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "implementation-summary-v1",
+        "subject_label": "output template implementation-summary-v1",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "implementation summary format for whole-plugin hardening"
+      },
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "2c92f3d199c82268e512b84890b9d6b136db21871651287d80a053529f3dbe07",
+      "hash_algorithm": "sha256:file:v1",
+      "created_at": "2026-07-10T08:49:21.788Z",
+      "audit": {
+        "decided_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-PLUGIN-HARDENING-001",
+          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.21"
+        }
+      }
+    },
+    {
+      "id": "DEC-output-template-implementation-summary-v1-20260710085015618-c2f069",
+      "type": "template_approved",
+      "template_id": "implementation-summary-v1",
+      "artifact_type": "implementation-summary",
+      "summary": "Antonio delegated autonomous production and approval of the implementation summary; the corrected template now uses real Markdown lines and the agreed Scope, Changes, Verification, and Residual Risks sections.",
+      "status": "approved",
+      "evidence": [],
+      "approval_source": "automation",
+      "approval_scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "implementation-summary-v1",
+        "subject_label": "output template implementation-summary-v1",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "implementation summary format for whole-plugin hardening"
+      },
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
+      "hash_algorithm": "sha256:file:v1",
+      "created_at": "2026-07-10T08:50:15.619Z",
+      "audit": {
+        "decided_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-PLUGIN-HARDENING-001",
+          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.4.21"
+        }
+      }
     }
   ],
   "created_at": "2026-07-01T11:12:46.834Z",
-  "updated_at": "2026-07-01T13:13:10.697Z",
+  "updated_at": "2026-07-10T09:06:49.568Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -343,16 +525,16 @@
       "source": "cli"
     },
     "updated_by": {
-      "id": "antonioantenore",
-      "type": "human",
-      "name": "Antonio Antenore",
-      "email": "a.antenore@reply.it",
-      "source": "environment"
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
     },
     "git": {
       "is_git_repo": true,
-      "branch": "main",
-      "head_sha": "dbaa1e0637a0ffc83038843ceaef7e5971c71342",
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -364,10 +546,10 @@
     },
     "run": {
       "run_id": null,
-      "thread_id": "019f1da7-86fc-7ab0-9e68-9a59b61b80c3",
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.4.6"
+      "version": "0.4.21"
     }
   }
 }

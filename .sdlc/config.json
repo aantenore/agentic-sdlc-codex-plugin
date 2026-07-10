@@ -85,7 +85,11 @@
   "parallel_work": {
     "principle": "Parallel work is story-scoped. Each active story lane has one active claim, an auditable actor, a branch, trace events, and explicit release or handoff.",
     "unit_of_parallelism": "story",
-    "branch_pattern": "feature/<story-id>",
+    "branch_pattern": "codex/<story-id>",
+    "branch_patterns": [
+      "codex/<story-id>",
+      "feature/<story-id>"
+    ],
     "active_claim_status": "active",
     "stale_claim_policy": "expired active claims block implementation until released, renewed, or force-reclaimed by a human"
   },
@@ -316,7 +320,7 @@
     "formal_approval_requires_explicit_source": true,
     "require_summary_or_evidence_for_explicit_user": true,
     "allow_bootstrap_approvals_in_strict_gate": false,
-    "legacy_approval_behavior": "warn",
+    "legacy_approval_behavior": "error",
     "accepted_sources": [
       "explicit-user",
       "ci",

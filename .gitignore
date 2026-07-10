@@ -4,3 +4,4 @@ node_modules/
 tmp/
 .sdlc/indexes/*.json
 .sdlc/reports/*.tmp
+.sdlc/**/*.lock

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/orchestration.schema.json",
+  "$id": "orchestration.schema.json",
   "title": "Agentic SDLC Orchestration Snapshot",
   "type": "object",
   "required": [

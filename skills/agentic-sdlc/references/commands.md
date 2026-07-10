@@ -219,11 +219,12 @@ Use phase locks for shared phase artifacts, not for normal story-scoped work. A 
 ## Append Trace
 
 ```bash
-node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --summary "Unit tests passed" --evidence .sdlc/tests/ST-001-test-run.json --actor codex --actor-type agent
+node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --outcome passed --summary "Unit tests passed" --evidence .sdlc/tests/ST-001-test-run.json --actor codex --actor-type agent
 node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type implementation --summary "Codex implemented a requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --authorized-by antonioantenore --authorized-by-type human --request-summary "Implement the requested feature"
 ```
 
 Valid trace types: `assumption`, `decision`, `gate`, `claim`, `handoff`, `implementation`, `lock`, `release`, `risk`, `sync`, `test`.
+Valid trace outcomes are `passed`, `failed`, `blocked`, `skipped`, and `ready`. Strict validation requires a `test` trace with `passed`; strict release requires `ready` or `passed`.
 
 Record push and merge events explicitly:
 

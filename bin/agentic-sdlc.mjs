@@ -4,14 +4,19 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import childProcess from "node:child_process";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.20";
+const VERSION = "0.4.21";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
+const INTERNAL_LOCK_WAIT_MS = 5000;
+const INTERNAL_LOCK_STALE_MS = 30000;
+const INTERNAL_LOCK_REMOTE_STALE_MS = 300000;
+const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const BOOLEAN_OPTIONS = new Set([
   "allow-incomplete-contract",
@@ -20,7 +25,6 @@ const BOOLEAN_OPTIONS = new Set([
   "apply",
   "approve-install",
   "confirm-start",
-  "dry-run",
   "force",
   "help",
   "json",
@@ -30,6 +34,166 @@ const BOOLEAN_OPTIONS = new Set([
   "revise-contract",
   "strict",
   "version",
+]);
+const KNOWN_OPTIONS = new Set([
+  ...BOOLEAN_OPTIONS,
+  "acceptance",
+  "action",
+  "actor",
+  "actor-email",
+  "actor-name",
+  "actor-type",
+  "after-sha",
+  "agent",
+  "approval-evidence",
+  "approval-source",
+  "artifact",
+  "assumption",
+  "authorized-by",
+  "authorized-by-email",
+  "authorized-by-name",
+  "authorized-by-source",
+  "authorized-by-type",
+  "available-capabilities-file",
+  "available-capabilities-json",
+  "base-artifact",
+  "before",
+  "before-sha",
+  "body",
+  "branch",
+  "breakdown",
+  "capability-binding-file",
+  "capability-binding-json",
+  "capability-policy-file",
+  "capability-policy-json",
+  "capability-recommendation",
+  "completion-id",
+  "confidence",
+  "confirmed-source",
+  "constraint",
+  "context-file",
+  "context-summary",
+  "contract",
+  "contract-id",
+  "decision-id",
+  "default-flow",
+  "delivery-unit",
+  "document",
+  "edge",
+  "event",
+  "evidence",
+  "execution-note",
+  "expires-at",
+  "from",
+  "git-event",
+  "handoff-id",
+  "id",
+  "input",
+  "intent-file",
+  "intent-json",
+  "item",
+  "kb-write",
+  "kind",
+  "limit",
+  "levels",
+  "metric",
+  "mode",
+  "model",
+  "next-step",
+  "notes",
+  "open-item",
+  "out",
+  "outcome",
+  "output",
+  "output-ref",
+  "owner-agent",
+  "parent",
+  "phase",
+  "pr-url",
+  "profile",
+  "profile-file",
+  "profile-json",
+  "project-id",
+  "project-name",
+  "qa",
+  "query",
+  "query-file",
+  "query-json",
+  "question",
+  "rationale",
+  "reason",
+  "reasoning",
+  "recommendation-file",
+  "recommendation-json",
+  "related",
+  "remote",
+  "request-id",
+  "request-run-id",
+  "request-session-id",
+  "request-source",
+  "request-summary",
+  "request-thread-id",
+  "requested-by",
+  "requested-by-email",
+  "requested-by-name",
+  "requested-by-source",
+  "requested-by-type",
+  "requirement",
+  "root",
+  "run-id",
+  "scope",
+  "session-id",
+  "since",
+  "source",
+  "status",
+  "step",
+  "story",
+  "strict-gate-unit",
+  "summary",
+  "task-gate",
+  "template",
+  "template-dir",
+  "text",
+  "thread-id",
+  "title",
+  "to-agent",
+  "tool",
+  "trace-limit",
+  "type",
+  "until",
+  "validation",
+  "view",
+]);
+const REPEATABLE_OPTIONS = new Set([
+  "acceptance",
+  "approval-evidence",
+  "artifact",
+  "assumption",
+  "capability-binding-file",
+  "capability-binding-json",
+  "capability-recommendation",
+  "confirmed-source",
+  "constraint",
+  "context-file",
+  "document",
+  "edge",
+  "evidence",
+  "execution-note",
+  "input",
+  "item",
+  "kb-write",
+  "levels",
+  "metric",
+  "open-item",
+  "output",
+  "output-ref",
+  "qa",
+  "question",
+  "related",
+  "requirement",
+  "source",
+  "tool",
+  "validation",
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const CLAIM_STATUSES = new Set(["active", "released", "transferred", "cancelled"]);
@@ -117,6 +281,7 @@ const TRACE_TYPES = new Set([
   "sync",
   "test",
 ]);
+const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready"]);
 
 function main() {
   try {
@@ -395,18 +560,26 @@ function parseArgs(argv) {
       const raw = arg.slice(2);
       const equalsIndex = raw.indexOf("=");
       const key = equalsIndex >= 0 ? raw.slice(0, equalsIndex) : raw;
+      if (!key || !KNOWN_OPTIONS.has(key)) {
+        fail(`Unknown option --${key || raw}`);
+      }
       const inlineValue = equalsIndex >= 0 ? raw.slice(equalsIndex + 1) : undefined;
       let value = inlineValue;
-      if (value === undefined && BOOLEAN_OPTIONS.has(key)) {
-        value = true;
-      } else if (value === undefined) {
+      if (BOOLEAN_OPTIONS.has(key)) {
         const next = argv[index + 1];
-        if (next !== undefined && !next.startsWith("-")) {
-          value = next;
+        if (value === undefined && next !== undefined && /^(?:true|false)$/i.test(next)) {
+          value = parseBooleanOption(key, next);
           index += 1;
         } else {
-          value = true;
+          value = value === undefined ? true : parseBooleanOption(key, value);
         }
+      } else if (value === undefined) {
+        const next = argv[index + 1];
+        if (next === undefined || next.startsWith("-")) {
+          fail(`Missing value for option --${key}`);
+        }
+        value = next;
+        index += 1;
       }
       addOption(options, key, value);
       continue;
@@ -417,10 +590,27 @@ function parseArgs(argv) {
   return { options, positionals, help, version };
 }
 
+function parseBooleanOption(key, value) {
+  if (value === true || value === false) {
+    return value;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  fail(`Option --${key} expects true or false, received '${value}'`);
+}
+
 function addOption(options, key, value) {
   if (options[key] === undefined) {
     options[key] = value;
     return;
+  }
+  if (!REPEATABLE_OPTIONS.has(key)) {
+    fail(`Option --${key} may only be provided once`);
   }
   if (!Array.isArray(options[key])) {
     options[key] = [options[key]];
@@ -433,8 +623,12 @@ function buildContext(options) {
   const templateDir = path.resolve(String(options["template-dir"] || DEFAULT_TEMPLATE_DIR));
   const templateConfig = validateSdlcConfig(readJson(path.join(templateDir, "sdlc-config.json")));
   const projectConfigPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
+  if (fs.existsSync(projectConfigPath)) {
+    resolveProjectFilePath({ root }, projectConfigPath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(projectConfigPath);
+  }
   const selectedConfig = fs.existsSync(projectConfigPath)
-    ? validateSdlcConfig(readJson(projectConfigPath))
+    ? validateSdlcConfig(readProjectJson({ root }, projectConfigPath))
     : templateConfig;
   return {
     root,
@@ -455,7 +649,29 @@ function validateSdlcConfig(config) {
   validateRoutingPolicy(config.routing_policy);
   validateWorkBreakdownPolicy(config.work_breakdown_policy);
   validateApprovalPolicy(config.approval_policy);
+  validateBranchPolicy(config.parallel_work);
   return config;
+}
+
+function validateBranchPolicy(policy = {}) {
+  const configured = policy?.branch_patterns ?? (policy?.branch_pattern ? [policy.branch_pattern] : []);
+  if (!Array.isArray(configured)) {
+    fail("parallel_work.branch_patterns must be an array");
+  }
+  for (const pattern of configured) {
+    const value = String(pattern || "");
+    const invalid =
+      !value.includes("<story-id>") ||
+      /[\\\s~^:?*\[]/.test(value) ||
+      value.includes("..") ||
+      value.includes("//") ||
+      value.startsWith("/") ||
+      value.endsWith("/") ||
+      value.endsWith(".");
+    if (invalid) {
+      fail(`Invalid parallel_work branch pattern '${value}'`);
+    }
+  }
 }
 
 function validateSdlcDirectoryList(values, field) {
@@ -575,6 +791,21 @@ function decideRoute(context, options) {
 
 function startTask(context, options) {
   const decision = buildTaskStartDecision(context, options);
+  if (decision.execution_allowed && options["confirm-start"]) {
+    const attribution = buildAttribution(context, options, "task.start.confirm");
+    const trace = appendTraceEvent(context, decision.story_id || null, {
+      type: "decision",
+      summary: `Confirmed start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
+      action: "task.start.confirm",
+      actor: attribution.actor,
+      ...buildTraceAuthorityMetadata(context, options, attribution),
+      evidence: decision.contract?.path ? [decision.contract.path] : [],
+      related: [decision.story_id, decision.contract_id].filter(Boolean),
+      git: attribution.git,
+      run: attribution.run,
+    });
+    decision.confirmation_trace_id = trace.id;
+  }
   output(options, decision, formatTaskStartDecision(decision));
 }
 
@@ -650,8 +881,24 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
+  const activeBaselines = selectActiveBaselines(context, storyId);
+  const unreadyBaselines = activeBaselines.filter(
+    (baseline) =>
+      baseline.status !== "approved" ||
+      !isApprovedRecordFresh(baseline) ||
+      validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true }).length > 0,
+  );
+  if (unreadyBaselines.length > 0) {
+    result.status = "needs_user_input";
+    result.contract_action = "approve_or_refresh_project_context";
+    pushAllUnique(result.blocking_reasons, ["baseline_not_ready"]);
+    pushAllUnique(result.questions, ["Refresh or approve the active project context before phase work starts."]);
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
   if (!phase || !taskRouteRequiresContract(routeDecision.route)) {
-    return finalizeTaskStartExecution(result, routeDecision, options);
+    return finalizeTaskStartExecution(context, result, routeDecision, options);
   }
 
   const contractState = findApplicableTaskContract(context, {
@@ -722,10 +969,19 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
-  return finalizeTaskStartExecution(result, routeDecision, options);
+  return finalizeTaskStartExecution(context, result, routeDecision, options);
 }
 
-function finalizeTaskStartExecution(result, routeDecision, options) {
+function finalizeTaskStartExecution(context, result, routeDecision, options) {
+  if (result.blocking_reasons.length > 0) {
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = "resolve_route_blockers";
+    result.approval_requests = result.approval_requests.length
+      ? result.approval_requests
+      : collectApprovalRequests(context, { storyId: result.story_id || null });
+    return dedupeTaskStartDecision(result);
+  }
   if (routeDecision.requires_confirmation && !options["confirm-start"]) {
     result.status = "needs_user_input";
     result.execution_allowed = false;
@@ -848,12 +1104,18 @@ function findApplicableTaskContract(context, options = {}) {
   };
 }
 
-function readContractById(context, id) {
-  const contractPath = path.join(context.sdlcRoot, "contracts", `${normalizeId(id)}.json`);
+function readContractById(context, contractId, options = {}) {
+  const id = normalizeId(contractId);
+  const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   if (!fs.existsSync(contractPath)) {
+    if (options.missingOk) {
+      return null;
+    }
     return null;
   }
-  const contract = readJson(contractPath);
+  resolveProjectFilePath(context, toProjectPath(context, contractPath), { mustExist: true, fileOnly: true });
+  assertNoSymlinkPathSegments(contractPath);
+  const contract = readProjectJson(context, contractPath);
   contract.__path = contractPath;
   contract.__relative_path = toProjectPath(context, contractPath);
   return contract;
@@ -962,6 +1224,7 @@ function userFriendlyBlockingReason(code) {
     approved_template_missing: "The structure of the output is not agreed yet. For an assessment, this means confirming the sections and level of detail before I write it.",
     artifact_type_required: "I need to know what kind of output I should create, for example a technical assessment, test plan, or release note.",
     capability_profile_missing: "I have not confirmed which project files, tools, skills, and external access are appropriate for this work.",
+    baseline_not_ready: "The active project context is not approved from current evidence yet.",
     contract_incomplete: "The work brief is missing project-specific context, such as which files are trusted inputs or what boundaries I must respect.",
     contract_needs_approval: "The work brief exists, but it has not been approved for execution.",
     contract_negotiation_required: "I need an agreed work brief before producing durable work.",
@@ -1641,7 +1904,7 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
 
   addRouteCheck(decision, "active_claim", "passed", "No active claim blocks implementation");
   decision.route = "claim_and_implement";
-  decision.next_commands.push(`agentic-sdlc story claim --id ${storyId} --agent <agent> --branch feature/${storyId}`);
+  decision.next_commands.push(`agentic-sdlc story claim --id ${storyId} --agent <agent> --branch ${defaultStoryBranch(context, storyId)}`);
   decision.next_commands.push(`agentic-sdlc gate check --story ${storyId} --strict`);
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
@@ -1811,11 +2074,18 @@ function inspectStoryContract(context, story) {
   if (!story.contract_id) {
     return { exists: false, approved: false, contract: null, message: "Story has no contract_id" };
   }
-  const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
-  if (!fs.existsSync(contractPath)) {
+  const contract = readContractById(context, story.contract_id, { missingOk: true });
+  if (!contract) {
     return { exists: false, approved: false, contract: null, message: `Missing contract ${story.contract_id}` };
   }
-  const contract = readJson(contractPath);
+  if (contract.story_id !== story.id) {
+    return {
+      exists: false,
+      approved: false,
+      contract,
+      message: `Contract ${story.contract_id} is bound to ${contract.story_id || "the project"}, not story ${story.id}`,
+    };
+  }
   return {
     exists: true,
     approved: contract.status === "approved" && hasFreshApprovedContractApproval(contract),
@@ -1842,6 +2112,9 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
   }
   const contract = contractState.contract;
   const errors = [];
+  if (contract.story_id !== storyId) {
+    errors.push(`contract.story_id is '${contract.story_id || "project"}', expected '${storyId}'`);
+  }
   if (contract.status !== "approved") {
     errors.push(`contract.status is '${contract.status || "unknown"}'`);
   }
@@ -1854,7 +2127,7 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
 
   const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
   for (const expectation of expectations) {
-    if (!expectation.artifact_type || refs.length === 0) {
+    if (!expectation.artifact_type) {
       continue;
     }
     const matchingRef = refs.find(
@@ -1924,7 +2197,7 @@ function addOutputRefChecks(context, decision, story, contract) {
 
 function readStoryClaim(context, storyId) {
   const claimPath = path.join(context.sdlcRoot, "stories", storyId, "claim.json");
-  return fs.existsSync(claimPath) ? readJson(claimPath) : null;
+  return fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
 }
 
 function routeStoryId(intent, policy) {
@@ -2392,8 +2665,13 @@ function createBaselineProposal(context, options) {
 
   const baselinePath = baselinePathById(context, id);
   const reportPath = path.join(baselineRoot(context), `${id}-current-state.md`);
-  writeJsonFile(baselinePath, baseline, { force: Boolean(options.force) });
-  writeTextFile(reportPath, renderBaselineReport(baseline), { force: Boolean(options.force) });
+  const releaseLock = acquireFileLock(`${baselinePath}.lock`);
+  try {
+    writeJsonFile(baselinePath, baseline, { force: Boolean(options.force) });
+    writeTextFile(reportPath, renderBaselineReport(baseline), { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, null, {
     type: "decision",
     summary: `Proposed project baseline ${id}`,
@@ -2414,35 +2692,42 @@ function approveBaseline(context, options) {
   if (!fs.existsSync(baselinePath)) {
     fail(`Baseline ${id} does not exist`);
   }
-  const baseline = readJson(baselinePath);
-  validateBaselineSourceHashes(context, baseline, `baseline ${id}`, { failOnStale: true });
   const attribution = buildAttribution(context, options, "baseline.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a project baseline");
-  const approvalSource = normalizeApprovalSource(context, options, attribution, `baseline ${id}`, "approved");
-  const canonicality = {
-    ...(baseline.canonicality || {}),
-    state: approvalSource === "bootstrap" ? "bootstrap" : "confirmed",
-    inferred_not_approved: approvalSource === "bootstrap",
-    user_confirmation_required: approvalSource === "bootstrap",
-  };
-  baseline.canonicality = canonicality;
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: baseline,
-    subject_id_field: "baseline_id",
-    subject_id: id,
-    label: `baseline ${id}`,
-  });
-  baseline.status = approval.provisional ? "provisionally_approved" : "approved";
-  baseline.approvals = Array.isArray(baseline.approvals) ? baseline.approvals : [];
-  baseline.approvals.push(approval);
-  baseline.updated_at = now();
-  baseline.audit = {
-    ...(baseline.audit || {}),
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(baselinePath, baseline, { force: true });
+  let baseline;
+  let approval;
+  const releaseLock = acquireFileLock(`${baselinePath}.lock`);
+  try {
+    baseline = readProjectJson(context, baselinePath);
+    validateBaselineSourceHashes(context, baseline, `baseline ${id}`, { failOnStale: true });
+    const approvalSource = normalizeApprovalSource(context, options, attribution, `baseline ${id}`, "approved");
+    baseline.canonicality = {
+      ...(baseline.canonicality || {}),
+      state: approvalSource === "bootstrap" ? "bootstrap" : "confirmed",
+      inferred_not_approved: approvalSource === "bootstrap",
+      user_confirmation_required: approvalSource === "bootstrap",
+    };
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: baseline,
+      subject_id_field: "baseline_id",
+      subject_id: id,
+      scope: options.scope || "project-baseline",
+      label: `baseline ${id}`,
+    });
+    baseline.status = approval.provisional ? "provisionally_approved" : "approved";
+    baseline.approvals = Array.isArray(baseline.approvals) ? baseline.approvals : [];
+    baseline.approvals.push(approval);
+    baseline.updated_at = now();
+    baseline.audit = {
+      ...(baseline.audit || {}),
+      approved_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(baselinePath, baseline, { force: true });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, null, {
     type: "gate",
     summary: approval.summary || `Approved project baseline ${id}`,
@@ -2509,7 +2794,7 @@ function showApprovalRequests(context, options) {
 function collectApprovalRequests(context, options = {}) {
   const storyId = options.storyId || null;
   return [
-    ...collectBaselineApprovalRequests(context),
+    ...collectBaselineApprovalRequests(context, storyId),
     ...collectCapabilityProfileApprovalRequests(context, storyId),
     ...collectCapabilityRecommendationApprovalRequests(context, storyId),
     ...collectOutputTemplateApprovalRequests(context, storyId),
@@ -2568,15 +2853,73 @@ function attachAssistantMessagePresentation(payload) {
   return payload;
 }
 
-function collectBaselineApprovalRequests(context) {
-  return readBaselines(context)
-    .filter((baseline) => !["approved"].includes(String(baseline.status || "").toLowerCase()))
+function collectBaselineApprovalRequests(context, storyId = null) {
+  return selectActiveBaselines(context, storyId)
+    .filter((baseline) => {
+      const approved = String(baseline.status || "").toLowerCase() === "approved";
+      const stale =
+        validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true }).length > 0 ||
+        (approved && !isApprovedRecordFresh(baseline));
+      return !approved || stale;
+    })
     .map((baseline) => buildBaselineApprovalRequest(context, baseline));
+}
+
+function selectActiveBaselines(context, storyId = null) {
+  const baselines = readBaselines(context);
+  if (baselines.length === 0) {
+    return [];
+  }
+  const referencedIds = storyId ? baselineIdsReferencedByStoryContract(context, storyId) : new Set();
+  if (referencedIds.size > 0) {
+    return baselines.filter((baseline) => referencedIds.has(baseline.id));
+  }
+  return [baselines.at(-1)];
+}
+
+function baselineIdsReferencedByStoryContract(context, storyId) {
+  const story = readStory(context, storyId);
+  if (!story?.contract_id) {
+    return new Set();
+  }
+  const contract = readContractById(context, story.contract_id, { missingOk: true });
+  if (!contract) {
+    return new Set();
+  }
+  const result = new Set();
+  for (const source of contract.contextualization?.context_sources || []) {
+    const sourcePath = String(source?.path || source || "").replace(/\\/g, "/");
+    const match = sourcePath.match(/^\.sdlc\/baseline\/([^/]+)\.json$/);
+    if (match) {
+      result.add(match[1]);
+    }
+  }
+  return result;
+}
+
+function baselineIdsReferencedByAllContracts(context) {
+  const result = new Set();
+  const contractsRoot = path.join(context.sdlcRoot, "contracts");
+  for (const contract of collectJsonFiles(context, contractsRoot)) {
+    for (const source of contract.contextualization?.context_sources || []) {
+      const sourcePath = String(source?.path || source || "").replace(/\\/g, "/");
+      const match = sourcePath.match(/^\.sdlc\/baseline\/([^/]+)\.json$/);
+      if (match) {
+        result.add(match[1]);
+      }
+    }
+  }
+  return result;
 }
 
 function collectCapabilityProfileApprovalRequests(context, storyId = null) {
   return readCapabilityProfiles(context)
-    .filter((profile) => profile.status !== "approved")
+    .filter(
+      (profile) =>
+        profile.status !== "approved" ||
+        !isApprovedRecordFresh(profile) ||
+        validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true }).length > 0,
+    )
     .filter((profile) => capabilityRecordMatchesStory(context, profile, storyId))
     .map((profile) => buildCapabilityProfileApprovalRequest(context, profile));
 }
@@ -2619,7 +2962,13 @@ function buildCapabilityProfileApprovalRequest(context, profile) {
 
 function collectCapabilityRecommendationApprovalRequests(context, storyId = null) {
   return readCapabilityRecommendations(context)
-    .filter((recommendation) => recommendation.status !== "approved" || capabilityRecommendationNeedsInstallApproval(recommendation))
+    .filter(
+      (recommendation) =>
+        recommendation.status !== "approved" ||
+        !isApprovedRecordFresh(recommendation) ||
+        validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${recommendation.id}`, { collectOnly: true }).length > 0 ||
+        capabilityRecommendationNeedsInstallApproval(recommendation),
+    )
     .filter((recommendation) => capabilityRecommendationMatchesStory(context, recommendation, storyId))
     .map((recommendation) => buildCapabilityRecommendationApprovalRequest(context, recommendation));
 }
@@ -2663,7 +3012,8 @@ function capabilityRecordMatchesStory(context, record, storyId = null) {
   if (!storyId) {
     return true;
   }
-  return !record.subject?.story_id || record.subject.story_id === storyId || record.subject?.scope === "project";
+  const subjectStoryId = record.subject?.story_id || null;
+  return !subjectStoryId || subjectStoryId === storyId;
 }
 
 function capabilityRecommendationMatchesStory(context, recommendation, storyId = null) {
@@ -2685,6 +3035,10 @@ function capabilityRecommendationNeedsInstallApproval(recommendation) {
 function buildBaselineApprovalRequest(context, baseline) {
   const baselinePath = `.sdlc/baseline/${baseline.id}.json`;
   const reportPath = `.sdlc/baseline/${baseline.id}-current-state.md`;
+  const staleSources = validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true });
+  if (staleSources.length > 0) {
+    return buildBaselineRefreshRequest(context, baseline, baselinePath, reportPath, staleSources);
+  }
   const reportHeadings = readProjectMarkdownHeadings(context, reportPath, 8);
   const reportExcerpt = readProjectFileExcerpt(context, reportPath, 900);
   const currentStateSummary = formatBaselineCurrentStateSummary(baseline, reportExcerpt);
@@ -2720,6 +3074,37 @@ function buildBaselineApprovalRequest(context, baseline) {
     }),
     suggested_question: `After reading the summary above, do you approve baseline ${baseline.id} as canonical, or should it be revised?`,
     suggested_command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<user-confirmed baseline>"`,
+  };
+}
+
+function buildBaselineRefreshRequest(context, baseline, baselinePath, reportPath, staleSources) {
+  const sources = [baselinePath, reportPath].filter((source) => fs.existsSync(path.join(context.root, source)));
+  return {
+    id: `refresh-baseline-${baseline.id}`,
+    type: "baseline_refresh_required",
+    status: "needs_refresh",
+    summary: `Refresh project context ${baseline.id} before asking for approval or using it as current evidence.`,
+    subject_id: baseline.id,
+    subject_status: baseline.status || null,
+    sources,
+    ...humanApprovalFields({
+      title: `Refresh project context (${baseline.id})`,
+      why_needed: "The project files used for this context changed after it was prepared, so approving the old snapshot would not approve the current project.",
+      review_items: [
+        baseline.summary ? `Previous project summary: ${baseline.summary}` : null,
+        `Changed or missing evidence: ${formatLimitedList(staleSources, 8)}`,
+        baseline.source_paths?.length ? `Files that must be read again: ${formatLimitedList(baseline.source_paths, 12)}` : null,
+        "What this means: refresh the inferred snapshot, explain the updated contents, and only then request approval if the active approval scope does not already cover it.",
+      ],
+      approval_meaning: "Refreshing does not approve the project context. It only replaces the outdated snapshot with evidence from the current files.",
+      approve_if: "Refresh if these files are still the intended project evidence.",
+      change_if: "Change the source list first if files should be added, removed, or treated as non-canonical.",
+      after_approval: `After refresh, ${baseline.id} can be summarized from current evidence and approved within the applicable approval scope.`,
+      user_prompt: `May I refresh project context ${baseline.id} from its current source files?`,
+      approval_phrase: `Refresh project context ${baseline.id}.`,
+    }),
+    suggested_question: `The evidence behind ${baseline.id} changed. Should I refresh that project context before continuing?`,
+    suggested_command: `agentic-sdlc baseline propose --id ${baseline.id} --source <current-path> --force --summary "<updated observable context>"`,
   };
 }
 
@@ -2893,9 +3278,17 @@ function collectOutputTemplateApprovalRequests(context, storyId = null) {
   }
   const relevantTemplateIds = storyId ? collectStoryTemplateIds(context, storyId, registry) : null;
   return (registry.templates || [])
-    .filter((template) => !relevantTemplateIds || relevantTemplateIds.has(template.id) || template.status !== "approved")
-    .filter((template) => template.status !== "approved")
+    .filter((template) => !relevantTemplateIds || relevantTemplateIds.has(template.id) || outputTemplateNeedsApproval(context, template))
+    .filter((template) => outputTemplateNeedsApproval(context, template))
     .map((template) => buildOutputTemplateApprovalRequest(context, template));
+}
+
+function outputTemplateNeedsApproval(context, template) {
+  if (template.status !== "approved" || !template.path || !template.approved_content_hash) {
+    return true;
+  }
+  const templatePath = resolveProjectFilePath(context, template.path, { mustExist: false });
+  return !fs.existsSync(templatePath) || !fs.statSync(templatePath).isFile() || hashFile(templatePath) !== template.approved_content_hash;
 }
 
 function buildOutputTemplateApprovalRequest(context, template) {
@@ -3388,11 +3781,14 @@ function simplifyReviewItemForUser(request, item) {
   if (!text) {
     return null;
   }
-  if (request.type === "output_template_approval" && /^(Template file|Template content to review):/.test(text)) {
-    return null;
-  }
   if (/^Allowed tools:/.test(text)) {
-    return null;
+    return `Tools and access being approved: ${text.replace(/^Allowed tools:\s*/, "")}`;
+  }
+  if (/^Template file:/.test(text)) {
+    return `Template source: ${text.replace(/^Template file:\s*/, "")}`;
+  }
+  if (/^Template content to review:/.test(text)) {
+    return `Proposed document structure: ${text.replace(/^Template content to review:\s*/, "")}`;
   }
   if (/^Decision scope:/.test(text)) {
     return `Decision scope: this only approves the document structure for ${humanOutputLabel(request.artifact_type || "this output")} work. It does not approve the final content.`;
@@ -3518,7 +3914,7 @@ function describeContractForHuman(contract) {
 function readProjectFileExcerpt(context, relativePath, maxLength = 220) {
   try {
     const filePath = resolveProjectFilePath(context, relativePath, { mustExist: true, fileOnly: true });
-    return compactText(fs.readFileSync(filePath, "utf8"), maxLength);
+    return compactText(readProjectText(context, filePath), maxLength);
   } catch {
     return null;
   }
@@ -3527,7 +3923,7 @@ function readProjectFileExcerpt(context, relativePath, maxLength = 220) {
 function readProjectMarkdownHeadings(context, relativePath, maxHeadings = 8) {
   try {
     const filePath = resolveProjectFilePath(context, relativePath, { mustExist: true, fileOnly: true });
-    return fs.readFileSync(filePath, "utf8")
+    return readProjectText(context, filePath)
       .split(/\r?\n/)
       .map((line) => line.match(/^(#{1,3})\s+(.+?)\s*$/))
       .filter(Boolean)
@@ -3621,10 +4017,16 @@ function createContract(context, options) {
   });
   validateContractReadinessForCreate(context, contract, options);
   validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
-  const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
-  writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
-  const linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
+  let linkedStory;
+  const releaseLock = acquireFileLock(`${contractPath}.lock`);
+  try {
+    const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
+    writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
+    linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
+  } finally {
+    releaseLock();
+  }
   output(
     options,
     { status: "created", contract_path: contractPath, contract, story_link: linkedStory },
@@ -3662,7 +4064,7 @@ function linkStoryToContractAfterCreate(context, storyLink, contract, contractPa
     return storyLink ? { status: "already_linked", story_id: storyLink.story_id, contract_id: contract.id } : null;
   }
   const storyPath = path.join(context.sdlcRoot, "stories", storyLink.story_id, "story.json");
-  const story = readJson(storyPath);
+  const story = readProjectJson(context, storyPath);
   story.contract_id = contract.id;
   story.updated_at = now();
   story.audit = {
@@ -3802,35 +4204,42 @@ function approveContract(context, options) {
   if (!fs.existsSync(contractPath)) {
     fail(`Contract ${id} does not exist`);
   }
-  const contract = readJson(contractPath);
   const attribution = buildAttribution(context, options, "contract.approve");
   const approvalStatus = normalizeApprovalStatus(options.status || "approved");
-  if (contract.human_gate === true) {
-    requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
+  let contract;
+  let approval;
+  const releaseLock = acquireFileLock(`${contractPath}.lock`);
+  try {
+    contract = readProjectJson(context, contractPath);
+    if (contract.human_gate === true) {
+      requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
+    }
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: contract,
+      subject_id_field: "contract_id",
+      subject_id: id,
+      status: approvalStatus,
+      scope: String(options.scope || "contract"),
+      label: `contract ${id}`,
+    });
+    contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
+    contract.approvals.push(approval);
+    if (approval.status === "approved" && !options["preserve-status"]) {
+      contract.status = "approved";
+    } else if (["changes_requested", "rejected"].includes(approval.status) && !options["preserve-status"]) {
+      contract.status = approval.status;
+    }
+    contract.updated_at = now();
+    contract.audit = {
+      ...(contract.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(contractPath, contract, { force: true });
+  } finally {
+    releaseLock();
   }
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: contract,
-    subject_id_field: "contract_id",
-    subject_id: id,
-    status: approvalStatus,
-    scope: String(options.scope || "contract"),
-    label: `contract ${id}`,
-  });
-  contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
-  contract.approvals.push(approval);
-  if (approval.status === "approved" && !options["preserve-status"]) {
-    contract.status = "approved";
-  } else if (["changes_requested", "rejected"].includes(approval.status) && !options["preserve-status"]) {
-    contract.status = approval.status;
-  }
-  contract.updated_at = now();
-  contract.audit = {
-    ...(contract.audit || {}),
-    updated_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(contractPath, contract, { force: true });
   appendTraceEvent(context, contract.story_id || null, {
     type: "gate",
     summary: approval.summary || `Contract ${id} ${approval.status}`,
@@ -4181,6 +4590,10 @@ function validateCapabilityBindingTargets(context, bindings, label, report) {
       if (!String(key).toLowerCase().includes("path") || typeof value !== "string") {
         continue;
       }
+      const candidate = path.isAbsolute(value) ? path.resolve(value) : path.resolve(context.root, value);
+      if (!isInsidePath(context.root, candidate)) {
+        continue;
+      }
       const resolved = resolveProjectFilePath(context, value, { mustExist: false });
       if (isDerivedArtifactPath(context, resolved)) {
         report.errors.push(`${label} capability binding ${binding.binding_id} target.${key} points to derived cache/index path ${value}`);
@@ -4207,7 +4620,7 @@ function validateContractCapabilityRecommendations(context, report, contract, la
       report.errors.push(`${label} references missing capability recommendation ${ref.id}`);
       continue;
     }
-    const recommendation = readJson(recommendationPath);
+    const recommendation = readProjectJson(context, recommendationPath);
     const recommendationLabel = `capability recommendation ${ref.id}`;
     if (recommendation.status !== "approved") {
       report.errors.push(`${label} references ${recommendationLabel} but it is not approved`);
@@ -4228,7 +4641,7 @@ function validateContractCapabilityRecommendations(context, report, contract, la
     if (!recommendation.profile_id || !fs.existsSync(profilePath)) {
       report.errors.push(`${label} ${recommendationLabel} references missing profile ${recommendation.profile_id || "unknown"}`);
     } else {
-      const profile = readJson(profilePath);
+      const profile = readProjectJson(context, profilePath);
       if (profile.status !== "approved") {
         report.errors.push(`${label} ${recommendationLabel} profile ${profile.id} is not approved or is stale`);
       } else if (!isApprovedRecordFresh(profile)) {
@@ -4282,7 +4695,7 @@ function loadCapabilityRecommendationsForContract(context, options) {
     if (!fs.existsSync(recommendationPath)) {
       fail(`Capability recommendation ${id} does not exist`);
     }
-    const recommendation = readJson(recommendationPath);
+    const recommendation = readProjectJson(context, recommendationPath);
     validateApprovedCapabilityRecommendationForUse(context, recommendation, `capability recommendation ${id}`);
     result.refs.push({
       id,
@@ -4577,28 +4990,30 @@ function hashApprovalSubject(value) {
   return shortHashFull(stableJson(stripApprovalVolatileFields(value)));
 }
 
-function stripApprovalVolatileFields(value) {
+function stripApprovalVolatileFields(value, depth = 0) {
   if (Array.isArray(value)) {
-    return value.map(stripApprovalVolatileFields);
+    return value.map((item) => stripApprovalVolatileFields(item, depth + 1));
   }
   if (!value || typeof value !== "object") {
     return value;
   }
   const stripped = {};
-  const volatile = new Set([
-    "__path",
-    "__relative_path",
-    "approvals",
-    "audit",
-    "created_at",
-    "updated_at",
-    "approved_at",
-    "approved_by",
-    "status",
-  ]);
+  const volatile = depth === 0
+    ? new Set([
+        "__path",
+        "__relative_path",
+        "approvals",
+        "audit",
+        "created_at",
+        "updated_at",
+        "approved_at",
+        "approved_by",
+        "status",
+      ])
+    : new Set();
   for (const key of Object.keys(value).sort()) {
     if (!volatile.has(key)) {
-      stripped[key] = stripApprovalVolatileFields(value[key]);
+      stripped[key] = stripApprovalVolatileFields(value[key], depth + 1);
     }
   }
   return stripped;
@@ -4797,7 +5212,7 @@ function readProjectSafe(context) {
   if (!fs.existsSync(projectPath)) {
     return null;
   }
-  return readJson(projectPath);
+  return readProjectJson(context, projectPath);
 }
 
 function buildContextSources(context, contextFiles) {
@@ -4877,7 +5292,7 @@ function createStory(context, options) {
     schema_version: context.config.schema_version,
     status,
     phase,
-    contract_id: options.contract ? String(options.contract) : null,
+    contract_id: options.contract ? normalizeId(String(options.contract)) : null,
     work_breakdown_id: options.breakdown ? normalizeId(String(options.breakdown)) : null,
     acceptance: acceptanceCriteria,
     acceptance_criteria: acceptanceCriteria,
@@ -5033,7 +5448,12 @@ function proposeBreakdown(context, options) {
     },
   };
   const breakdownPath = breakdownPathById(context, id);
-  writeJsonFile(breakdownPath, breakdown, { force: Boolean(options.force) });
+  const releaseLock = acquireFileLock(`${breakdownPath}.lock`);
+  try {
+    writeJsonFile(breakdownPath, breakdown, { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   output(options, { status: "proposed", breakdown_path: breakdownPath, breakdown }, [`Proposed breakdown ${id}`]);
 }
 
@@ -5044,26 +5464,34 @@ function approveBreakdown(context, options) {
   if (!fs.existsSync(breakdownPath)) {
     fail(`Breakdown ${id} does not exist`);
   }
-  const breakdown = readJson(breakdownPath);
   const attribution = buildAttribution(context, options, "breakdown.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a work breakdown");
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: breakdown,
-    subject_id_field: "breakdown_id",
-    subject_id: id,
-    label: `breakdown ${id}`,
-  });
-  breakdown.status = "approved";
-  breakdown.approvals = Array.isArray(breakdown.approvals) ? breakdown.approvals : [];
-  breakdown.approvals.push(approval);
-  breakdown.updated_at = now();
-  breakdown.audit = {
-    ...(breakdown.audit || {}),
-    updated_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(breakdownPath, breakdown, { force: true });
+  let breakdown;
+  let approval;
+  const releaseLock = acquireFileLock(`${breakdownPath}.lock`);
+  try {
+    breakdown = readProjectJson(context, breakdownPath);
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: breakdown,
+      subject_id_field: "breakdown_id",
+      subject_id: id,
+      scope: options.scope || "work-breakdown",
+      label: `breakdown ${id}`,
+    });
+    breakdown.status = "approved";
+    breakdown.approvals = Array.isArray(breakdown.approvals) ? breakdown.approvals : [];
+    breakdown.approvals.push(approval);
+    breakdown.updated_at = now();
+    breakdown.audit = {
+      ...(breakdown.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(breakdownPath, breakdown, { force: true });
+  } finally {
+    releaseLock();
+  }
   output(options, { status: "approved", breakdown_path: breakdownPath, approval, breakdown }, [`Approved breakdown ${id}`]);
 }
 
@@ -5113,7 +5541,12 @@ function proposeDependencyGraph(context, options) {
     },
   };
   const proposalPath = dependencyProposalPath(context, id);
-  writeJsonFile(proposalPath, proposal, { force: Boolean(options.force) });
+  const releaseLock = acquireFileLock(path.join(dependenciesRoot(context), "graph.lock"));
+  try {
+    writeJsonFile(proposalPath, proposal, { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   output(options, { status: "proposed", dependency_path: proposalPath, dependency: proposal }, [`Proposed dependency graph ${id}`]);
 }
 
@@ -5124,46 +5557,56 @@ function approveDependencyGraph(context, options) {
   if (!fs.existsSync(proposalPath)) {
     fail(`Dependency proposal ${id} does not exist`);
   }
-  const proposal = readJson(proposalPath);
   const attribution = buildAttribution(context, options, "dependency.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving dependency graph changes");
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: proposal,
-    subject_id_field: "dependency_id",
-    subject_id: id,
-    label: `dependency ${id}`,
-  });
-  proposal.status = "approved";
-  proposal.approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
-  proposal.approvals.push(approval);
-  proposal.updated_at = now();
-  proposal.audit = {
-    ...(proposal.audit || {}),
-    updated_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(proposalPath, proposal, { force: true });
-
-  const graph = readDependencyGraph(context, { missingOk: true });
-  for (const edge of proposal.edges || []) {
-    upsertDependencyEdge(graph, {
-      ...edge,
-      proposal_id: id,
-      requirement_id: proposal.requirement_id || null,
-      rationale: proposal.rationale || null,
-      approved_at: now(),
-      approved_by: attribution.actor,
+  let proposal;
+  let graph;
+  let approval;
+  const releaseLock = acquireFileLock(path.join(dependenciesRoot(context), "graph.lock"));
+  try {
+    proposal = readProjectJson(context, proposalPath);
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: proposal,
+      subject_id_field: "dependency_id",
+      subject_id: id,
+      scope: options.scope || "dependency-graph",
+      label: `dependency ${id}`,
     });
+    proposal.status = "approved";
+    proposal.approvals = Array.isArray(proposal.approvals) ? proposal.approvals : [];
+    proposal.approvals.push(approval);
+    proposal.updated_at = now();
+    proposal.audit = {
+      ...(proposal.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+
+    graph = readDependencyGraph(context, { missingOk: true });
+    for (const edge of proposal.edges || []) {
+      upsertDependencyEdge(graph, {
+        ...edge,
+        proposal_id: id,
+        requirement_id: proposal.requirement_id || null,
+        rationale: proposal.rationale || null,
+        approved_at: now(),
+        approved_by: attribution.actor,
+      });
+    }
+    graph.updated_at = now();
+    graph.audit = {
+      ...(graph.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    // Write the canonical graph first. A retry is idempotent because edges are upserted.
+    writeJsonFile(dependencyGraphPath(context), graph, { force: true });
+    writeJsonFile(proposalPath, proposal, { force: true });
+  } finally {
+    releaseLock();
   }
-  graph.updated_at = now();
-  graph.audit = {
-    ...(graph.audit || {}),
-    updated_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(dependencyGraphPath(context), graph, { force: true });
   output(options, { status: "approved", dependency_path: proposalPath, graph_path: dependencyGraphPath(context), approval, dependency: proposal, graph }, [`Approved dependency graph ${id}`]);
 }
 
@@ -5230,7 +5673,12 @@ function proposeCapabilityProfile(context, options) {
     },
   };
   const profilePath = capabilityProfilePath(context, id);
-  writeJsonFile(profilePath, profile, { force: Boolean(options.force) });
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    writeJsonFile(profilePath, profile, { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, profile.subject.story_id || null, {
     type: "decision",
     summary: `Proposed capability profile ${id}`,
@@ -5264,27 +5712,35 @@ function approveCapabilityProfile(context, options) {
   if (!fs.existsSync(profilePath)) {
     fail(`Capability profile ${id} does not exist`);
   }
-  const profile = readJson(profilePath);
   const attribution = buildAttribution(context, options, "capability.profile.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a capability profile");
-  validateCapabilityRecordSourceHashes(context, profile, `capability profile ${id}`, { failOnStale: true });
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: profile,
-    subject_id_field: "profile_id",
-    subject_id: id,
-    label: `capability profile ${id}`,
-  });
-  profile.status = "approved";
-  profile.approvals = Array.isArray(profile.approvals) ? profile.approvals : [];
-  profile.approvals.push(approval);
-  profile.updated_at = now();
-  profile.audit = {
-    ...(profile.audit || {}),
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(profilePath, profile, { force: true });
+  let profile;
+  let approval;
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    profile = readProjectJson(context, profilePath);
+    validateCapabilityRecordSourceHashes(context, profile, `capability profile ${id}`, { failOnStale: true });
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: profile,
+      subject_id_field: "profile_id",
+      subject_id: id,
+      scope: options.scope || "capability-profile",
+      label: `capability profile ${id}`,
+    });
+    profile.status = "approved";
+    profile.approvals = Array.isArray(profile.approvals) ? profile.approvals : [];
+    profile.approvals.push(approval);
+    profile.updated_at = now();
+    profile.audit = {
+      ...(profile.audit || {}),
+      approved_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(profilePath, profile, { force: true });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, profile.subject?.story_id || null, {
     type: "gate",
     summary: `Approved capability profile ${id}`,
@@ -5307,7 +5763,7 @@ function proposeCapabilityRecommendation(context, options) {
   if (!fs.existsSync(profilePath)) {
     fail(`Capability profile ${profileId} does not exist`);
   }
-  const profile = readJson(profilePath);
+  const profile = readProjectJson(context, profilePath);
   const input = loadOptionalJsonInput(context, options, "recommendation-json", "recommendation-file", "Capability recommendation");
   const availableCapabilities = loadOptionalJsonInput(
     context,
@@ -5356,7 +5812,12 @@ function proposeCapabilityRecommendation(context, options) {
     },
   };
   const recommendationPath = capabilityRecommendationPath(context, id);
-  writeJsonFile(recommendationPath, recommendation, { force: Boolean(options.force) });
+  const releaseLock = acquireFileLock(`${recommendationPath}.lock`);
+  try {
+    writeJsonFile(recommendationPath, recommendation, { force: Boolean(options.force) });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, profile.subject?.story_id || null, {
     type: "decision",
     summary: `Proposed capability recommendation ${id}`,
@@ -5390,39 +5851,51 @@ function approveCapabilityRecommendation(context, options) {
   if (!fs.existsSync(recommendationPath)) {
     fail(`Capability recommendation ${id} does not exist`);
   }
-  const recommendation = readJson(recommendationPath);
   const attribution = buildAttribution(context, options, "capability.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a capability recommendation");
-  const profile = readCapabilityProfile(context, recommendation.profile_id);
-  validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
-  validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${id}`, { failOnStale: true });
-  if (options["approve-install"]) {
-    recommendation.recommendations = (recommendation.recommendations || []).map((item) =>
-      item.install_required ? { ...item, install_approved: true, install_approved_at: now(), install_approved_by: attribution.actor } : item,
-    );
+  if (options["approve-install"] && !["human", "ci"].includes(attribution.actor.type)) {
+    fail("Approving capability installation requires a directly attributed human or CI actor; delegated automation cannot expand into installs.");
   }
-  recommendation.profile_ref = {
-    path: toProjectPath(context, capabilityProfilePath(context, recommendation.profile_id)),
-    approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
-    current_content_hash: hashApprovalSubject(profile),
-  };
-  const approval = buildApprovalRecord(context, options, attribution, {
-    subject: recommendation,
-    subject_id_field: "recommendation_id",
-    subject_id: id,
-    label: `capability recommendation ${id}`,
-  });
-  recommendation.status = "approved";
-  recommendation.approvals = Array.isArray(recommendation.approvals) ? recommendation.approvals : [];
-  recommendation.approvals.push(approval);
-  recommendation.updated_at = now();
-  recommendation.audit = {
-    ...(recommendation.audit || {}),
-    approved_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(recommendationPath, recommendation, { force: true });
+  let recommendation;
+  let profile;
+  let approval;
+  const releaseLock = acquireFileLock(`${recommendationPath}.lock`);
+  try {
+    recommendation = readProjectJson(context, recommendationPath);
+    profile = readCapabilityProfile(context, recommendation.profile_id);
+    validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
+    validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${id}`, { failOnStale: true });
+    if (options["approve-install"]) {
+      recommendation.recommendations = (recommendation.recommendations || []).map((item) =>
+        item.install_required ? { ...item, install_approved: true, install_approved_at: now(), install_approved_by: attribution.actor } : item,
+      );
+    }
+    recommendation.profile_ref = {
+      path: toProjectPath(context, capabilityProfilePath(context, recommendation.profile_id)),
+      approved_content_hash: latestApprovedRecordApproval(profile)?.approved_content_hash || null,
+      current_content_hash: hashApprovalSubject(profile),
+    };
+    approval = buildApprovalRecord(context, options, attribution, {
+      subject: recommendation,
+      subject_id_field: "recommendation_id",
+      subject_id: id,
+      scope: options.scope || "capability-recommendation",
+      label: `capability recommendation ${id}`,
+    });
+    recommendation.status = "approved";
+    recommendation.approvals = Array.isArray(recommendation.approvals) ? recommendation.approvals : [];
+    recommendation.approvals.push(approval);
+    recommendation.updated_at = now();
+    recommendation.audit = {
+      ...(recommendation.audit || {}),
+      approved_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(recommendationPath, recommendation, { force: true });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, profile.subject?.story_id || null, {
     type: "gate",
     summary: `Approved capability recommendation ${id}`,
@@ -5524,8 +5997,11 @@ function baselinePathById(context, id) {
 function readBaselines(context) {
   return safeReadDir(baselineRoot(context))
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(baselineRoot(context), name)))
-    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    .map((name) => readProjectJson(context, path.join(baselineRoot(context), name)))
+    .sort((a, b) => {
+      const createdComparison = String(a.created_at || "").localeCompare(String(b.created_at || ""));
+      return createdComparison || String(a.id).localeCompare(String(b.id));
+    });
 }
 
 function buildBaselineDocumentEvidence(context, rawPath) {
@@ -5630,7 +6106,7 @@ function readPackageScripts(context) {
     return {};
   }
   try {
-    const pkg = readJson(packageJsonPath);
+    const pkg = readProjectJson(context, packageJsonPath);
     return normalizeObject(pkg.scripts);
   } catch {
     return {};
@@ -5698,13 +6174,20 @@ function listOrNone(values) {
 
 function validateBaselineSourceHashes(context, baseline, label, options = {}) {
   const issues = [];
-  for (const [sourcePath, expectedHash] of Object.entries(baseline.source_hashes || {})) {
+  const sourceHashes = baseline.source_hashes || {};
+  const sourcePaths = new Set([...(baseline.source_paths || []), ...Object.keys(sourceHashes)]);
+  for (const sourcePath of sourcePaths) {
+    const expectedHash = sourceHashes[sourcePath];
     const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
     if (isDerivedArtifactPath(context, resolved)) {
       issues.push(`${label} uses derived source ${sourcePath}`);
     } else if (!fs.existsSync(resolved)) {
       issues.push(`${label} source ${sourcePath} is missing`);
-    } else if (fs.statSync(resolved).isFile() && hashFile(resolved) !== expectedHash) {
+    } else if (!expectedHash) {
+      issues.push(`${label} source ${sourcePath} has no recorded hash`);
+    } else if (!fs.statSync(resolved).isFile()) {
+      issues.push(`${label} source ${sourcePath} is not a file`);
+    } else if (hashFile(resolved) !== expectedHash) {
       issues.push(`${label} source ${sourcePath} changed after baseline proposal`);
     }
   }
@@ -5730,20 +6213,20 @@ function readCapabilityProfile(context, id) {
   if (!fs.existsSync(profilePath)) {
     fail(`Capability profile ${id} does not exist`);
   }
-  return readJson(profilePath);
+  return readProjectJson(context, profilePath);
 }
 
 function readCapabilityProfiles(context) {
   return safeReadDir(capabilityProfilesRoot(context))
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(capabilityProfilesRoot(context), name)))
+    .map((name) => readProjectJson(context, path.join(capabilityProfilesRoot(context), name)))
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
 function readCapabilityRecommendations(context) {
   return safeReadDir(capabilityRecommendationsRoot(context))
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(capabilityRecommendationsRoot(context), name)))
+    .map((name) => readProjectJson(context, path.join(capabilityRecommendationsRoot(context), name)))
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
@@ -5760,7 +6243,7 @@ function loadOptionalJsonInput(context, options, inlineKey, fileKey, label) {
     if (file) {
       const filePath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
       assertNotDerivedArtifact(context, filePath, label);
-      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+      return JSON.parse(readProjectText(context, filePath));
     }
     return JSON.parse(inline);
   } catch (error) {
@@ -5816,7 +6299,7 @@ function normalizeCapabilitySourcePaths(context, rawPaths) {
     if (!rawPath) {
       continue;
     }
-    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: false });
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
     assertNotDerivedArtifact(context, resolved, "Capability source path");
     result.push(toProjectPath(context, resolved));
   }
@@ -5963,7 +6446,7 @@ function detectProjectStack(context) {
     const packageJsonPath = path.join(context.root, "package.json");
     add("package-json", "node", "package.json");
     try {
-      const pkg = readJson(packageJsonPath);
+      const pkg = readProjectJson(context, packageJsonPath);
       const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
       for (const [dependency, type] of Object.entries({
         next: "web-framework",
@@ -6017,6 +6500,9 @@ function findApprovedCapabilityProfiles(context, options = {}) {
     if (profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
       return false;
     }
+    if (validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true }).length > 0) {
+      return false;
+    }
     if (options.storyId && profile.subject?.story_id && profile.subject.story_id !== options.storyId) {
       return false;
     }
@@ -6040,12 +6526,19 @@ function capabilityRecordStatus(context, record, label) {
 
 function validateCapabilityRecordSourceHashes(context, record, label, options = {}) {
   const issues = [];
-  for (const [sourcePath, expectedHash] of Object.entries(record.source_hashes || {})) {
+  const sourceHashes = record.source_hashes || {};
+  const sourcePaths = new Set([...(record.source_paths || []), ...Object.keys(sourceHashes)]);
+  for (const sourcePath of sourcePaths) {
+    const expectedHash = sourceHashes[sourcePath];
     const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
     if (isDerivedArtifactPath(context, resolved)) {
       issues.push(`${label} uses derived source ${sourcePath}`);
     } else if (!fs.existsSync(resolved)) {
       issues.push(`${label} source ${sourcePath} is missing`);
+    } else if (!expectedHash) {
+      issues.push(`${label} source ${sourcePath} has no recorded hash`);
+    } else if (!fs.statSync(resolved).isFile()) {
+      issues.push(`${label} source ${sourcePath} is not a file`);
     } else if (hashFile(resolved) !== expectedHash) {
       issues.push(`${label} source ${sourcePath} changed after record creation`);
     }
@@ -6152,7 +6645,7 @@ function readEffectiveBreakdownPolicy(context) {
     task_gate: "light",
   };
   const policyPath = path.join(workBreakdownRoot(context), "project-policy.json");
-  const projectPolicy = fs.existsSync(policyPath) ? readJson(policyPath).policy || {} : {};
+  const projectPolicy = fs.existsSync(policyPath) ? readProjectJson(context, policyPath).policy || {} : {};
   const policy = {
     ...defaults,
     ...configured,
@@ -6179,7 +6672,7 @@ function readBreakdowns(context) {
   const root = workBreakdownRoot(context);
   return safeReadDir(root)
     .filter((name) => name.endsWith(".json") && name !== "project-policy.json")
-    .map((name) => readJson(path.join(root, name)));
+    .map((name) => readProjectJson(context, path.join(root, name)));
 }
 
 function latestApprovedRecordApproval(record) {
@@ -6236,7 +6729,7 @@ function readDependencyGraph(context, options = {}) {
       audit: {},
     };
   }
-  const graph = readJson(graphPath);
+  const graph = readProjectJson(context, graphPath);
   graph.edges = Array.isArray(graph.edges) ? graph.edges : [];
   return graph;
 }
@@ -6244,7 +6737,7 @@ function readDependencyGraph(context, options = {}) {
 function readDependencyProposals(context) {
   return safeReadDir(dependenciesRoot(context))
     .filter((name) => name.endsWith(".json") && name !== "graph.json")
-    .map((name) => readJson(path.join(dependenciesRoot(context), name)))
+    .map((name) => readProjectJson(context, path.join(dependenciesRoot(context), name)))
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
 
@@ -6273,6 +6766,8 @@ function buildDependencyStatus(context, storyId = null) {
       warnings.push(`${edge.from} depends on ${edge.to} via ${edge.type}`);
       continue;
     }
+    // Status and orchestration expose blockers for upcoming phases. Phase-aware
+    // enforcement is applied by the story gate, which passes the current story.
     const state = inspectDependencyEdge(context, edge);
     if (state.blocking && !state.satisfied) {
       blockers.push(state.message);
@@ -6306,7 +6801,7 @@ function inspectDependencyEdge(context, edge, story = null) {
   const stale = dependencyUpstreamArtifactChanged(context, edge);
   if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since)) {
     return {
-      blocking: isHardDependencyEdge(edge),
+      blocking,
       satisfied: false,
       message: `${edge.from} requires revalidation because upstream artifact ${stale.artifact_path} changed after linking`,
     };
@@ -6458,21 +6953,25 @@ function claimStory(context, options) {
   const claimPath = path.join(storyDir, "claim.json");
   const releaseLock = acquireFileLock(path.join(storyDir, "claim.lock"));
   let claim;
-  let attribution;
+  const attribution = buildAttribution(context, options, "story.claim");
   try {
     const claimExists = fs.existsSync(claimPath);
     if (claimExists && !options.force) {
-      const existing = readJson(claimPath);
+      const existing = readProjectJson(context, claimPath);
       if (existing.status === "active") {
         fail(`Story ${id} already has an active claim by ${existing.agent}. Release it first or use --force after coordination.`);
       }
     }
-
-    attribution = buildAttribution(context, options, "story.claim");
+    if (claimExists && options.force) {
+      const existing = readProjectJson(context, claimPath);
+      if (existing.status === "active") {
+        requireCoordinationOverrideActor(attribution, `Force-claiming active story ${id}`);
+      }
+    }
     claim = {
       story_id: id,
       agent: String(agent),
-      branch: String(options.branch || `feature/${id}`),
+      branch: String(options.branch || defaultStoryBranch(context, id)),
       status: "active",
       claimed_at: now(),
       expires_at: expiresAt,
@@ -6510,25 +7009,34 @@ function releaseStoryClaimRecord(context, options) {
   const id = normalizeId(requireOption(options, "id"));
   const storyDir = path.join(context.sdlcRoot, "stories", id);
   const claimPath = path.join(storyDir, "claim.json");
-  if (!fs.existsSync(claimPath)) {
-    fail(`Story ${id} has no claim to release`);
-  }
-  const claim = readJson(claimPath);
-  const requestedAgent = options.agent ? String(options.agent) : null;
-  if (requestedAgent && claim.agent !== requestedAgent && !options.force) {
-    fail(`Story ${id} is claimed by ${claim.agent}, not ${requestedAgent}. Use --force only after coordination.`);
-  }
   const attribution = buildAttribution(context, options, "story.release");
-  claim.status = normalizeClaimStatus(options.status || "released");
-  claim.released_at = now();
-  claim.release_reason = options.reason ? String(options.reason) : null;
-  claim.audit = {
-    ...(claim.audit || {}),
-    released_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeJsonFile(claimPath, claim, { force: true });
+  const requestedAgent = options.agent ? String(options.agent) : null;
+  let claim;
+  const releaseLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+  try {
+    if (!fs.existsSync(claimPath)) {
+      fail(`Story ${id} has no claim to release`);
+    }
+    claim = readProjectJson(context, claimPath);
+    if (requestedAgent && claim.agent !== requestedAgent && !options.force) {
+      fail(`Story ${id} is claimed by ${claim.agent}, not ${requestedAgent}. Use --force only after coordination.`);
+    }
+    if (requestedAgent && claim.agent !== requestedAgent && options.force) {
+      requireCoordinationOverrideActor(attribution, `Force-releasing story ${id} claimed by another agent`);
+    }
+    claim.status = normalizeClaimStatus(options.status || "released");
+    claim.released_at = now();
+    claim.release_reason = options.reason ? String(options.reason) : null;
+    claim.audit = {
+      ...(claim.audit || {}),
+      released_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeJsonFile(claimPath, claim, { force: true });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, id, {
     type: "sync",
     summary: `Story ${id} claim ${claim.status}`,
@@ -6556,14 +7064,14 @@ function createStoryHandoffRecord(context, options) {
   }
   const toAgent = requireOption(options, "to-agent");
   const attribution = buildAttribution(context, options, "story.handoff");
-  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${compactTimestamp()}`));
+  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${uniqueRecordSuffix()}`));
   const handoffPath = path.join(context.sdlcRoot, "handoffs", `${handoffId}.json`);
   const handoff = {
     id: handoffId,
     story_id: storyId,
     from_actor: attribution.actor,
     to_agent: String(toAgent),
-    status: String(options.status || "open"),
+    status: normalizeHandoffStatus(options.status || "open"),
     summary: options.summary ? String(options.summary) : null,
     required_artifacts: normalizeListOption(options.artifact),
     open_items: normalizeListOption(options["open-item"]),
@@ -6624,13 +7132,26 @@ function completeStoryStep(context, options) {
       }
     }
   }
+  if (["validation", "release"].includes(step)) {
+    if (artifactEvidence.length === 0 && extraEvidence.length === 0 && outputLinks.length === 0) {
+      fail(`${step} completion requires --artifact, --evidence, or a linked output; a summary alone is not release evidence.`);
+    }
+    const requiredTraceType = step === "validation" ? "test" : "release";
+    const acceptableOutcomes = step === "validation" ? ["passed"] : ["ready", "passed"];
+    const supportingTrace = readTraceEvents(context, storyId).find(
+      (event) => event.type === requiredTraceType && acceptableOutcomes.includes(event.outcome),
+    );
+    if (!supportingTrace) {
+      fail(`${step} completion requires a ${requiredTraceType} trace with outcome ${acceptableOutcomes.join(" or ")}.`);
+    }
+  }
 
   const attribution = buildAttribution(context, options, "story.complete-step");
   const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
   const stepPath = path.join(stepDir, `${step}.json`);
   const relativeStepPath = toProjectPath(context, stepPath);
   const record = {
-    id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${compactTimestamp()}`)),
+    id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${uniqueRecordSuffix()}`)),
     story_id: storyId,
     step,
     status: "completed",
@@ -6702,7 +7223,7 @@ function prepareStoryHandoff(context, options) {
   }
   assertReleaseClaimPrecondition(context, storyId, options);
   requireOption(options, "to-agent");
-  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${compactTimestamp()}`));
+  const handoffId = normalizeId(String(options["handoff-id"] || `HND-${storyId}-${uniqueRecordSuffix()}`));
   const packagePath = path.join(context.sdlcRoot, "stories", storyId, "handoffs", `${handoffId}-package.json`);
   const handoffPackage = buildStoryHandoffPackage(context, storyId, handoffId, options);
   writeJsonFile(packagePath, handoffPackage, { force: Boolean(options.force) });
@@ -6749,7 +7270,7 @@ function closeHandoff(context, options) {
   if (!fs.existsSync(handoffPath)) {
     fail(`Handoff ${handoffId} does not exist`);
   }
-  const handoff = readJson(handoffPath);
+  const handoff = readProjectJson(context, handoffPath);
   const status = normalizeHandoffCloseStatus(options.status || "closed");
   const attribution = buildAttribution(context, options, "handoff.close");
   handoff.status = status;
@@ -6789,7 +7310,7 @@ function lockPhase(context, options) {
   let lock;
   let lockPath;
   let lockId;
-  let attribution;
+  const attribution = buildAttribution(context, options, "phase.lock");
   try {
     const conflictingLock = readActiveLocks(context).find(
       (candidate) => candidate.phase === phase && String(candidate.scope || candidate.phase) === scope,
@@ -6799,8 +7320,21 @@ function lockPhase(context, options) {
         `Phase ${phase} scope ${scope} already has active lock ${conflictingLock.id}. Release it first or use --force after coordination.`,
       );
     }
-    attribution = buildAttribution(context, options, "phase.lock");
-    lockId = normalizeId(String(options.id || `LOCK-${phase}-${compactTimestamp()}`));
+    if (conflictingLock && options.force) {
+      requireCoordinationOverrideActor(attribution, `Overriding phase lock ${conflictingLock.id}`);
+      const conflictingPath = path.join(context.sdlcRoot, "locks", `${normalizeId(conflictingLock.id)}.json`);
+      conflictingLock.status = "cancelled";
+      conflictingLock.released_at = now();
+      conflictingLock.release_reason = `Replaced by coordinated override from ${attribution.actor.id}`;
+      conflictingLock.audit = {
+        ...(conflictingLock.audit || {}),
+        released_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      };
+      writeJsonFile(conflictingPath, conflictingLock, { force: true });
+    }
+    lockId = normalizeId(String(options.id || `LOCK-${phase}-${uniqueRecordSuffix()}`));
     lockPath = path.join(context.sdlcRoot, "locks", `${lockId}.json`);
     lock = {
       id: lockId,
@@ -6840,7 +7374,7 @@ function releasePhaseLock(context, options) {
   if (!fs.existsSync(lockPath)) {
     fail(`Phase lock ${id} does not exist`);
   }
-  const lock = readJson(lockPath);
+  const lock = readProjectJson(context, lockPath);
   const attribution = buildAttribution(context, options, "phase.release");
   lock.status = normalizeLockStatus(options.status || "released");
   lock.released_at = now();
@@ -6873,6 +7407,9 @@ function appendTrace(context, options) {
   }
   const summary = requireOption(options, "summary");
   const storyId = options.story ? normalizeId(String(options.story)) : null;
+  if (storyId && !readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
   const traceFile = storyId ? `${storyId}.jsonl` : "project.jsonl";
   const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
   const attribution = buildAttribution(context, options, `trace.${type}`);
@@ -6882,6 +7419,7 @@ function appendTrace(context, options) {
     story_id: storyId,
     type,
     summary,
+    outcome: options.outcome ? normalizeTraceOutcome(options.outcome) : null,
     actor: attribution.actor,
     ...buildTraceAuthorityMetadata(context, options, attribution),
     action: normalizeScalarOption(options.action, "action") || type,
@@ -6902,6 +7440,9 @@ function recordSyncEvent(context, options) {
   ensureInitialized(context);
   const event = normalizeGitEvent(requireOption(options, "event"));
   const storyId = options.story ? normalizeId(String(options.story)) : null;
+  if (storyId && !readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
   const attribution = buildAttribution(context, options, `sync.${event}`);
   const summary = options.summary ? String(options.summary) : `Recorded git ${event}`;
   const traceEvent = appendTraceEvent(context, storyId, {
@@ -6930,7 +7471,7 @@ function initializeDependencyGraph(context, options = {}) {
   ensurePlanningDirectories(context);
   const graphPath = dependencyGraphPath(context);
   if (fs.existsSync(graphPath) && !options.force) {
-    return readJson(graphPath);
+    return readProjectJson(context, graphPath);
   }
   const attribution = options.attribution || buildAttribution(context, {}, "dependency.graph.init");
   const graph = {
@@ -6957,7 +7498,7 @@ function initializeOutputContracts(context, options = {}) {
 
   const registryPath = outputRegistryPath(context);
   if (fs.existsSync(registryPath) && !options.force) {
-    return readJson(registryPath);
+    return readProjectJson(context, registryPath);
   }
 
   const project = readProjectSafe(context);
@@ -7071,7 +7612,7 @@ function approveOutputTemplate(context, options) {
   const attribution = buildAttribution(context, options, "output.template.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving an output template");
 
-  const decisionId = normalizeId(String(options["decision-id"] || `DEC-output-template-${id}-${compactTimestamp()}`));
+  const decisionId = normalizeId(String(options["decision-id"] || `DEC-output-template-${id}-${uniqueRecordSuffix()}`));
   const templatePath = resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true });
   assertNotDerivedArtifact(context, templatePath, "Output template");
   const approvedContentHash = hashFile(templatePath);
@@ -7259,7 +7800,10 @@ function linkOutputArtifact(context, options) {
       fail("Creating an output override decision requires --actor-type human or an approved CI actor.");
     }
     const decisionEvidence = buildApprovalEvidence(context, options);
-    const decisionSummary = getOptionString(options, "rationale") || `Approved output override for ${storyId}/${artifactType}`;
+    const decisionSummary = getOptionString(options, "rationale");
+    if (!decisionSummary && decisionEvidence.length === 0) {
+      fail("Creating an output override decision requires --rationale or --approval-evidence describing the approved exception.");
+    }
     const approvalSource = normalizeApprovalSource(context, options, attribution, `output override ${decisionId}`, "approved");
     validateApprovalSourceForActor(context, {
       source: approvalSource,
@@ -7430,7 +7974,8 @@ function showCacheStatus(context, options) {
 
 function clearCache(context, options) {
   ensureInitialized(context);
-  const cacheRoot = path.join(context.sdlcRoot, "cache");
+  const cacheRoot = resolveProjectFilePath(context, path.join(SDLC_DIR, "cache"), { mustExist: false });
+  assertNoSymlinkPathSegments(cacheRoot);
   fs.rmSync(cacheRoot, { recursive: true, force: true });
   ensureDir(cacheRoot);
   output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
@@ -7495,7 +8040,7 @@ function loadReportQuery(context, options = {}) {
   if (file) {
     const queryPath = resolveProjectFilePath(context, file, { mustExist: true, fileOnly: true });
     assertNotDerivedArtifact(context, queryPath, "Report query file");
-    return { source: toProjectPath(context, queryPath), query: readJson(queryPath) };
+    return { source: toProjectPath(context, queryPath), query: readProjectJson(context, queryPath) };
   }
   return { source: "missing", query: null, raw_text: getOptionString(options, "text", "query") || null };
 }
@@ -8394,7 +8939,7 @@ function buildKnowledgeManifest(context, options = {}) {
     },
     stories: stories.map((story) => {
       const claimPath = path.join(context.sdlcRoot, "stories", story.id, "claim.json");
-      const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
+      const claim = fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
       return {
         id: story.id,
         title: story.title,
@@ -8462,7 +9007,7 @@ function collectJsonFiles(context, root) {
   return walkFiles(root)
     .filter((filePath) => filePath.endsWith(".json"))
     .map((filePath) => {
-      const data = readJson(filePath);
+      const data = readProjectJson(context, filePath);
       data.__path = filePath;
       data.__relative_path = toProjectPath(context, filePath);
       return data;
@@ -8474,7 +9019,7 @@ function collectApprovalManifestEntries(context) {
   for (const filePath of collectManifestSourceFiles(context).filter((candidate) => candidate.endsWith(".json"))) {
     let data;
     try {
-      data = readJson(filePath);
+      data = readProjectJson(context, filePath);
     } catch {
       continue;
     }
@@ -8514,7 +9059,7 @@ function compactTraces(context, options) {
     .filter((event) => !beforeDate || Date.parse(String(event.created_at || "")) < beforeDate.getTime())
     .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
   const sourcePaths = Array.from(new Set(events.map((event) => event.source?.path).filter(Boolean))).sort();
-  const id = normalizeId(`CMP-${storyId || "project"}-${compactTimestamp()}`);
+  const id = normalizeId(`CMP-${storyId || "project"}-${uniqueRecordSuffix()}`);
   const compaction = {
     id,
     kind: "trace_compaction",
@@ -8569,7 +9114,7 @@ function archiveClosedArtifacts(context, options) {
   ensureInitialized(context);
   const beforeDate = parseDateBoundary(options.before || "90d", "before");
   const candidates = collectArchiveCandidates(context, beforeDate);
-  const planId = normalizeId(`ARCH-${compactTimestamp()}`);
+  const planId = normalizeId(`ARCH-${uniqueRecordSuffix()}`);
   const plan = {
     id: planId,
     kind: "archive_plan",
@@ -8588,24 +9133,29 @@ function archiveClosedArtifacts(context, options) {
       run: buildRunMetadata(options),
     },
   };
-  if (options.apply) {
-    for (const candidate of candidates) {
-      const sourcePath = resolveProjectFilePath(context, candidate.source_path, { mustExist: true, fileOnly: true });
-      const targetPath = resolveProjectFilePath(context, candidate.target_path, { mustExist: false });
-      if (fs.existsSync(targetPath) && !options.force) {
-        fail(`Archive target already exists: ${candidate.target_path}. Use --force to overwrite after review.`);
-      }
-      ensureDir(path.dirname(targetPath));
-      fs.renameSync(sourcePath, targetPath);
-      candidate.applied = true;
-    }
-    plan.applied = true;
-  }
   const planPath = options.out
     ? resolveProjectFilePath(context, options.out, { mustExist: false })
     : path.join(context.sdlcRoot, "archive", `${planId}.json`);
   assertNotDerivedArtifact(context, planPath, "Archive plan");
-  writeJsonFile(planPath, plan, { force: Boolean(options.force) });
+  if (fs.existsSync(planPath) && !options.force) {
+    fail(`Archive plan already exists: ${toProjectPath(context, planPath)}. Use --force to overwrite it.`);
+  }
+  const reservedPaths = new Set(
+    candidates.flatMap((candidate) => [candidate.source_path, candidate.target_path]).map((entry) =>
+      resolveProjectFilePath(context, entry, { mustExist: false }),
+    ),
+  );
+  if (reservedPaths.has(planPath)) {
+    fail("Archive plan path must be separate from every archive source and target.");
+  }
+  if (options.apply) {
+    plan.applied = true;
+    applyArchiveCandidates(context, candidates, { force: Boolean(options.force) }, () => {
+      writeJsonFile(planPath, plan, { force: Boolean(options.force) });
+    });
+  } else {
+    writeJsonFile(planPath, plan, { force: Boolean(options.force) });
+  }
   output(
     options,
     { status: plan.applied ? "archived" : "planned", plan_path: planPath, plan },
@@ -8614,6 +9164,84 @@ function archiveClosedArtifacts(context, options) {
       `Archive plan: ${toProjectPath(context, planPath)}`,
     ],
   );
+}
+
+function applyArchiveCandidates(context, candidates, options = {}, commit = () => {}) {
+  const releaseLock = acquireFileLock(path.join(context.sdlcRoot, "archive", "archive.lock"));
+  const operations = [];
+  const completed = [];
+  const backups = [];
+  try {
+    for (const candidate of candidates) {
+      const sourcePath = resolveProjectFilePath(context, candidate.source_path, { mustExist: true, fileOnly: true });
+      const targetPath = resolveProjectFilePath(context, candidate.target_path, { mustExist: false });
+      assertNoSymlinkPathSegments(sourcePath);
+      assertNoSymlinkPathSegments(targetPath);
+      if (hashFile(sourcePath) !== candidate.sha256) {
+        fail(`Archive source changed after planning: ${candidate.source_path}`);
+      }
+      if (fs.existsSync(targetPath)) {
+        if (!options.force) {
+          fail(`Archive target already exists: ${candidate.target_path}. Use --force to overwrite after review.`);
+        }
+        if (!fs.lstatSync(targetPath).isFile()) {
+          fail(`Archive target is not a regular file: ${candidate.target_path}`);
+        }
+      }
+      operations.push({ candidate, sourcePath, targetPath });
+    }
+
+    for (const operation of operations) {
+      ensureDir(path.dirname(operation.targetPath));
+      if (fs.existsSync(operation.targetPath)) {
+        const backupPath = `${operation.targetPath}.backup-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+        fs.renameSync(operation.targetPath, backupPath);
+        backups.push({ targetPath: operation.targetPath, backupPath });
+      }
+      fs.renameSync(operation.sourcePath, operation.targetPath);
+      completed.push(operation);
+    }
+    for (const operation of completed) {
+      operation.candidate.applied = true;
+    }
+    commit();
+    for (const backup of backups) {
+      try {
+        fs.rmSync(backup.backupPath, { force: true });
+      } catch {
+        // The archive is committed; an orphaned backup is safer than rolling it back incompletely.
+      }
+    }
+  } catch (error) {
+    for (const operation of completed) {
+      operation.candidate.applied = false;
+    }
+    for (const operation of [...completed].reverse()) {
+      try {
+        if (fs.existsSync(operation.targetPath) && !fs.existsSync(operation.sourcePath)) {
+          ensureDir(path.dirname(operation.sourcePath));
+          fs.renameSync(operation.targetPath, operation.sourcePath);
+        }
+      } catch {
+        // Continue restoring the remaining files; the final error reports the failed transaction.
+      }
+    }
+    for (const backup of [...backups].reverse()) {
+      try {
+        if (fs.existsSync(backup.backupPath)) {
+          fs.renameSync(backup.backupPath, backup.targetPath);
+        }
+      } catch {
+        // Best effort rollback for a filesystem-level failure.
+      }
+    }
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Archive transaction failed and was rolled back: ${error.message}`);
+  } finally {
+    releaseLock();
+  }
 }
 
 function collectArchiveCandidates(context, beforeDate) {
@@ -8962,7 +9590,7 @@ function readOutputRegistry(context, options = {}) {
     }
     fail("Output registry does not exist. Run 'agentic-sdlc init' or create it with output template propose.");
   }
-  const registry = readJson(registryPath);
+  const registry = readProjectJson(context, registryPath);
   registry.templates = Array.isArray(registry.templates) ? registry.templates : [];
   registry.links = Array.isArray(registry.links) ? registry.links : [];
   registry.decisions = Array.isArray(registry.decisions) ? registry.decisions : [];
@@ -9170,7 +9798,7 @@ function readAllStories(context) {
   return safeReadDir(storiesRoot)
     .map((entry) => {
       const storyPath = path.join(storiesRoot, entry, "story.json");
-      return fs.existsSync(storyPath) ? readJson(storyPath) : null;
+      return fs.existsSync(storyPath) ? readProjectJson(context, storyPath) : null;
     })
     .filter(Boolean)
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -9326,6 +9954,7 @@ function appendTraceEvent(context, storyId, event) {
     story_id: normalizedStoryId,
     type: event.type,
     summary: event.summary,
+    outcome: event.outcome || null,
     actor: event.actor,
     requested_by: event.requested_by || null,
     authorized_by: event.authorized_by || null,
@@ -9405,7 +10034,7 @@ function gateCheck(context, options) {
     fail("Gate scope 'story' requires --story.");
   }
   validateProject(context, report);
-  validateBaselines(context, report);
+  validateBaselines(context, report, storyId && scope === "story" ? storyId : null);
   validateLocks(context, report);
 
   if (storyId && scope === "story") {
@@ -9468,8 +10097,9 @@ function gateCheck(context, options) {
 }
 
 function readStory(context, storyId) {
-  const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
-  return fs.existsSync(storyPath) ? normalizeStoryRecord(readJson(storyPath)) : null;
+  const id = normalizeId(storyId);
+  const storyPath = path.join(context.sdlcRoot, "stories", id, "story.json");
+  return fs.existsSync(storyPath) ? normalizeStoryRecord(readProjectJson(context, storyPath)) : null;
 }
 
 function normalizeStoryRecord(story) {
@@ -9556,7 +10186,7 @@ function showStatus(context, options) {
     const dirPath = path.join(context.sdlcRoot, directory);
     counts[directory] = countFiles(dirPath);
   }
-  const project = readJson(path.join(context.sdlcRoot, "project.json"));
+  const project = readProjectJson(context, path.join(context.sdlcRoot, "project.json"));
   output(
     options,
     { project, counts },
@@ -9600,8 +10230,8 @@ function showOrchestrationPlan(context, options) {
       story_id: story.id,
       title: story.title,
       phase: story.phase,
-      suggested_branch: `feature/${story.id}`,
-      suggested_claim: `agentic-sdlc story claim --id ${story.id} --agent <agent> --branch feature/${story.id}`,
+      suggested_branch: defaultStoryBranch(context, story.id),
+      suggested_claim: `agentic-sdlc story claim --id ${story.id} --agent <agent> --branch ${defaultStoryBranch(context, story.id)}`,
     }));
   output(
     options,
@@ -9623,10 +10253,10 @@ function buildOrchestrationSnapshot(context) {
       if (!fs.existsSync(storyPath)) {
         return null;
       }
-      const story = readJson(storyPath);
+      const story = readProjectJson(context, storyPath);
       story.__folder_id = entry;
       const claimPath = path.join(storiesRoot, entry, "claim.json");
-      const claim = fs.existsSync(claimPath) ? readJson(claimPath) : null;
+      const claim = fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
       const lastTrace = readLastTraceEvent(context, entry);
       const dependencyStatus = buildDependencyStatus(context, story.id || entry);
       const blockers = inferStoryBlockers(context, story, claim, dependencyStatus);
@@ -9703,7 +10333,7 @@ function readLocks(context) {
   const locksRoot = path.join(context.sdlcRoot, "locks");
   return safeReadDir(locksRoot)
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(locksRoot, name)));
+    .map((name) => readProjectJson(context, path.join(locksRoot, name)));
 }
 
 function readActiveLocks(context) {
@@ -9714,7 +10344,7 @@ function readHandoffs(context) {
   const handoffsRoot = path.join(context.sdlcRoot, "handoffs");
   return safeReadDir(handoffsRoot)
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(handoffsRoot, name)));
+    .map((name) => readProjectJson(context, path.join(handoffsRoot, name)));
 }
 
 function normalizeStoryStep(value) {
@@ -9777,7 +10407,7 @@ function assertReleaseClaimPrecondition(context, storyId, options) {
   if (!fs.existsSync(claimPath)) {
     fail(`Story ${storyId} has no claim to release`);
   }
-  const claim = readJson(claimPath);
+  const claim = readProjectJson(context, claimPath);
   if (claim.status !== "active") {
     fail(`Story ${storyId} claim is '${claim.status}', not active`);
   }
@@ -9787,7 +10417,7 @@ function readStoryStepRecords(context, storyId) {
   const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
   return safeReadDir(stepsRoot)
     .filter((name) => name.endsWith(".json"))
-    .map((name) => readJson(path.join(stepsRoot, name)))
+    .map((name) => readProjectJson(context, path.join(stepsRoot, name)))
     .sort((a, b) => String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
 }
 
@@ -9820,7 +10450,7 @@ function buildStoryHandoffPackage(context, storyId, handoffId, options = {}) {
       acceptance: storyAcceptanceCriteria(story),
       acceptance_criteria: storyAcceptanceCriteria(story),
     },
-    active_claim: fs.existsSync(claimPath) ? readJson(claimPath) : null,
+    active_claim: fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null,
     completed_steps: readStoryStepRecords(context, storyId),
     output_links: storyLinks,
     dependency_status: {
@@ -9906,7 +10536,7 @@ function validateProject(context, report) {
     report.errors.push("Missing .sdlc/project.json");
     return;
   }
-  const project = readJson(projectPath);
+  const project = readProjectJson(context, projectPath);
   for (const field of ["project_id", "project_name", "schema_version", "sdlc_version", "knowledge_base"]) {
     if (project[field] === undefined || project[field] === null || project[field] === "") {
       report.errors.push(`Project is missing required field '${field}'`);
@@ -9918,23 +10548,41 @@ function validateProject(context, report) {
   report.checked.push("project");
 }
 
-function validateBaselines(context, report) {
-  for (const baseline of readBaselines(context)) {
+function validateBaselines(context, report, storyId = null) {
+  const allBaselines = readBaselines(context);
+  const referencedIds = storyId
+    ? baselineIdsReferencedByStoryContract(context, storyId)
+    : baselineIdsReferencedByAllContracts(context);
+  const activeIds = new Set([
+    ...selectActiveBaselines(context, storyId).map((baseline) => baseline.id),
+    ...referencedIds,
+  ]);
+  const availableIds = new Set(allBaselines.map((baseline) => baseline.id));
+  for (const baselineId of referencedIds) {
+    if (!availableIds.has(baselineId)) {
+      report.errors.push(`Referenced baseline ${baselineId} is missing from .sdlc/baseline`);
+    }
+  }
+  const baselines = report.scope === "story"
+    ? allBaselines.filter((baseline) => activeIds.has(baseline.id))
+    : allBaselines;
+  for (const baseline of baselines) {
     const label = `baseline ${baseline.id || "unknown"}`;
     const baselineStatus = String(baseline.status || "").toLowerCase();
+    const active = activeIds.has(baseline.id);
     if (!baseline.id || !baseline.schema_version || !baseline.status || !baseline.kind) {
       report.errors.push(`${label} is missing id, schema_version, status, or kind`);
     }
     for (const issue of validateBaselineSourceHashes(context, baseline, label, { collectOnly: true })) {
-      const severity = ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
+      const severity = active && ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
       report[severity].push(issue);
     }
-    if (report.strict && baselineStatus && baselineStatus !== "approved") {
+    if (report.strict && active && baselineStatus && baselineStatus !== "approved") {
       report.errors.push(
         `${label} is '${baseline.status}'; strict gate requires explicit baseline approval before phase work treats inferred project facts as canonical`,
       );
     }
-    if (baselineStatus === "approved") {
+    if (active && baselineStatus === "approved") {
       const approval = latestApprovedRecordApproval(baseline);
       if (!approval || !hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
         report.errors.push(`${label} approval must be attributed to ${formalApprovalActorDescription(approval?.approval_source)}`);
@@ -9944,7 +10592,7 @@ function validateBaselines(context, report) {
         report.errors.push(`${label} approval is stale`);
       }
     }
-    if (baselineStatus === "provisionally_approved" && report.strict) {
+    if (active && baselineStatus === "provisionally_approved" && report.strict) {
       report.errors.push(`${label} is provisionally approved; explicit user or CI approval is required for strict gate`);
     }
     report.checked.push(label);
@@ -10015,6 +10663,9 @@ function validateHandoffs(context, report, storyId = null) {
     }
     if (handoff.story_id && !readStory(context, handoff.story_id)) {
       report.errors.push(`${label} references missing story ${handoff.story_id}`);
+    }
+    if (!HANDOFF_STATUSES.has(String(handoff.status || "").toLowerCase())) {
+      report.errors.push(`${label} has unknown status '${handoff.status}'`);
     }
     for (const artifact of handoff.required_artifacts || []) {
       const artifactPath = resolveProjectFilePath(context, artifact, { mustExist: false });
@@ -10118,7 +10769,7 @@ function validateOutputContracts(context, report, storyId = null) {
     report.checked.push(label);
   }
 
-  for (const decision of decisions) {
+  for (const decision of effectiveOutputDecisions(decisions)) {
     validateOutputDecision(context, report, decision);
   }
 
@@ -10134,6 +10785,25 @@ function validateOutputContracts(context, report, storyId = null) {
       report[severity].push(`Story ${storyId} output candidate ${candidate} is not linked in output-contracts registry`);
     }
   }
+}
+
+function effectiveOutputDecisions(decisions) {
+  const result = [];
+  const latestTemplateDecision = new Map();
+  for (const decision of decisions) {
+    if (decision.type !== "template_approved" || !decision.template_id) {
+      result.push(decision);
+      continue;
+    }
+    const current = latestTemplateDecision.get(decision.template_id);
+    const currentKey = `${current?.created_at || ""}\u0000${current?.id || ""}`;
+    const candidateKey = `${decision.created_at || ""}\u0000${decision.id || ""}`;
+    if (!current || candidateKey > currentKey) {
+      latestTemplateDecision.set(decision.template_id, decision);
+    }
+  }
+  result.push(...latestTemplateDecision.values());
+  return result;
 }
 
 function validateOutputDecision(context, report, decision) {
@@ -10330,7 +11000,7 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
         report[approvalIssueSeverity(context, report, approval)].push(`${label} approval is stale`);
       }
       const profile = fs.existsSync(capabilityProfilePath(context, recommendation.profile_id))
-        ? readJson(capabilityProfilePath(context, recommendation.profile_id))
+        ? readProjectJson(context, capabilityProfilePath(context, recommendation.profile_id))
         : null;
       if (!profile || profile.status !== "approved") {
         report.errors.push(`${label} approved recommendation requires an approved fresh profile`);
@@ -10413,7 +11083,7 @@ function validateContracts(context, report, contractIds = null) {
     return;
   }
   for (const file of files) {
-    const contract = readJson(path.join(contractsRoot, file));
+    const contract = readProjectJson(context, path.join(contractsRoot, file));
     const label = `contract ${file}`;
     for (const field of context.config.gate_policy.contract_required_fields) {
       if (contract[field] === undefined || contract[field] === null || contract[field] === "") {
@@ -10437,11 +11107,20 @@ function validateContracts(context, report, contractIds = null) {
       if (!contract.contextualization.summary) {
         report.errors.push(`${label} strict gate requires contextualization.summary`);
       }
-      if (Number(contract.contextualization.open_questions || 0) > 0) {
+      const openQuestionCount = (contract.contextualization.questions || []).filter(
+        (question) => question?.status !== "answered",
+      ).length;
+      if (Number(contract.contextualization.open_questions || 0) !== openQuestionCount) {
+        report.errors.push(
+          `${label} contextualization.open_questions does not match the ${openQuestionCount} open question record(s)`,
+        );
+      }
+      if (openQuestionCount > 0) {
         report.errors.push(`${label} strict gate blocks open contract questions`);
       }
     }
     validateContractApprovals(context, report, contract, label);
+    validateContractContextSources(context, report, contract, label);
     if (report.strict && contract.human_gate === true && contract.status !== "approved") {
       report.errors.push(`${label} strict gate requires contract.status to be approved`);
     }
@@ -10456,6 +11135,37 @@ function validateContracts(context, report, contractIds = null) {
     validateCapabilityBindings(context, contract, label, report);
     validateContractCapabilityRecommendations(context, report, contract, label);
     report.checked.push(label);
+  }
+}
+
+function validateContractContextSources(context, report, contract, label) {
+  for (const source of contract.contextualization?.context_sources || []) {
+    const sourcePath = source?.path || source;
+    if (!sourcePath) {
+      report.errors.push(`${label} has a context source without path`);
+      continue;
+    }
+    let resolved;
+    try {
+      resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+      assertNoSymlinkPathSegments(resolved);
+    } catch (error) {
+      report.errors.push(`${label} context source ${sourcePath} is invalid: ${error.message}`);
+      continue;
+    }
+    if (!fs.existsSync(resolved)) {
+      report.errors.push(`${label} context source ${sourcePath} is missing`);
+      continue;
+    }
+    if (!fs.statSync(resolved).isFile()) {
+      report.errors.push(`${label} context source ${sourcePath} is not a file`);
+      continue;
+    }
+    if (!source.sha256) {
+      report.errors.push(`${label} context source ${sourcePath} has no recorded hash`);
+    } else if (hashFile(resolved) !== source.sha256) {
+      report.errors.push(`${label} context source ${sourcePath} changed after contract creation`);
+    }
   }
 }
 
@@ -10606,7 +11316,10 @@ function validateTraces(context, report, storyId = null) {
   const requireActor = context.config.trace_policy?.require_actor !== false;
   for (const filePath of files) {
     const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
+    const fileName = path.basename(filePath, ".jsonl");
+    const expectedStoryId = fileName === "project" ? null : fileName;
     const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+    const latestOutcomeEvents = new Map();
     lines.forEach((line, index) => {
       if (!line.trim()) {
         return;
@@ -10620,6 +11333,12 @@ function validateTraces(context, report, storyId = null) {
       }
       if (!TRACE_TYPES.has(event.type)) {
         report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
+      }
+      if ((event.story_id || null) !== expectedStoryId) {
+        report.errors.push(`${label}:${index + 1} story_id must match ${expectedStoryId || "project trace"}`);
+      }
+      if (event.story_id && !readStory(context, event.story_id)) {
+        report.errors.push(`${label}:${index + 1} references missing story ${event.story_id}`);
       }
       if (!event.summary || typeof event.summary !== "string") {
         report.errors.push(`${label}:${index + 1} is missing summary`);
@@ -10647,8 +11366,17 @@ function validateTraces(context, report, storyId = null) {
       }
       if (report.strict && ["test", "release"].includes(event.type)) {
         validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
+        latestOutcomeEvents.set(event.type, { event, line: index + 1 });
       }
     });
+    for (const [type, latest] of latestOutcomeEvents) {
+      const acceptableOutcomes = type === "test" ? ["passed"] : ["ready", "passed"];
+      if (!acceptableOutcomes.includes(latest.event.outcome)) {
+        report.errors.push(
+          `${label}:${latest.line} latest ${type} trace outcome must be ${acceptableOutcomes.join(" or ")}, found '${latest.event.outcome || "missing"}'`,
+        );
+      }
+    }
     report.checked.push(label);
   }
 }
@@ -10687,7 +11415,7 @@ function validateStory(context, storyId, report) {
     report.errors.push(`Story ${storyId} is missing story.json`);
     return;
   }
-  const story = normalizeStoryRecord(readJson(storyPath));
+  const story = normalizeStoryRecord(readProjectJson(context, storyPath));
   for (const field of context.config.gate_policy.story_required_fields) {
     if (story[field] === undefined || story[field] === null || story[field] === "") {
       report.errors.push(`Story ${storyId} is missing required field '${field}'`);
@@ -10709,23 +11437,33 @@ function validateStory(context, storyId, report) {
   const isImplementationLike = ["implementation", "in_progress", "review", "validation", "release", "done"].includes(
     String(story.status),
   ) || story.phase === "implementation";
+  const currentPhaseCompleted = readStoryStepRecords(context, storyId).some(
+    (record) => record.status === "completed" && record.phase === story.phase,
+  );
+  const requiresActiveClaim = isImplementationLike && story.status !== "done" && !currentPhaseCompleted;
   if (context.config.gate_policy.implementation_requires_claim && isImplementationLike) {
     const claimPath = path.join(storyDir, "claim.json");
     if (!fs.existsSync(claimPath)) {
-      report.errors.push(`Story ${storyId} requires an active claim before implementation`);
+      if (requiresActiveClaim) {
+        report.errors.push(`Story ${storyId} requires an active claim before implementation`);
+      }
     } else {
-      const claim = readJson(claimPath);
-      validateClaim(context, storyId, claim, report);
+      const claim = readProjectJson(context, claimPath);
+      validateClaim(context, storyId, claim, report, { requireActive: requiresActiveClaim });
     }
   }
   if (story.contract_id) {
-    const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
-    if (!fs.existsSync(contractPath)) {
+    let contract = null;
+    try {
+      contract = readContractById(context, story.contract_id, { missingOk: true });
+    } catch (error) {
+      report.errors.push(`Story ${storyId} has invalid contract_id '${story.contract_id}': ${error.message}`);
+    }
+    if (!contract) {
       report.errors.push(`Story ${storyId} references missing contract ${story.contract_id}`);
     } else {
-      const contract = readJson(contractPath);
-      if (contract.story_id && contract.story_id !== storyId) {
-        report.errors.push(`Story ${storyId} contract ${story.contract_id} is bound to story ${contract.story_id}`);
+      if (contract.story_id !== storyId) {
+        report.errors.push(`Story ${storyId} contract ${story.contract_id} is bound to ${contract.story_id || "the project"}`);
       }
     }
   } else {
@@ -10733,11 +11471,19 @@ function validateStory(context, storyId, report) {
     report[severity].push(`Story ${storyId} has no contract_id`);
   }
   const traceEvents = readTraceEvents(context, storyId);
-  if ((story.phase === "validation" || story.status === "validation") && !traceEvents.some((event) => event.type === "test")) {
-    report.errors.push(`Story ${storyId} is in validation but has no test trace`);
+  const latestTestTrace = latestTraceEvent(traceEvents, "test");
+  if (
+    (story.phase === "validation" || story.status === "validation") &&
+    latestTestTrace?.outcome !== "passed"
+  ) {
+    report.errors.push(`Story ${storyId} is in validation but has no passing test trace`);
   }
-  if ((story.phase === "release" || story.status === "release") && !traceEvents.some((event) => event.type === "release")) {
-    report.errors.push(`Story ${storyId} is in release but has no release trace`);
+  const latestReleaseTrace = latestTraceEvent(traceEvents, "release");
+  if (
+    (story.phase === "release" || story.status === "release") &&
+    !["ready", "passed"].includes(latestReleaseTrace?.outcome)
+  ) {
+    report.errors.push(`Story ${storyId} is in release but has no ready release trace`);
   }
   validateStoryBreakdown(context, story, report);
   validateStoryDependencies(context, story, report);
@@ -10749,7 +11495,7 @@ function validateStoryStepRecords(context, storyId, report) {
   const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
   for (const fileName of safeReadDir(stepsRoot).filter((name) => name.endsWith(".json"))) {
     const stepPath = path.join(stepsRoot, fileName);
-    const record = readJson(stepPath);
+    const record = readProjectJson(context, stepPath);
     const label = `story step ${storyId}/${path.basename(fileName, ".json")}`;
     if (record.story_id !== storyId) {
       report.errors.push(`${label} story_id must match ${storyId}`);
@@ -10788,6 +11534,18 @@ function validateStoryStepRecords(context, storyId, report) {
         if (!linkedTypes.has(artifactType)) {
           report.errors.push(`${label} completed ${artifactType} without a linked output`);
         }
+      }
+    }
+    if (report.strict && ["validation", "release"].includes(record.step)) {
+      const substantiveEvidence = stepArtifacts.length + stepEvidence.length + (record.output_links || []).length;
+      if (substantiveEvidence === 0) {
+        report.errors.push(`${label} has no artifact, evidence, or linked output`);
+      }
+      const requiredTraceType = record.step === "validation" ? "test" : "release";
+      const acceptableOutcomes = record.step === "validation" ? ["passed"] : ["ready", "passed"];
+      const supportingTrace = latestTraceEvent(readTraceEvents(context, storyId), requiredTraceType);
+      if (!supportingTrace || !acceptableOutcomes.includes(supportingTrace.outcome)) {
+        report.errors.push(`${label} has no ${requiredTraceType} trace with outcome ${acceptableOutcomes.join(" or ")}`);
       }
     }
     report.checked.push(label);
@@ -10841,15 +11599,17 @@ function validateStoryDependencies(context, story, report) {
   }
 }
 
-function validateClaim(context, storyId, claim, report) {
+function validateClaim(context, storyId, claim, report, options = {}) {
   if (claim.story_id !== storyId) {
     report.errors.push(`Story ${storyId} claim.story_id must match story id`);
   }
   if (!CLAIM_STATUSES.has(String(claim.status || "").toLowerCase())) {
     report.errors.push(`Story ${storyId} claim has unknown status '${claim.status}'`);
   }
-  if (claim.status !== "active") {
+  if (options.requireActive !== false && claim.status !== "active") {
     report.errors.push(`Story ${storyId} requires an active claim, found '${claim.status}'`);
+  } else if (options.requireActive === false && !["active", "released", "transferred"].includes(claim.status)) {
+    report.errors.push(`Story ${storyId} completed work has unsupported claim status '${claim.status}'`);
   }
   if (!claim.agent) {
     report.errors.push(`Story ${storyId} active claim is missing agent`);
@@ -10857,10 +11617,10 @@ function validateClaim(context, storyId, claim, report) {
   if (!claim.branch) {
     report.errors.push(`Story ${storyId} active claim is missing branch`);
   } else {
-    const expectedBranch = String(context.config.parallel_work?.branch_pattern || "feature/<story-id>").replace("<story-id>", storyId);
-    if (claim.branch !== expectedBranch) {
+    const expectedBranches = storyBranchPatterns(context, storyId);
+    if (!expectedBranches.includes(claim.branch)) {
       const severity = report.strict && context.config.claim_policy?.require_branch_pattern !== false ? "errors" : "warnings";
-      report[severity].push(`Story ${storyId} claim branch '${claim.branch}' does not match expected '${expectedBranch}'`);
+      report[severity].push(`Story ${storyId} claim branch '${claim.branch}' does not match expected ${expectedBranches.join(" or ")}`);
     }
   }
   if (claim.expires_at && !Number.isFinite(Date.parse(String(claim.expires_at)))) {
@@ -10875,13 +11635,24 @@ function validateClaim(context, storyId, claim, report) {
   }
 }
 
+function storyBranchPatterns(context, storyId) {
+  const configured = context.config.parallel_work?.branch_patterns;
+  const patterns = Array.isArray(configured) && configured.length > 0
+    ? configured
+    : [context.config.parallel_work?.branch_pattern || "codex/<story-id>"];
+  return Array.from(new Set(patterns.map((pattern) => String(pattern).replaceAll("<story-id>", storyId))));
+}
+
+function defaultStoryBranch(context, storyId) {
+  return storyBranchPatterns(context, storyId)[0];
+}
+
 function readTraceEvents(context, storyId) {
   const tracePath = path.join(context.sdlcRoot, "traces", `${storyId}.jsonl`);
   if (!fs.existsSync(tracePath)) {
     return [];
   }
-  return fs
-    .readFileSync(tracePath, "utf8")
+  return readProjectText(context, tracePath)
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
@@ -10891,6 +11662,15 @@ function readTraceEvents(context, storyId) {
         return { type: "invalid" };
       }
     });
+}
+
+function latestTraceEvent(events, type) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type === type) {
+      return events[index];
+    }
+  }
+  return null;
 }
 
 function buildIndex(context) {
@@ -10929,7 +11709,7 @@ function getIndexStatus(context) {
   }
   let index;
   try {
-    index = readJson(indexPath);
+    index = readProjectJson(context, indexPath);
   } catch {
     return { exists: true, valid: false, index_path: indexPath, index: null };
   }
@@ -10978,9 +11758,12 @@ function inferTitle(filePath, raw) {
 }
 
 function ensureInitialized(context) {
-  if (!fs.existsSync(path.join(context.sdlcRoot, "project.json"))) {
+  const projectPath = path.join(context.sdlcRoot, "project.json");
+  if (!fs.existsSync(projectPath)) {
     fail(`No ${SDLC_DIR}/project.json found. Run 'agentic-sdlc init' first.`);
   }
+  resolveProjectFilePath(context, path.join(SDLC_DIR, "project.json"), { mustExist: true, fileOnly: true });
+  assertNoSymlinkPathSegments(projectPath);
 }
 
 function renderTemplateFile(context, templateName, destination, variables, options = {}) {
@@ -11006,25 +11789,79 @@ function readJson(filePath) {
   }
 }
 
+function readProjectJson(context, filePath) {
+  try {
+    return JSON.parse(readProjectText(context, filePath));
+  } catch (error) {
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Unable to read JSON file ${filePath}: ${error.message}`);
+  }
+}
+
+function readProjectText(context, filePath) {
+  resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const realRoot = fs.realpathSync.native(context.root);
+  if (!isInsidePath(realRoot, parentIdentity.realpath)) {
+    fail(`Project file parent resolves outside the target project root: ${filePath}`);
+  }
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    return fs.readFileSync(descriptor, "utf8");
+  } catch (error) {
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Unable to read project file ${filePath}: ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
 function writeJsonFile(filePath, value, options = {}) {
   writeTextFile(filePath, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
 function writeTextFile(filePath, content, options = {}) {
   assertNoSymlinkPathSegments(filePath);
+  const parentPath = path.dirname(filePath);
+  ensureDir(parentPath);
+  const parentIdentity = captureDirectoryIdentity(parentPath);
   if (fs.existsSync(filePath) && !options.force) {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
       fail(`Refusing to write through symlink: ${filePath}`);
     }
-    const existing = fs.readFileSync(filePath, "utf8");
+    const existing = readFileFromStableParent(filePath, parentIdentity);
     if (existing === content) {
       return false;
     }
     fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
   }
-  ensureDir(path.dirname(filePath));
+  if (options.force) {
+    const tempPath = path.join(
+      parentPath,
+      `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+    );
+    try {
+      writeFileToStableParent(tempPath, content, parentIdentity);
+      assertDirectoryIdentity(parentPath, parentIdentity);
+      fs.renameSync(tempPath, filePath);
+    } finally {
+      if (directoryIdentityMatches(parentPath, parentIdentity)) {
+        fs.rmSync(tempPath, { force: true });
+      }
+    }
+    return true;
+  }
   try {
-    fs.writeFileSync(filePath, content, { flag: options.force ? "w" : "wx" });
+    writeFileToStableParent(filePath, content, parentIdentity);
   } catch (error) {
     if (error && error.code === "EEXIST") {
       fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
@@ -11034,32 +11871,184 @@ function writeTextFile(filePath, content, options = {}) {
   return true;
 }
 
+function captureDirectoryIdentity(directoryPath) {
+  const entry = fs.lstatSync(directoryPath);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    fail(`Refusing unstable write directory: ${directoryPath}`);
+  }
+  const stat = fs.statSync(directoryPath);
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    realpath: fs.realpathSync.native(directoryPath),
+  };
+}
+
+function directoryIdentityMatches(directoryPath, expected) {
+  try {
+    const current = captureDirectoryIdentity(directoryPath);
+    return current.dev === expected.dev && current.ino === expected.ino && current.realpath === expected.realpath;
+  } catch {
+    return false;
+  }
+}
+
+function assertDirectoryIdentity(directoryPath, expected) {
+  if (!directoryIdentityMatches(directoryPath, expected)) {
+    fail(`Directory changed during filesystem operation: ${directoryPath}`);
+  }
+}
+
+function verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity) {
+  const descriptorStat = fs.fstatSync(descriptor);
+  if (!descriptorStat.isFile()) {
+    fail(`Refusing non-regular file: ${filePath}`);
+  }
+  assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
+  const pathStat = fs.lstatSync(filePath);
+  if (pathStat.isSymbolicLink() || pathStat.dev !== descriptorStat.dev || pathStat.ino !== descriptorStat.ino) {
+    fail(`File changed while opening it: ${filePath}`);
+  }
+}
+
+function readFileFromStableParent(filePath, parentIdentity) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    return fs.readFileSync(descriptor, "utf8");
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
+function writeFileToStableParent(filePath, content, parentIdentity) {
+  assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
+  let descriptor;
+  let created = false;
+  let complete = false;
+  try {
+    descriptor = fs.openSync(
+      filePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
+      0o666,
+    );
+    created = true;
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    fs.writeFileSync(descriptor, content);
+    complete = true;
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+    if (created && !complete && directoryIdentityMatches(path.dirname(filePath), parentIdentity)) {
+      fs.rmSync(filePath, { force: true });
+    }
+  }
+}
+
 function appendJsonLine(filePath, value) {
   assertNoSymlinkPathSegments(filePath);
   ensureDir(path.dirname(filePath));
-  fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  try {
+    fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
+  } finally {
+    releaseLock();
+  }
 }
 
 function acquireFileLock(lockPath) {
   assertNoSymlinkPathSegments(lockPath);
   ensureDir(path.dirname(lockPath));
-  try {
-    const fd = fs.openSync(lockPath, "wx");
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, created_at: now() }));
-    fs.closeSync(fd);
-  } catch (error) {
-    if (error && error.code === "EEXIST") {
-      fail(`Resource is locked by another SDLC operation: ${lockPath}`);
+  const nonce = crypto.randomBytes(12).toString("hex");
+  const metadata = {
+    pid: process.pid,
+    host: os.hostname(),
+    nonce,
+    created_at: now(),
+  };
+  const deadline = Date.now() + INTERNAL_LOCK_WAIT_MS;
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, JSON.stringify(metadata));
+      fs.closeSync(fd);
+      break;
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") {
+        throw error;
+      }
+      if (reclaimStaleInternalLock(lockPath)) {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        fail(`Resource is locked by another SDLC operation: ${lockPath}`);
+      }
+      sleepSync(25);
     }
-    throw error;
   }
   return () => {
     try {
-      fs.rmSync(lockPath, { force: true });
+      const current = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, "utf8")) : null;
+      if (current?.nonce === nonce) {
+        fs.rmSync(lockPath, { force: true });
+      }
     } catch {
       // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
     }
   };
+}
+
+function reclaimStaleInternalLock(lockPath) {
+  let metadata = null;
+  let ageMs = 0;
+  try {
+    metadata = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const createdAt = Date.parse(String(metadata.created_at || ""));
+    ageMs = Number.isFinite(createdAt) ? Date.now() - createdAt : Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    try {
+      ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+    } catch {
+      return true;
+    }
+  }
+  if (ageMs < INTERNAL_LOCK_STALE_MS) {
+    return false;
+  }
+  if (metadata?.host && metadata.host !== os.hostname() && ageMs < INTERNAL_LOCK_REMOTE_STALE_MS) {
+    return false;
+  }
+  if ((!metadata?.host || metadata.host === os.hostname()) && Number.isInteger(metadata?.pid) && processIsAlive(metadata.pid)) {
+    return false;
+  }
+  const stalePath = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    fs.renameSync(lockPath, stalePath);
+    fs.rmSync(stalePath, { force: true });
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return true;
+    }
+    return false;
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function assertNoSymlinkPathSegments(filePath) {
@@ -11087,7 +12076,20 @@ function safeReadDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
     return [];
   }
-  return fs.readdirSync(dirPath);
+  if (fs.lstatSync(dirPath).isSymbolicLink()) {
+    fail(`Refusing to read through symlinked directory: ${dirPath}`);
+  }
+  if (!fs.statSync(dirPath).isDirectory()) {
+    fail(`Expected directory but found another file type: ${dirPath}`);
+  }
+  const entries = fs.readdirSync(dirPath);
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry);
+    if (fs.lstatSync(entryPath).isSymbolicLink()) {
+      fail(`Refusing symlinked canonical entry: ${entryPath}`);
+    }
+  }
+  return entries;
 }
 
 function walkFiles(startDir) {
@@ -11185,6 +12187,14 @@ function normalizeGitEvent(value) {
   return normalized;
 }
 
+function normalizeTraceOutcome(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!TRACE_OUTCOMES.has(normalized)) {
+    fail(`Unknown trace outcome '${value}'. Valid values: ${Array.from(TRACE_OUTCOMES).join(", ")}`);
+  }
+  return normalized;
+}
+
 function normalizeHandoffCloseStatus(value) {
   const normalized = String(value || "").trim().toLowerCase();
   const allowed = ["accepted", "closed", "cancelled"];
@@ -11192,6 +12202,20 @@ function normalizeHandoffCloseStatus(value) {
     fail(`Unknown handoff status '${value}'. Valid values: ${allowed.join(", ")}`);
   }
   return normalized;
+}
+
+function normalizeHandoffStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!HANDOFF_STATUSES.has(normalized)) {
+    fail(`Unknown handoff status '${value}'. Valid values: ${Array.from(HANDOFF_STATUSES).join(", ")}`);
+  }
+  return normalized;
+}
+
+function requireCoordinationOverrideActor(attribution, action) {
+  if (!["human", "ci"].includes(attribution.actor?.type)) {
+    fail(`${action} requires --actor-type human or an approved CI actor after coordination.`);
+  }
 }
 
 function normalizeStoryStatus(value) {
@@ -11269,6 +12293,10 @@ function compactTimestamp() {
   return new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 }
 
+function uniqueRecordSuffix() {
+  return `${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
 function output(options, jsonPayload, lines) {
   if (options.json) {
     console.log(JSON.stringify(jsonPayload, null, 2));
@@ -11339,6 +12367,7 @@ Usage:
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
+      [--outcome passed|failed|blocked|skipped|ready]
       [--actor id] [--requested-by id] [--authorized-by id]
       [--request-summary text] [--git-event push|commit|merge|pull|rebase]
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
@@ -11488,6 +12517,9 @@ Baseline onboarding options:
                          Repeatable.
 
 Trace options:
+  --outcome outcome     Explicit trace result: passed, failed, blocked, skipped,
+                        or ready. Strict validation/release gates require a
+                        successful outcome in addition to canonical evidence.
   --git-event event      Classify a sync trace as push, commit, merge, pull,
                          rebase, branch, or another project Git event.
   --event event          For sync record: push, commit, merge, pull, rebase,

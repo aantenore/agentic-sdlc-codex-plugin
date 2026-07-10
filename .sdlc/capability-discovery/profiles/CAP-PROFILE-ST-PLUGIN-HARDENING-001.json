@@ -1,0 +1,205 @@
+{
+  "id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "subject": {
+    "story_id": "ST-PLUGIN-HARDENING-001",
+    "requirement_ids": [
+      "REQ-PLUGIN-HARDENING-001"
+    ],
+    "phase": "implementation",
+    "scope": "project"
+  },
+  "application_profile": {},
+  "detected_stack": [
+    {
+      "name": "package-json",
+      "type": "node",
+      "source_path": "package.json"
+    },
+    {
+      "name": "npm-scripts",
+      "type": "automation",
+      "source_path": "package.json",
+      "scripts": [
+        "check",
+        "smoke",
+        "test"
+      ]
+    }
+  ],
+  "constraints": [],
+  "integrations": [],
+  "evidence": [
+    {
+      "type": "context_file",
+      "path": ".codex-plugin/plugin.json",
+      "sha256": "c946f3798820020cad9be36003f3a10c7af5c0d1b5bd17c6c29d31af13c26caf",
+      "size_bytes": 1463,
+      "excerpt": "name agentic-sdlc-codex-plugin version 0.4.21 description A Codex plugin for contract-driven agentic SDLC execution with a shared Git-first project knowledge base. author name Antonio Antenore url https //github.com/aantenore homepage https //github.com/aantenore/agentic-sdlc-codex-plugin repository https //github.com/aantenore/agentic-sdlc-codex-plugin license MIT keywords codex sdlc agentic-development knowledge-base contracts skills ./skills/ interface displayName Agentic SDLC shortDescription Contract-driven agentic SDLC for Codex. longDescription Agentic SDLC turns a classic software deve"
+    },
+    {
+      "type": "context_file",
+      "path": "README.md",
+      "sha256": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+      "size_bytes": 29708,
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven agent-legible operating system. The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The CLI creates a shared `.sdlc/` knowledge base inside the target project so teams and agents can work in parallel through Git branches and pull requests. ## What It Implements - Phase contracts for Discovery Analysis Design Implementation Validation and Release. - Existing-project onboarding with an inferred baseline that must be confirmed before it bec"
+    },
+    {
+      "type": "context_file",
+      "path": "bin/agentic-sdlc.mjs",
+      "sha256": "17b6e0243ff89162432d08c16042b4b3fe877adcfc52899d2ba406ea1fcd031b",
+      "size_bytes": 502720,
+      "excerpt": "#!/usr/bin/env node import fs from node fs ; import path from node path ; import crypto from node crypto ; import childProcess from node child_process ; import os from node os ; import fileURLToPath from node url ; const VERSION = 0.4.21 ; const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT templates ); const SDLC_DIR = .sdlc ; const CACHE_FILE_NAME = kb-cache.json ; const PROJECT_CONFIG_FILE_NAME = config.json ; const INTERNAL_LOCK_WAIT_MS = 5000; const INTERNAL_LOCK_STALE_MS = 30000; const INTERNAL_LOCK_REMOTE"
+    },
+    {
+      "type": "context_file",
+      "path": "package.json",
+      "sha256": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
+      "size_bytes": 779,
+      "excerpt": "name agentic-sdlc-codex-plugin version 0.4.21 description Codex plugin for contract-driven agentic SDLC with a shared Git-first knowledge base. type module bin agentic-sdlc ./bin/agentic-sdlc.mjs engines node >=18.18 files .codex-plugin/ assets/ bin/ docs/ schemas/ scripts/ skills/ templates/ scripts check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs smoke node bin/agentic-sdlc.mjs --help test node --test test/*.mjs keywords codex sdlc agentic knowledge-base author Antonio Antenore license MIT"
+    },
+    {
+      "type": "context_file",
+      "path": "scripts/install-personal-marketplace.py",
+      "sha256": "5b1a0022ee412b649710040b92fb67ddbf2eeaeb4bf3a2af254d4cc5127b66da",
+      "size_bytes": 18334,
+      "excerpt": "#!/usr/bin/env python3 Stage Agentic SDLC into the default personal Codex marketplace. from __future__ import annotations import fnmatch import json import os import secrets import shutil import sys import tempfile import time from contextlib import contextmanager from pathlib import Path PurePosixPath PLUGIN_NAME = agentic-sdlc-codex-plugin DEFAULT_MARKETPLACE_NAME = personal STANDARD_ROOT_FILES = ( package.json README.md LICENSE ) EXCLUDED_NAMES = frozenset( .git .sdlc test .DS_Store ) EXCLUDED_FILE_SUFFIXES = ( .pyc .pyo ) INSTALL_LOCK_WAIT_SECONDS = 30.0 INSTALL_LOCK_STALE_SECONDS = 300.0 "
+    },
+    {
+      "type": "context_file",
+      "path": "skills/agentic-sdlc/SKILL.md",
+      "sha256": "15e620a542b7047cc8112d86dc60b6972c96a7e3b01bead2c7aa95f7f9c87885",
+      "size_bytes": 21147,
+      "excerpt": "--- name agentic-sdlc description Use this skill when a user wants to run a contract-driven agentic SDLC in Codex initialize or maintain a shared project knowledge base create SDLC phase contracts split work into story-scoped parallel tracks validate gates capture decisions/tests/traces or use the Agentic SDLC plugin in a software project. --- # Agentic SDLC ## Purpose Use this skill to operate a stateless contract-driven SDLC for a target project. The plugin contains process templates schemas and CLI automation; all contracts output contracts traces and knowledge base artifacts must be saved "
+    },
+    {
+      "type": "context_file",
+      "path": "test/cli.e2e.mjs",
+      "sha256": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52",
+      "size_bytes": 117383,
+      "excerpt": "import test from node test ; import assert from node assert/strict ; import fs from node fs ; import os from node os ; import path from node path ; import spawn spawnSync from node child_process ; import fileURLToPath from node url ; const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const bin = path.join(repoRoot bin agentic-sdlc.mjs ); function tmpProject(name) return fs.mkdtempSync(path.join(os.tmpdir() `sdlc-$ name -`)); function run(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) "
+    },
+    {
+      "type": "detected_stack",
+      "path": "package.json",
+      "summary": "node:package-json"
+    },
+    {
+      "type": "detected_stack",
+      "path": "package.json",
+      "summary": "automation:npm-scripts"
+    }
+  ],
+  "confidence": 0.7,
+  "source_paths": [
+    ".codex-plugin/plugin.json",
+    "README.md",
+    "bin/agentic-sdlc.mjs",
+    "package.json",
+    "scripts/install-personal-marketplace.py",
+    "skills/agentic-sdlc/SKILL.md",
+    "test/cli.e2e.mjs"
+  ],
+  "source_hashes": {
+    ".codex-plugin/plugin.json": "c946f3798820020cad9be36003f3a10c7af5c0d1b5bd17c6c29d31af13c26caf",
+    "README.md": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+    "bin/agentic-sdlc.mjs": "17b6e0243ff89162432d08c16042b4b3fe877adcfc52899d2ba406ea1fcd031b",
+    "package.json": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
+    "scripts/install-personal-marketplace.py": "5b1a0022ee412b649710040b92fb67ddbf2eeaeb4bf3a2af254d4cc5127b66da",
+    "skills/agentic-sdlc/SKILL.md": "15e620a542b7047cc8112d86dc60b6972c96a7e3b01bead2c7aa95f7f9c87885",
+    "test/cli.e2e.mjs": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260710090648-c34423",
+      "profile_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
+      "status": "approved",
+      "summary": "Antonio delegated autonomous repository read/write, local tests, plugin and skill validation, isolated installer checks, plugin reinstall, and Git delivery; this seals the final tested source hashes.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
+        "subject_label": "capability profile CAP-PROFILE-ST-PLUGIN-HARDENING-001",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "whole-plugin hardening local evidence and non-destructive validation tools"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "08921c062e56b6247d6deb047e38a9226031d4377a4d5f806cea184ff1912906",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-PLUGIN-HARDENING-001",
+        "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.4.21"
+      },
+      "created_at": "2026-07-10T09:06:48.862Z"
+    }
+  ],
+  "created_at": "2026-07-10T09:06:48.733Z",
+  "updated_at": "2026-07-10T09:06:48.862Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.21"
+    },
+    "approved_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}

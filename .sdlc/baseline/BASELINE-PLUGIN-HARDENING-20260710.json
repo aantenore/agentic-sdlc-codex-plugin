@@ -1,0 +1,343 @@
+{
+  "id": "BASELINE-PLUGIN-HARDENING-20260710",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.4.21",
+  "kind": "existing-project",
+  "status": "approved",
+  "summary": "Current observable state for the completed 2026-07-10 whole-plugin hardening, covering runtime, governance, security, schemas, packaging, installer, tests, documentation, and release metadata.",
+  "repository_snapshot": {
+    "root_name": "TravelOps",
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "detected_stack": [
+      {
+        "name": "package-json",
+        "type": "node",
+        "source_path": "package.json"
+      },
+      {
+        "name": "npm-scripts",
+        "type": "automation",
+        "source_path": "package.json",
+        "scripts": [
+          "check",
+          "smoke",
+          "test"
+        ]
+      }
+    ],
+    "key_files": [
+      {
+        "path": "package.json",
+        "sha256": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
+        "size_bytes": 779
+      },
+      {
+        "path": "README.md",
+        "sha256": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+        "size_bytes": 29708
+      }
+    ],
+    "package_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test test/*.mjs"
+    },
+    "source_roots": [
+      "bin"
+    ],
+    "test_roots": [
+      "test"
+    ],
+    "ci_files": []
+  },
+  "imported_documents": [
+    {
+      "type": "document",
+      "path": "README.md",
+      "sha256": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+      "size_bytes": 29708,
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC is a Codex plugin that turns a classic software development life cycle into a contract-driven agent-legible operating system. The plugin gives Codex a reusable SDLC skill and a cross-platform Node CLI. The CLI creates a shared `.sdlc/` knowledge base inside the target project so teams and agents can work in parallel through Git branches and pull requests. ## What It Implements - Phase contracts for Discovery Analysis Design Implementation Validation and Release. - Existing-project onboarding with an inferred baseline that must be confirmed before it becomes canonical. - A Git-first knowledge base for requirements stories decisions assumptions risks tests traces and releases. - Story-scoped workspaces so multiple agents can work in parallel without o"
+    },
+    {
+      "type": "document",
+      "path": "docs/architecture.md",
+      "sha256": "44063a33935bb8a740db945cb157bed74e2a06c92ee7b912df66ad054fe01d46",
+      "size_bytes": 16651,
+      "excerpt": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> contracts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Capabilities Capability discovery OutputRegistry Output contracts registry Breakdown Work breakdown agreements"
+    },
+    {
+      "type": "document",
+      "path": "docs/agent-interactions.md",
+      "sha256": "9ef5613929060fd01fdb55247fee4249f5651307f7bc59218cf24199ceeb970f",
+      "size_bytes": 18370,
+      "excerpt": "# Agent Interactions Agentic SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory. The examples below use neutral product placeholders. The plugin behavior is not tied to any domain. ## Interaction Pattern Each phase follows the same loop ```text phase contract -> agent reads required inputs from .sdlc/ -> agent resolves approved output contracts -> agent proposes reuse delta or new output structure -> user approves new templates or structural changes -> agent produces phase outputs -> agent links outputs in .sdlc/output-contracts/registry.json -> agent appends trace evidence -> gate check validates required artifacts -> human approves or sends the p"
+    },
+    {
+      "type": "document",
+      "path": "docs/kb-structure.md",
+      "sha256": "56fcedcb1642c4864654c45bb3fcccb3ddac284ce9e5aac42b140a0ccabafaa2",
+      "size_bytes": 19564,
+      "excerpt": "# Knowledge Base Structure Agentic SDLC uses a Git-first project knowledge base. The plugin is stateless; the KB is created inside each target project. The sample records below use neutral placeholders. The structure is generic and should be reused for any project. ```text <target-project>/ .sdlc/ project.json README.md baseline/ contracts/ capability-discovery/ output-contracts/ requirements/ work-items/ work-breakdown/ dependencies/ stories/ orchestration/ locks/ handoffs/ decisions/ assumptions/ risks/ tests/ traces/ releases/ manifests/ archive/ cache/ indexes/ reports/ ``` ## Source Of Truth The source of truth is the human-readable and machine-readable files under `.sdlc/` - JSON for structured contracts stories claims and machine validation. - Markdown for narrative requirements dec"
+    },
+    {
+      "type": "document",
+      "path": "docs/portable-install.md",
+      "sha256": "6f25e3f675e6722c66d7039a0857b1cc5271802c6ffbfd7576aff896afece9b9",
+      "size_bytes": 4846,
+      "excerpt": "# Portable Codex Install Agentic SDLC is packaged as a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`. ## What Travels With The Plugin ```mermaid flowchart TB Repo Repository root --> Manifest .codex-plugin/plugin.json Repo --> Assets assets/ Repo --> Skill skills/agentic-sdlc/ Repo --> CLI bin/agentic-sdlc.mjs Repo --> Method schemas/ templates/ docs/ Skill --> SkillAssets skills/agentic-sdlc/assets/ ``` All paths in the plugin manifest and skill agent card are relative to the repository. The npm distribution is controlled by the `package.json` `files` whitelist so it contains no absolute paths to Antonio's machine project-specific contracts target-project `.sdlc/` data repository tests or local metadata. The source repo"
+    }
+  ],
+  "inferred_context": {
+    "stack_summary": [
+      "node:package-json",
+      "automation:npm-scripts"
+    ],
+    "likely_entrypoints": [
+      "package.json",
+      "README.md"
+    ],
+    "test_surface": [
+      "check",
+      "smoke",
+      "test"
+    ],
+    "imported_document_count": 5,
+    "confidence": 0.7,
+    "caveats": [
+      "This is inferred from repository files and imported documents.",
+      "Historical authorship, prior approvals, and rationale are unknown unless present in evidence files."
+    ]
+  },
+  "canonicality": {
+    "state": "confirmed",
+    "inferred_not_approved": false,
+    "confirmed_sources": [],
+    "user_confirmation_required": false,
+    "notes": [
+      "This baseline describes the current observable project state.",
+      "It does not reconstruct pre-SDLC historical decisions unless evidence is present in source files."
+    ]
+  },
+  "open_questions": [],
+  "assumptions": [],
+  "source_paths": [
+    ".codex-plugin/plugin.json",
+    ".gitignore",
+    "README.md",
+    "bin/agentic-sdlc.mjs",
+    "docs/agent-interactions.md",
+    "docs/architecture.md",
+    "docs/kb-structure.md",
+    "docs/portable-install.md",
+    "package.json",
+    "schemas/baseline.schema.json",
+    "schemas/cache.schema.json",
+    "schemas/capability-profile.schema.json",
+    "schemas/capability-recommendation.schema.json",
+    "schemas/claim.schema.json",
+    "schemas/common.schema.json",
+    "schemas/contract.schema.json",
+    "schemas/dependency-graph.schema.json",
+    "schemas/gate-report.schema.json",
+    "schemas/handoff.schema.json",
+    "schemas/orchestration.schema.json",
+    "schemas/output-contract-registry.schema.json",
+    "schemas/output-link.schema.json",
+    "schemas/output-template.schema.json",
+    "schemas/phase-lock.schema.json",
+    "schemas/project.schema.json",
+    "schemas/report-query.schema.json",
+    "schemas/route-intent.schema.json",
+    "schemas/story.schema.json",
+    "schemas/trace.schema.json",
+    "schemas/work-breakdown.schema.json",
+    "schemas/work-item.schema.json",
+    "scripts/generate-plugin-assets.mjs",
+    "scripts/install-personal-marketplace.py",
+    "skills/agentic-sdlc/SKILL.md",
+    "skills/agentic-sdlc/agents/openai.yaml",
+    "skills/agentic-sdlc/references/commands.md",
+    "skills/agentic-sdlc/references/contract-generation.md",
+    "skills/agentic-sdlc/references/contracts.md",
+    "skills/agentic-sdlc/references/knowledge-base.md",
+    "skills/agentic-sdlc/references/parallel-work.md",
+    "skills/agentic-sdlc/references/process.md",
+    "templates/cache-template.json",
+    "templates/claim-template.json",
+    "templates/contract-template.json",
+    "templates/gate-report-template.json",
+    "templates/handoff-template.json",
+    "templates/implementation-log.md",
+    "templates/kb-readme.md",
+    "templates/kb-structure.json",
+    "templates/orchestration-plan-template.json",
+    "templates/output-contract-registry-template.json",
+    "templates/output-template-template.md",
+    "templates/phase-lock-template.json",
+    "templates/sdlc-config.json",
+    "templates/story-plan.md",
+    "test/cli.e2e.mjs"
+  ],
+  "source_hashes": {
+    ".codex-plugin/plugin.json": "c946f3798820020cad9be36003f3a10c7af5c0d1b5bd17c6c29d31af13c26caf",
+    ".gitignore": "00ec9ea7ab840faffdc0b18575d906068039509f024ae29ec34e5e5a104c97d0",
+    "README.md": "4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034",
+    "bin/agentic-sdlc.mjs": "17b6e0243ff89162432d08c16042b4b3fe877adcfc52899d2ba406ea1fcd031b",
+    "docs/agent-interactions.md": "9ef5613929060fd01fdb55247fee4249f5651307f7bc59218cf24199ceeb970f",
+    "docs/architecture.md": "44063a33935bb8a740db945cb157bed74e2a06c92ee7b912df66ad054fe01d46",
+    "docs/kb-structure.md": "56fcedcb1642c4864654c45bb3fcccb3ddac284ce9e5aac42b140a0ccabafaa2",
+    "docs/portable-install.md": "6f25e3f675e6722c66d7039a0857b1cc5271802c6ffbfd7576aff896afece9b9",
+    "package.json": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
+    "schemas/baseline.schema.json": "d7eb36e7defdd0f1ed35591719ace7d1d6881f8f546e88edadaae11322060f61",
+    "schemas/cache.schema.json": "0bc6744e2a29588c666fa39f6c2a376657e4046b96750c08a2b13fcab25c397a",
+    "schemas/capability-profile.schema.json": "edb97b3e35d4e274a5d319743439e5f7bf4c4258ba15db73a0d951e367c829a5",
+    "schemas/capability-recommendation.schema.json": "7bf04a459cd8f6e247756214ec9a1b0ed7d25071b5242e7a228ce4d0f573105b",
+    "schemas/claim.schema.json": "d80cdf38c3122939f6b9e6725d538bc35293a535dbef76bc20994d7bcbc0a53c",
+    "schemas/common.schema.json": "bff48153f4326057efc54faec95ac7e1e2ac384d78d6a5aedc4751ebeaf6698c",
+    "schemas/contract.schema.json": "b2926b34051ada41a0119ae031ed423559f83baf6603537c26affdf73fc40fa9",
+    "schemas/dependency-graph.schema.json": "5c9971044ad1f9dbf4f3f5fd8f88dbdde5f424f553715145571ab1e0e1721f07",
+    "schemas/gate-report.schema.json": "f75af2a03948cd903538280e26c31c3a7c7744c1532285b3b5a2472127a51b05",
+    "schemas/handoff.schema.json": "0068bccc24e872872f0e985dbf1e6d528f78fc72d850c15e026e09df76cb6b67",
+    "schemas/orchestration.schema.json": "017077abe22f5e1cfdaaf835c6955caa1b982060a91b52b96075a053d8f32524",
+    "schemas/output-contract-registry.schema.json": "930bee4b42892b532dd729d2536230ed616d9fcceb748802c702e72d1f416c95",
+    "schemas/output-link.schema.json": "a1af76f851cc9c9c2355d7484281548f8a5d0b95c376bd7cd609e09bf1a34775",
+    "schemas/output-template.schema.json": "e7dba3acaa5400bdc28c81ebc4ba6f0756b14ed30225912a500b85762c6e7422",
+    "schemas/phase-lock.schema.json": "8ca5db794675652ac62511a4907ed7c8079a81cf7bfbbafa55264eebb1e0ae94",
+    "schemas/project.schema.json": "b5db98126989714b5ed0669a80a31c314396d2827bdbfa1b6294eeaa94e73ae3",
+    "schemas/report-query.schema.json": "690b257447be88300624eb984b3930e614c2abeb199d29fd83dc1b84921f2742",
+    "schemas/route-intent.schema.json": "14c8dbe68c4178bd7609d3c362153734ac9d0a733c96f41795220a2431c39b94",
+    "schemas/story.schema.json": "2d610e10e1d93c151643eb1365f4e7f712fe51219c42ba8f502fa4030bfaa395",
+    "schemas/trace.schema.json": "b04a9044e03997cab16b64475af8e5a65c2cf61b5497d85149115558f866a80b",
+    "schemas/work-breakdown.schema.json": "faa3760946081c9dc6f5836c3ee497f4f90dbfc1fc653ec965aecc567cc110dc",
+    "schemas/work-item.schema.json": "75faac923432c3b3a1bbb044099ae0d7ff4c74c0cbfbfab3e26f78fd92d26a16",
+    "scripts/generate-plugin-assets.mjs": "c7ba7c709c9998988949719fcd546bc516b6bce2ba3bbfbbc8f933020bf96202",
+    "scripts/install-personal-marketplace.py": "5b1a0022ee412b649710040b92fb67ddbf2eeaeb4bf3a2af254d4cc5127b66da",
+    "skills/agentic-sdlc/SKILL.md": "15e620a542b7047cc8112d86dc60b6972c96a7e3b01bead2c7aa95f7f9c87885",
+    "skills/agentic-sdlc/agents/openai.yaml": "dec3034abd00e3ae9a9bf8e96e1459e63717649e100b100f0882edc70dbab97d",
+    "skills/agentic-sdlc/references/commands.md": "604c9ab809e6f599a15021b689dcd3d7fb8ad83f9f7fa43e5b99a43a6aca1cc9",
+    "skills/agentic-sdlc/references/contract-generation.md": "c153aee877f8c49e690c0c8fc6ce671a6e4c06dbee9c4ab79cd849a818bd382d",
+    "skills/agentic-sdlc/references/contracts.md": "01b2297a0f4295461c04319163aa3e03e063e6f220b2e7b71c67ff2b8104ae2a",
+    "skills/agentic-sdlc/references/knowledge-base.md": "89ab23302ac36e96240a31219432353565626ada0c666efdd17b1e7189640dfb",
+    "skills/agentic-sdlc/references/parallel-work.md": "21644be2c3ca9d1f02b312b3fc47b0a9c59e357dcaf6a664baacf839b0ee3405",
+    "skills/agentic-sdlc/references/process.md": "cbaa64b52ea5ae58dbe725fed5449a5b4a2d51ec01a12e18fb6186fbf193070c",
+    "templates/cache-template.json": "dd08729b27c942cbfb41323349fffb98650ad82e6b75db2cb681766505ed3aaa",
+    "templates/claim-template.json": "3d733318b121c57fd5329cc7cc062ff21ebcfc0d60b0b5a38b9548409c98163b",
+    "templates/contract-template.json": "9c9caf3feb58742f3b87ab1a6ef50f98ac3b64b04e0a8c06464ca2b17788cab1",
+    "templates/gate-report-template.json": "50aba8b1dbfa948dc514604babe5d2530256226ef60b727e26e9befbf0acdf38",
+    "templates/handoff-template.json": "f777b1f5a37b1fdf6ba4f3c3ffa23dd7ec26bf8707b22c4b347969931167672d",
+    "templates/implementation-log.md": "9b9be46ec7d4b0d1d40699afccdfdd4b061640429b2b16f0b66f63e4aeb0721c",
+    "templates/kb-readme.md": "999d7c74b2450eb98f80c5a224a8ed95c56433fdd495289e5cc1b700cea278eb",
+    "templates/kb-structure.json": "e042bdfd3d45845b876f758fe72843f98f01bc43871a9d7dd102c803c7a7e40c",
+    "templates/orchestration-plan-template.json": "dcd76ff44b7e78936546e746a4917b2763ee45939ce01b51df939d1b5437d308",
+    "templates/output-contract-registry-template.json": "52d2285e00dc401980c3b89255fe16efc08585d38d4fb66a5714b0d026a3e306",
+    "templates/output-template-template.md": "135353b4317f8023d5d8ae56b0e31f670b1fba85b4d13c7ac34c5ddc3b512acd",
+    "templates/phase-lock-template.json": "3faf7dc54db1a03aaf8c636dc22e7d661d5c0bc5256a862191b7dede629968e7",
+    "templates/sdlc-config.json": "d04817a426c798062ee7d702f78b1df81949e898ba32b01a5624ec43f8b4cf6b",
+    "templates/story-plan.md": "9d8d3855c2aff7ac0ad5c7054b619c0c7417e4dfe1c09fa98a110482f09989a6",
+    "test/cli.e2e.mjs": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260710090648-fc3776",
+      "baseline_id": "BASELINE-PLUGIN-HARDENING-20260710",
+      "status": "approved",
+      "summary": "Antonio delegated autonomous approval for all formal artifacts inside the requested whole-plugin hardening, testing, reinstall, commit, and push scope; this seals the final tested source hashes.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "BASELINE-PLUGIN-HARDENING-20260710",
+        "subject_label": "baseline BASELINE-PLUGIN-HARDENING-20260710",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "approval_level": "whole-plugin audit, correction, testing, reinstall, release evidence, commit, and push"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "5ede2c48efaf79036e9d77f37ac30328dd4ca919ec6baf3393dd225351f0b748",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-PLUGIN-HARDENING-001",
+        "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.4.21"
+      },
+      "created_at": "2026-07-10T09:06:48.584Z"
+    }
+  ],
+  "created_at": "2026-07-10T09:06:48.427Z",
+  "updated_at": "2026-07-10T09:06:48.584Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.4.21"
+    },
+    "approved_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}
