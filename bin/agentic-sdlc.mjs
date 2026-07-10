@@ -5886,7 +5886,7 @@ function buildContextSources(context, contextFiles) {
     const content = fs.readFileSync(resolved);
     const text = content.toString("utf8");
     return {
-      path: path.relative(context.root, resolved),
+      path: toProjectPath(context, resolved),
       sha256: crypto.createHash("sha256").update(content).digest("hex"),
       size_bytes: content.length,
       excerpt: normalizeText(text).slice(0, 1200),

@@ -2402,6 +2402,10 @@ test("task start blocks when an approved contract source changes", () => {
     "--output-ref",
     "implementation-summary:implementation-summary-v1:new",
   ]);
+  const sourceBoundContract = readJson(
+    path.join(project, ".sdlc", "contracts", "contract-ST-STALE-implementation.json"),
+  );
+  assert.equal(sourceBoundContract.contextualization.context_sources[0].path, contextFile);
   mustRun([
     "contract",
     "approve",
@@ -3835,7 +3839,7 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
     false,
   );
 
-  if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+  if (process.platform !== "win32" && (typeof process.getuid !== "function" || process.getuid() !== 0)) {
     const rollbackSentinel = path.join(destination, "docs", "rollback-sentinel.md");
     fs.writeFileSync(rollbackSentinel, "restore me\n");
     const marketplaceDirectory = path.join(home, ".agents", "plugins");
@@ -3970,10 +3974,15 @@ function collectJsonSchemaReferences(value, references = []) {
 }
 
 test("npm package contains only reusable plugin files", () => {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const packed = spawnSync(npm, ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+  const npmArguments = ["pack", "--dry-run", "--json", "--ignore-scripts"];
+  const npmCommand = process.env.npm_execpath ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
+  const commandArguments = process.env.npm_execpath
+    ? [process.env.npm_execpath, ...npmArguments]
+    : npmArguments;
+  const packed = spawnSync(npmCommand, commandArguments, {
     cwd: repoRoot,
     encoding: "utf8",
+    shell: process.platform === "win32" && !process.env.npm_execpath,
   });
   assert.equal(packed.status, 0, `npm pack failed\nSTDOUT:\n${packed.stdout}\nSTDERR:\n${packed.stderr}`);
   const payload = JSON.parse(packed.stdout);
