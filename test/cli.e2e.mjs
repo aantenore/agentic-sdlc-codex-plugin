@@ -233,6 +233,8 @@ test("story create persists acceptance criteria with human-readable alias", () =
   const stored = readJson(path.join(project, ".sdlc", "stories", "ST-ACCEPTANCE", "story.json"));
   assert.deepEqual(stored.acceptance_criteria, ["The current architecture assessment is observable and actionable"]);
   assert.deepEqual(stored.acceptance, ["The current architecture assessment is observable and actionable"]);
+  const plan = fs.readFileSync(path.join(project, ".sdlc", "stories", "ST-ACCEPTANCE", "plan.md"), "utf8");
+  assert.doesNotMatch(plan, /[ \t]+$/m);
 });
 
 test("strict gate fails when a story has no contract", () => {

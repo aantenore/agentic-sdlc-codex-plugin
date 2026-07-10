@@ -33,4 +33,4 @@ List the commands, tests, reviews, or evidence required before this story can cl
 
 ## Open Questions
 
-- 
+- None.
