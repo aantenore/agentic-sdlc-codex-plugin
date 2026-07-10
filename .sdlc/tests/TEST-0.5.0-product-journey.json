@@ -9,7 +9,12 @@
     {
       "command": "npm test (shell-independent node --test discovery)",
       "status": "passed",
-      "summary": "80 tests passed, including delegated authorization, task-start freshness, assessment routing, format enforcement, artifact verification, concurrency, packaging, baseline discovery, and cross-platform test discovery without shell glob expansion."
+      "summary": "80 tests passed before the Windows portability patch, including delegated authorization, task-start freshness, assessment routing, format enforcement, artifact verification, concurrency, packaging, baseline discovery, and shell-independent test discovery."
+    },
+    {
+      "command": "node --test --test-name-pattern='task start blocks when an approved contract source changes|personal marketplace installer stages only allowlisted plugin files|npm package contains only reusable plugin files' test/cli.e2e.mjs",
+      "status": "passed",
+      "summary": "All three Windows portability regressions pass locally: canonical contract paths use forward slashes, POSIX permission rollback is platform-scoped, and npm pack uses npm_execpath with a Windows shell fallback."
     },
     {
       "command": "npm run check",
@@ -75,6 +80,7 @@
   ],
   "notes": [
     "The full installed Codex checkpoint transcript and rendered artifact smoke tests were executed in disposable temporary repositories; the durable pass summary is recorded here.",
+    "A post-patch full local rerun was interrupted after the host reached a load average near 289 from unrelated concurrent workloads; it is not counted as a pass. The clean GitHub Actions Linux, macOS, and Windows matrix is the required final validation for this portability patch.",
     "Public GitHub release publication is intentionally not performed without an explicit version-tag release action."
   ]
 }

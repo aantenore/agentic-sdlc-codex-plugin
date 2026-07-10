@@ -1,10 +1,10 @@
 {
-  "id": "STEP-ST-PRODUCT-JOURNEY-001-implementation-20260710121553464-f40e5b",
+  "id": "STEP-ST-PRODUCT-JOURNEY-001-implementation-20260710130048403-a519ed",
   "story_id": "ST-PRODUCT-JOURNEY-001",
   "step": "implementation",
   "status": "completed",
   "phase": "implementation",
-  "summary": "Refreshed completion evidence after replacing shell glob test discovery with cross-platform native Node discovery; all 80 tests passed.",
+  "summary": "Completed Windows portability corrections for canonical contract paths, POSIX-only permission rollback testing, and portable npm execution; targeted regressions and all static/package/plugin validators pass.",
   "output_types": [
     "implementation-summary"
   ],
@@ -25,12 +25,12 @@
   "evidence": [
     {
       "path": ".sdlc/tests/TEST-0.5.0-product-journey.json",
-      "sha256": "0879ffd7f5ab77e21fe20019f92c14101081d2e1625cc6bb0864607b2ff8cd5d",
+      "sha256": "2b443903db02cf616b9873fc0a3df195c252ffeb59fc0ff18648962550258e65",
       "hash_algorithm": "sha256:file:v1"
     }
   ],
   "next_step": "validation",
-  "completed_at": "2026-07-10T12:15:53.465Z",
+  "completed_at": "2026-07-10T13:00:48.406Z",
   "audit": {
     "completed_by": {
       "id": "codex",
@@ -41,8 +41,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-CI-PORTABILITY-001",
-      "head_sha": "55c6e016fef938e4f40e21f3a85fb1569474c878",
+      "branch": "codex/ST-WINDOWS-PORTABILITY-001",
+      "head_sha": "083b3d8381dec224af71785c8ff1a2c5d73c69dc",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
