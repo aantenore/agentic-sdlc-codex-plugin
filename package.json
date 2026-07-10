@@ -23,7 +23,7 @@
     "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs",
     "doctor": "node bin/agentic-sdlc.mjs doctor",
     "smoke": "node bin/agentic-sdlc.mjs --help",
-    "test": "node --test test/*.mjs"
+    "test": "node --test"
   },
   "keywords": [
     "codex",
