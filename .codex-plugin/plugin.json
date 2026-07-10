@@ -1,7 +1,7 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.4.21",
-  "description": "A Codex plugin for contract-driven agentic SDLC execution with a shared Git-first project knowledge base.",
+  "version": "0.5.0",
+  "description": "A Codex plugin for project contextualization, verified assessments, and traceable software delivery.",
   "author": {
     "name": "Antonio Antenore",
     "url": "https://github.com/aantenore"
@@ -12,6 +12,8 @@
   "keywords": [
     "codex",
     "sdlc",
+    "project-assessment",
+    "technical-assessment",
     "agentic-development",
     "knowledge-base",
     "contracts"
@@ -19,8 +21,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agentic SDLC",
-    "shortDescription": "Contract-driven agentic SDLC for Codex.",
-    "longDescription": "Agentic SDLC turns a classic software development life cycle into an agent-legible operating system: each phase is governed by a contract, validated by gates, and recorded in a Git-first knowledge base that teams and agents can share in parallel.",
+    "shortDescription": "Project context and verified assessments for Codex.",
+    "longDescription": "Agentic SDLC helps Codex understand an existing software project, agree a focused assessment in plain language, produce the requested artifact in its real format, verify it, and retain a traceable project record for later work.",
     "developerName": "Antonio Antenore",
     "category": "Productivity",
     "composerIcon": "./assets/icon.png",
@@ -32,9 +34,9 @@
       "Automation"
     ],
     "defaultPrompt": [
-      "Use Agentic SDLC to initialize this project.",
-      "Create an SDLC contract for the next phase.",
-      "Check the SDLC gate for my active story."
+      "Contextualize this project and prepare an initial technical assessment.",
+      "Assess this project's architecture, risks, and priorities.",
+      "Prepare a functional assessment for this project."
     ],
     "brandColor": "#0EA5E9"
   }

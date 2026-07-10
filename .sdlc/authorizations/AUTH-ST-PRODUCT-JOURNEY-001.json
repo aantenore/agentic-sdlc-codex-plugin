@@ -1,0 +1,55 @@
+{
+  "id": "AUTH-ST-PRODUCT-JOURNEY-001",
+  "status": "active",
+  "scope": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories",
+  "summary": "Antonio explicitly requested autonomous concept and product analysis, full implementation correction, exhaustive testing, and push for the Agentic SDLC plugin within this repository.",
+  "allowed_actions": [
+    "output.template.approve",
+    "contract.approve",
+    "task.start.confirm"
+  ],
+  "allowed_artifact_types": [
+    "implementation-summary"
+  ],
+  "allowed_subjects": [
+    "implementation-summary-v1",
+    "contract-ST-PRODUCT-JOURNEY-001-implementation",
+    "ST-PRODUCT-JOURNEY-001"
+  ],
+  "expires_at": null,
+  "approval_source": "explicit-user",
+  "approval_evidence": [],
+  "granted_by": {
+    "id": "antonioantenore",
+    "type": "human",
+    "name": "Antonio Antenore",
+    "email": "a.antenore@reply.it",
+    "source": "environment"
+  },
+  "created_at": "2026-07-10T09:59:24.584Z",
+  "updated_at": "2026-07-10T09:59:24.584Z",
+  "audit": {
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PRODUCT-JOURNEY-001",
+      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.5.0"
+    }
+  },
+  "approved_content_hash": "94106897921fc8062cf38be3676b2156ba5a4c01137e4882f374e49a25806d2d",
+  "hash_algorithm": "sha256:stable-json:v1"
+}

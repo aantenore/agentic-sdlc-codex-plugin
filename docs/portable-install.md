@@ -1,107 +1,180 @@
 # Portable Codex Install
 
-Agentic SDLC is packaged as a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`.
+Agentic SDLC 0.5.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
-## What Travels With The Plugin
+## Package Surface
 
-```mermaid
-flowchart TB
-  Repo["Repository root"] --> Manifest[".codex-plugin/plugin.json"]
-  Repo --> Assets["assets/"]
-  Repo --> Skill["skills/agentic-sdlc/"]
-  Repo --> CLI["bin/agentic-sdlc.mjs"]
-  Repo --> Method["schemas/, templates/, docs/"]
-  Skill --> SkillAssets["skills/agentic-sdlc/assets/"]
+The staged plugin contains:
+
+```text
+.codex-plugin/plugin.json
+assets/
+bin/
+docs/
+schemas/
+scripts/
+skills/agentic-sdlc/
+skills/agentic-sdlc-assessment/
+templates/
+LICENSE
+package.json
+README.md
 ```
 
-All paths in the plugin manifest and skill agent card are relative to the repository. The npm distribution is controlled by the `package.json` `files` whitelist, so it contains no absolute paths to Antonio's machine, project-specific contracts, target-project `.sdlc/` data, repository tests, or local metadata. The source repository may contain its own `.sdlc/` because it dogfoods Agentic SDLC; that project state is not part of the distributable plugin.
+The assessment skill includes `agents/openai.yaml`, which makes `Project Assessment` visible and allows implicit invocation. The first product starter is:
 
-## Install On Another Codex
+```text
+Contextualize this project and prepare an initial technical assessment.
+```
 
-Use the personal marketplace flow when you want this plugin to behave like other local Codex plugins. Run the staging installer from any source checkout; the checkout must remain separate from the generated personal-plugin destination.
+The npm `files` allowlist defines the package surface. Project-specific `.sdlc/` data, repository tests, Git metadata, and unlisted root files do not travel with the plugin.
+
+## Prerequisites
+
+- Codex with the `codex plugin` command group.
+- Node.js 18.18 or newer for `bin/agentic-sdlc.mjs`.
+- Python 3 for the repository staging installer.
+- A source checkout outside the generated `~/plugins/agentic-sdlc-codex-plugin` destination.
+
+Use `python3`, `python`, or `py -3` according to the Python 3 launcher available on the machine.
+
+## Install
+
+From the source checkout:
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list | grep agentic-sdlc-codex-plugin
+codex plugin list --json
 ```
 
-Expected result:
-
-```text
-agentic-sdlc-codex-plugin@personal  installed, enabled
-```
-
-The installer reads the `package.json` `files` allowlist and adds `package.json`, `README.md`, and `LICENSE`. It copies only that package surface into a clean sibling staging directory, excluding `.git`, `.sdlc`, `test`, `.DS_Store`, and unlisted root content, then swaps the staged tree into `~/plugins/agentic-sdlc-codex-plugin`. Rerunning it replaces the complete managed tree, so stale packaged files are removed.
-
-The destination is generated installation output, not a development checkout. The installer refuses to replace it when it is a symlink, a Git checkout, the source checkout itself, or a directory with unmanaged top-level entries. In those cases it leaves the destination untouched for manual inspection. It honors `HOME`, including for isolated installation tests.
-
-The install script creates or updates this machine-local marketplace entry:
+A successful list result contains an installed, enabled entry with:
 
 ```json
 {
-  "name": "agentic-sdlc-codex-plugin",
-  "source": {
-    "source": "local",
-    "path": "./plugins/agentic-sdlc-codex-plugin"
-  },
-  "policy": {
-    "installation": "AVAILABLE",
-    "authentication": "ON_INSTALL"
-  },
-  "category": "Productivity"
+  "pluginId": "agentic-sdlc-codex-plugin@personal",
+  "version": "0.5.0",
+  "installed": true,
+  "enabled": true
 }
 ```
 
-The marketplace file lives at `~/.agents/plugins/marketplace.json`. Keep it out of this repository unless you are intentionally maintaining a separate team marketplace repository.
+Start a new Codex task after installing. Existing tasks do not need to be treated as proof that the new skills and card were reloaded.
 
-After install or reinstall, start a new Codex thread so the app reloads plugin-provided skills, assets, and MCP/app metadata.
+### What The Installer Changes
 
-## Update An Existing Local Install
+The script:
 
-Update the source checkout using your normal source-control workflow, then rerun the staging installer from that checkout:
+1. reads the package allowlist and adds npm's standard root files;
+2. builds a clean sibling staging directory;
+3. replaces `~/plugins/agentic-sdlc-codex-plugin` only when the destination is managed and safe;
+4. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
+5. preserves unrelated marketplace entries.
+
+The script honors `HOME`. It refuses to replace a symlink, Git checkout, source checkout, or directory with unmanaged top-level content and leaves that destination untouched for inspection.
+
+Treat the generated tree under `~/plugins` as installation output. Do not clone into it, symlink it to the source, or update it with Git.
+
+## Update
+
+There is no dedicated update subcommand in the current Codex plugin CLI. Refresh the source checkout by your normal source-control process, rerun the staging installer, and add the plugin again:
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
+codex plugin list --json
 ```
 
-Do not update `~/plugins/agentic-sdlc-codex-plugin` directly. Each successful rerun replaces that generated tree from the current source package allowlist.
+Re-adding is supported and refreshes the installed cache. The installer replaces the complete managed staging tree, so files removed from the package do not remain stale. Start a new Codex task afterward.
 
-If the plugin version did not change and you still need Codex to refresh its cache during local development, add a Codex cachebuster to `.codex-plugin/plugin.json` before reinstalling:
+For a released build, change the semantic version. During local development at the same version, the same staging-and-add sequence is the supported refresh workaround; a cachebuster is optional maintainer tooling, not an end-user update command.
+
+## Uninstall
+
+Remove the installed plugin and its Codex cache:
 
 ```bash
-python3 /path/to/plugin-creator/scripts/update_plugin_cachebuster.py \
-  /path/to/agentic-sdlc-codex-plugin
-cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
-codex plugin add agentic-sdlc-codex-plugin@personal
+codex plugin remove agentic-sdlc-codex-plugin@personal
+codex plugin list --json
 ```
 
-Do not use the cachebuster for tagged releases; bump the plugin version instead.
+This command does not delete:
 
-## Validate Before Sharing
+- the source checkout;
+- target-project `.sdlc/` knowledge;
+- `~/plugins/agentic-sdlc-codex-plugin`;
+- the catalog entry in `~/.agents/plugins/marketplace.json`.
+
+That retained catalog entry allows a later reinstall. For permanent machine cleanup, first run the supported remove command, then delete only the generated plugin directory and remove only the matching plugin object from the personal marketplace JSON with a JSON-aware editor. Preserve unrelated entries and do not remove the shared `personal` marketplace source.
+
+## Doctor
+
+Run the plugin's non-destructive doctor from the source checkout. The npm script and direct CLI form execute the same checks:
 
 ```bash
-node --check bin/agentic-sdlc.mjs
-npm test
+npm run doctor
+npm run doctor -- --root /path/to/target-project --json
+node bin/agentic-sdlc.mjs doctor --root /path/to/target-project --json
+```
+
+Without `--root`, doctor checks the repository used as the current directory. With a target root, it also validates the project KB and output registry when `.sdlc/` exists. It returns a non-zero exit code when a check fails.
+
+For installation and package diagnostics, combine it with:
+
+```bash
+codex plugin list --available --json
+npm run check
 npm pack --dry-run --json
-python /path/to/plugin-creator/scripts/validate_plugin.py .
-python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
 ```
 
-The package listing must contain `.codex-plugin/`, `bin/`, `skills/`, `schemas/`, and `templates/`, and must not contain `.sdlc/` or `test/`.
+Interpret the results as follows:
 
-## Project Knowledge Is Separate
+| Check | Expected result | Recovery |
+| --- | --- | --- |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.5.0` | Rerun staging, add again, then open a new task |
+| `npm run doctor` or CLI doctor | Reports runtime, version, entry point, both skills, agent card, preset, and optional project KB checks as passed | Repair the failed item, restage, and open a new task |
+| `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
+| Package dry run | Contains manifest, both skills, agent card, CLI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
 
-The plugin is reusable method code. The project knowledge base is created in each target project under `.sdlc/` and should be shared through that project's Git remote. This separation is what lets multiple Codex installations use the same SDLC plugin while collaborating on different products.
+If the staging script refuses the destination, inspect the printed path. Move or rename an unmanaged destination rather than forcing deletion; rerun the script only after the generated location is safe.
 
-## Asset Regeneration
+If the plugin is installed but `Project Assessment` is not visible, verify that the dry-run package includes `skills/agentic-sdlc-assessment/SKILL.md` and `skills/agentic-sdlc-assessment/agents/openai.yaml`, add the plugin again, and open a new Codex task.
 
-The PNG assets are committed for portability. They can be regenerated deterministically with:
+### Maintainer Validators
+
+When the Codex plugin and skill validator scripts are available locally, run them in an isolated `uv` environment so the validators receive their declared `PyYAML` dependency without modifying the plugin runtime:
 
 ```bash
-node scripts/generate-plugin-assets.mjs
+uv run --with pyyaml python /path/to/plugin-creator/scripts/validate_plugin.py .
+uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
+uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc-assessment
 ```
+
+These are file validators, not Codex plugin subcommands. If `uv` is unavailable, use an isolated Python environment that already contains `PyYAML`; do not add it as a plugin runtime dependency.
+
+## Installed-Journey Smoke Check
+
+After installation, open a new Codex task in a disposable existing repository and submit:
+
+```text
+Contextualize this project and prepare an initial technical assessment.
+```
+
+The normal journey must expose no more than two decisions:
+
+1. approve or correct the inferred project context;
+2. approve or change one combined assessment proposal.
+
+The combined proposal must name an explicit assessment story such as `ST-INITIAL-ASSESSMENT`. After approval, that story must exist before its contract or output, the approval must be persisted with `authorization grant`, and agent-driven approvals plus `task start --confirm-start` must use `--authorization <id>`.
+
+The final delivery must include the real requested artifact, a concise chat summary, and a stored verification receipt. DOCX, XLSX, PDF, PPTX, and HTML links must also contain render or visual-check evidence.
+
+## Portability Boundaries
+
+- The plugin is reusable code and method; target-project state remains in that project's `.sdlc/` directory.
+- Cache and indexes are derived and are never accepted as canonical evidence.
+- The installer changes only the current user's plugin staging and personal marketplace files.
+- The plugin has no runtime npm dependencies.
+- External tools needed for a requested artifact format are selected and disclosed in the assessment proposal; missing tools require a decision before installation.

@@ -64,6 +64,47 @@
         "type": "string"
       }
     },
+    "delivery_format": {
+      "description": "Canonical delivery format snapshot copied from the approved output template.",
+      "enum": [
+        "markdown",
+        "docx",
+        "xlsx",
+        "pdf",
+        "pptx",
+        "html",
+        "json",
+        "csv",
+        "custom"
+      ]
+    },
+    "delivery_extension": {
+      "description": "Canonical extension snapshot copied from the approved output template.",
+      "type": "string",
+      "pattern": "^\\.[a-z0-9][a-z0-9._-]*$"
+    },
+    "media_type": {
+      "description": "Canonical media type snapshot copied from the approved output template.",
+      "type": "string",
+      "minLength": 1
+    },
+    "generator": {
+      "description": "Artifact capability snapshot copied from the approved output template.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "delivery_mode": {
+      "description": "Delivery mode snapshot copied from the approved output template.",
+      "enum": [
+        "artifact",
+        "artifact-plus-chat-summary"
+      ]
+    },
+    "verification_receipt": {
+      "$ref": "#/$defs/verification_receipt"
+    },
     "fingerprints": {
       "type": "object",
       "required": [
@@ -95,6 +136,82 @@
     "audit": {
       "type": "object",
       "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "verification_receipt": {
+      "type": "object",
+      "required": [
+        "status",
+        "verifier",
+        "format",
+        "checks",
+        "evidence",
+        "artifact_sha256",
+        "verified_at"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "verifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "enum": [
+            "markdown",
+            "docx",
+            "xlsx",
+            "pdf",
+            "pptx",
+            "html",
+            "json",
+            "csv",
+            "custom"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true

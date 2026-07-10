@@ -1,0 +1,80 @@
+{
+  "id": "TEST-0.5.0-product-journey",
+  "kind": "test_evidence",
+  "story_id": "ST-PRODUCT-JOURNEY-001",
+  "summary": "End-to-end product, governance, artifact, packaging, and installed-plugin validation for Agentic SDLC 0.5.0.",
+  "status": "passed",
+  "created_at": "2026-07-10T10:16:00Z",
+  "commands": [
+    {
+      "command": "npm test",
+      "status": "passed",
+      "summary": "80 tests passed, including delegated authorization, task-start freshness, assessment routing, format enforcement, artifact verification, concurrency, packaging, and baseline discovery."
+    },
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "summary": "CLI and asset generator syntax checks passed."
+    },
+    {
+      "command": "npm run doctor -- --json",
+      "status": "passed",
+      "summary": "Version, manifest entry point, skills, preset, and project KB checks passed."
+    },
+    {
+      "command": "validate_plugin.py .",
+      "status": "passed",
+      "summary": "Codex plugin manifest and package structure are valid."
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc",
+      "status": "passed"
+    },
+    {
+      "command": "quick_validate.py skills/agentic-sdlc-assessment",
+      "status": "passed"
+    },
+    {
+      "command": "npm pack --dry-run --json",
+      "status": "passed",
+      "summary": "The 0.5.0 package contains 65 reusable files."
+    },
+    {
+      "command": "clean personal-marketplace reinstall and installed CLI doctor",
+      "status": "passed",
+      "summary": "The enabled installed plugin reports 0.5.0 and its CLI SHA-256 matches the repository source."
+    },
+    {
+      "command": "installed Codex Italian assessment checkpoint scenario",
+      "status": "passed",
+      "summary": "The plugin explained observed facts, architecture gaps, assumptions, unknowns, and exact approval scope, then stopped at Checkpoint 1 without producing an assessment."
+    },
+    {
+      "command": "real DOCX and XLSX generation, render inspection, output linking, and strict gates",
+      "status": "passed",
+      "summary": "Both OOXML artifacts received passed verification receipts with visual evidence and zero strict-gate errors."
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "evidence": [
+    ".codex-plugin/plugin.json",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "bin/agentic-sdlc.mjs",
+    "docs/product-assessment.md",
+    "schemas/authorization.schema.json",
+    "schemas/output-link.schema.json",
+    "schemas/output-template.schema.json",
+    "skills/agentic-sdlc/SKILL.md",
+    "skills/agentic-sdlc-assessment/SKILL.md",
+    "templates/technical-assessment.md",
+    "test/cli.e2e.mjs"
+  ],
+  "notes": [
+    "The full installed Codex checkpoint transcript and rendered artifact smoke tests were executed in disposable temporary repositories; the durable pass summary is recorded here.",
+    "Public GitHub release publication is intentionally not performed without an explicit version-tag release action."
+  ]
+}

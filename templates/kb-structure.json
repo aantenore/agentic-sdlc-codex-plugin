@@ -5,6 +5,7 @@
     "project.json",
     "baseline/**/*",
     "contracts/**/*.json",
+    "authorizations/**/*.json",
     "output-contracts/**/*",
     "requirements/**/*",
     "work-items/**/*",
@@ -30,6 +31,7 @@
   "directories": {
     "baseline": "Existing-project current-state baselines, imported documents, inferred context, and formal approval records.",
     "contracts": "Phase and story contracts.",
+    "authorizations": "Explicit, action-scoped delegated automation grants with immutable approval evidence.",
     "output-contracts": "Approved output templates, artifact links, and user-approved structural decisions.",
     "requirements": "User, product, business, and non-functional requirements.",
     "work-items": "Project-local epics and tasks used for agreed work breakdown.",

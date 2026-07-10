@@ -14,29 +14,40 @@
       "type": "implementation-summary",
       "status": "approved",
       "path": ".sdlc/output-contracts/templates/implementation-summary-v1.md",
-      "summary": "Standard implementation summary for plugin changes.",
-      "source_paths": [],
-      "proposed_at": "2026-07-01T11:26:24.866Z",
-      "approved_at": "2026-07-10T08:50:15.619Z",
+      "summary": "Canonical implementation summary for the complete Agentic SDLC product journey",
+      "preset": null,
+      "delivery": {
+        "format": "markdown",
+        "label": "Markdown document",
+        "extension": ".md",
+        "media_type": "text/markdown",
+        "generator": null,
+        "mode": "artifact-plus-chat-summary"
+      },
+      "source_paths": [
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "proposed_at": "2026-07-10T09:59:32.540Z",
+      "approved_at": "2026-07-10T09:59:32.802Z",
       "approved_by": {
         "id": "codex",
         "type": "agent",
         "name": "Codex",
         "email": null,
-        "source": "cli"
+        "source": "default"
       },
       "audit": {
         "proposed_by": {
           "id": "codex",
           "type": "agent",
-          "name": "Antonio Antenore",
-          "email": "a.antenore@reply.it",
-          "source": "cli"
+          "name": "Codex",
+          "email": null,
+          "source": "default"
         },
         "git": {
           "is_git_repo": true,
-          "branch": "codex/ST-PLUGIN-HARDENING-001",
-          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+          "branch": "codex/ST-PRODUCT-JOURNEY-001",
+          "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
           "is_dirty": true,
           "user": {
             "name": "Antonio Antenore",
@@ -51,21 +62,24 @@
           "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
           "session_id": null,
           "tool": "agentic-sdlc-cli",
-          "version": "0.4.21"
+          "version": "0.5.0"
         },
         "approved_by": {
           "id": "codex",
           "type": "agent",
           "name": "Codex",
           "email": null,
-          "source": "cli"
+          "source": "default"
         }
       },
-      "approval_summary": "Antonio delegated autonomous production and approval of the implementation summary; the corrected template now uses real Markdown lines and the agreed Scope, Changes, Verification, and Residual Risks sections.",
+      "approval_summary": "Approved within the persisted user authorization for this exact implementation summary format and product journey.",
       "approved_content_hash": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
+      "approved_delivery_hash": "71eeb826fa48e2aa5a3641f3b1b66295e1a905207e310e6e023bff2ac3e62c59",
       "hash_algorithm": "sha256:file:v1",
       "approval_evidence": [],
       "approval_source": "automation",
+      "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+      "authorization_action": "output.template.approve",
       "approval_scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "implementation-summary-v1",
@@ -76,7 +90,14 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "approval_level": "implementation summary format for whole-plugin hardening"
+        "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+        "approval_level": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories",
+        "allowed_actions": [
+          "output.template.approve",
+          "contract.approve",
+          "task.start.confirm"
+        ],
+        "subject_scope": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories"
       },
       "explicit_user_confirmation": false,
       "provisional": false
@@ -357,6 +378,79 @@
           "version": "0.4.21"
         }
       }
+    },
+    {
+      "id": "OUT-ST-PRODUCT-JOURNEY-001-implementation-summary-5f5693d3",
+      "story_id": "ST-PRODUCT-JOURNEY-001",
+      "artifact_type": "implementation-summary",
+      "artifact_path": ".sdlc/stories/ST-PRODUCT-JOURNEY-001/outputs/implementation-summary.md",
+      "template_id": "implementation-summary-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-PRODUCT-JOURNEY-001"
+      ],
+      "decision_id": null,
+      "rationale": null,
+      "delivery_format": "markdown",
+      "delivery_extension": ".md",
+      "media_type": "text/markdown",
+      "generator": null,
+      "delivery_mode": "artifact-plus-chat-summary",
+      "verification_receipt": {
+        "status": "passed",
+        "verifier": "file-structure-v1",
+        "format": "markdown",
+        "checks": [
+          "non-empty file (3203 bytes)",
+          "extension .md",
+          "non-binary text content"
+        ],
+        "evidence": [],
+        "artifact_sha256": "544a889e5e8ddb0ed39519e700a0aaa3405daabad752680ce5316c4feb8b33e7",
+        "verified_at": "2026-07-10T10:16:34.074Z"
+      },
+      "source_paths": [
+        ".sdlc/stories/ST-PRODUCT-JOURNEY-001/outputs/implementation-summary.md",
+        ".sdlc/output-contracts/templates/implementation-summary-v1.md"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "544a889e5e8ddb0ed39519e700a0aaa3405daabad752680ce5316c4feb8b33e7",
+        "base_artifact_sha256": null,
+        "template_sha256": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-10T10:16:34.465Z",
+      "updated_at": "2026-07-10T10:16:34.465Z",
+      "audit": {
+        "linked_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "default"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-PRODUCT-JOURNEY-001",
+          "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.5.0"
+        }
+      }
     }
   ],
   "decisions": [
@@ -512,10 +606,84 @@
           "version": "0.4.21"
         }
       }
+    },
+    {
+      "id": "DEC-output-template-implementation-summary-v1-20260710095932801-689448",
+      "type": "template_approved",
+      "template_id": "implementation-summary-v1",
+      "artifact_type": "implementation-summary",
+      "summary": "Approved within the persisted user authorization for this exact implementation summary format and product journey.",
+      "status": "approved",
+      "evidence": [],
+      "approval_source": "automation",
+      "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+      "authorization_action": "output.template.approve",
+      "approval_scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "implementation-summary-v1",
+        "subject_label": "output template implementation-summary-v1",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+        "approval_level": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories",
+        "allowed_actions": [
+          "output.template.approve",
+          "contract.approve",
+          "task.start.confirm"
+        ],
+        "subject_scope": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories"
+      },
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
+      "approved_delivery_hash": "71eeb826fa48e2aa5a3641f3b1b66295e1a905207e310e6e023bff2ac3e62c59",
+      "delivery": {
+        "format": "markdown",
+        "label": "Markdown document",
+        "extension": ".md",
+        "media_type": "text/markdown",
+        "generator": null,
+        "mode": "artifact-plus-chat-summary"
+      },
+      "hash_algorithm": "sha256:file:v1",
+      "created_at": "2026-07-10T09:59:32.802Z",
+      "audit": {
+        "decided_by": {
+          "id": "codex",
+          "type": "agent",
+          "name": "Codex",
+          "email": null,
+          "source": "default"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-PRODUCT-JOURNEY-001",
+          "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "a.antenore@reply.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.5.0"
+        }
+      }
     }
   ],
   "created_at": "2026-07-01T11:12:46.834Z",
-  "updated_at": "2026-07-10T09:13:22.699Z",
+  "updated_at": "2026-07-10T10:16:34.466Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -529,12 +697,12 @@
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "cli"
+      "source": "default"
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-PLUGIN-HARDENING-001",
-      "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
+      "branch": "codex/ST-PRODUCT-JOURNEY-001",
+      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -549,7 +717,7 @@
       "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.4.21"
+      "version": "0.5.0"
     }
   }
 }

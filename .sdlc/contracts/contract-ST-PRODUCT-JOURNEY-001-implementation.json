@@ -1,0 +1,259 @@
+{
+  "id": "contract-ST-PRODUCT-JOURNEY-001-implementation",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.5.0",
+  "project": {
+    "project_id": "agentic-sdlc-codex-plugin",
+    "project_name": "Agentic SDLC Codex Plugin"
+  },
+  "phase": "implementation",
+  "story_id": "ST-PRODUCT-JOURNEY-001",
+  "status": "approved",
+  "purpose": "Implement story-scoped changes on dedicated branches using the approved contract, tests, and knowledge base context.",
+  "owner_agent": "implementation-agent",
+  "inputs": [
+    "approved story",
+    "contract",
+    "acceptance criteria",
+    "test strategy",
+    "active claim"
+  ],
+  "outputs": [
+    "code changes",
+    "implementation log",
+    "test evidence",
+    "review notes",
+    "updated knowledge base"
+  ],
+  "output_contract_refs": [
+    {
+      "artifact_type": "implementation-summary",
+      "template_id": "implementation-summary-v1",
+      "mode": "new"
+    }
+  ],
+  "validation": [
+    "branch is story-scoped",
+    "acceptance criteria are addressed",
+    "blocking tests pass",
+    "decision and assumption changes are recorded",
+    "no unauthorized tool or resource use"
+  ],
+  "allowed_tools": [
+    "knowledge-base",
+    "repo-read",
+    "repo-write",
+    "test-runner",
+    "code-review"
+  ],
+  "kb_writes": [
+    "traces",
+    "tests",
+    "decisions",
+    "stories"
+  ],
+  "human_gate": true,
+  "metrics": [
+    "tests_run_count",
+    "blocking_failures_count",
+    "review_findings_count"
+  ],
+  "execution_policy": {
+    "runtime": "codex",
+    "model": {
+      "mode": "inherit",
+      "value": null
+    },
+    "reasoning": {
+      "mode": "inherit",
+      "level": null
+    },
+    "notes": []
+  },
+  "capability_policy": {
+    "skills": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "approval_required_for": []
+  },
+  "capability_bindings": [],
+  "capability_recommendation_refs": [],
+  "contextualization": {
+    "summary": "Implement the product-level journey that turns natural project contextualization and assessment requests into a concise guided workflow with explicit artifact formats and deterministic validation.",
+    "context_sources": [
+      {
+        "path": ".sdlc/requirements/REQ-PRODUCT-JOURNEY-001.md",
+        "sha256": "1a33d8fd43c7017a18da5601fe9bfd893e0eab5942b7aadaa9d3a0cd6a6d1ba0",
+        "size_bytes": 2203,
+        "excerpt": "# REQ-PRODUCT-JOURNEY-001 ## Product Goal Turn Agentic SDLC from a robust low-level governance engine into a complete Codex product experience for the original use case a user asks the plugin to contextualize an existing project and prepare an initial assessment without needing to understand SDLC artifact names or manually inspect JSON files. ## Expected Journey 1. Codex inspects the existing project and presents the inferred project context in plain language. 2. The user approves or corrects only that presented context. 3. Codex prepares one understandable work proposal containing assessment scope evidence sources output structure real file format local tools boundaries missing information and the meaning of approval. 4. One approval covers exactly the items shown in that work proposal. A broader autonomy level is honored only inside the scope explicitly declared by the user. 5. Codex performs the assessment creates the requested artifact verifies it links it to the project KB and summarizes the result in chat. ## Acceptance Criteria - The plugin exposes a dedicated assessment skill whose trigger matches natural requests to contextualize a project and prepare an initial functional"
+      },
+      {
+        "path": ".codex-plugin/plugin.json",
+        "sha256": "320f02a203fe67d6869fd4624e954b6d6c6ada30c0a8febdd2dd7bc31214a33b",
+        "size_bytes": 1555,
+        "excerpt": "name agentic-sdlc-codex-plugin version 0.5.0 description A Codex plugin for project contextualization verified assessments and traceable software delivery. author name Antonio Antenore url https //github.com/aantenore homepage https //github.com/aantenore/agentic-sdlc-codex-plugin repository https //github.com/aantenore/agentic-sdlc-codex-plugin license MIT keywords codex sdlc project-assessment technical-assessment agentic-development knowledge-base contracts skills ./skills/ interface displayName Agentic SDLC shortDescription Project context and verified assessments for Codex. longDescription Agentic SDLC helps Codex understand an existing software project agree a focused assessment in plain language produce the requested artifact in its real format verify it and retain a traceable project record for later work. developerName Antonio Antenore category Productivity composerIcon ./assets/icon.png logo ./assets/logo.png logoDark ./assets/logo-dark.png capabilities Read Write Automation defaultPrompt Contextualize this project and prepare an initial technical assessment. Assess this project's architecture risks and priorities. Prepare a functional assessment for this project. brandCo"
+      },
+      {
+        "path": "README.md",
+        "sha256": "75009fa15121b82ae75a4fa41fede726248f9d523eaec660c3dab2f522f677a9",
+        "size_bytes": 10399,
+        "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC 0.5.0 gives Codex a guided way to understand an existing software project and deliver a verified technical or functional assessment. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains only reusable skills templates schemas and the cross-platform Node.js CLI. ## Start Here Install the plugin open the target project in a new Codex task and use the first starter prompt ```text Contextualize this project and prepare an initial technical assessment. ``` The dedicated `Project Assessment` skill is visible in Codex and can also be selected implicitly from equivalent natural-language requests including requests in languages other than English. ## The Assessment Journey A normal local read-only assessment has at most two user checkpoints. ### 1. Confirm Project Context Codex inspects the repository and summarizes - the product purpose users and current state supported by evidence; - the detected stack runtime integration"
+      },
+      {
+        "path": "bin/agentic-sdlc.mjs",
+        "sha256": "08985bbf87b05c0c00d8c320adf53b0c3a1628b38458342f5cbb1caa076b6f0a",
+        "size_bytes": 557102,
+        "excerpt": "#!/usr/bin/env node import fs from node fs ; import path from node path ; import crypto from node crypto ; import childProcess from node child_process ; import os from node os ; import zlib from node zlib ; import fileURLToPath from node url ; const VERSION = 0.5.0 ; const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT templates ); const SDLC_DIR = .sdlc ; const CACHE_FILE_NAME = kb-cache.json ; const PROJECT_CONFIG_FILE_NAME = config.json ; const INTERNAL_LOCK_WAIT_MS = 5000; const INTERNAL_LOCK_STALE_MS = 30000; const INTERNAL_LOCK_REMOTE_STALE_MS = 300000; const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0; const OUTPUT_LINK_MODES = new Set( reuse delta new ); const OUTPUT_DELIVERY_MODES = new Set( artifact artifact-plus-chat-summary ); const OUTPUT_VISUAL_FORMATS = new Set( docx xlsx pdf pptx html ); const OUTPUT_FORMATS = Object.freeze( markdown Object.freeze( label Markdown document extension .md media_type text/markdown generator null ) docx Object.freeze( label Word document extension .docx media_type application/vnd.openxmlformats-officedocument.wordprocessingml.document generator documents "
+      },
+      {
+        "path": "skills/agentic-sdlc/SKILL.md",
+        "sha256": "3547a246321c71f3e170b3a47834f396225baba196783a3d4f528a6fd2e8fc55",
+        "size_bytes": 21757,
+        "excerpt": "--- name agentic-sdlc description Use this skill when a user wants to run a contract-driven agentic SDLC in Codex initialize or maintain a shared project knowledge base create SDLC phase contracts split work into story-scoped parallel tracks validate gates capture decisions/tests/traces or use the Agentic SDLC plugin in a software project. --- # Agentic SDLC ## Purpose Use this skill to operate a stateless contract-driven SDLC for a target project. The plugin contains process templates schemas and CLI automation; all contracts output contracts traces and knowledge base artifacts must be saved inside the target project's `.sdlc/` directory. For a request to contextualize an existing project and produce a technical functional architecture or product assessment load `../agentic-sdlc-assessment/SKILL.md` and follow that dedicated journey. It is the product entry point for assessments and limits the normal user experience to two plain-language checkpoints. Do not expand that request into the generic sequence of separate capability template contract and start questions. ## Core Rule Never store project contracts or project KB state inside the plugin installation. Treat the plugin as reus"
+      },
+      {
+        "path": "test/cli.e2e.mjs",
+        "sha256": "8216220f4903147df231ddd344596af84c7edc7a6e32fe412f4dd86fb8a5472b",
+        "size_bytes": 142370,
+        "excerpt": "import test from node test ; import assert from node assert/strict ; import fs from node fs ; import os from node os ; import path from node path ; import spawn spawnSync from node child_process ; import fileURLToPath from node url ; const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const bin = path.join(repoRoot bin agentic-sdlc.mjs ); function tmpProject(name) return fs.mkdtempSync(path.join(os.tmpdir() `sdlc-$ name -`)); function run(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) delete env key ; Object.assign(env options.env || ); return spawnSync(process.execPath bin ...args cwd options.cwd || repoRoot encoding utf8 env timeout options.timeout || 30_000 maxBuffer 10 * 1024 * 1024 ); function runAsync(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) delete env key ; Object.assign(env options.env || ); return new Promise((resolve reject) => const child = spawn(process.execPath bin ...args cwd options.cwd || repoRoot env ); let stdout = ; let stderr = ; const timeout = setTimeout(() => child."
+      }
+    ],
+    "questions": [
+      {
+        "question": "What original user experience must work?",
+        "answer": "Contextualize an existing project, explain inferred context, agree assessment scope and output in plain language, then autonomously produce and verify the requested artifact.",
+        "status": "answered"
+      },
+      {
+        "question": "How many normal approval checkpoints are acceptable?",
+        "answer": "At most two: project context, then one combined work proposal covering format, scope, evidence, tools, and boundaries.",
+        "status": "answered"
+      },
+      {
+        "question": "Which output formats must be first-class?",
+        "answer": "Markdown, DOCX, XLSX, PDF, PPTX, HTML, JSON, and CSV, with aliases and extension enforcement.",
+        "status": "answered"
+      }
+    ],
+    "constraints": [
+      "Keep the CLI language-agnostic; natural-language interpretation remains in Codex skills.",
+      "Preserve strict governance for installs, external access, secrets, production, destructive actions, and out-of-scope writes.",
+      "Keep implementation generic, configurable, and backward compatible for legacy templates."
+    ],
+    "assumptions": [],
+    "open_questions": 0
+  },
+  "approvals": [
+    {
+      "id": "APR-20260710103010-7c49c5",
+      "contract_id": "contract-ST-PRODUCT-JOURNEY-001-implementation",
+      "status": "approved",
+      "summary": "Approved by Codex under Antonio's persisted authorization for this exact implementation contract and final source set.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "contract-ST-PRODUCT-JOURNEY-001-implementation",
+        "subject_label": "contract contract-ST-PRODUCT-JOURNEY-001-implementation",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+        "approval_level": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories",
+        "allowed_actions": [
+          "output.template.approve",
+          "contract.approve",
+          "task.start.confirm"
+        ],
+        "subject_scope": "whole Agentic SDLC plugin product journey, canonical output formats, local verification, tests, documentation, installation validation, commit, and push; excludes deploys, secrets, production access, destructive external actions, and unrelated repositories"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "authorization_ref": "AUTH-ST-PRODUCT-JOURNEY-001",
+      "authorization_action": "contract.approve",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "40627079fe5c2fbc7b7931fcf1f6901838dfcb9ce43e44308e05d4cdb7d59f26",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-PRODUCT-JOURNEY-001",
+        "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "a.antenore@reply.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.5.0"
+      },
+      "created_at": "2026-07-10T10:30:10.992Z"
+    }
+  ],
+  "created_at": "2026-07-10T10:30:03.770Z",
+  "updated_at": "2026-07-10T10:30:10.992Z",
+  "audit": {
+    "created_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "default"
+    },
+    "updated_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PRODUCT-JOURNEY-001",
+      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.5.0"
+    }
+  }
+}

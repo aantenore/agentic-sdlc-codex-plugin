@@ -1,0 +1,47 @@
+{
+  "story_id": "ST-PRODUCT-JOURNEY-001",
+  "agent": "codex",
+  "branch": "codex/ST-PRODUCT-JOURNEY-001",
+  "status": "released",
+  "claimed_at": "2026-07-10T09:22:58.392Z",
+  "expires_at": null,
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-PRODUCT-JOURNEY-001",
+      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "a.antenore@reply.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.5.0"
+    },
+    "released_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "default"
+    }
+  },
+  "released_at": "2026-07-10T10:31:36.010Z",
+  "release_reason": "Completed implementation; story prepared for handoff"
+}
