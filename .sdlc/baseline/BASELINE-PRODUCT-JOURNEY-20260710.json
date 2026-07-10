@@ -4,13 +4,13 @@
   "sdlc_version": "0.5.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Agentic SDLC 0.5.0 is a Codex plugin for plain-language project contextualization, bounded two-checkpoint assessments, canonical multi-format delivery, scoped delegated authorization, deterministic verification, and traceable Git-first SDLC execution. The implementation includes the CLI, dedicated assessment skill and preset, schemas, tests, doctor, packaging, CI, and release automation.",
+  "summary": "Agentic SDLC 0.5.0 is a Codex plugin for plain-language project contextualization, bounded two-checkpoint assessments, canonical multi-format delivery, exact delegated authorization with explicit approval boundaries, deterministic verification, portable installation, and traceable Git-first SDLC execution. The implementation includes the CLI, assessment skill and preset, schemas, 82-test suite, doctor, installed-tarball validation, cross-platform CI, and matrix-gated release automation.",
   "repository_snapshot": {
     "root_name": "TravelOps",
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-WINDOWS-PORTABILITY-001",
-      "head_sha": "083b3d8381dec224af71785c8ff1a2c5d73c69dc",
+      "branch": "codex/ST-PRODUCT-HARDENING-002",
+      "head_sha": "5c972bfa29b6a4debce88ed9d30bdb76fdc1cfda",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -46,8 +46,8 @@
       },
       {
         "path": ".github/workflows/release.yml",
-        "sha256": "7bc5ce90a0b1c4c9ba80916c43e32dbb82ecba0e4f57a12bf3b02b3549017ccb",
-        "size_bytes": 1318
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
       },
       {
         "path": "package.json",
@@ -56,8 +56,8 @@
       },
       {
         "path": "README.md",
-        "sha256": "75009fa15121b82ae75a4fa41fede726248f9d523eaec660c3dab2f522f677a9",
-        "size_bytes": 10399
+        "sha256": "ae3585ec9595351700eed0c1468ef8163647aaecd17c8ba8bbd0cef7c87816bb",
+        "size_bytes": 10445
       }
     ],
     "package_scripts": {
@@ -88,8 +88,8 @@
       },
       {
         "path": ".github/workflows/release.yml",
-        "sha256": "7bc5ce90a0b1c4c9ba80916c43e32dbb82ecba0e4f57a12bf3b02b3549017ccb",
-        "size_bytes": 1318
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
       }
     ]
   },
@@ -97,8 +97,8 @@
     {
       "type": "document",
       "path": "README.md",
-      "sha256": "75009fa15121b82ae75a4fa41fede726248f9d523eaec660c3dab2f522f677a9",
-      "size_bytes": 10399,
+      "sha256": "ae3585ec9595351700eed0c1468ef8163647aaecd17c8ba8bbd0cef7c87816bb",
+      "size_bytes": 10445,
       "title": "Agentic SDLC Codex Plugin",
       "headings": [
         "Agentic SDLC Codex Plugin",
@@ -141,8 +141,8 @@
     {
       "type": "document",
       "path": "docs/architecture.md",
-      "sha256": "44063a33935bb8a740db945cb157bed74e2a06c92ee7b912df66ad054fe01d46",
-      "size_bytes": 16651,
+      "sha256": "1c32b61a0f547569f91c4a817680dab36f8fa570f45aa9df63c933a1188aa007",
+      "size_bytes": 17410,
       "title": "Architecture",
       "headings": [
         "Architecture",
@@ -163,8 +163,8 @@
     {
       "type": "document",
       "path": "docs/agent-interactions.md",
-      "sha256": "1f8929a4e40faee9ff9c148759fda72f62db7787498ae8e79c9a3680dab8ecb7",
-      "size_bytes": 14335,
+      "sha256": "eaab28639a1b9fd83b3943dd2128da5a6a1055a42d5a9483608166ea0c17b11d",
+      "size_bytes": 15768,
       "title": "Assessment Interactions",
       "headings": [
         "Assessment Interactions",
@@ -207,8 +207,8 @@
     {
       "type": "document",
       "path": "docs/portable-install.md",
-      "sha256": "1c9893ce0a265cbc06d54a7d4927b18a06454db36ecc03151cc70dfb8d290da5",
-      "size_bytes": 8052,
+      "sha256": "29fd6d58fa3706581dea48d4829d2d2348cd4fde9378179ca14f0af26ba4fecd",
+      "size_bytes": 8107,
       "title": "Portable Codex Install",
       "headings": [
         "Portable Codex Install",
@@ -488,16 +488,16 @@
   "source_hashes": {
     ".codex-plugin/plugin.json": "320f02a203fe67d6869fd4624e954b6d6c6ada30c0a8febdd2dd7bc31214a33b",
     ".github/workflows/ci.yml": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
-    ".github/workflows/release.yml": "7bc5ce90a0b1c4c9ba80916c43e32dbb82ecba0e4f57a12bf3b02b3549017ccb",
+    ".github/workflows/release.yml": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
     "LICENSE": "448f6587ec2fe8a826c14e6fef892cf45c9c865cf8ed6c1b6fd2905a9d767d3a",
-    "README.md": "75009fa15121b82ae75a4fa41fede726248f9d523eaec660c3dab2f522f677a9",
-    "docs/agent-interactions.md": "1f8929a4e40faee9ff9c148759fda72f62db7787498ae8e79c9a3680dab8ecb7",
-    "docs/architecture.md": "44063a33935bb8a740db945cb157bed74e2a06c92ee7b912df66ad054fe01d46",
+    "README.md": "ae3585ec9595351700eed0c1468ef8163647aaecd17c8ba8bbd0cef7c87816bb",
+    "docs/agent-interactions.md": "eaab28639a1b9fd83b3943dd2128da5a6a1055a42d5a9483608166ea0c17b11d",
+    "docs/architecture.md": "1c32b61a0f547569f91c4a817680dab36f8fa570f45aa9df63c933a1188aa007",
     "docs/kb-structure.md": "aa02f1c80c199fc190d481e97db2bb0a2552d5e7c2755aa7dd6aab8e16345450",
-    "docs/portable-install.md": "1c9893ce0a265cbc06d54a7d4927b18a06454db36ecc03151cc70dfb8d290da5",
+    "docs/portable-install.md": "29fd6d58fa3706581dea48d4829d2d2348cd4fde9378179ca14f0af26ba4fecd",
     "docs/product-assessment.md": "9838fde0a0022df695b2468f7e8b00bb6fd0b077c652e1322bfef875d20c33fb",
     "package.json": "db5978d667eab1116cee974f50233c53ec032bc3e4803748eee20d9dda1b056c",
-    "schemas/authorization.schema.json": "609f78e94adb85a6d04d67cfceea6932a36b6f1004f948c2ce75b3b8dba51f98",
+    "schemas/authorization.schema.json": "cec3d0b8a3f888cbe7730508390242fc1fcb828b5df7f0cac4ef3e46a3c69ea6",
     "schemas/baseline.schema.json": "d7eb36e7defdd0f1ed35591719ace7d1d6881f8f546e88edadaae11322060f61",
     "schemas/cache.schema.json": "0bc6744e2a29588c666fa39f6c2a376657e4046b96750c08a2b13fcab25c397a",
     "schemas/capability-profile.schema.json": "edb97b3e35d4e274a5d319743439e5f7bf4c4258ba15db73a0d951e367c829a5",
@@ -548,10 +548,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260710125833-d57e3e",
+      "id": "APR-20260710143331-686145",
       "baseline_id": "BASELINE-PRODUCT-JOURNEY-20260710",
       "status": "approved",
-      "summary": "Approved by Codex under Antonio's persisted whole-product authorization after Windows portability fixes passed the targeted local suite.",
+      "summary": "Approved by Codex under Antonio's persisted whole-product authorization after the final 82-test suite and all source, package, plugin, skill, Python, and workflow validators passed.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "BASELINE-PRODUCT-JOURNEY-20260710",
@@ -575,7 +575,7 @@
       "authorization_action": "baseline.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "80a2a5d6edb02d84703b3313c0effc444b9d5ed5245f5936806271d892767014",
+      "approved_content_hash": "f98d35bcdd0cd88001fbb4b710e7a032c2163812a89e10d957cadea6d9acaf96",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -586,8 +586,8 @@
       },
       "git": {
         "is_git_repo": true,
-        "branch": "codex/ST-WINDOWS-PORTABILITY-001",
-        "head_sha": "083b3d8381dec224af71785c8ff1a2c5d73c69dc",
+        "branch": "codex/ST-PRODUCT-HARDENING-002",
+        "head_sha": "5c972bfa29b6a4debce88ed9d30bdb76fdc1cfda",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -604,11 +604,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.5.0"
       },
-      "created_at": "2026-07-10T12:58:33.120Z"
+      "created_at": "2026-07-10T14:33:31.035Z"
     }
   ],
-  "created_at": "2026-07-10T12:57:34.934Z",
-  "updated_at": "2026-07-10T12:58:33.120Z",
+  "created_at": "2026-07-10T14:33:24.218Z",
+  "updated_at": "2026-07-10T14:33:31.035Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -619,8 +619,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-WINDOWS-PORTABILITY-001",
-      "head_sha": "083b3d8381dec224af71785c8ff1a2c5d73c69dc",
+      "branch": "codex/ST-PRODUCT-HARDENING-002",
+      "head_sha": "5c972bfa29b6a4debce88ed9d30bdb76fdc1cfda",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

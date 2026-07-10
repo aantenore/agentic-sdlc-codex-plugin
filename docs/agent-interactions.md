@@ -28,6 +28,8 @@ A normal low-risk assessment has at most two user checkpoints:
 
 Internal context, tool, output, work-brief, and routing records are implementation details. Prepare them behind these two plain-language decisions instead of exposing one approval per record.
 
+When project context is still proposed or stale, `approval requests` returns only that context decision. Format, capability, contract, and start decisions cannot leak into checkpoint 1. After context is approved, checkpoint 2 may present the represented work records as one combined bundle.
+
 An additional decision is allowed only when the work cannot continue inside the approved proposal, such as a new installation, external or production access, secrets, a destructive action, a write outside the displayed paths, or a material change to scope, format, evidence, or tools.
 
 ## Checkpoint 1: Project Context
@@ -128,6 +130,8 @@ Verify that:
 
 DOCX, XLSX, PDF, PPTX, and HTML require at least one render or visual-check evidence file when linking the output. Store evidence inside the project, but not under `.sdlc/cache/` or `.sdlc/indexes/`:
 
+The evidence must be a separate file from the delivered artifact. Passing the artifact itself, including through a symlink alias, is rejected both when linking and during strict-gate revalidation.
+
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs output link \
   --root <target-project> \
@@ -204,6 +208,10 @@ node <plugin-root>/bin/agentic-sdlc.mjs authorization grant \
 ```
 
 Then cite that persistent ID on every covered automation approval:
+
+The CLI enforces every non-empty authorization dimension together: action, exact subject, artifact type, expiry, approved authorization hash, and declared scope. Contract approval and task-start confirmation inherit artifact types from the contract output references. Strict gates repeat these checks and reject a receipt or approval whose authorization no longer covers the same work.
+
+`task start` also requires the explicit `--story`, normalized intent story, selected contract, and `contract.story_id` to agree. Bootstrap-only, revoked, expired, stale, or incorrectly attributed approvals cannot start normal work. Capability installation remains outside delegated automation even when the automation actor is CI. Any other contract boundary declared through `approval_required_for` is excluded unless the direct authorization grant names that exact boundary with `--allow-boundary`; an omitted boundary is never inferred from free text.
 
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs contract approve \

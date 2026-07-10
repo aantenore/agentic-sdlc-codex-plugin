@@ -33,7 +33,7 @@ The npm `files` allowlist defines the package surface. Project-specific `.sdlc/`
 
 - Codex with the `codex plugin` command group.
 - Node.js 18.18 or newer for `bin/agentic-sdlc.mjs`.
-- Python 3 for the repository staging installer.
+- Python 3.8 or newer for the repository staging installer.
 - A source checkout outside the generated `~/plugins/agentic-sdlc-codex-plugin` destination.
 
 Use `python3`, `python`, or `py -3` according to the Python 3 launcher available on the machine.
@@ -72,7 +72,7 @@ The script:
 4. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
 5. preserves unrelated marketplace entries.
 
-The script honors `HOME`. It refuses to replace a symlink, Git checkout, source checkout, or directory with unmanaged top-level content and leaves that destination untouched for inspection.
+The script honors `HOME`. It refuses to traverse or replace a symlink, Windows junction/reparse point, Git checkout, source checkout, or directory with unmanaged top-level content and leaves that destination untouched for inspection.
 
 Treat the generated tree under `~/plugins` as installation output. Do not clone into it, symlink it to the source, or update it with Git.
 

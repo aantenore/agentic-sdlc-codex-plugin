@@ -1,10 +1,10 @@
 {
-  "id": "STEP-ST-PRODUCT-JOURNEY-001-implementation-20260710130048403-a519ed",
+  "id": "STEP-ST-PRODUCT-JOURNEY-001-implementation-20260710143405468-88ab4d",
   "story_id": "ST-PRODUCT-JOURNEY-001",
   "step": "implementation",
   "status": "completed",
   "phase": "implementation",
-  "summary": "Completed Windows portability corrections for canonical contract paths, POSIX-only permission rollback testing, and portable npm execution; targeted regressions and all static/package/plugin validators pass.",
+  "summary": "Completed final product hardening audit: exact delegated governance with explicit approval boundaries, task identity consistency, independent evidence, cross-platform identifiers and paths, junction-safe installer, real packaged-install validation, and matrix-gated releases; 82 local tests pass.",
   "output_types": [
     "implementation-summary"
   ],
@@ -25,12 +25,12 @@
   "evidence": [
     {
       "path": ".sdlc/tests/TEST-0.5.0-product-journey.json",
-      "sha256": "2b443903db02cf616b9873fc0a3df195c252ffeb59fc0ff18648962550258e65",
+      "sha256": "10f9d40094069ea5ba5223e34ee5a95e9ff8b96c0d443cac5c3079e0574fb618",
       "hash_algorithm": "sha256:file:v1"
     }
   ],
   "next_step": "validation",
-  "completed_at": "2026-07-10T13:00:48.406Z",
+  "completed_at": "2026-07-10T14:34:05.468Z",
   "audit": {
     "completed_by": {
       "id": "codex",
@@ -41,8 +41,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-WINDOWS-PORTABILITY-001",
-      "head_sha": "083b3d8381dec224af71785c8ff1a2c5d73c69dc",
+      "branch": "codex/ST-PRODUCT-HARDENING-002",
+      "head_sha": "5c972bfa29b6a4debce88ed9d30bdb76fdc1cfda",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

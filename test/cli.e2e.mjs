@@ -74,6 +74,10 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+function readJsonLines(filePath) {
+  return fs.readFileSync(filePath, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -109,6 +113,7 @@ function delegatedAutomationApproval(
 function grantAutomationAuthorization(project, id, actions, options = {}) {
   const scope = options.scope || delegatedApprovalScope;
   const artifactTypes = options.artifactTypes || [];
+  const boundaries = options.boundaries || [];
   const subjects = options.subjects || [];
   const granted = JSON.parse(mustRun([
     "authorization",
@@ -123,6 +128,7 @@ function grantAutomationAuthorization(project, id, actions, options = {}) {
     options.summary || `Delegate ${actions.join(", ")} within ${scope}`,
     ...actions.flatMap((action) => ["--allow-action", action]),
     ...artifactTypes.flatMap((type) => ["--allow-artifact-type", type]),
+    ...boundaries.flatMap((boundary) => ["--allow-boundary", boundary]),
     ...subjects.flatMap((subject) => ["--allow-subject", subject]),
     "--actor-type",
     "human",
@@ -444,11 +450,50 @@ test("formal approvals require explicit source and summary or evidence", () => {
     /requires --summary or --approval-evidence/,
   );
   mustRun(["contract", "approve", "--root", project, "--id", "contract-approval-policy", ...humanApproval("Explicitly approved")]);
+  const approvalTrace = readJsonLines(path.join(project, ".sdlc", "traces", "project.jsonl"))
+    .find((event) => event.action === "contract.approve");
+  assert.deepEqual(approvalTrace.evidence, [".sdlc/contracts/contract-approval-policy.json"]);
 });
 
 test("delegated automation approvals require persistent action and scope authorization", () => {
   const project = tmpProject("delegated-approval");
   initProject(project);
+  mustFail([
+    "authorization",
+    "grant",
+    "--root",
+    project,
+    "--id",
+    "AUTH-BAD-CI-PROVENANCE",
+    "--scope",
+    "test",
+    "--summary",
+    "Mismatched provenance",
+    "--allow-action",
+    "contract.approve",
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "ci",
+  ], /approval_source ci require --actor-type ci/);
+  mustFail([
+    "authorization",
+    "grant",
+    "--root",
+    project,
+    "--id",
+    "AUTH-BAD-USER-PROVENANCE",
+    "--scope",
+    "test",
+    "--summary",
+    "Mismatched provenance",
+    "--allow-action",
+    "contract.approve",
+    "--actor-type",
+    "ci",
+    "--approval-source",
+    "explicit-user",
+  ], /approval_source explicit-user require --actor-type human/);
   story(project, "ST-001", ["--contract", "contract-ST-001-implementation"]);
   const authorization = grantAutomationAuthorization(
     project,
@@ -470,6 +515,36 @@ test("delegated automation approvals require persistent action and scope authori
     "AUTH-WRONG-SUBJECT",
     ["output.template.approve"],
     { artifactTypes: ["implementation-summary"], subjects: ["another-template"] },
+  );
+  const wrongContractArtifactAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-WRONG-CONTRACT-ARTIFACT",
+    ["contract.approve"],
+    {
+      artifactTypes: ["technical-analysis"],
+      subjects: ["contract-ST-001-implementation"],
+    },
+  );
+  const wrongStartArtifactAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-WRONG-START-ARTIFACT",
+    ["task.start.confirm"],
+    { artifactTypes: ["technical-analysis"], subjects: ["ST-001"] },
+  );
+  const riskyContractAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-RISKY-CONTRACT",
+    ["contract.approve"],
+    { subjects: ["contract-risky-implementation"] },
+  );
+  const boundedRiskyContractAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-BOUNDED-RISKY-CONTRACT",
+    ["contract.approve"],
+    {
+      subjects: ["contract-risky-implementation"],
+      boundaries: ["production:write"],
+    },
   );
   const authorizationPath = path.join(project, ".sdlc", "authorizations", "AUTH-DELEGATED-ASSESSMENT.json");
   assert.equal(fs.existsSync(authorizationPath), true);
@@ -600,6 +675,58 @@ test("delegated automation approvals require persistent action and scope authori
   assert.equal(template.authorization_action, "output.template.approve");
   assert.equal(template.approval_scope.delegated_approval, true);
   assert.equal(template.approval_scope.approval_level, "technical assessment workbook, read-only repo analysis");
+  assert.deepEqual(template.approval_scope.artifact_types, ["implementation-summary"]);
+
+  template.authorization_ref = wrongSubjectAuthorization.id;
+  writeJson(path.join(project, ".sdlc", "output-contracts", "registry.json"), registry);
+  const tamperedTemplateGate = JSON.parse(run([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--strict",
+    "--json",
+  ]).stdout);
+  assert.ok(tamperedTemplateGate.errors.some(
+    (error) => error.includes("does not allow subject implementation-summary-v1"),
+  ));
+  template.authorization_ref = authorization.id;
+  writeJson(path.join(project, ".sdlc", "output-contracts", "registry.json"), registry);
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--id",
+    "contract-risky-implementation",
+    "--context-summary",
+    "This contract crosses a boundary that requires a direct decision.",
+    "--qa",
+    "Who approves production access?|A human or direct CI decision",
+    "--capability-policy-json",
+    JSON.stringify({ approval_required_for: ["production:write"] }),
+  ]);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-risky-implementation",
+    ...delegatedAutomationApproval(undefined, undefined, riskyContractAuthorization.id),
+  ], /does not allow approval boundary production:write/);
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-risky-implementation",
+    ...delegatedAutomationApproval(undefined, undefined, boundedRiskyContractAuthorization.id),
+  ]);
 
   mustRun([
     "contract",
@@ -636,6 +763,18 @@ test("delegated automation approvals require persistent action and scope authori
     ],
     /requires --summary or --approval-evidence/,
   );
+  mustFail(
+    [
+      "contract",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "contract-ST-001-implementation",
+      ...delegatedAutomationApproval(undefined, undefined, wrongContractArtifactAuthorization.id),
+    ],
+    /does not allow artifact type implementation-summary/,
+  );
   mustRun([
     "contract",
     "approve",
@@ -659,7 +798,7 @@ test("delegated automation approvals require persistent action and scope authori
   const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
   const storyData = readJson(storyPath);
   writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
-  const started = JSON.parse(mustRun([
+  const startArguments = [
     "task",
     "start",
     "--root",
@@ -672,12 +811,37 @@ test("delegated automation approvals require persistent action and scope authori
       proposed_phase: "implementation",
     }),
     "--confirm-start",
+  ];
+  mustFail(
+    [...startArguments, "--authorization", wrongStartArtifactAuthorization.id],
+    /does not allow artifact type implementation-summary/,
+  );
+  const started = JSON.parse(mustRun([
+    ...startArguments,
     "--authorization",
     authorization.id,
   ]).stdout);
   assert.equal(started.status, "ready_to_execute");
   assert.equal(started.execution_allowed, true);
   assert.equal(started.contract_id, "contract-ST-001-implementation");
+
+  const taskStartPath = path.join(project, ".sdlc", "stories", "ST-001", "task-start.json");
+  const taskStartReceipt = readJson(taskStartPath);
+  writeJson(taskStartPath, { ...taskStartReceipt, authorization_ref: wrongStartArtifactAuthorization.id });
+  const tamperedStartGate = JSON.parse(run([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--strict",
+    "--json",
+  ]).stdout);
+  assert.ok(tamperedStartGate.errors.some(
+    (error) => error.includes("does not allow artifact type implementation-summary"),
+  ));
+  writeJson(taskStartPath, taskStartReceipt);
 
   const strictGateResult = run(["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--json"]);
   assert.notEqual(strictGateResult.status, 0, "The output is not linked yet, so the strict gate should still fail.");
@@ -687,6 +851,26 @@ test("delegated automation approvals require persistent action and scope authori
     false,
     `Delegated template approval lost its authorization during gate validation: ${strictGate.errors.join("; ")}`,
   );
+  mustRun([
+    "authorization",
+    "revoke",
+    "--root",
+    project,
+    "--id",
+    authorization.id,
+    "--actor-type",
+    "human",
+    "--reason",
+    "Delegation withdrawn",
+  ]);
+  const revokedApprovalStart = JSON.parse(mustRun([
+    ...startArguments,
+    "--authorization",
+    wrongStartArtifactAuthorization.id,
+  ]).stdout);
+  assert.equal(revokedApprovalStart.execution_allowed, false);
+  assert.equal(revokedApprovalStart.status, "needs_user_input");
+  assert.notEqual(revokedApprovalStart.status, "ready_to_execute");
 });
 
 test("output delivery canonicalizes Excel and verifies OOXML evidence before linking", () => {
@@ -864,6 +1048,24 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
       ].join(""),
     },
   );
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    workbook,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--evidence",
+    workbook,
+  ], /evidence must be a separate render or inspection record/);
   const linked = JSON.parse(mustRun([
     "output",
     "link",
@@ -911,6 +1113,27 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
   const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
   const storedLink = registry.links.find((item) => item.id === linked.link.id);
   assert.deepEqual(storedLink.verification_receipt, linked.link.verification_receipt);
+  const originalEvidence = storedLink.verification_receipt.evidence;
+  storedLink.verification_receipt.evidence = [{
+    path: workbook,
+    sha256: storedLink.verification_receipt.artifact_sha256,
+  }];
+  writeJson(path.join(project, ".sdlc", "output-contracts", "registry.json"), registry);
+  const selfEvidenceGate = JSON.parse(run([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--strict",
+    "--json",
+  ]).stdout);
+  assert.ok(selfEvidenceGate.errors.some(
+    (error) => error.includes("verification evidence must be separate from the output artifact"),
+  ));
+  storedLink.verification_receipt.evidence = originalEvidence;
+  writeJson(path.join(project, ".sdlc", "output-contracts", "registry.json"), registry);
   const status = JSON.parse(mustRun([
     "output",
     "status",
@@ -959,7 +1182,21 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   assert.ok(onboard.baseline.imported_documents.some((document) => document.path === "README.md"));
   assert.ok(onboard.baseline.repository_snapshot.detected_stack.some((item) => item.name === "package-json"));
 
+  mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "technical-analysis",
+    "--id",
+    "technical-analysis-v1",
+    "--summary",
+    "This later decision must not leak into the context checkpoint.",
+  ]);
   const pendingApprovals = JSON.parse(mustRun(["approval", "requests", "--root", project, "--json"]).stdout);
+  assert.deepEqual(Array.from(new Set(pendingApprovals.requests.map((request) => request.type))), ["baseline_approval"]);
   const baselineRequest = pendingApprovals.requests.find((request) => request.type === "baseline_approval");
   assert.ok(baselineRequest);
   assert.ok(baselineRequest.review_items.some((item) => /Documents I read: README\.md/.test(item)));
@@ -1355,6 +1592,35 @@ test("unsafe config directories and symlink context escapes are blocked", () => 
   );
 });
 
+test("portable IDs reject Windows device names while valid dotted paths stay inside the project", () => {
+  const project = tmpProject("portable-identifiers");
+  initProject(project);
+  for (const id of ["CON", "lpt1.audit", "story."]) {
+    mustFail(
+      ["story", "create", "--root", project, "--id", id, "--title", "Portable story", "--acceptance", "Portable"],
+      /Invalid id/,
+    );
+  }
+
+  const contextFile = writeArtifact(project, "..context/portable.md", "# Portable context\n");
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-portable-context",
+    "--context-summary",
+    "Use a valid project directory whose name starts with two periods.",
+    "--context-file",
+    contextFile,
+    "--qa",
+    "Is the context inside the project?|Yes",
+  ]);
+});
+
 test("test and release traces require real canonical evidence in strict mode", () => {
   const project = tmpProject("trace-evidence");
   initProject(project);
@@ -1367,7 +1633,8 @@ test("test and release traces require real canonical evidence in strict mode", (
 
   const evidence = writeArtifact(project, ".sdlc/tests/ST-001-test-run.json", "{}\n");
   fs.rmSync(path.join(project, ".sdlc", "traces", "ST-001.jsonl"));
-  mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "test", "--summary", "Tests passed", "--evidence", evidence]);
+  mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "test", "--summary", "Tests passed", "--evidence", evidence.replaceAll("/", "\\")]);
+  assert.deepEqual(readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl"))[0].evidence, [evidence]);
   writeJson(storyPath, { ...storyData, phase: "release", status: "release" });
   mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "release", "--summary", "Release ready"]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /release.*requires at least one evidence path/);
@@ -1410,6 +1677,7 @@ test("handoff open items block strict gate and handoff close clears them", () =>
   const project = tmpProject("handoff");
   initProject(project);
   createStrictReadyStory(project, "ST-001");
+  const handoffArtifact = writeArtifact(project, "docs/handoff-artifact.md", "# Handoff artifact\n");
   mustRun([
     "story",
     "handoff",
@@ -1419,11 +1687,15 @@ test("handoff open items block strict gate and handoff close clears them", () =>
     "ST-001",
     "--to-agent",
     "validation-agent",
+    "--artifact",
+    handoffArtifact.replaceAll("/", "\\"),
     "--open-item",
     "Need reviewer",
   ]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /has open items/);
-  const handoffId = readJson(path.join(project, ".sdlc", "handoffs", fs.readdirSync(path.join(project, ".sdlc", "handoffs"))[0])).id;
+  const handoffRecord = readJson(path.join(project, ".sdlc", "handoffs", fs.readdirSync(path.join(project, ".sdlc", "handoffs"))[0]));
+  const handoffId = handoffRecord.id;
+  assert.deepEqual(handoffRecord.required_artifacts, [handoffArtifact]);
   mustRun(["story", "handoff", "close", "--root", project, "--id", handoffId, "--status", "closed"]);
   mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
 });
@@ -1867,6 +2139,12 @@ test("install-required capability recommendation blocks strict gate without inst
     "--capability-recommendation",
     "CAP-REC-INSTALL",
   ], /without install approval/);
+  const installAutomationAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-CI-INSTALL-AUTOMATION",
+    ["capability.approve"],
+    { subjects: ["CAP-REC-INSTALL"] },
+  );
   mustFail([
     "capability",
     "approve",
@@ -1876,6 +2154,25 @@ test("install-required capability recommendation blocks strict gate without inst
     "CAP-REC-INSTALL",
     "--approve-install",
     ...delegatedAutomationApproval("Delegated analysis approval does not include installing capabilities"),
+  ], /delegated automation cannot expand into installs/);
+  mustFail([
+    "capability",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-INSTALL",
+    "--approve-install",
+    "--actor-type",
+    "ci",
+    "--approval-source",
+    "automation",
+    "--authorization",
+    installAutomationAuthorization.id,
+    "--scope",
+    delegatedApprovalScope,
+    "--summary",
+    "CI automation may not expand into an installation",
   ], /delegated automation cannot expand into installs/);
   const notInstalled = readJson(path.join(project, ".sdlc", "capability-discovery", "recommendations", "CAP-REC-INSTALL.json"));
   assert.equal(notInstalled.recommendations[0].install_approved, false);
@@ -2284,12 +2581,52 @@ test("task start is the SDLC front door before phase work", () => {
   const storyPath = path.join(readyProject, ".sdlc", "stories", "ST-001", "story.json");
   const storyData = readJson(storyPath);
   writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
+  story(readyProject, "ST-002", ["--contract", "contract-ST-001-implementation"]);
+  const secondStoryPath = path.join(readyProject, ".sdlc", "stories", "ST-002", "story.json");
+  writeJson(secondStoryPath, { ...readJson(secondStoryPath), status: "ready", phase: "implementation" });
 
   const intent = routeIntent({
     requested_action: "implement_story",
     referenced_entities: [{ type: "story", id: "ST-001" }],
     proposed_phase: "implementation",
   });
+  const conflictingStory = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--story",
+    "ST-002",
+    "--intent-json",
+    intent,
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(conflictingStory.execution_allowed, false);
+  assert.ok(conflictingStory.blocking_reasons.includes("story_reference_mismatch"));
+
+  const wrongStoryContract = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    readyProject,
+    "--json",
+    "--story",
+    "ST-002",
+    "--contract-id",
+    "contract-ST-001-implementation",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-002" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(wrongStoryContract.execution_allowed, false);
+  assert.equal(wrongStoryContract.contract_action, "revise_contract");
+  assert.ok(wrongStoryContract.blocking_reasons.includes("contract_story_mismatch"));
+
   const unconfirmed = JSON.parse(mustRun([
     "task",
     "start",
@@ -2370,6 +2707,66 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(revision.status, "contract_revision_required");
   assert.equal(revision.execution_allowed, false);
   assert.equal(revision.contract_action, "revise_contract");
+});
+
+test("task start rejects a bootstrap-only contract approval", () => {
+  const project = tmpProject("task-start-bootstrap-contract");
+  initProject(project);
+  story(project, "ST-BOOT", ["--contract", "contract-ST-BOOT-implementation"]);
+  createApprovedTemplate(project, "implementation-summary");
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-BOOT",
+    "--id",
+    "contract-ST-BOOT-implementation",
+    "--context-summary",
+    "Bootstrap approvals cannot start normal work.",
+    "--qa",
+    "Who must approve?|The user or CI",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-BOOT-implementation",
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "bootstrap",
+    "--summary",
+    "Migration-only bootstrap approval",
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-BOOT", "story.json");
+  writeJson(storyPath, { ...readJson(storyPath), status: "ready", phase: "implementation" });
+  const blocked = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--json",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-BOOT" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+    "--actor-type",
+    "human",
+  ]).stdout);
+  assert.equal(blocked.execution_allowed, false);
+  assert.equal(blocked.status, "needs_user_input");
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-BOOT", "task-start.json")), false);
 });
 
 test("task start blocks when an approved contract source changes", () => {
@@ -3854,6 +4251,23 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
     assert.equal(fs.readFileSync(rollbackSentinel, "utf8"), "restore me\n");
   }
 
+  if (process.platform === "win32") {
+    const junctionHome = tmpProject("personal-installer-junction-home");
+    const externalPlugins = tmpProject("personal-installer-junction-target");
+    const sentinel = path.join(externalPlugins, "sentinel.txt");
+    fs.writeFileSync(sentinel, "do not replace\n");
+    fs.symlinkSync(externalPlugins, path.join(junctionHome, "plugins"), "junction");
+    const junctionInstall = spawnSync(python, [installer], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: junctionHome },
+      timeout: 30_000,
+    });
+    assert.notEqual(junctionInstall.status, 0);
+    assert.match(junctionInstall.stderr, /symlinked or junction/i);
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "do not replace\n");
+  }
+
   fs.writeFileSync(path.join(destination, "unmanaged.txt"), "do not delete\n");
   const refused = install();
   assert.notEqual(refused.status, 0);
@@ -3951,7 +4365,12 @@ test("schemas and JSON templates parse with portable local references", () => {
   assert.ok(outputLinkSchema.$defs.verification_receipt.required.includes("artifact_sha256"));
   const authorizationSchema = readJson(path.join(repoRoot, "schemas", "authorization.schema.json"));
   assert.ok(authorizationSchema.required.includes("allowed_actions"));
+  assert.equal(authorizationSchema.properties.allowed_approval_boundaries.type, "array");
   assert.equal(authorizationSchema.properties.hash_algorithm.const, "sha256:stable-json:v1");
+  const releaseWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+  assert.match(releaseWorkflow, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
+  assert.match(releaseWorkflow, /node: \[18\.18\.0, 20, 24\]/);
+  assert.match(releaseWorkflow, /package:\n\s+needs: verify/);
 });
 
 function collectJsonSchemaReferences(value, references = []) {
@@ -3973,17 +4392,23 @@ function collectJsonSchemaReferences(value, references = []) {
   return references;
 }
 
-test("npm package contains only reusable plugin files", () => {
-  const npmArguments = ["pack", "--dry-run", "--json", "--ignore-scripts"];
-  const npmCommand = process.env.npm_execpath ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
-  const commandArguments = process.env.npm_execpath
-    ? [process.env.npm_execpath, ...npmArguments]
-    : npmArguments;
-  const packed = spawnSync(npmCommand, commandArguments, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    shell: process.platform === "win32" && !process.env.npm_execpath,
-  });
+test("npm package installs as a complete reusable plugin", () => {
+  const invokeNpm = (args, cwd = repoRoot) => {
+    const npmCommand = process.env.npm_execpath
+      ? process.execPath
+      : process.platform === "win32" ? "npm.cmd" : "npm";
+    const commandArguments = process.env.npm_execpath
+      ? [process.env.npm_execpath, ...args]
+      : args;
+    return spawnSync(npmCommand, commandArguments, {
+      cwd,
+      encoding: "utf8",
+      shell: process.platform === "win32" && !process.env.npm_execpath,
+      timeout: 60_000,
+    });
+  };
+  const packageRoot = tmpProject("npm-package-install");
+  const packed = invokeNpm(["pack", "--json", "--ignore-scripts", "--pack-destination", packageRoot]);
   assert.equal(packed.status, 0, `npm pack failed\nSTDOUT:\n${packed.stdout}\nSTDERR:\n${packed.stderr}`);
   const payload = JSON.parse(packed.stdout);
   const files = payload[0].files.map((entry) => entry.path);
@@ -3993,4 +4418,27 @@ test("npm package contains only reusable plugin files", () => {
   assert.equal(files.some((file) => file === ".sdlc" || file.startsWith(".sdlc/")), false);
   assert.equal(files.some((file) => file === "test" || file.startsWith("test/")), false);
   assert.equal(files.some((file) => file.endsWith(".DS_Store")), false);
+
+  const archivePath = path.join(packageRoot, payload[0].filename);
+  const installRoot = path.join(packageRoot, "installed");
+  const installed = invokeNpm([
+    "install",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--prefix",
+    installRoot,
+    archivePath,
+  ], packageRoot);
+  assert.equal(installed.status, 0, `npm install failed\nSTDOUT:\n${installed.stdout}\nSTDERR:\n${installed.stderr}`);
+  const installedPluginRoot = path.join(installRoot, "node_modules", "agentic-sdlc-codex-plugin");
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "templates", "sdlc-config.json")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
+  const installedDoctor = spawnSync(
+    process.execPath,
+    [path.join(installedPluginRoot, "bin", "agentic-sdlc.mjs"), "doctor", "--root", packageRoot, "--json"],
+    { cwd: packageRoot, encoding: "utf8", timeout: 30_000 },
+  );
+  assert.equal(installedDoctor.status, 0, `installed doctor failed\n${installedDoctor.stdout}\n${installedDoctor.stderr}`);
+  assert.equal(JSON.parse(installedDoctor.stdout).status, "passed");
 });

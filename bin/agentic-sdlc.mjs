@@ -245,6 +245,7 @@ const KNOWN_OPTIONS = new Set([
   "extension",
   "allow-action",
   "allow-artifact-type",
+  "allow-boundary",
   "allow-subject",
   "trace-limit",
   "type",
@@ -257,6 +258,7 @@ const REPEATABLE_OPTIONS = new Set([
   "approval-evidence",
   "allow-action",
   "allow-artifact-type",
+  "allow-boundary",
   "allow-subject",
   "artifact",
   "assumption",
@@ -900,11 +902,15 @@ function startTask(context, options) {
   const decision = buildTaskStartDecision(context, options);
   if (decision.execution_allowed && options["confirm-start"]) {
     const attribution = buildAttribution(context, options, "task.start.confirm");
+    const taskContract = decision.contract_id
+      ? readContractById(context, decision.contract_id, { missingOk: true })
+      : null;
     const authorization = attribution.actor.type === "human"
       ? null
       : requireAutomationAuthorization(context, options, attribution.action, {
           label: `task start${decision.story_id ? ` for ${decision.story_id}` : ""}`,
           subject_id: decision.story_id || "PROJECT",
+          artifact_types: contractArtifactTypes(taskContract || {}),
         });
     const trace = appendTraceEvent(context, decision.story_id || null, {
       type: "decision",
@@ -951,7 +957,11 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
 function buildTaskStartDecision(context, options) {
   const routeDecision = buildRouteDecision(context, options);
   const policy = getRoutingPolicy(context);
-  const storyId = routeDecision.intent ? routeStoryId(routeDecision.intent, policy) : null;
+  const intentStoryId = routeDecision.intent ? routeStoryId(routeDecision.intent, policy) : null;
+  const explicitStoryId = getOptionString(options, "story")
+    ? normalizeId(getOptionString(options, "story"))
+    : null;
+  const storyId = explicitStoryId || intentStoryId;
   const phase = inferTaskPhase(routeDecision, options);
   const explicitContractId = getOptionString(options, "contract-id") ||
     (routeDecision.intent ? routeEntityId(routeDecision.intent, policy, "contract") : null);
@@ -980,6 +990,21 @@ function buildTaskStartDecision(context, options) {
   pushAllUnique(result.questions, routeDecision.questions);
   pushAllUnique(result.next_commands, routeDecision.next_commands);
 
+  if (explicitStoryId && intentStoryId && explicitStoryId !== intentStoryId) {
+    result.status = "needs_user_input";
+    result.contract_action = "normalize_request";
+    pushAllUnique(result.blocking_reasons, ["story_reference_mismatch"]);
+    pushAllUnique(result.questions, [
+      `The command names story ${explicitStoryId}, but the normalized request names ${intentStoryId}. Confirm the one story this task should use.`,
+    ]);
+    result.deterministic_checks.push({
+      check: "story_reference_consistency",
+      status: "failed",
+      details: `${explicitStoryId} != ${intentStoryId}`,
+    });
+    return dedupeTaskStartDecision(result);
+  }
+
   if (routeDecision.route === "ask_clarification" || routeDecision.status === "needs_normalization") {
     result.status = routeDecision.status === "needs_normalization" ? "needs_normalization" : "needs_user_input";
     result.contract_action = "normalize_request";
@@ -1000,6 +1025,27 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.blocking_reasons, [`${routeDecision.route}_required`]);
     pushAllUnique(result.questions, ["Complete the project baseline step before starting phase work."]);
     return dedupeTaskStartDecision(result);
+  }
+
+  if (explicitContractId && storyId) {
+    const explicitContract = readContractById(context, explicitContractId, { missingOk: true });
+    if (explicitContract && explicitContract.story_id !== storyId) {
+      result.status = "contract_revision_required";
+      result.contract_action = "revise_contract";
+      result.contract_id = explicitContract.id;
+      result.contract = summarizeTaskContract(context, explicitContract);
+      pushAllUnique(result.blocking_reasons, ["contract_story_mismatch"]);
+      pushAllUnique(result.questions, [
+        `Contract ${explicitContract.id} belongs to ${explicitContract.story_id || "the project"}, not story ${storyId}. Select or create a contract bound to the requested story.`,
+      ]);
+      result.deterministic_checks.push({
+        check: "contract_story_consistency",
+        status: "failed",
+        details: `${explicitContract.story_id || "PROJECT"} != ${storyId}`,
+      });
+      pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, null));
+      return dedupeTaskStartDecision(result);
+    }
   }
 
   if (routeDecision.route === "confirm_phase_skip") {
@@ -1060,6 +1106,22 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.questions, [contractNegotiationQuestion(phase, storyId)]);
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, explicitContractId));
     result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (storyId && contractState.contract.story_id !== storyId) {
+    result.status = "contract_revision_required";
+    result.contract_action = "revise_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_story_mismatch"]);
+    pushAllUnique(result.questions, [
+      `Contract ${contractState.contract.id} belongs to ${contractState.contract.story_id || "the project"}, not story ${storyId}. Select or create a contract bound to the requested story.`,
+    ]);
+    result.deterministic_checks.push({
+      check: "contract_story_consistency",
+      status: "failed",
+      details: `${contractState.contract.story_id || "PROJECT"} != ${storyId}`,
+    });
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, null));
     return dedupeTaskStartDecision(result);
   }
 
@@ -1294,8 +1356,29 @@ function isTaskContractApproved(context, contract) {
   return (
     contract.status === "approved" &&
     hasFreshApprovedContractApproval(contract) &&
+    contractApprovalGovernanceErrors(context, contract).length === 0 &&
     collectContractDependencyFreshnessGaps(context, contract).length === 0
   );
+}
+
+function contractApprovalGovernanceErrors(context, contract) {
+  const approval = latestContractApproval(contract);
+  if (!approval) {
+    return ["Contract has no approval record"];
+  }
+  const report = { strict: true, errors: [], warnings: [] };
+  validateFormalApprovalRecord(
+    context,
+    report,
+    approval,
+    `contract ${contract.id || "unknown"} approval ${approval.id || "unknown"}`,
+    approval.approved_by,
+    {
+      subject_id: contract.id || null,
+      artifact_types: contractArtifactTypes(contract),
+    },
+  );
+  return report.errors;
 }
 
 function contractNegotiationQuestion(phase, storyId) {
@@ -2298,7 +2381,8 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
   const requiresStartReceipt = refs.some((ref) =>
     (registry?.templates || []).some((template) => template.id === ref.template_id && template.preset === "technical-assessment"),
   );
-  if (requiresStartReceipt) {
+  const taskStartReceiptPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+  if (requiresStartReceipt || fs.existsSync(taskStartReceiptPath)) {
     for (const issue of validateTaskStartReceipt(context, storyId, contract)) {
       errors.push(issue);
     }
@@ -2352,8 +2436,13 @@ function validateTaskStartReceipt(context, storyId, contract) {
   }
   if (receipt.authorization_ref) {
     const authorization = readAuthorization(context, receipt.authorization_ref, { missingOk: true });
-    if (!authorization || authorization.status !== "active" || !authorizationAllowsAction(authorization, "task.start.confirm")) {
-      issues.push(`task-start receipt authorization ${receipt.authorization_ref} is missing, inactive, or does not allow task.start.confirm`);
+    if (!authorization) {
+      issues.push(`task-start receipt authorization ${receipt.authorization_ref} is missing`);
+    } else {
+      issues.push(...authorizationUseErrors(authorization, "task.start.confirm", {
+        subject_id: storyId,
+        artifact_types: contractArtifactTypes(contract),
+      }).map((error) => `task-start receipt: ${error}`));
     }
   } else if (receipt.confirmed_by?.type !== "human") {
     issues.push("task-start receipt is neither directly human-confirmed nor backed by delegated authorization");
@@ -3105,6 +3194,12 @@ function grantAuthorization(context, options) {
   if (!['explicit-user', 'ci'].includes(source)) {
     fail("Authorization grants must come from explicit-user or ci approval, not automation or bootstrap.");
   }
+  if (source === "explicit-user" && attribution.actor.type !== "human") {
+    fail("Authorization grants with approval_source explicit-user require --actor-type human.");
+  }
+  if (source === "ci" && attribution.actor.type !== "ci") {
+    fail("Authorization grants with approval_source ci require --actor-type ci.");
+  }
   const expiresAt = options["expires-at"] ? normalizeOptionalDateTime(options["expires-at"], "expires-at") : null;
   const record = {
     id,
@@ -3113,6 +3208,7 @@ function grantAuthorization(context, options) {
     summary,
     allowed_actions: allowedActions,
     allowed_artifact_types: normalizeListOption(options["allow-artifact-type"]).map(normalizeArtifactType),
+    allowed_approval_boundaries: normalizeListOption(options["allow-boundary"]),
     allowed_subjects: normalizeListOption(options["allow-subject"]).map((subject) => subject === "*" ? "*" : normalizeId(subject)),
     expires_at: expiresAt,
     approval_source: source,
@@ -3188,14 +3284,95 @@ function revokeAuthorization(context, options) {
 
 function authorizationAllowsAction(record, action) {
   const normalized = String(action || "").trim().toLowerCase();
-  return (record.allowed_actions || []).some((allowed) =>
+  const allowedActions = Array.isArray(record.allowed_actions) ? record.allowed_actions : [];
+  return allowedActions.some((allowed) =>
     allowed === "*" || allowed === normalized || (allowed.endsWith(".*") && normalized.startsWith(allowed.slice(0, -1))),
   );
+}
+
+function authorizationArtifactTypes(settings = {}) {
+  const values = [
+    settings.artifact_type,
+    ...(Array.isArray(settings.artifact_types) ? settings.artifact_types : []),
+  ];
+  return Array.from(new Set(values.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)));
+}
+
+function contractArtifactTypes(contract = {}) {
+  return authorizationArtifactTypes({
+    artifact_types: (Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [])
+      .map((reference) => reference?.artifact_type),
+  });
+}
+
+function contractDirectApprovalRequirements(contract = {}) {
+  const policyRequirements = Array.isArray(contract.capability_policy?.approval_required_for)
+    ? contract.capability_policy.approval_required_for
+    : [];
+  const bindingRequirements = (Array.isArray(contract.capability_bindings) ? contract.capability_bindings : [])
+    .flatMap((binding) => Array.isArray(binding?.requires_approval_for) ? binding.requires_approval_for : []);
+  return Array.from(new Set([...policyRequirements, ...bindingRequirements].map((value) => String(value).trim()).filter(Boolean)));
+}
+
+function authorizationAllowsSubject(record, subjectId) {
+  const allowedSubjects = Array.isArray(record.allowed_subjects) ? record.allowed_subjects : [];
+  return !subjectId || allowedSubjects.length === 0 || allowedSubjects.includes("*") || allowedSubjects.includes(subjectId);
+}
+
+function authorizationAllowsArtifactType(record, artifactType) {
+  const allowedArtifactTypes = Array.isArray(record.allowed_artifact_types) ? record.allowed_artifact_types : [];
+  return allowedArtifactTypes.length === 0 || allowedArtifactTypes.includes(artifactType);
+}
+
+function authorizationApprovalBoundaries(settings = {}) {
+  return Array.from(new Set(
+    (Array.isArray(settings.approval_boundaries) ? settings.approval_boundaries : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  ));
+}
+
+function authorizationAllowsApprovalBoundary(record, boundary) {
+  const allowedBoundaries = Array.isArray(record.allowed_approval_boundaries)
+    ? record.allowed_approval_boundaries
+    : [];
+  return allowedBoundaries.includes("*") || allowedBoundaries.includes(boundary);
 }
 
 function hashAuthorizationRecord(record) {
   const { approved_content_hash, hash_algorithm, revoked_at, revocation_reason, ...subject } = record || {};
   return hashApprovalSubject(subject);
+}
+
+function authorizationUseErrors(record, action, settings = {}) {
+  const errors = [];
+  if (record.status !== "active") {
+    errors.push(`Authorization ${record.id} is ${record.status || "inactive"}.`);
+  }
+  if (record.expires_at && Date.parse(record.expires_at) <= Date.now()) {
+    errors.push(`Authorization ${record.id} expired at ${record.expires_at}.`);
+  }
+  if (record.approved_content_hash !== hashAuthorizationRecord(record)) {
+    errors.push(`Authorization ${record.id} changed after it was granted.`);
+  }
+  if (!authorizationAllowsAction(record, action)) {
+    const allowedActions = Array.isArray(record.allowed_actions) ? record.allowed_actions : [];
+    errors.push(`Authorization ${record.id} does not allow action ${action}. Allowed actions: ${allowedActions.join(", ")}`);
+  }
+  for (const artifactType of authorizationArtifactTypes(settings)) {
+    if (!authorizationAllowsArtifactType(record, artifactType)) {
+      errors.push(`Authorization ${record.id} does not allow artifact type ${artifactType}.`);
+    }
+  }
+  for (const boundary of authorizationApprovalBoundaries(settings)) {
+    if (!authorizationAllowsApprovalBoundary(record, boundary)) {
+      errors.push(`Authorization ${record.id} does not allow approval boundary ${boundary}.`);
+    }
+  }
+  if (!authorizationAllowsSubject(record, settings.subject_id)) {
+    errors.push(`Authorization ${record.id} does not allow subject ${settings.subject_id}.`);
+  }
+  return errors;
 }
 
 function requireAutomationAuthorization(context, options, action, settings = {}) {
@@ -3204,36 +3381,13 @@ function requireAutomationAuthorization(context, options, action, settings = {})
     fail(`${settings.label || action} uses delegated automation approval and requires --authorization <id>. Free-text --scope is not sufficient.`);
   }
   const record = readAuthorization(context, normalizeId(id));
-  if (record.status !== "active") {
-    fail(`Authorization ${record.id} is ${record.status || "inactive"}.`);
-  }
-  if (record.expires_at && Date.parse(record.expires_at) <= Date.now()) {
-    fail(`Authorization ${record.id} expired at ${record.expires_at}.`);
-  }
-  if (record.approved_content_hash !== hashAuthorizationRecord(record)) {
-    fail(`Authorization ${record.id} changed after it was granted.`);
-  }
-  if (!authorizationAllowsAction(record, action)) {
-    fail(`Authorization ${record.id} does not allow action ${action}. Allowed actions: ${(record.allowed_actions || []).join(", ")}`);
+  const errors = authorizationUseErrors(record, action, settings);
+  if (errors.length > 0) {
+    fail(errors[0]);
   }
   const requestedScope = getOptionString(options, "scope");
   if (requestedScope && requestedScope !== record.scope) {
     fail(`--scope '${requestedScope}' does not match authorization ${record.id} scope '${record.scope}'.`);
-  }
-  if (
-    settings.artifact_type &&
-    (record.allowed_artifact_types || []).length > 0 &&
-    !record.allowed_artifact_types.includes(settings.artifact_type)
-  ) {
-    fail(`Authorization ${record.id} does not allow artifact type ${settings.artifact_type}.`);
-  }
-  if (
-    settings.subject_id &&
-    (record.allowed_subjects || []).length > 0 &&
-    !record.allowed_subjects.includes("*") &&
-    !record.allowed_subjects.includes(settings.subject_id)
-  ) {
-    fail(`Authorization ${record.id} does not allow subject ${settings.subject_id}.`);
   }
   return record;
 }
@@ -3261,8 +3415,11 @@ function showApprovalRequests(context, options) {
 
 function collectApprovalRequests(context, options = {}) {
   const storyId = options.storyId || null;
+  const baselineRequests = collectBaselineApprovalRequests(context, storyId);
+  if (baselineRequests.length > 0) {
+    return baselineRequests;
+  }
   return [
-    ...collectBaselineApprovalRequests(context, storyId),
     ...collectCapabilityProfileApprovalRequests(context, storyId),
     ...collectCapabilityRecommendationApprovalRequests(context, storyId),
     ...collectOutputTemplateApprovalRequests(context, storyId),
@@ -4837,10 +4994,13 @@ function approveContract(context, options) {
     if (contract.human_gate === true) {
       requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
     }
+    const directApprovalRequirements = contractDirectApprovalRequirements(contract);
     approval = buildApprovalRecord(context, options, attribution, {
       subject: contract,
       subject_id_field: "contract_id",
       subject_id: id,
+      artifact_types: contractArtifactTypes(contract),
+      approval_boundaries: directApprovalRequirements,
       status: approvalStatus,
       scope: String(options.scope || "contract"),
       label: `contract ${id}`,
@@ -4868,7 +5028,7 @@ function approveContract(context, options) {
     summary: approval.summary || `Contract ${id} ${approval.status}`,
     action: "contract.approve",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, contractPath)],
+    evidence: [toProjectPath(context, contractPath)],
     related: [id],
     git: attribution.git,
     run: attribution.run,
@@ -5468,6 +5628,8 @@ function buildApprovalRecordScope(source, settings = {}) {
 }
 
 function defaultApprovalRecordScope(source, settings = {}) {
+  const artifactTypes = authorizationArtifactTypes(settings);
+  const approvalBoundaries = authorizationApprovalBoundaries(settings);
   if (source === "explicit-user") {
     return {
       principle: "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
@@ -5493,6 +5655,8 @@ function defaultApprovalRecordScope(source, settings = {}) {
       authorization_ref: settings.authorization?.id || null,
       approval_level: settings.authorization?.scope || null,
       allowed_actions: settings.authorization?.allowed_actions || [],
+      ...(artifactTypes.length > 0 ? { artifact_types: artifactTypes } : {}),
+      ...(approvalBoundaries.length > 0 ? { approval_boundaries: approvalBoundaries } : {}),
     };
   }
   return settings.scope || undefined;
@@ -5561,7 +5725,42 @@ function validateApprovalSourceForActor(context, approval) {
   }
 }
 
-function validateFormalApprovalRecord(context, report, approval, label, actor) {
+function approvalAuthorizationSettings(approval = {}, settings = {}) {
+  const scope = approval.scope && typeof approval.scope === "object"
+    ? approval.scope
+    : approval.approval_scope && typeof approval.approval_scope === "object"
+      ? approval.approval_scope
+      : {};
+  const subjectId = settings.subject_id || scope.subject_id || [
+    "baseline_id",
+    "contract_id",
+    "breakdown_id",
+    "dependency_id",
+    "profile_id",
+    "recommendation_id",
+    "template_id",
+    "story_id",
+  ].map((field) => approval[field]).find(Boolean) || null;
+  return {
+    scope,
+    subject_id: subjectId,
+    artifact_types: authorizationArtifactTypes({
+      artifact_type: settings.artifact_type || approval.artifact_type,
+      artifact_types: [
+        ...(Array.isArray(settings.artifact_types) ? settings.artifact_types : []),
+        ...(Array.isArray(scope.artifact_types) ? scope.artifact_types : []),
+      ],
+    }),
+    approval_boundaries: authorizationApprovalBoundaries({
+      approval_boundaries: [
+        ...(Array.isArray(settings.approval_boundaries) ? settings.approval_boundaries : []),
+        ...(Array.isArray(scope.approval_boundaries) ? scope.approval_boundaries : []),
+      ],
+    }),
+  };
+}
+
+function validateFormalApprovalRecord(context, report, approval, label, actor, settings = {}) {
   if (!approval || approval.status !== "approved") {
     return;
   }
@@ -5587,26 +5786,32 @@ function validateFormalApprovalRecord(context, report, approval, label, actor) {
     report.errors.push(`${label} approval_source automation requires an agent, system, or CI approver`);
   }
   if (source === "automation" && report.strict) {
-    const authorizationId = approval.authorization_ref || approval.scope?.authorization_ref || null;
+    const authorizationSettings = approvalAuthorizationSettings(approval, settings);
+    const scopedAuthorizationId = authorizationSettings.scope.authorization_ref || null;
+    const authorizationId = approval.authorization_ref || scopedAuthorizationId || null;
     if (!authorizationId) {
       report.errors.push(`${label} automation approval has no persistent authorization_ref`);
     } else {
       const authorization = readAuthorization(context, authorizationId, { missingOk: true });
       const action = approval.authorization_action || null;
+      if (approval.authorization_ref && scopedAuthorizationId && approval.authorization_ref !== scopedAuthorizationId) {
+        report.errors.push(`${label} authorization_ref does not match its approved scope authorization ${scopedAuthorizationId}`);
+      }
       if (!authorization) {
         report.errors.push(`${label} references missing authorization ${authorizationId}`);
       } else {
-        if (authorization.status !== "active") {
-          report.errors.push(`${label} authorization ${authorizationId} is ${authorization.status || "inactive"}`);
+        if (!action) {
+          report.errors.push(`${label} is missing an authorized action`);
+        } else {
+          for (const error of authorizationUseErrors(authorization, action, authorizationSettings)) {
+            report.errors.push(`${label}: ${error}`);
+          }
         }
-        if (authorization.expires_at && Date.parse(authorization.expires_at) <= Date.now()) {
-          report.errors.push(`${label} authorization ${authorizationId} expired at ${authorization.expires_at}`);
-        }
-        if (authorization.approved_content_hash !== hashAuthorizationRecord(authorization)) {
-          report.errors.push(`${label} authorization ${authorizationId} changed after grant`);
-        }
-        if (!action || !authorizationAllowsAction(authorization, action)) {
-          report.errors.push(`${label} is missing an authorized action or authorization ${authorizationId} does not allow it`);
+        if (
+          authorizationSettings.scope.approval_level &&
+          authorizationSettings.scope.approval_level !== authorization.scope
+        ) {
+          report.errors.push(`${label} approval level does not match authorization ${authorizationId} scope`);
         }
       }
     }
@@ -6518,8 +6723,12 @@ function approveCapabilityRecommendation(context, options) {
   }
   const attribution = buildAttribution(context, options, "capability.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a capability recommendation");
-  if (options["approve-install"] && !["human", "ci"].includes(attribution.actor.type)) {
-    fail("Approving capability installation requires a directly attributed human or CI actor; delegated automation cannot expand into installs.");
+  const requestedApprovalSource = String(getOptionString(options, "approval-source") || "").trim().toLowerCase();
+  const directInstallApproval =
+    (requestedApprovalSource === "explicit-user" && attribution.actor.type === "human") ||
+    ((requestedApprovalSource === "ci" || (!requestedApprovalSource && attribution.actor.type === "ci")) && attribution.actor.type === "ci");
+  if (options["approve-install"] && !directInstallApproval) {
+    fail("Approving capability installation requires direct explicit-user or CI approval; delegated automation cannot expand into installs.");
   }
   let recommendation;
   let profile;
@@ -7706,7 +7915,7 @@ function claimStory(context, options) {
     summary: `Story ${id} claimed by ${agent}`,
     action: "story.claim",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, claimPath)],
+    evidence: [toProjectPath(context, claimPath)],
     related: [id],
     git: attribution.git,
     run: attribution.run,
@@ -7757,7 +7966,7 @@ function releaseStoryClaimRecord(context, options) {
     summary: `Story ${id} claim ${claim.status}`,
     action: "story.release",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, claimPath)],
+    evidence: [toProjectPath(context, claimPath)],
     related: [id],
     git: attribution.git,
     run: attribution.run,
@@ -7788,7 +7997,7 @@ function createStoryHandoffRecord(context, options) {
     to_agent: String(toAgent),
     status: normalizeHandoffStatus(options.status || "open"),
     summary: options.summary ? String(options.summary) : null,
-    required_artifacts: normalizeListOption(options.artifact),
+    required_artifacts: normalizeListOption(options.artifact).map(normalizeProjectPathInput),
     open_items: normalizeListOption(options["open-item"]),
     created_at: now(),
     audit: {
@@ -7803,7 +8012,7 @@ function createStoryHandoffRecord(context, options) {
     summary: handoff.summary || `Story ${storyId} handed off to ${toAgent}`,
     action: "story.handoff",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, handoffPath)],
+    evidence: [toProjectPath(context, handoffPath)],
     related: [storyId, handoffId],
     git: attribution.git,
     run: attribution.run,
@@ -8004,7 +8213,7 @@ function closeHandoff(context, options) {
     summary: handoff.close_summary || `Handoff ${handoffId} ${status}`,
     action: "handoff.close",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, handoffPath)],
+    evidence: [toProjectPath(context, handoffPath)],
     related: [handoff.story_id, handoffId].filter(Boolean),
     git: attribution.git,
     run: attribution.run,
@@ -8074,7 +8283,7 @@ function lockPhase(context, options) {
     summary: `Phase ${phase} locked: ${lock.reason || lock.scope}`,
     action: "phase.lock",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, lockPath)],
+    evidence: [toProjectPath(context, lockPath)],
     related: [phase, lockId],
     git: attribution.git,
     run: attribution.run,
@@ -8106,7 +8315,7 @@ function releasePhaseLock(context, options) {
     summary: `Phase lock ${id} ${lock.status}`,
     action: "phase.release",
     actor: attribution.actor,
-    evidence: [path.relative(context.root, lockPath)],
+    evidence: [toProjectPath(context, lockPath)],
     related: [lock.phase, id],
     git: attribution.git,
     run: attribution.run,
@@ -8138,7 +8347,7 @@ function appendTrace(context, options) {
     actor: attribution.actor,
     ...buildTraceAuthorityMetadata(context, options, attribution),
     action: normalizeScalarOption(options.action, "action") || type,
-    evidence: normalizeListOption(options.evidence),
+    evidence: normalizeListOption(options.evidence).map(normalizeProjectPathInput),
     related: normalizeListOption(options.related),
     git: {
       ...attribution.git,
@@ -8166,7 +8375,7 @@ function recordSyncEvent(context, options) {
     action: `sync.${event}`,
     actor: attribution.actor,
     ...buildTraceAuthorityMetadata(context, options, attribution),
-    evidence: normalizeListOption(options.evidence),
+    evidence: normalizeListOption(options.evidence).map(normalizeProjectPathInput),
     related: normalizeListOption(options.related),
     git: {
       ...attribution.git,
@@ -8345,6 +8554,7 @@ function approveOutputTemplate(context, options) {
     : null;
   const approvalScope = buildApprovalRecordScope(approvalSource, {
     subject_id: id,
+    artifact_type: template.type,
     label: `output template ${id}`,
     scope: String(options.scope || "output_template"),
     authorization,
@@ -10571,6 +10781,9 @@ function verifyOutputArtifact(context, artifactPath, delivery, options = {}) {
   const evidence = normalizeListValue(options.evidence, []).map((rawPath) => {
     const evidencePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
     assertNotDerivedArtifact(context, evidencePath, "Output verification evidence");
+    if (fs.realpathSync.native(evidencePath) === fs.realpathSync.native(artifactPath)) {
+      fail("Output verification evidence must be a separate render or inspection record, not the output artifact itself.");
+    }
     return {
       path: toProjectPath(context, evidencePath),
       sha256: hashFile(evidencePath),
@@ -10681,7 +10894,7 @@ function readZipEntry(filePath, entry) {
 }
 
 function resolveProjectFilePath(context, rawPath, options = {}) {
-  const value = String(rawPath || "").trim();
+  const value = normalizeProjectPathInput(rawPath);
   if (!value) {
     fail("Path value cannot be empty");
   }
@@ -10714,6 +10927,10 @@ function resolveProjectFilePath(context, rawPath, options = {}) {
   return resolved;
 }
 
+function normalizeProjectPathInput(rawPath) {
+  return String(rawPath || "").trim().replace(/\\/g, "/");
+}
+
 function nearestExistingParent(filePath) {
   let current = path.dirname(path.resolve(filePath));
   while (!fs.existsSync(current)) {
@@ -10737,10 +10954,10 @@ function toProjectPath(context, filePath) {
 }
 
 function isDerivedArtifactPath(context, filePath) {
-  const relative = path.relative(context.sdlcRoot, path.resolve(filePath));
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (!isInsidePath(context.sdlcRoot, filePath)) {
     return false;
   }
+  const relative = path.relative(context.sdlcRoot, path.resolve(filePath));
   const first = relative.split(path.sep)[0];
   const derived = new Set(context.config.cache_policy?.derived_directories || ["cache", "indexes"]);
   return derived.has(first);
@@ -11611,11 +11828,23 @@ function validateAuthorizations(context, report) {
     if (!Array.isArray(authorization.allowed_subjects)) {
       report.errors.push(`${label} allowed_subjects must be an array`);
     }
+    if (!Array.isArray(authorization.allowed_artifact_types)) {
+      report.errors.push(`${label} allowed_artifact_types must be an array`);
+    }
+    if (
+      authorization.allowed_approval_boundaries !== undefined &&
+      !Array.isArray(authorization.allowed_approval_boundaries)
+    ) {
+      report.errors.push(`${label} allowed_approval_boundaries must be an array`);
+    }
     if (!['explicit-user', 'ci'].includes(authorization.approval_source)) {
       report.errors.push(`${label} must be granted by explicit-user or ci approval`);
     }
     if (authorization.approval_source === "explicit-user" && authorization.granted_by?.type !== "human") {
       report.errors.push(`${label} explicit-user grant requires a human actor`);
+    }
+    if (authorization.approval_source === "ci" && authorization.granted_by?.type !== "ci") {
+      report.errors.push(`${label} CI grant requires a CI actor`);
     }
     if (authorization.approved_content_hash && authorization.approved_content_hash !== hashAuthorizationRecord(authorization)) {
       report.errors.push(`${label} changed after grant`);
@@ -11833,6 +12062,7 @@ function validateOutputContracts(context, report, storyId = null) {
           authorization_ref: template.authorization_ref || null,
           authorization_action: template.authorization_action || null,
           scope: template.approval_scope || null,
+          artifact_type: template.type,
           explicit_user_confirmation: template.explicit_user_confirmation,
           provisional: template.provisional,
         },
@@ -12017,6 +12247,8 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
           const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: false });
           if (!fs.existsSync(evidencePath) || (evidence.sha256 && hashFile(evidencePath) !== evidence.sha256)) {
             report.errors.push(`${label} verification evidence ${evidence.path} is missing or changed`);
+          } else if (fs.realpathSync.native(evidencePath) === fs.realpathSync.native(artifactPath)) {
+            report.errors.push(`${label} verification evidence must be separate from the output artifact`);
           }
         }
       }
@@ -12331,7 +12563,11 @@ function validateContractApprovals(context, report, contract, label) {
       if (!hasFormalApprovalAttribution(actor, approval.approval_source)) {
         report.errors.push(`${approvalLabel} is missing ${formalApprovalActorDescription(approval.approval_source)} approval attribution`);
       }
-      validateFormalApprovalRecord(context, report, approval, approvalLabel, actor);
+      validateFormalApprovalRecord(context, report, approval, approvalLabel, actor, {
+        subject_id: contract.id,
+        artifact_types: contractArtifactTypes(contract),
+        approval_boundaries: contractDirectApprovalRequirements(contract),
+      });
       for (const evidence of approval.evidence || []) {
         const evidencePath = resolveProjectFilePath(context, evidence.path || evidence, { mustExist: false });
         if (!fs.existsSync(evidencePath)) {
@@ -12377,6 +12613,15 @@ function validateContractOutputRefs(context, report, contract, label) {
   const registry = readOutputRegistry(context, { missingOk: true });
   const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
   const links = registry?.links || [];
+  const requiresStartReceipt = refs.some((ref) => templates.get(ref.template_id)?.preset === "technical-assessment");
+  const taskStartReceiptPath = contract.story_id
+    ? path.join(context.sdlcRoot, "stories", contract.story_id, "task-start.json")
+    : null;
+  if (report.strict && contract.story_id && (requiresStartReceipt || fs.existsSync(taskStartReceiptPath))) {
+    for (const issue of validateTaskStartReceipt(context, contract.story_id, contract)) {
+      report.errors.push(`${label} ${issue}`);
+    }
+  }
   for (const ref of refs) {
     const refLabel = `${label} output ref ${ref.artifact_type || "unknown"}`;
     if (!ref.artifact_type || !ref.template_id || !ref.mode) {
@@ -13401,12 +13646,22 @@ function normalizeId(value) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalized)) {
     fail(`Invalid id '${value}'. Use only letters, numbers, dots, underscores, and hyphens; do not use path separators.`);
   }
+  if (normalized.endsWith(".")) {
+    fail(`Invalid id '${value}'. IDs cannot end with a period because they must remain portable across supported filesystems.`);
+  }
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(normalized)) {
+    fail(`Invalid id '${value}'. This name is reserved by Windows and cannot be used for a portable project artifact.`);
+  }
   return normalized;
 }
 
 function isInsidePath(parent, child) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 function slugify(value) {
@@ -13510,7 +13765,8 @@ Usage:
   agentic-sdlc authorization grant --id id --scope "exact delegated scope"
       --allow-action contract.approve [--allow-action task.start.confirm]
       --actor-type human|ci --approval-source explicit-user|ci --summary text
-      [--allow-artifact-type technical-analysis] [--expires-at iso]
+      [--allow-artifact-type technical-analysis] [--allow-boundary production:write]
+      [--expires-at iso]
       [--allow-subject exact-artifact-or-story-id]
   agentic-sdlc authorization status [--id id] [--json]
   agentic-sdlc authorization revoke --id id --actor-type human|ci [--reason text]
