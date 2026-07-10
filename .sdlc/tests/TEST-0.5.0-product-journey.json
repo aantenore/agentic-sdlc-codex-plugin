@@ -14,7 +14,7 @@
     {
       "command": "targeted product-governance, portability, installer, and supply-chain regression scenarios",
       "status": "passed",
-      "summary": "Negative scenarios reject mismatched stories/contracts, bootstrap or revoked approvals, authorization subject/artifact drift, delegated install approval, self-referential visual evidence, Windows device IDs, junction destinations, and cross-platform path separators."
+      "summary": "Negative scenarios reject mismatched stories/contracts, bootstrap or revoked approvals, authorization subject/artifact drift, delegated install approval, self-referential visual evidence, Windows device IDs, junction destinations, and cross-platform path separators; workflow assertions accept both LF and Windows CRLF checkouts."
     },
     {
       "command": "npm run check",
@@ -91,6 +91,7 @@
   ],
   "notes": [
     "The full installed Codex checkpoint transcript and rendered artifact smoke tests were executed in disposable temporary repositories; the durable pass summary is recorded here.",
+    "The first full matrix run exposed a Windows-only CRLF assumption in a release-workflow assertion; the assertion now validates both portable line-ending forms and the complete local suite passes.",
     "The clean GitHub Actions Linux, macOS, and Windows matrix is required before this hardening commit is considered delivered.",
     "Public GitHub release publication is intentionally not performed without an explicit version-tag release action."
   ]
