@@ -4370,7 +4370,7 @@ test("schemas and JSON templates parse with portable local references", () => {
   const releaseWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.match(releaseWorkflow, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
   assert.match(releaseWorkflow, /node: \[18\.18\.0, 20, 24\]/);
-  assert.match(releaseWorkflow, /package:\n\s+needs: verify/);
+  assert.match(releaseWorkflow, /package:\r?\n\s+needs: verify/);
 });
 
 function collectJsonSchemaReferences(value, references = []) {
