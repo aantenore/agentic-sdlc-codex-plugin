@@ -1,0 +1,7 @@
+interface:
+  display_name: "Project Assessment"
+  short_description: "Contextualize a project and deliver a verified assessment"
+  brand_color: "#0EA5E9"
+  default_prompt: "Contextualize this project and prepare an initial technical assessment."
+policy:
+  allow_implicit_invocation: true

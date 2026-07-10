@@ -11,6 +11,7 @@ The sample records below use neutral placeholders. The structure is generic and 
     README.md
     baseline/
     contracts/
+    authorizations/
     capability-discovery/
     output-contracts/
     requirements/

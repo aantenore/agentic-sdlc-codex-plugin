@@ -1,557 +1,286 @@
-# Agent Interactions
+# Assessment Interactions
 
-Agentic SDLC models software delivery as a sequence of contract-governed agent handoffs. The plugin is stateless; every project-specific artifact is written under the target project's `.sdlc/` directory.
+This document defines the user-facing behavior of the `Project Assessment` skill. The goal is a useful project assessment, not a lesson in internal workflow records.
 
-The examples below use neutral product placeholders. The plugin behavior is not tied to any domain.
+## Activation
 
-## Interaction Pattern
-
-Each phase follows the same loop:
+The skill is visible in Codex through its agent card and allows implicit invocation. The first starter prompt is exactly:
 
 ```text
-phase contract
-  -> agent reads required inputs from .sdlc/
-  -> agent resolves approved output contracts
-  -> agent proposes reuse, delta, or new output structure
-  -> user approves new templates or structural changes
-  -> agent produces phase outputs
-  -> agent links outputs in .sdlc/output-contracts/registry.json
-  -> agent appends trace evidence
-  -> gate check validates required artifacts
-  -> human approves or sends the phase back for repair
-  -> next agent receives structured inputs
+Contextualize this project and prepare an initial technical assessment.
 ```
 
-```mermaid
-sequenceDiagram
-  participant Human as Human owner
-  participant Agent as Phase agent
-  participant KB as SDLC KB
-  participant Registry as Output registry
-  participant Gate as Gate check
+Equivalent natural requests should select the same journey, for example:
 
-  Human->>Agent: Goal, files, constraints
-  Agent->>KB: Read project context
-  Agent->>Registry: Resolve output type
-  Registry-->>Agent: Template and reuse recommendation
-  Agent-->>Human: Ask only blocking questions
-  Human-->>Agent: Approve answers or structure
-  Agent->>KB: Write outputs and trace evidence
-  Agent->>Registry: Link artifacts
-  Agent->>Gate: Run validation
-  Gate-->>Human: Pass, warning, or repair needed
-```
+- "Assess the current architecture and technical risks."
+- "Contestualizza il progetto e prepara un assessment tecnico iniziale."
+- "Prepare a functional assessment of this existing application."
+- "Review this repository and give me a Word assessment."
 
-When a lane is complete, the agent records the step before handing work to another lane:
+The request may name a project root, format, destination, exclusions, evidence sources, or autonomy boundary. Preserve those choices; do not ask for them again when they are already clear.
+
+## Two-Checkpoint Rule
+
+A normal low-risk assessment has at most two user checkpoints:
+
+1. inferred project context;
+2. one combined work proposal.
+
+Internal context, tool, output, work-brief, and routing records are implementation details. Prepare them behind these two plain-language decisions instead of exposing one approval per record.
+
+An additional decision is allowed only when the work cannot continue inside the approved proposal, such as a new installation, external or production access, secrets, a destructive action, a write outside the displayed paths, or a material change to scope, format, evidence, or tools.
+
+## Checkpoint 1: Project Context
+
+Inspect the repository and any user-provided local files read-only. Present a decision-ready summary in the user's language that covers:
+
+- evidenced product purpose, users, and current lifecycle state;
+- stack, runtimes, deployment model, and integrations;
+- architecture boundaries and important components;
+- documents, directories, and files inspected;
+- constraints and explicit non-goals;
+- observed facts, inferences, assumptions, contradictions, and confidence;
+- important facts that repository evidence cannot recover.
+
+Do not substitute a list of paths or an internal JSON file for the summary. Paths are supporting evidence.
+
+End with one clear decision:
+
+> Approve or correct this project context. This confirms only the context I may rely on; it does not approve the assessment scope, format, tools, writes, or start.
+
+Apply corrections and ask again within the same checkpoint. Reuse a fresh, already-confirmed context when possible, while still letting the user correct it when contextualization was requested.
+
+## Checkpoint 2: Combined Proposal
+
+Resolve reuse before proposing a new artifact. Prefer an existing approved assessment plus a delta when that fully addresses the request.
+
+Present one proposal with concrete values under these headings:
+
+1. **Outcome**: assessment type, intended decision, and audience.
+2. **Assessment record**: the explicit story ID, whether it will be created or reused, and why it represents this assessment.
+3. **Scope**: included and excluded areas, depth, and new/reuse/delta mode.
+4. **Evidence**: exact directories, files, local commands, project records, and any approved external sources.
+5. **Sections**: ordered report sections and how missing evidence will be marked.
+6. **Artifact**: canonical format, aliases normalized, extension, media type, destination, delivery mode, generator, and verifier.
+7. **Tools and actions**: installed tools, read/write permissions, targets, and checks that will run.
+8. **Limits**: assumptions, missing information, non-goals, access boundaries, and triggers for a new decision.
+9. **Start and delivery**: creation/reuse of the story, persistent authorization, represented records, authorized task start, exact artifact, and final chat summary.
+10. **Approval boundary**: what this answer covers and what remains outside it.
+
+Ask one question: approve this exact proposal or describe changes. Do not split format, tools, report structure, work brief, and start into separate questions.
+
+A short answer applies only to the visible bundle. If any internal representation differs materially from that bundle, revise the proposal before work starts.
+
+## Execute Without A Third Checkpoint
+
+After checkpoint 2 is approved:
+
+1. create or reuse the explicit assessment story shown in the proposal;
+2. persist the proposal with `authorization grant`, including the exact approval actions and `task.start.confirm`;
+3. create the story-scoped output records and contract, using `--authorization <id>` on every automation approval;
+4. confirm execution with `task start --confirm-start --authorization <id>`;
+5. perform the agreed read-only analysis and only the displayed writes;
+6. generate the artifact in its real canonical format;
+7. verify content, container, and visual rendering where required;
+8. link the artifact with its evidence and persist the verification receipt;
+9. run the applicable deterministic checks;
+10. return the artifact path and concise assessment summary.
+
+Do not add a routine approval round for the completed assessment. The user can request revisions after delivery.
+
+## Canonical Formats
+
+Normalize requested aliases before presenting checkpoint 2.
+
+| Canonical format | Accepted aliases | Extension | Media type | Required capability |
+| --- | --- | --- | --- | --- |
+| `markdown` | `md`, `markdown` | `.md` | `text/markdown` | Native checks |
+| `docx` | `word`, `doc`, `docx` | `.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `documents` |
+| `xlsx` | `excel`, `spreadsheet`, `workbook`, `xlsx` | `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `spreadsheets` |
+| `pdf` | `pdf` | `.pdf` | `application/pdf` | `pdf` |
+| `pptx` | `powerpoint`, `slides`, `pptx` | `.pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | `presentations` |
+| `html` | `html` | `.html` | `text/html` | Native generation plus browser rendering |
+| `json` | `json` | `.json` | `application/json` | Native parse validation |
+| `csv` | `csv` | `.csv` | `text/csv` | `spreadsheets` |
+
+Use `artifact` or `artifact-plus-chat-summary` as the delivery mode. Default to `artifact-plus-chat-summary` for assessments.
+
+Never create a fake format by renaming Markdown. Extension and media type must match the approved canonical format.
+
+## Format Verification
+
+Use the format capability before generating and inspecting a non-native artifact:
+
+- `documents` for DOCX generation and rendered inspection;
+- `spreadsheets` for XLSX/CSV generation, recalculation where relevant, structural checks, and workbook inspection;
+- `pdf` for PDF generation, page rendering, and page inspection;
+- `presentations` for PPTX generation, slide rendering, and deck inspection;
+- a browser renderer for HTML layout and viewport inspection.
+
+Verify that:
+
+- every material finding distinguishes fact from inference and cites evidence;
+- required sections exist, using `Not evidenced` or `Not assessed` when appropriate;
+- risks, recommendations, roadmap items, evidence, and open decisions have stable IDs;
+- the target application opens the file;
+- rendered content is legible, complete, and free of overlap or clipping;
+- the extension and media type match the proposal.
+
+DOCX, XLSX, PDF, PPTX, and HTML require at least one render or visual-check evidence file when linking the output. Store evidence inside the project, but not under `.sdlc/cache/` or `.sdlc/indexes/`:
 
 ```bash
-node bin/agentic-sdlc.mjs story complete-step \
-  --id ST-001 \
-  --step functional-analysis \
-  --type functional-analysis \
-  --summary "Functional analysis accepted for implementation"
-
-node bin/agentic-sdlc.mjs story prepare-handoff \
-  --id ST-001 \
-  --to-agent implementation-agent \
-  --release-claim \
-  --summary "Ready for implementation"
+node <plugin-root>/bin/agentic-sdlc.mjs output link \
+  --root <target-project> \
+  --story ST-INITIAL-ASSESSMENT \
+  --type technical-analysis \
+  --artifact docs/technical-assessment.docx \
+  --template technical-analysis-v1 \
+  --mode new \
+  --requirement REQ-001 \
+  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render-check.md
 ```
 
-```mermaid
-sequenceDiagram
-  participant Analyst as Analysis chat
-  participant KB as Shared KB
-  participant Dev as Implementation chat
+Use repeatable `--evidence` options when multiple pages, sheets, slides, or viewports matter. A valid OOXML, PDF, or HTML container without visual evidence is insufficient for these formats.
 
-  Analyst->>KB: output link functional-analysis
-  Analyst->>KB: story complete-step
-  Analyst->>KB: story prepare-handoff --release-claim
-  Dev->>KB: pull and read handoff package
-  Dev->>KB: story claim
-  Dev->>KB: implementation traces and tests
-```
+## Verification Receipt
 
-The operating model is not "agents freely coding." It is bounded execution:
+Linking stores a `verification_receipt` with:
 
-- contracts define the work;
-- execution policy defines model/reasoning inheritance or overrides;
-- output contracts keep generated artifact structures consistent;
-- the KB stores the durable context;
-- local cache speeds lookup but is never source of truth;
-- traces explain what happened;
-- gates catch missing evidence;
-- humans approve important transitions.
+- `status` and verifier;
+- canonical format;
+- deterministic checks performed;
+- evidence paths and SHA-256 values;
+- artifact SHA-256;
+- verification timestamp.
 
-Activity reports reconstruct the real timeline from trace files:
+There is no separate receipt command. Retrieve the persisted output link and receipt with:
 
 ```bash
-node bin/agentic-sdlc.mjs report activity --since 3d --view business
-node bin/agentic-sdlc.mjs report activity --since 3d --view dev --story ST-001
-node bin/agentic-sdlc.mjs report query --query-json '<canonical-report-query-json>' --json
+node <plugin-root>/bin/agentic-sdlc.mjs output status \
+  --root <target-project> \
+  --story ST-INITIAL-ASSESSMENT \
+  --type technical-analysis \
+  --json
 ```
 
-Each report item cites the source file and line that produced it. If a decision, test, push, handoff, story, output, contract, approval, or test evidence was not recorded in the KB, the report will not invent it.
+The chat delivery should state the artifact path, verification performed, evidence used, limitations, and any open decisions without dumping the raw receipt.
 
-```mermaid
-flowchart LR
-  Human["Natural-language history question"] --> Codex["Normalize to report query JSON"]
-  Codex --> Query["report query"]
-  Query --> KB["Canonical .sdlc records"]
-  KB --> Result["Cited report results"]
-```
+## Story And Persistent Authorization
 
-## Request Router Behavior
-
-When the user invokes Agentic SDLC, the first agent acts as an intent normalizer rather than a keyword classifier. It maps the conversation and supplied files to canonical route intent JSON, then asks the CLI for a deterministic decision. Natural-language assessment requests, such as an initial technical assessment, must be normalized to a configured action like `technical_analysis` before any analysis is produced. Before phase work starts, use `task start` as the execution front door so contract readiness and human control are checked together:
+After the user approves checkpoint 2, create the displayed assessment story before any contract or output operation:
 
 ```bash
-node bin/agentic-sdlc.mjs route decide --json --intent-json '<canonical-route-intent-json>'
-node bin/agentic-sdlc.mjs task start --json --intent-json '<canonical-route-intent-json>'
+node <plugin-root>/bin/agentic-sdlc.mjs story create \
+  --root <target-project> \
+  --id ST-INITIAL-ASSESSMENT \
+  --title "Initial project assessment" \
+  --acceptance "Deliver the approved assessment artifact with verification evidence"
 ```
 
-```mermaid
-sequenceDiagram
-  participant Human as Human owner
-  participant Agent as Codex agent
-  participant Router as route decide
-  participant KB as SDLC KB
+If that story already exists, reuse it only when its scope, requirement links, and output lineage match the proposal; do not overwrite it with `--force`. Resolve reuse with `output resolve --story ST-INITIAL-ASSESSMENT --type technical-analysis` before persisting the output template and story contract.
 
-  Human->>Agent: Request in any language
-  Agent-->>Human: Ask only if context is missing or confidence is low
-  Agent->>Router: Canonical intent JSON via task start
-  Router->>KB: Read project state, contracts, and policies
-  Router-->>Agent: ready_to_execute or required user input
-  Agent-->>Human: Ask for contract creation, revision, approval, or start confirmation
-```
-
-If `task start` does not return `ready_to_execute`, the agent stops and explains the missing decision in user-facing language. Do not show raw route or gate codes as the main answer. Translate baseline to project context, capability profile to project evidence and boundaries, capability recommendation to allowed tools for the work, template to output format, and contract to work brief before mentioning technical IDs. When the decision depends on files, summarize the contents the user is being asked to trust or approve; paths are evidence, not the primary explanation. The summary must be detailed enough for the user to approve from chat: what was produced, what is inside it, what decision is needed, and what approval does not cover. Do not use stale/hash wording as the primary explanation; if an internal reference must be refreshed and the approved work scope did not change, say that the internal reference is being refreshed and continue. By default, a user approval applies only to the item just shown and summarized; do not carry a baseline approval forward to templates, capabilities, contracts, or `--confirm-start`. If the user explicitly specifies a broader approval level or autonomy scope, carry it only inside that scope and record later formal approvals as delegated automation, not as direct `explicit-user` approvals. `--confirm-start` confirms the concrete execution start but does not approve or revise contracts.
-
-The router can distinguish intake, story decomposition, contract creation, implementation, validation, release, phase skip confirmation, or clarification from canonical fields and KB state. It never writes canonical artifacts and never treats `.sdlc/cache/` as the authority.
-
-## Contract Builder Behavior
-
-The contract-building agent is generic. It does not know the project domain in advance. Before creating a contract it should:
-
-1. Read `.sdlc/project.json`.
-2. Search or inspect relevant `.sdlc/` artifacts.
-3. Read user-provided files when the user points to them.
-4. Ask concise questions for missing critical context.
-5. Confirm whether the contract should inherit the main Codex thread model/reasoning or store an explicit override.
-6. Store the evidence, answers, assumptions, constraints, execution policy, and open questions inside the generated contract.
-
-Example:
+The checkpoint approval itself must be persisted with `authorization grant`. Free-text scope is not enough. Use the human or CI actor that approved the proposal, include the story in the exact scope, and enumerate every covered action:
 
 ```bash
-node bin/agentic-sdlc.mjs contract create \
-  --phase analysis \
-  --context-file .sdlc/requirements/REQ-001.md \
-  --context-summary "Analyze the MVP around the approved business workflow." \
-  --qa "Who approves this phase?|Product owner" \
-  --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
-  --constraint "Provider-specific logic must stay behind an adapter" \
-  --reasoning high \
-  --execution-note "Higher reasoning requested for integration-risk analysis"
-```
-
-## Output Contract Behavior
-
-Before generating a durable output, an agent checks `.sdlc/output-contracts/registry.json`:
-
-```bash
-node bin/agentic-sdlc.mjs output resolve --story ST-001 --type functional-analysis
-```
-
-If no approved template exists, the agent proposes one and waits for user approval:
-
-```bash
-node bin/agentic-sdlc.mjs output template propose --type functional-analysis --summary "Standard functional analysis"
-node bin/agentic-sdlc.mjs output template approve \
-  --id functional-analysis-v1 \
+node <plugin-root>/bin/agentic-sdlc.mjs authorization grant \
+  --root <target-project> \
+  --id AUTH-ASSESSMENT-001 \
+  --scope "ST-INITIAL-ASSESSMENT: technical assessment, read-only repository analysis, agreed local artifact" \
+  --allow-action capability.profile.approve \
+  --allow-action capability.approve \
+  --allow-action output.template.approve \
+  --allow-action contract.approve \
+  --allow-action task.start.confirm \
+  --allow-artifact-type technical-analysis \
+  --allow-subject CAP-PROFILE-ST-001 \
+  --allow-subject CAP-REC-ST-001 \
+  --allow-subject technical-analysis-v1 \
+  --allow-subject contract-ST-001-analysis \
+  --allow-subject ST-001 \
+  --actor antonio \
   --actor-type human \
   --approval-source explicit-user \
-  --summary "Approved functional analysis template"
+  --summary "Antonio delegated these exact assessment approvals within the displayed proposal."
 ```
 
-If a related story already covers the same requirement, the agent reuses the base artifact and creates only a delta:
+Then cite that persistent ID on every covered automation approval:
 
 ```bash
-node bin/agentic-sdlc.mjs output link \
-  --story ST-002 \
-  --type functional-analysis \
-  --artifact .sdlc/requirements/ST-002-functional-analysis-delta.md \
-  --template functional-analysis-v1 \
-  --mode delta \
-  --base-artifact .sdlc/requirements/functional-analysis.md \
-  --requirement REQ-001
-```
-
-New templates, duplicate new outputs, and incompatible structures are human decisions, not silent agent choices.
-
-```mermaid
-sequenceDiagram
-  participant Agent as Agent
-  participant Cache as Local cache
-  participant Registry as Output registry
-  participant Human as Human owner
-  participant KB as SDLC source files
-
-  Agent->>Cache: Try valid output resolution
-  alt Cache valid
-    Cache-->>Agent: Cached recommendation
-  else Cache missing or stale
-    Agent->>Registry: Read templates and links
-    Agent->>KB: Read story and requirements
-    Registry-->>Agent: Approved templates and related artifacts
-  end
-  alt New template or structure change
-    Agent-->>Human: Propose template or override
-    Human-->>Registry: Approve decision
-  else Related artifact exists
-    Registry-->>Agent: Reuse base artifact plus delta
-  end
-  Agent->>KB: Write canonical artifact
-  Agent->>Registry: Link story, requirement, template, and mode
-```
-
-## Example 1: Discovery Agent
-
-The Discovery Agent starts from an idea or product request.
-
-```bash
-node bin/agentic-sdlc.mjs init --project-name "My Product"
-node bin/agentic-sdlc.mjs contract create --phase discovery --context-summary "Discover the validated product problem and user constraints"
-```
-
-Reads:
-
-```text
-.sdlc/project.json
-.sdlc/contracts/contract-discovery-v1.json
-.sdlc/requirements/
-.sdlc/assumptions/
-```
-
-Produces:
-
-```text
-.sdlc/requirements/REQ-001.md
-.sdlc/assumptions/ASM-001.md
-.sdlc/risks/RISK-001.md
-.sdlc/decisions/ADR-0001-problem-framing.md
-```
-
-Trace example:
-
-```bash
-node bin/agentic-sdlc.mjs trace append \
-  --type decision \
-  --summary "Target the MVP on the approved business workflow instead of a generic process." \
+node <plugin-root>/bin/agentic-sdlc.mjs contract approve \
+  --root <target-project> \
+  --id contract-ST-INITIAL-ASSESSMENT-analysis \
   --actor codex \
   --actor-type agent \
-  --requested-by antonioantenore \
-  --requested-by-type human
+  --approval-source automation \
+  --authorization AUTH-ASSESSMENT-001 \
+  --summary "Approved within AUTH-ASSESSMENT-001 and the unchanged combined proposal."
 ```
 
-Handoff to Analysis:
-
-```text
-Problem statement, target users, constraints, competitor alternatives,
-discarded options, and success metrics are now durable KB artifacts.
-```
-
-## Example 2: Analysis Agent
-
-The Analysis Agent turns discovery output into functional and technical boundaries.
+After the contract is approved and unchanged, use the same authorization for the agent-confirmed start:
 
 ```bash
-node bin/agentic-sdlc.mjs contract create --phase analysis --context-summary "Analyze approved discovery outputs and known constraints"
+node <plugin-root>/bin/agentic-sdlc.mjs task start \
+  --root <target-project> \
+  --story ST-INITIAL-ASSESSMENT \
+  --contract-id contract-ST-INITIAL-ASSESSMENT-analysis \
+  --intent-json '<canonical-route-intent-json>' \
+  --confirm-start \
+  --actor codex \
+  --actor-type agent \
+  --authorization AUTH-ASSESSMENT-001 \
+  --json
 ```
 
-Reads:
+The rule is strict:
 
-```text
-.sdlc/requirements/
-.sdlc/assumptions/
-.sdlc/risks/
-.sdlc/decisions/
-.sdlc/contracts/contract-analysis-v1.json
-```
+- `--scope` describes a boundary but never replaces `--authorization <id>`;
+- the authorization must be active, unexpired, unchanged, and allow the exact action;
+- an artifact type restriction must cover the assessment artifact;
+- every later automated approval must reference the authorization;
+- every agent-confirmed `task start --confirm-start` must use the authorization and the grant must allow `task.start.confirm`;
+- installs, external systems, secrets, production, destructive actions, and unrelated writes remain outside scope unless explicitly decided, and installations require a direct human or CI decision.
 
-Produces:
-
-```text
-.sdlc/requirements/functional-analysis.md
-.sdlc/requirements/integration-map.md
-.sdlc/risks/RISK-002-provider-api-availability.md
-.sdlc/decisions/ADR-0002-provider-strategy.md
-```
-
-Trace example:
+Inspect or revoke persistent delegation with supported commands:
 
 ```bash
-node bin/agentic-sdlc.mjs trace append \
-  --type assumption \
-  --summary "Provider data can be refreshed at workflow checkpoint granularity for MVP."
+node <plugin-root>/bin/agentic-sdlc.mjs authorization status \
+  --root <target-project> \
+  --id AUTH-ASSESSMENT-001 \
+  --json
+
+node <plugin-root>/bin/agentic-sdlc.mjs authorization revoke \
+  --root <target-project> \
+  --id AUTH-ASSESSMENT-001 \
+  --actor antonio \
+  --actor-type human \
+  --reason "Assessment completed"
 ```
 
-Handoff to Design:
-
-```text
-Functional flows, edge cases, API/mock strategy, and integration risks.
-```
-
-## Example 3: Design Agent
-
-The Design Agent converts analysis into story workspaces and acceptance criteria.
-
-```bash
-node bin/agentic-sdlc.mjs contract create --phase design --context-summary "Design approved analysis outputs into story-scoped work"
-node bin/agentic-sdlc.mjs story create \
-  --id ST-001 \
-  --title "Implement the approved workflow trigger" \
-  --phase design \
-  --acceptance "Given the approved trigger, the system proposes the expected alternative workflow."
-```
-
-Reads:
-
-```text
-.sdlc/requirements/functional-analysis.md
-.sdlc/requirements/integration-map.md
-.sdlc/decisions/
-.sdlc/risks/
-```
-
-Produces:
-
-```text
-.sdlc/stories/ST-001/story.json
-.sdlc/stories/ST-001/plan.md
-.sdlc/stories/ST-001/implementation-log.md
-.sdlc/tests/ST-001-test-strategy.md
-.sdlc/decisions/ADR-0003-workflow-scope.md
-```
-
-Handoff to Implementation:
-
-```text
-Story ID, acceptance criteria, active contract, planned branch,
-test strategy, and relevant decisions.
-```
-
-## Example 4: Implementation Agent
-
-The Implementation Agent works only after a story has been claimed.
-
-```bash
-node bin/agentic-sdlc.mjs contract create \
-  --phase implementation \
-  --story ST-001 \
-  --id contract-ST-001-implementation
-
-node bin/agentic-sdlc.mjs story claim \
-  --id ST-001 \
-  --agent codex \
-  --branch feature/ST-001
-```
-
-Reads:
-
-```text
-.sdlc/stories/ST-001/story.json
-.sdlc/stories/ST-001/claim.json
-.sdlc/contracts/contract-ST-001-implementation.json
-.sdlc/tests/ST-001-test-strategy.md
-.sdlc/decisions/
-```
-
-Produces:
-
-```text
-application code changes
-.sdlc/stories/ST-001/implementation-log.md
-.sdlc/traces/ST-001.jsonl
-.sdlc/tests/ST-001-test-run.json
-```
-
-Trace examples:
-
-```bash
-node bin/agentic-sdlc.mjs trace append \
-  --story ST-001 \
-  --type implementation \
-  --summary "Added domain-event workflow service and fallback selector."
-
-node bin/agentic-sdlc.mjs trace append \
-  --story ST-001 \
-  --type test \
-  --outcome passed \
-  --summary "Unit and integration tests passed for the trigger-driven workflow." \
-  --evidence .sdlc/tests/ST-001-test-run.json
-```
-
-Handoff to Validation:
-
-```text
-Code diff, implementation log, test evidence, unresolved risks,
-and trace events linked to the story.
-```
-
-## Example 5: Validation Agent
-
-The Validation Agent checks whether the story satisfies its contract and acceptance criteria.
-
-```bash
-node bin/agentic-sdlc.mjs gate check --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.md
-```
-
-Reads:
-
-```text
-.sdlc/stories/ST-001/story.json
-.sdlc/contracts/contract-ST-001-implementation.json
-.sdlc/traces/ST-001.jsonl
-.sdlc/tests/
-.sdlc/risks/
-```
-
-Produces:
-
-```text
-.sdlc/reports/ST-001-gate-report.md
-.sdlc/tests/ST-001-validation-summary.md
-.sdlc/traces/ST-001.jsonl
-```
-
-Trace example:
-
-```bash
-node bin/agentic-sdlc.mjs trace append \
-  --story ST-001 \
-  --type gate \
-  --summary "Validation gate passed with test evidence linked."
-```
-
-Handoff to Release:
-
-```text
-Gate result, validation summary, accepted risks, and release notes input.
-```
-
-## Example 6: Release Agent
-
-The Release Agent packages the validated change and keeps feedback observable.
-
-Reads:
-
-```text
-.sdlc/reports/
-.sdlc/tests/
-.sdlc/traces/
-.sdlc/decisions/
-.sdlc/risks/
-```
-
-Produces:
-
-```text
-.sdlc/releases/REL-001.md
-.sdlc/releases/observability-plan.md
-.sdlc/releases/feedback-loop.md
-.sdlc/traces/ST-001.jsonl
-```
-
-Trace example:
-
-```bash
-node bin/agentic-sdlc.mjs trace append \
-  --story ST-001 \
-  --type release \
-  --outcome ready \
-  --summary "Released workflow MVP with provider signal monitoring." \
-  --evidence .sdlc/releases/REL-001.md
-```
-
-## Parallel Agent Example
-
-Two agents can work at the same time when work is split by story:
-
-```text
-Agent A
-  story: ST-001
-  branch: feature/ST-001
-  trace: .sdlc/traces/ST-001.jsonl
-
-Agent B
-  story: ST-002
-  branch: feature/ST-002
-  trace: .sdlc/traces/ST-002.jsonl
-```
-
-They share global context through `.sdlc/requirements`, `.sdlc/decisions`, and `.sdlc/risks`, but their active work and evidence stay story-scoped.
-
-```mermaid
-flowchart TB
-  Parent["Parent orchestrator chat"] --> Status["orchestrate status"]
-  Status --> LaneA["Available lane ST-001"]
-  Status --> LaneB["Available lane ST-002"]
-
-  LaneA --> ClaimA["Agent A claim"]
-  LaneB --> ClaimB["Agent B claim"]
-
-  ClaimA --> BranchA["feature/ST-001"]
-  ClaimB --> BranchB["feature/ST-002"]
-
-  BranchA --> TraceA[".sdlc/traces/ST-001.jsonl"]
-  BranchB --> TraceB[".sdlc/traces/ST-002.jsonl"]
-
-  TraceA --> GateA["Story gate ST-001"]
-  TraceB --> GateB["Story gate ST-002"]
-  GateA --> ProjectGate["Project gate"]
-  GateB --> ProjectGate
-```
-
-## Multiple Codex Chats
-
-Use this when separate Codex chats work on separate stories:
-
-```bash
-node bin/agentic-sdlc.mjs orchestrate status --json
-node bin/agentic-sdlc.mjs story claim --id ST-001 --agent analysis-chat --branch feature/ST-001 --thread-id codex-thread-a
-node bin/agentic-sdlc.mjs story claim --id ST-002 --agent implementation-chat --branch feature/ST-002 --thread-id codex-thread-b
-```
-
-Each chat records its own evidence:
-
-```bash
-node bin/agentic-sdlc.mjs trace append --story ST-001 --type decision --summary "Functional flow accepted" --actor analysis-chat --actor-type agent
-node bin/agentic-sdlc.mjs sync record --story ST-001 --event push --summary "Pushed analysis artifacts"
-node bin/agentic-sdlc.mjs story handoff --id ST-001 --to-agent implementation-agent --artifact .sdlc/requirements/functional-analysis.md
-node bin/agentic-sdlc.mjs story handoff close --id HND-ST-001-20260701123000 --status closed
-node bin/agentic-sdlc.mjs gate check --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
-```
-
-When output resolution becomes slow or the KB grows, each chat can rebuild a local cache:
-
-```bash
-node bin/agentic-sdlc.mjs cache rebuild
-node bin/agentic-sdlc.mjs cache status
-```
-
-The cache accelerates lookup only. Agents must still cite canonical `.sdlc/` source artifacts in links, traces, and gates.
-
-## Parent Orchestrator Chat
-
-A parent chat coordinates available lanes without taking over worker claims:
-
-```bash
-node bin/agentic-sdlc.mjs orchestrate plan --json
-node bin/agentic-sdlc.mjs phase lock --phase analysis --reason "Updating shared integration map"
-node bin/agentic-sdlc.mjs phase release --id LOCK-analysis-20260701123000 --reason "Integration map stable"
-node bin/agentic-sdlc.mjs gate check --scope all --strict --out .sdlc/reports/project-gate-report.json
-```
-
-## Human Governance
-
-Humans approve phase gates, resolve conflicting decisions, split stories, accept risks, and decide when a trace or contract must be corrected. Agents can propose changes and produce evidence, but they should not silently bypass gates.
+## Exception Handling
+
+| Condition | Agent behavior |
+| --- | --- |
+| Project root cannot be identified | Ask one immediate clarification |
+| Request could mean implementation rather than assessment | Clarify intent before checkpoint 1 |
+| Missing local read-only capability | Include the installation decision in checkpoint 2 or stop at the boundary |
+| External evidence becomes necessary | Present source, access, and data boundary before use |
+| Requested format cannot be generated or verified | Propose a supported alternative; do not fake the extension |
+| Evidence changes after approval | Refresh internally if meaning is unchanged; otherwise revise the affected checkpoint |
+| Scope, destination, tools, or access changes materially | Present one revised combined proposal |
+| Assessment story is missing or does not match the proposal | Create a matching story or revise checkpoint 2 before contract/output work |
+| Visual evidence is missing for DOCX/XLSX/PDF/PPTX/HTML | Do not link or claim completion |
+
+## Internal Command Choreography
+
+The agent may use project onboarding, canonical intent, capability records, output templates, work briefs, task start, output links, traces, and deterministic gates. Keep those details behind the product language above.
+
+The internal sequence must preserve these invariants:
+
+- no assessment findings before project context and the combined proposal are approved;
+- no more than the two normal checkpoints;
+- no assessment contract or output without an explicit matching story;
+- no automation approval without a persistent authorization reference;
+- no agent-confirmed task start without the same authorization and `task.start.confirm` action;
+- no visual-format output link without evidence;
+- no final completion claim without a passed verification receipt;
+- no project-specific state inside the plugin installation.

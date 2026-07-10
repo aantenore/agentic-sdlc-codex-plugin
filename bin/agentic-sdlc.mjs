@@ -5,9 +5,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import os from "node:os";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.4.21";
+const VERSION = "0.5.0";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
@@ -18,6 +19,83 @@ const INTERNAL_LOCK_STALE_MS = 30000;
 const INTERNAL_LOCK_REMOTE_STALE_MS = 300000;
 const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
+const OUTPUT_DELIVERY_MODES = new Set(["artifact", "artifact-plus-chat-summary"]);
+const OUTPUT_VISUAL_FORMATS = new Set(["docx", "xlsx", "pdf", "pptx", "html"]);
+const OUTPUT_FORMATS = Object.freeze({
+  markdown: Object.freeze({
+    label: "Markdown document",
+    extension: ".md",
+    media_type: "text/markdown",
+    generator: null,
+  }),
+  docx: Object.freeze({
+    label: "Word document",
+    extension: ".docx",
+    media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    generator: "documents",
+  }),
+  xlsx: Object.freeze({
+    label: "Excel workbook",
+    extension: ".xlsx",
+    media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    generator: "spreadsheets",
+  }),
+  pdf: Object.freeze({
+    label: "PDF document",
+    extension: ".pdf",
+    media_type: "application/pdf",
+    generator: "pdf",
+  }),
+  pptx: Object.freeze({
+    label: "PowerPoint presentation",
+    extension: ".pptx",
+    media_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    generator: "presentations",
+  }),
+  html: Object.freeze({
+    label: "HTML document",
+    extension: ".html",
+    media_type: "text/html",
+    generator: null,
+  }),
+  json: Object.freeze({
+    label: "JSON document",
+    extension: ".json",
+    media_type: "application/json",
+    generator: null,
+  }),
+  csv: Object.freeze({
+    label: "CSV table",
+    extension: ".csv",
+    media_type: "text/csv",
+    generator: "spreadsheets",
+  }),
+  custom: Object.freeze({
+    label: "Custom artifact",
+    extension: null,
+    media_type: "application/octet-stream",
+    generator: null,
+  }),
+});
+const OUTPUT_FORMAT_ALIASES = Object.freeze({
+  md: "markdown",
+  markdown: "markdown",
+  word: "docx",
+  doc: "docx",
+  docx: "docx",
+  excel: "xlsx",
+  spreadsheet: "xlsx",
+  workbook: "xlsx",
+  xlsx: "xlsx",
+  pdf: "pdf",
+  powerpoint: "pptx",
+  slides: "pptx",
+  pptx: "pptx",
+  html: "html",
+  json: "json",
+  csv: "csv",
+  custom: "custom",
+});
 const BOOLEAN_OPTIONS = new Set([
   "allow-incomplete-contract",
   "allow-unapproved-contract-output",
@@ -47,6 +125,7 @@ const KNOWN_OPTIONS = new Set([
   "agent",
   "approval-evidence",
   "approval-source",
+  "authorization",
   "artifact",
   "assumption",
   "authorized-by",
@@ -79,12 +158,14 @@ const KNOWN_OPTIONS = new Set([
   "default-flow",
   "delivery-unit",
   "document",
+  "delivery",
   "edge",
   "event",
   "evidence",
   "execution-note",
   "expires-at",
   "from",
+  "format",
   "git-event",
   "handoff-id",
   "id",
@@ -97,6 +178,7 @@ const KNOWN_OPTIONS = new Set([
   "limit",
   "levels",
   "metric",
+  "media-type",
   "mode",
   "model",
   "next-step",
@@ -110,6 +192,7 @@ const KNOWN_OPTIONS = new Set([
   "parent",
   "phase",
   "pr-url",
+  "preset",
   "profile",
   "profile-file",
   "profile-json",
@@ -158,6 +241,11 @@ const KNOWN_OPTIONS = new Set([
   "title",
   "to-agent",
   "tool",
+  "generator",
+  "extension",
+  "allow-action",
+  "allow-artifact-type",
+  "allow-subject",
   "trace-limit",
   "type",
   "until",
@@ -167,6 +255,9 @@ const KNOWN_OPTIONS = new Set([
 const REPEATABLE_OPTIONS = new Set([
   "acceptance",
   "approval-evidence",
+  "allow-action",
+  "allow-artifact-type",
+  "allow-subject",
   "artifact",
   "assumption",
   "capability-binding-file",
@@ -302,6 +393,10 @@ function main() {
       initProject(context, parsed.options);
       return;
     }
+    if (command === "doctor") {
+      runDoctor(context, parsed.options);
+      return;
+    }
     if (command === "onboard" && subcommand === "existing-project") {
       onboardExistingProject(context, parsed.options);
       return;
@@ -420,6 +515,18 @@ function main() {
     }
     if (command === "approval" && subcommand === "requests") {
       showApprovalRequests(context, parsed.options);
+      return;
+    }
+    if (command === "authorization" && subcommand === "grant") {
+      grantAuthorization(context, parsed.options);
+      return;
+    }
+    if (command === "authorization" && subcommand === "status") {
+      showAuthorizations(context, parsed.options);
+      return;
+    }
+    if (command === "authorization" && subcommand === "revoke") {
+      revokeAuthorization(context, parsed.options);
       return;
     }
     if (command === "task" && subcommand === "start") {
@@ -793,6 +900,12 @@ function startTask(context, options) {
   const decision = buildTaskStartDecision(context, options);
   if (decision.execution_allowed && options["confirm-start"]) {
     const attribution = buildAttribution(context, options, "task.start.confirm");
+    const authorization = attribution.actor.type === "human"
+      ? null
+      : requireAutomationAuthorization(context, options, attribution.action, {
+          label: `task start${decision.story_id ? ` for ${decision.story_id}` : ""}`,
+          subject_id: decision.story_id || "PROJECT",
+        });
     const trace = appendTraceEvent(context, decision.story_id || null, {
       type: "decision",
       summary: `Confirmed start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
@@ -801,12 +914,38 @@ function startTask(context, options) {
       ...buildTraceAuthorityMetadata(context, options, attribution),
       evidence: decision.contract?.path ? [decision.contract.path] : [],
       related: [decision.story_id, decision.contract_id].filter(Boolean),
+      authorization_ref: authorization?.id || null,
       git: attribution.git,
       run: attribution.run,
     });
     decision.confirmation_trace_id = trace.id;
+    decision.authorization_ref = authorization?.id || null;
+    decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
   }
   output(options, decision, formatTaskStartDecision(decision));
+}
+
+function writeTaskStartReceipt(context, decision, attribution, authorization = null) {
+  const receipt = {
+    id: `START-${decision.story_id || "PROJECT"}-${uniqueRecordSuffix()}`,
+    story_id: decision.story_id || null,
+    phase: decision.phase || null,
+    route: decision.route,
+    contract_id: decision.contract_id || null,
+    contract_approval_hash: decision.contract_id
+      ? latestContractApproval(readContractById(context, decision.contract_id, { missingOk: true }) || {})?.approved_content_hash || null
+      : null,
+    status: "confirmed",
+    authorization_ref: authorization?.id || null,
+    confirmed_by: attribution.actor,
+    confirmed_at: now(),
+    audit: { git: attribution.git, run: attribution.run },
+  };
+  const receiptPath = decision.story_id
+    ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
+    : path.join(context.sdlcRoot, "reports", "project-task-start.json");
+  writeJsonFile(receiptPath, receipt, { force: true });
+  return toProjectPath(context, receiptPath);
 }
 
 function buildTaskStartDecision(context, options) {
@@ -955,7 +1094,18 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
-  if (!isTaskContractApproved(contractState.contract)) {
+  const freshnessGaps = collectContractDependencyFreshnessGaps(context, contractState.contract);
+  if (freshnessGaps.length > 0) {
+    result.status = "contract_revision_required";
+    result.contract_action = "refresh_contract_dependencies";
+    pushAllUnique(result.blocking_reasons, ["contract_dependencies_stale"]);
+    pushAllUnique(result.questions, freshnessGaps.map((gap) => gap.question));
+    pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
+    result.approval_requests = collectApprovalRequests(context, { storyId });
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (!isTaskContractApproved(context, contractState.contract)) {
     result.status = "needs_user_input";
     result.contract_action = "approve_contract";
     pushAllUnique(result.blocking_reasons, ["contract_not_approved"]);
@@ -1127,19 +1277,25 @@ function newestContract(contracts) {
 
 function summarizeTaskContract(context, contract) {
   const gaps = collectContractReadinessGaps(context, contract);
+  const freshnessGaps = collectContractDependencyFreshnessGaps(context, contract);
   return {
     id: contract.id,
     phase: contract.phase || null,
     story_id: contract.story_id || null,
     status: contract.status || null,
-    approved: isTaskContractApproved(contract),
+    approved: isTaskContractApproved(context, contract),
     readiness_gaps: gaps.map((gap) => gap.code),
+    freshness_gaps: freshnessGaps.map((gap) => gap.code),
     path: contract.__relative_path || (contract.__path ? toProjectPath(context, contract.__path) : null),
   };
 }
 
-function isTaskContractApproved(contract) {
-  return contract.status === "approved" && hasFreshApprovedContractApproval(contract);
+function isTaskContractApproved(context, contract) {
+  return (
+    contract.status === "approved" &&
+    hasFreshApprovedContractApproval(contract) &&
+    collectContractDependencyFreshnessGaps(context, contract).length === 0
+  );
 }
 
 function contractNegotiationQuestion(phase, storyId) {
@@ -1295,6 +1451,7 @@ function buildRouteDecision(context, options) {
     intent_source: intentLoad.source,
     confidence: intentLoad.intent?.confidence,
   });
+  decision.requesting_actor = buildActor(options, context.root);
 
   if (intentLoad.parse_error) {
     addRouteCheck(decision, "canonical_intent", "failed", intentLoad.parse_error);
@@ -1884,6 +2041,12 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
 
   const claim = readStoryClaim(context, storyId);
   if (claim?.status === "active" && !isExpired(claim.expires_at)) {
+    if (claim.agent && claim.agent === decision.requesting_actor?.id) {
+      addRouteCheck(decision, "active_claim", "passed", `${storyId} is already claimed by the requesting actor ${claim.agent}`);
+      decision.route = "claim_and_implement";
+      decision.next_commands.push(`agentic-sdlc gate check --story ${storyId} --strict`);
+      return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+    }
     addRouteCheck(decision, "active_claim", "failed", `${storyId} is already claimed by ${claim.agent || "unknown"}`);
     return finalizeAskRoute(decision, {
       status: "blocked",
@@ -2088,9 +2251,11 @@ function inspectStoryContract(context, story) {
   }
   return {
     exists: true,
-    approved: contract.status === "approved" && hasFreshApprovedContractApproval(contract),
+    approved: isTaskContractApproved(context, contract),
     contract,
-    message: story.contract_id,
+    message: collectContractDependencyFreshnessGaps(context, contract).length > 0
+      ? `Contract ${story.contract_id} has stale context, output-format, or capability dependencies`
+      : story.contract_id,
   };
 }
 
@@ -2121,11 +2286,23 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
   if (!hasFreshApprovedContractApproval(contract)) {
     errors.push("contract approval is missing, stale, or lacks approved_content_hash");
   }
+  for (const gap of collectContractDependencyFreshnessGaps(context, contract)) {
+    errors.push(`contract dependency freshness gap: ${gap.summary}`);
+  }
   for (const gap of collectContractReadinessGaps(context, contract)) {
     errors.push(`contract readiness gap: ${gap.summary}`);
   }
 
   const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const requiresStartReceipt = refs.some((ref) =>
+    (registry?.templates || []).some((template) => template.id === ref.template_id && template.preset === "technical-assessment"),
+  );
+  if (requiresStartReceipt) {
+    for (const issue of validateTaskStartReceipt(context, storyId, contract)) {
+      errors.push(issue);
+    }
+  }
   for (const expectation of expectations) {
     if (!expectation.artifact_type) {
       continue;
@@ -2157,6 +2334,31 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
     );
   }
   return contract;
+}
+
+function validateTaskStartReceipt(context, storyId, contract) {
+  const receiptPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+  if (!fs.existsSync(receiptPath)) {
+    return [`assessment journey has no task-start receipt; run task start --confirm-start for ${storyId}`];
+  }
+  const receipt = readProjectJson(context, receiptPath);
+  const issues = [];
+  const latestApprovalHash = latestContractApproval(contract)?.approved_content_hash || null;
+  if (receipt.status !== "confirmed") {
+    issues.push(`task-start receipt status is '${receipt.status || "unknown"}'`);
+  }
+  if (receipt.contract_id !== contract.id || receipt.contract_approval_hash !== latestApprovalHash) {
+    issues.push("task-start receipt does not match the current approved contract");
+  }
+  if (receipt.authorization_ref) {
+    const authorization = readAuthorization(context, receipt.authorization_ref, { missingOk: true });
+    if (!authorization || authorization.status !== "active" || !authorizationAllowsAction(authorization, "task.start.confirm")) {
+      issues.push(`task-start receipt authorization ${receipt.authorization_ref} is missing, inactive, or does not allow task.start.confirm`);
+    }
+  } else if (receipt.confirmed_by?.type !== "human") {
+    issues.push("task-start receipt is neither directly human-confirmed nor backed by delegated authorization");
+  }
+  return issues;
 }
 
 function addOutputRefChecks(context, decision, story, contract) {
@@ -2449,6 +2651,64 @@ function initProject(context, options) {
   output(options, result.payload, result.messages);
 }
 
+function runDoctor(context, options) {
+  const checks = [];
+  const add = (id, status, details) => checks.push({ id, status, details });
+  const nodeVersion = process.versions.node;
+  const [major, minor] = nodeVersion.split(".").map(Number);
+  add("node-runtime", major > 18 || (major === 18 && minor >= 18) ? "passed" : "failed", `Node ${nodeVersion}; requires >=18.18`);
+
+  const packagePath = path.join(PLUGIN_ROOT, "package.json");
+  const manifestPath = path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json");
+  try {
+    const pkg = readJson(packagePath);
+    const manifest = readJson(manifestPath);
+    add("version-consistency", pkg.version === VERSION && manifest.version === VERSION ? "passed" : "failed", `CLI ${VERSION}, package ${pkg.version}, manifest ${manifest.version}`);
+    const firstPrompt = Array.isArray(manifest.interface?.defaultPrompt) ? manifest.interface.defaultPrompt[0] : manifest.interface?.defaultPrompt;
+    add(
+      "assessment-entry-point",
+      firstPrompt === "Contextualize this project and prepare an initial technical assessment." ? "passed" : "failed",
+      firstPrompt || "missing first starter prompt",
+    );
+  } catch (error) {
+    add("plugin-metadata", "failed", error.message);
+  }
+
+  for (const [id, relativePath] of [
+    ["core-skill", "skills/agentic-sdlc/SKILL.md"],
+    ["assessment-skill", "skills/agentic-sdlc-assessment/SKILL.md"],
+    ["assessment-agent-card", "skills/agentic-sdlc-assessment/agents/openai.yaml"],
+    ["assessment-preset", "templates/technical-assessment.md"],
+  ]) {
+    const filePath = path.join(PLUGIN_ROOT, relativePath);
+    add(id, fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? "passed" : "failed", relativePath);
+  }
+
+  if (fs.existsSync(context.sdlcRoot)) {
+    add("project-kb", isKbInitialized(context) ? "passed" : "failed", isKbInitialized(context) ? `${SDLC_DIR}/project.json` : `${SDLC_DIR} exists without project.json`);
+    const registry = readOutputRegistry(context, { missingOk: true });
+    add("output-registry", registry ? "passed" : "failed", registry ? `${SDLC_DIR}/output-contracts/registry.json` : "missing output registry");
+  } else {
+    add("project-kb", "not_applicable", `No ${SDLC_DIR} directory at ${context.root}`);
+  }
+
+  const failed = checks.filter((check) => check.status === "failed");
+  const payload = {
+    status: failed.length === 0 ? "passed" : "failed",
+    plugin_root: PLUGIN_ROOT,
+    project_root: context.root,
+    version: VERSION,
+    checks,
+  };
+  if (failed.length > 0) {
+    process.exitCode = 1;
+  }
+  output(options, payload, [
+    `Agentic SDLC doctor: ${payload.status}`,
+    ...checks.map((check) => `${check.status === "passed" ? "PASS" : check.status === "not_applicable" ? "N/A" : "FAIL"} ${check.id}: ${check.details}`),
+  ]);
+}
+
 function initializeProject(context, options) {
   const projectName = String(options["project-name"] || path.basename(context.root));
   const projectId = String(options["project-id"] || slugify(projectName));
@@ -2611,7 +2871,9 @@ function createBaselineProposal(context, options) {
   ensureBaselineDirectory(context);
   const id = normalizeId(options.id || `BASELINE-${shortDate()}`);
   const attribution = buildAttribution(context, options, "baseline.propose");
-  const documents = normalizeRawListOption(options.document).map((rawPath) => buildBaselineDocumentEvidence(context, rawPath));
+  const requestedDocuments = normalizeRawListOption(options.document);
+  const documentPaths = requestedDocuments.length > 0 ? requestedDocuments : discoverExistingProjectDocuments(context);
+  const documents = documentPaths.map((rawPath) => buildBaselineDocumentEvidence(context, rawPath));
   const extraSources = normalizeBaselineSourcePaths(context, normalizeRawListOption(options.source));
   const detectedStack = detectProjectStack(context);
   const repoSnapshot = buildRepositorySnapshot(context, detectedStack);
@@ -2683,6 +2945,43 @@ function createBaselineProposal(context, options) {
     run: attribution.run,
   });
   return { baseline, baseline_path: baselinePath, report_path: reportPath };
+}
+
+function discoverExistingProjectDocuments(context) {
+  const candidates = [];
+  for (const name of ["README.md", "README.mdx", "readme.md", "ARCHITECTURE.md", "REQUIREMENTS.md"]) {
+    const filePath = path.join(context.root, name);
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      candidates.push(toProjectPath(context, filePath));
+    }
+  }
+  const docsRoot = path.join(context.root, "docs");
+  if (fs.existsSync(docsRoot) && fs.statSync(docsRoot).isDirectory()) {
+    const ranked = walkFiles(docsRoot)
+      .filter((filePath) => shouldIndexFile(context, filePath) && /\.(?:md|mdx|txt)$/i.test(filePath))
+      .sort((left, right) => {
+        const score = (filePath) => /architecture|requirement|product|strategy|api|test|security|privacy|adr/i.test(path.basename(filePath)) ? 0 : 1;
+        return score(left) - score(right) || left.localeCompare(right);
+      })
+      .slice(0, 12)
+      .map((filePath) => toProjectPath(context, filePath));
+    candidates.push(...ranked);
+  }
+  const seenFiles = new Set();
+  return candidates
+    .filter((projectPath) => {
+      const filePath = resolveProjectFilePath(context, projectPath, { mustExist: true, fileOnly: true });
+      const stat = fs.statSync(filePath);
+      const identity = stat.ino
+        ? `inode:${stat.dev}:${stat.ino}`
+        : `realpath:${fs.realpathSync.native(filePath)}`;
+      if (seenFiles.has(identity)) {
+        return false;
+      }
+      seenFiles.add(identity);
+      return true;
+    })
+    .slice(0, 12);
 }
 
 function approveBaseline(context, options) {
@@ -2770,6 +3069,175 @@ function showBaselineStatus(context, options) {
   );
 }
 
+function authorizationRoot(context) {
+  return path.join(context.sdlcRoot, "authorizations");
+}
+
+function authorizationPath(context, id) {
+  return path.join(authorizationRoot(context), `${normalizeId(id)}.json`);
+}
+
+function normalizeAuthorizedActions(value) {
+  const actions = normalizeListOption(value).map((action) => action.toLowerCase());
+  for (const action of actions) {
+    if (action !== "*" && !/^[a-z0-9][a-z0-9._-]*(?:\.\*)?$/.test(action)) {
+      fail(`Invalid authorized action '${action}'. Use an exact CLI action such as contract.approve, a prefix such as capability.*, or *.`);
+    }
+  }
+  return Array.from(new Set(actions));
+}
+
+function grantAuthorization(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const scope = getOptionString(options, "scope");
+  const summary = getOptionString(options, "summary");
+  const allowedActions = normalizeAuthorizedActions(options["allow-action"]);
+  if (!scope || !summary || allowedActions.length === 0) {
+    fail("Authorization grant requires --scope, --summary, and at least one --allow-action.");
+  }
+  const attribution = buildAttribution(context, options, "authorization.grant");
+  requireFormalApprovalActor(context, options, attribution, "Granting delegated automation authorization");
+  if (!['human', 'ci'].includes(attribution.actor.type)) {
+    fail("Granting delegated automation authorization requires --actor-type human or ci.");
+  }
+  const source = normalizeApprovalSource(context, options, attribution, `authorization ${id}`, "approved");
+  if (!['explicit-user', 'ci'].includes(source)) {
+    fail("Authorization grants must come from explicit-user or ci approval, not automation or bootstrap.");
+  }
+  const expiresAt = options["expires-at"] ? normalizeOptionalDateTime(options["expires-at"], "expires-at") : null;
+  const record = {
+    id,
+    status: "active",
+    scope,
+    summary,
+    allowed_actions: allowedActions,
+    allowed_artifact_types: normalizeListOption(options["allow-artifact-type"]).map(normalizeArtifactType),
+    allowed_subjects: normalizeListOption(options["allow-subject"]).map((subject) => subject === "*" ? "*" : normalizeId(subject)),
+    expires_at: expiresAt,
+    approval_source: source,
+    approval_evidence: buildApprovalEvidence(context, options),
+    granted_by: attribution.actor,
+    created_at: now(),
+    updated_at: now(),
+    audit: {
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  record.approved_content_hash = hashAuthorizationRecord(record);
+  record.hash_algorithm = "sha256:stable-json:v1";
+  ensureDir(authorizationRoot(context));
+  writeJsonFile(authorizationPath(context, id), record, { force: Boolean(options.force) });
+  appendTraceEvent(context, null, {
+    type: "decision",
+    summary: `Granted delegated authorization ${id}: ${summary}`,
+    action: "authorization.grant",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, authorizationPath(context, id)), ...record.approval_evidence.map((item) => item.path)],
+    related: [id, ...allowedActions],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "active", authorization: record }, [
+    `Granted authorization ${id}`,
+    `Scope: ${scope}`,
+    `Allowed actions: ${allowedActions.join(", ")}`,
+  ]);
+}
+
+function readAuthorization(context, id, options = {}) {
+  const filePath = authorizationPath(context, id);
+  if (!fs.existsSync(filePath)) {
+    if (options.missingOk) {
+      return null;
+    }
+    fail(`Authorization ${id} does not exist.`);
+  }
+  return readProjectJson(context, filePath);
+}
+
+function showAuthorizations(context, options) {
+  ensureInitialized(context);
+  const id = getOptionString(options, "id");
+  const records = id
+    ? [readAuthorization(context, normalizeId(id))]
+    : collectJsonFiles(context, authorizationRoot(context));
+  output(options, { authorizations: records }, records.length
+    ? records.map((record) => `${record.id}: ${record.status}, scope ${record.scope}, actions ${(record.allowed_actions || []).join(", ")}`)
+    : ["No delegated automation authorizations found."]);
+}
+
+function revokeAuthorization(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const attribution = buildAttribution(context, options, "authorization.revoke");
+  if (!['human', 'ci'].includes(attribution.actor.type)) {
+    fail("Revoking delegated automation authorization requires --actor-type human or ci.");
+  }
+  const filePath = authorizationPath(context, id);
+  const record = readAuthorization(context, id);
+  record.status = "revoked";
+  record.revoked_at = now();
+  record.revocation_reason = getOptionString(options, "reason") || null;
+  record.updated_at = now();
+  record.audit = { ...(record.audit || {}), revoked_by: attribution.actor, git: attribution.git, run: attribution.run };
+  writeJsonFile(filePath, record, { force: true });
+  output(options, { status: "revoked", authorization: record }, [`Revoked authorization ${id}`]);
+}
+
+function authorizationAllowsAction(record, action) {
+  const normalized = String(action || "").trim().toLowerCase();
+  return (record.allowed_actions || []).some((allowed) =>
+    allowed === "*" || allowed === normalized || (allowed.endsWith(".*") && normalized.startsWith(allowed.slice(0, -1))),
+  );
+}
+
+function hashAuthorizationRecord(record) {
+  const { approved_content_hash, hash_algorithm, revoked_at, revocation_reason, ...subject } = record || {};
+  return hashApprovalSubject(subject);
+}
+
+function requireAutomationAuthorization(context, options, action, settings = {}) {
+  const id = getOptionString(options, "authorization");
+  if (!id) {
+    fail(`${settings.label || action} uses delegated automation approval and requires --authorization <id>. Free-text --scope is not sufficient.`);
+  }
+  const record = readAuthorization(context, normalizeId(id));
+  if (record.status !== "active") {
+    fail(`Authorization ${record.id} is ${record.status || "inactive"}.`);
+  }
+  if (record.expires_at && Date.parse(record.expires_at) <= Date.now()) {
+    fail(`Authorization ${record.id} expired at ${record.expires_at}.`);
+  }
+  if (record.approved_content_hash !== hashAuthorizationRecord(record)) {
+    fail(`Authorization ${record.id} changed after it was granted.`);
+  }
+  if (!authorizationAllowsAction(record, action)) {
+    fail(`Authorization ${record.id} does not allow action ${action}. Allowed actions: ${(record.allowed_actions || []).join(", ")}`);
+  }
+  const requestedScope = getOptionString(options, "scope");
+  if (requestedScope && requestedScope !== record.scope) {
+    fail(`--scope '${requestedScope}' does not match authorization ${record.id} scope '${record.scope}'.`);
+  }
+  if (
+    settings.artifact_type &&
+    (record.allowed_artifact_types || []).length > 0 &&
+    !record.allowed_artifact_types.includes(settings.artifact_type)
+  ) {
+    fail(`Authorization ${record.id} does not allow artifact type ${settings.artifact_type}.`);
+  }
+  if (
+    settings.subject_id &&
+    (record.allowed_subjects || []).length > 0 &&
+    !record.allowed_subjects.includes("*") &&
+    !record.allowed_subjects.includes(settings.subject_id)
+  ) {
+    fail(`Authorization ${record.id} does not allow subject ${settings.subject_id}.`);
+  }
+  return record;
+}
+
 function showApprovalRequests(context, options) {
   ensureInitialized(context);
   const storyId = options.story ? normalizeId(String(options.story)) : null;
@@ -2811,18 +3279,21 @@ function renderApprovalRequestsAssistantMessage(requests) {
       "I can continue with the next operational step when needed.",
     ].join("\n");
   }
+  const internalRefreshOnly = requests.every((request) => request.status === "needs_internal_refresh");
   return [
-    "I need your decision before I continue.",
+    internalRefreshOnly
+      ? "I need to refresh internal project references before I continue; this does not ask you to approve a changed scope."
+      : "I need your decision before I continue.",
     "Plainly: I am checking that I use the right project context, produce the output in the right format, and stay inside the work you actually want. You do not need to know the workflow terms; answer the questions in normal language.",
     "I will summarize the relevant file contents here. Links and file paths are supporting evidence, not homework for you.",
     "Important: your approval applies only to the item or items shown in this message. If I create a new format, evidence/boundary set, tool choice, work brief, or start confirmation later, I must show what is inside it and ask again unless you already gave a broader scope.",
     "",
     ...requests.flatMap((request, index) => formatHumanApprovalRequest(request, index + 1)),
-    "You can answer in natural language, for example:",
-    '- "Use README.md, package.json, and src/ as the trusted context; the proposed assessment format is fine."',
-    '- "The sections are fine, but also include deployment risks."',
-    '- "Do not start yet; first explain item 2 in simpler terms."',
-  ].join("\n");
+    internalRefreshOnly ? null : "You can answer in natural language, for example:",
+    internalRefreshOnly ? null : '- "Use README.md, package.json, and src/ as the trusted context; the proposed assessment format is fine."',
+    internalRefreshOnly ? null : '- "The sections are fine, but also include deployment risks."',
+    internalRefreshOnly ? null : '- "Do not start yet; first explain item 2 in simpler terms."',
+  ].filter(Boolean).join("\n");
 }
 
 function assistantMessagePresentationFields() {
@@ -2926,6 +3397,30 @@ function collectCapabilityProfileApprovalRequests(context, storyId = null) {
 
 function buildCapabilityProfileApprovalRequest(context, profile) {
   const profilePath = toProjectPath(context, capabilityProfilePath(context, profile.id));
+  const staleSources = validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true });
+  if (profile.status === "approved" && (!isApprovedRecordFresh(profile) || staleSources.length > 0)) {
+    return {
+      id: `refresh-capability-profile-${profile.id}`,
+      type: "capability_profile_refresh_required",
+      status: "needs_internal_refresh",
+      summary: `Refresh capability evidence ${profile.id}; its sources or approved snapshot changed.`,
+      subject_id: profile.id,
+      story_id: profile.subject?.story_id || null,
+      sources: [profilePath, ...(profile.source_paths || [])].filter(Boolean),
+      ...humanApprovalFields({
+        title: `Refresh project evidence and boundaries (${profile.id})`,
+        why_needed: "The evidence behind this internal capability record changed. I must rebuild it before relying on it; refreshing does not broaden permissions.",
+        review_items: [
+          `Previous scope: ${formatCapabilitySubject(profile.subject)}`,
+          staleSources.length ? `Changed evidence: ${formatLimitedList(staleSources, 8)}` : "The approved record content changed after approval.",
+          `Current source files: ${formatLimitedList(profile.source_paths || [], 10)}`,
+        ],
+        approval_meaning: "No new approval is created by this refresh. A material boundary change still requires a decision.",
+        after_approval: "After refresh, the current policy or combined proposal determines whether a fresh approval is needed.",
+      }),
+      suggested_command: `agentic-sdlc capability profile propose --id ${profile.id}${profile.subject?.story_id ? ` --story ${profile.subject.story_id}` : ""}${profile.subject?.phase ? ` --phase ${profile.subject.phase}` : ""}${profile.source_paths?.[0] ? ` --context-file ${profile.source_paths[0]}` : ""} --force`,
+    };
+  }
   return {
     id: `approve-capability-profile-${profile.id}`,
     type: "capability_profile_approval",
@@ -2976,6 +3471,33 @@ function collectCapabilityRecommendationApprovalRequests(context, storyId = null
 function buildCapabilityRecommendationApprovalRequest(context, recommendation) {
   const recommendationPath = toProjectPath(context, capabilityRecommendationPath(context, recommendation.id));
   const needsInstallApproval = capabilityRecommendationNeedsInstallApproval(recommendation);
+  const staleSources = validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${recommendation.id}`, { collectOnly: true });
+  if (
+    recommendation.status === "approved" &&
+    !needsInstallApproval &&
+    (!isApprovedRecordFresh(recommendation) || staleSources.length > 0)
+  ) {
+    return {
+      id: `refresh-capability-recommendation-${recommendation.id}`,
+      type: "capability_recommendation_refresh_required",
+      status: "needs_internal_refresh",
+      summary: `Refresh tool recommendation ${recommendation.id}; its approved evidence is stale.`,
+      subject_id: recommendation.id,
+      sources: [recommendationPath, ...(recommendation.source_paths || [])].filter(Boolean),
+      ...humanApprovalFields({
+        title: `Refresh allowed-tool recommendation (${recommendation.id})`,
+        why_needed: "The approved tool recommendation or its evidence changed. I must rebuild it before use; this refresh cannot add installs, external access, secrets, or new permissions.",
+        review_items: [
+          `Profile: ${recommendation.profile_id || "unknown"}`,
+          staleSources.length ? `Changed evidence: ${formatLimitedList(staleSources, 8)}` : "The approved recommendation content changed after approval.",
+          `Previous tools: ${formatCapabilityRecommendationsForUser(recommendation.recommendations || [])}`,
+        ],
+        approval_meaning: "No new permission is granted by refreshing the internal record.",
+        after_approval: "A materially different tool or permission set must return to the combined proposal.",
+      }),
+      suggested_command: `agentic-sdlc capability recommend --id ${recommendation.id} --profile ${recommendation.profile_id} --force`,
+    };
+  }
   return {
     id: `approve-capability-recommendation-${recommendation.id}`,
     type: "capability_recommendation_approval",
@@ -3125,6 +3647,8 @@ function formatBaselineCurrentStateSummary(baseline, fallback = null) {
   const questions = normalizeListValue(baseline.open_questions || [], []).slice(0, 3);
   const parts = [
     baseline.summary ? `summary: ${baseline.summary}` : null,
+    baseline.inferred_context?.product_signal ? `product signal: ${compactText(baseline.inferred_context.product_signal, 260)}` : null,
+    baseline.inferred_context?.component_roots?.length ? `component roots: ${baseline.inferred_context.component_roots.join(", ")}` : null,
     stack.length ? `detected stack: ${stack.join(", ")}` : null,
     keyFiles.length ? `key files: ${keyFiles.join(", ")}` : null,
     documents.length ? `documents: ${documents.join(", ")}` : null,
@@ -3288,12 +3812,18 @@ function outputTemplateNeedsApproval(context, template) {
     return true;
   }
   const templatePath = resolveProjectFilePath(context, template.path, { mustExist: false });
-  return !fs.existsSync(templatePath) || !fs.statSync(templatePath).isFile() || hashFile(templatePath) !== template.approved_content_hash;
+  return (
+    !fs.existsSync(templatePath) ||
+    !fs.statSync(templatePath).isFile() ||
+    hashFile(templatePath) !== template.approved_content_hash ||
+    !outputDeliveryIsFresh(template)
+  );
 }
 
 function buildOutputTemplateApprovalRequest(context, template) {
   const templateExcerpt = template.path ? readProjectFileExcerpt(context, template.path, 1200) : null;
   const templateHeadings = template.path ? readProjectMarkdownHeadings(context, template.path, 10) : [];
+  const delivery = effectiveOutputDelivery(template);
   return {
     id: `approve-output-template-${template.id}`,
     type: "output_template_approval",
@@ -3305,20 +3835,24 @@ function buildOutputTemplateApprovalRequest(context, template) {
     sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
     ...humanApprovalFields({
       title: `Assessment format (${template.id})`,
-      why_needed: "Before I write the assessment, I need to confirm what sections and level of detail you expect.",
+      why_needed: "Before I write the assessment, I need to confirm its sections, level of detail, and canonical file format.",
       review_items: [
         "What this is: the proposed structure and delivery style for the assessment. It does not approve the final assessment content or the work brief.",
         `Decision scope: this only approves the document structure for ${template.type || "this"} outputs. It does not approve the final assessment content.`,
         `Output type: ${template.type || "unknown"}`,
+        `Canonical result: ${formatOutputDeliveryForHuman(delivery)}. This choice is enforced when the output file is linked.`,
         template.summary ? `Summary: ${template.summary}` : null,
         templateHeadings.length ? `Assessment sections: ${templateHeadings.join(" > ")}` : null,
         template.path ? `Template file: ${template.path}` : null,
         `Template content to review: ${templateExcerpt || "unavailable"}`,
       ],
-      delivery_format_options: deliveryFormatOptionsForOutput(template.type),
-      recommended_delivery_format: recommendedDeliveryFormatForOutput(template.type),
-      delivery_question: deliveryQuestionForOutput(template.type),
-      approval_meaning: "If you approve it, I can write the assessment using this structure. You will still be able to review the actual content afterwards.",
+      delivery_format_options: [
+        ...canonicalOutputFormatOptions(),
+        ...deliveryFormatOptionsForOutput(template.type),
+      ],
+      recommended_delivery_format: formatOutputDeliveryForHuman(delivery),
+      delivery_question: `Should the canonical result remain ${delivery.label} (${delivery.extension}) with delivery mode ${delivery.mode}, or should I change it before approval?`,
+      approval_meaning: "If you approve it, I can write the assessment using this structure and must deliver the canonical file in the selected format. You will still review the actual content afterwards.",
       approve_if: "Approve if these sections match the assessment you expect.",
       change_if: "Ask for changes if you want different sections, more detail, less detail, or a different presentation.",
       after_approval: `Then I can use ${template.id} as the assessment format.`,
@@ -3333,6 +3867,8 @@ function buildOutputTemplateApprovalRequest(context, template) {
 function collectContractApprovalRequests(context, storyId = null) {
   return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
     .filter((contract) => !storyId || contract.story_id === storyId)
+    .filter((contract) => collectContractReadinessGaps(context, contract).length === 0)
+    .filter((contract) => collectContractDependencyFreshnessGaps(context, contract).length === 0)
     .filter((contract) => contract.human_gate === true && (contract.status !== "approved" || !hasFreshApprovedContractApproval(contract)))
     .map((contract) => ({
       id: `approve-contract-${contract.id}`,
@@ -3347,7 +3883,7 @@ function collectContractApprovalRequests(context, storyId = null) {
       ...humanApprovalFields({
         title: `Work brief (${contract.id})`,
         why_needed: "This is the short operating brief for the work: what I should do, what context to use, what output to produce, and what boundaries to respect.",
-        review_items: describeContractForHuman(contract),
+        review_items: describeContractForHuman(context, contract),
         delivery_format_options: deliveryFormatOptionsForContract(contract),
         recommended_delivery_format: recommendedDeliveryFormatForContract(contract),
         delivery_question: deliveryQuestionForContract(contract),
@@ -3368,7 +3904,10 @@ function collectContractClarificationRequests(context, storyId = null) {
     .filter((contract) => !storyId || contract.story_id === storyId)
     .map((contract) => ({
       contract,
-      gaps: collectContractReadinessGaps(context, contract),
+      gaps: [
+        ...collectContractReadinessGaps(context, contract),
+        ...collectContractDependencyFreshnessGaps(context, contract),
+      ],
     }))
     .filter((item) => item.gaps.length > 0)
     .map(({ contract, gaps }) => ({
@@ -3383,10 +3922,10 @@ function collectContractClarificationRequests(context, storyId = null) {
       gaps: gaps.map((gap) => gap.code),
       sources: [contract.__relative_path],
       ...humanApprovalFields({
-        title: `Missing context for the work brief (${contract.id})`,
-        why_needed: "The brief does not yet say enough about the project context. I need that before I can produce useful work without inventing details.",
+        title: `Work brief needs clarification or refresh (${contract.id})`,
+        why_needed: "The brief is incomplete or one of its project, output-format, or tool references changed. I need to refresh it before asking you to approve the current work.",
         review_items: [
-          ...describeContractForHuman(contract),
+          ...describeContractForHuman(context, contract),
           ...gaps.map((gap) => `Missing: ${gap.summary}`),
         ],
         approval_meaning: "This is not an approval yet. It is a request for missing context.",
@@ -3405,6 +3944,13 @@ function collectOutputLinkActionRequests(context, storyId = null) {
   const requests = [];
   for (const contract of collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))) {
     if (storyId && contract.story_id !== storyId) {
+      continue;
+    }
+    if (!isTaskContractApproved(context, contract) || collectContractReadinessGaps(context, contract).length > 0) {
+      continue;
+    }
+    const candidates = contract.story_id ? findUnlinkedStoryOutputCandidates(context, contract.story_id) : [];
+    if (candidates.length === 0) {
       continue;
     }
     for (const ref of contract.output_contract_refs || []) {
@@ -3439,6 +3985,7 @@ function collectOutputLinkActionRequests(context, storyId = null) {
               `Required template: ${ref.template_id}`,
               `Mode: ${ref.mode}`,
               `Contract: ${contract.id}`,
+              `Available unlinked result files: ${formatLimitedList(candidates, 8)}`,
             ],
             approval_meaning: "Choosing the canonical file makes that artifact verifiable by later gates.",
             approve_if: "Provide the file only when the output exists and is the official source you want to use.",
@@ -3447,7 +3994,7 @@ function collectOutputLinkActionRequests(context, storyId = null) {
             user_prompt: `Which file should be the canonical ${ref.artifact_type} output for ${contract.story_id}?`,
           }),
           suggested_question: `Which ${ref.artifact_type} artifact should be canonical for ${contract.story_id}?`,
-          suggested_command: `agentic-sdlc output link --story ${contract.story_id} --type ${ref.artifact_type} --artifact <path> --template ${ref.template_id} --mode ${ref.mode} --requirement <REQ-ID>`,
+          suggested_command: `agentic-sdlc output link --story ${contract.story_id} --type ${ref.artifact_type} --artifact ${candidates[0]} --template ${ref.template_id} --mode ${ref.mode} --requirement <REQ-ID>`,
         });
       }
     }
@@ -3517,6 +4064,18 @@ function formatDeliveryFormatOption(option) {
     option.description ? ` - ${option.description}` : null,
     option.when_to_use ? ` Use when: ${option.when_to_use}` : null,
   ].filter(Boolean).join("");
+}
+
+function canonicalOutputFormatOptions() {
+  return Object.entries(OUTPUT_FORMATS)
+    .filter(([format]) => format !== "custom")
+    .map(([format, descriptor]) => ({
+      id: format,
+      label: `${descriptor.label} (${descriptor.extension})`,
+      description: descriptor.generator
+        ? `Canonical file generated and verified with the ${descriptor.generator} artifact capability.`
+        : "Canonical file stored in the project and verified by the SDLC gate.",
+    }));
 }
 
 function deliveryFormatOptionsForOutput(artifactType = "", phase = null) {
@@ -3880,7 +4439,7 @@ function plainApprovalRequestCopy(request) {
   }
 }
 
-function describeContractForHuman(contract) {
+function describeContractForHuman(context, contract) {
   const contextualization = contract.contextualization || {};
   const contextSources = Array.isArray(contextualization.context_sources)
     ? contextualization.context_sources.map((source) => source.path).filter(Boolean)
@@ -3895,14 +4454,26 @@ function describeContractForHuman(contract) {
         .filter((question) => question.status !== "answered")
         .map((question) => question.question)
     : [];
+  const registry = readOutputRegistry(context, { missingOk: true });
   const outputRefs = Array.isArray(contract.output_contract_refs)
-    ? contract.output_contract_refs.map((ref) => `${ref.artifact_type}:${ref.template_id}:${ref.mode}`)
+    ? contract.output_contract_refs.map((ref) => {
+        const template = (registry?.templates || []).find((item) => item.id === ref.template_id);
+        const delivery = template ? effectiveOutputDelivery(template) : null;
+        return `${ref.artifact_type}:${ref.template_id}:${ref.mode}${delivery ? ` -> ${delivery.label} ${delivery.extension}, ${delivery.mode}` : ""}`;
+      })
     : [];
+  const sourceEvidence = contextSources
+    .slice(0, 8)
+    .map((sourcePath) => {
+      const excerpt = readProjectFileExcerpt(context, sourcePath, 220);
+      return excerpt ? `${sourcePath}: ${excerpt}` : `${sourcePath}: unavailable or non-text evidence`;
+    });
   return [
     contract.story_id ? `Story: ${contract.story_id}` : "Scope: project",
     contract.purpose ? `Purpose: ${contract.purpose}` : null,
     contextualization.summary ? `Context: ${contextualization.summary}` : null,
     contextSources.length ? `Context sources: ${contextSources.join(", ")}` : null,
+    sourceEvidence.length ? `What those sources say: ${sourceEvidence.join(" | ")}` : null,
     answeredQuestions.length ? `Recorded answers: ${answeredQuestions.join("; ")}` : null,
     openQuestions.length ? `Open questions: ${openQuestions.join("; ")}` : null,
     outputRefs.length ? `Expected outputs: ${outputRefs.join(", ")}` : null,
@@ -4157,6 +4728,56 @@ function collectContractReadinessGaps(context, contract) {
   return gaps;
 }
 
+function collectContractDependencyFreshnessGaps(context, contract) {
+  const gaps = [];
+  const addGap = (code, summary, question) => {
+    if (!gaps.some((gap) => gap.code === code && gap.summary === summary)) {
+      gaps.push({ code, summary, question });
+    }
+  };
+
+  for (const source of contract.contextualization?.context_sources || []) {
+    const sourcePath = source?.path || source;
+    if (!sourcePath) {
+      addGap("invalid_context_source", "a context source has no path", "Refresh the work brief because one of its context sources is invalid.");
+      continue;
+    }
+    try {
+      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+        addGap("missing_context_source", `context source ${sourcePath} is missing`, `Refresh the work brief after choosing a current replacement for ${sourcePath}.`);
+      } else if (!source.sha256 || hashFile(resolved) !== source.sha256) {
+        addGap("stale_context_source", `context source ${sourcePath} changed`, `Refresh the work brief from the current contents of ${sourcePath}; do not reuse its old approval.`);
+      }
+    } catch (error) {
+      addGap("invalid_context_source", `context source ${sourcePath} is invalid`, `Refresh the work brief after correcting context source ${sourcePath}: ${error.message}`);
+    }
+  }
+
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
+  for (const ref of contract.output_contract_refs || []) {
+    const template = templates.get(ref.template_id);
+    if (!template) {
+      addGap("missing_output_template", `output template ${ref.template_id} is missing`, `Create and review the required ${ref.artifact_type || "output"} format before refreshing the work brief.`);
+      continue;
+    }
+    if (template.type !== ref.artifact_type || outputTemplateNeedsApproval(context, template)) {
+      addGap("stale_output_template", `output template ${ref.template_id} is not approved for its current structure and delivery format`, `Review the current structure and canonical file format of ${ref.template_id}, then refresh the work brief.`);
+    }
+  }
+
+  if ((contract.capability_recommendation_refs || []).length > 0) {
+    const report = { strict: true, errors: [], warnings: [], checked: [] };
+    validateContractCapabilityRecommendations(context, report, contract, `contract ${contract.id || "unknown"}`);
+    for (const issue of [...report.errors, ...report.warnings]) {
+      addGap("stale_capability_context", issue, "Refresh the capability evidence or tool recommendation, then refresh the work brief inside the approved scope.");
+    }
+  }
+
+  return gaps;
+}
+
 function storyOutputResolveHint(contract) {
   if (!contract.story_id) {
     return null;
@@ -4183,6 +4804,8 @@ function validateContractOutputRefsForCreate(context, rawRefs, options = {}) {
     }
     if (template.status !== "approved") {
       errors.push(`${ref.artifact_type}:${ref.template_id}:${ref.mode} uses ${template.status || "unknown"} template ${ref.template_id}`);
+    } else if (outputTemplateNeedsApproval(context, template)) {
+      errors.push(`${ref.artifact_type}:${ref.template_id}:${ref.mode} uses stale structure or delivery metadata for template ${ref.template_id}`);
     }
   }
   if (errors.length > 0) {
@@ -4786,7 +5409,10 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
   const evidence = buildApprovalEvidence(context, options);
   const summary = getOptionString(options, "summary") || null;
   const source = normalizeApprovalSource(context, options, attribution, settings.label || "approval", status);
-  const scope = buildApprovalRecordScope(source, settings);
+  const authorization = source === "automation"
+    ? requireAutomationAuthorization(context, options, attribution.action, settings)
+    : null;
+  const scope = buildApprovalRecordScope(source, { ...settings, authorization });
   validateApprovalSourceForActor(context, {
     source,
     status,
@@ -4804,6 +5430,8 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
     scope,
     evidence,
     approval_source: source,
+    authorization_ref: authorization?.id || null,
+    authorization_action: authorization ? attribution.action : null,
     explicit_user_confirmation: source === "explicit-user",
     provisional: source === "bootstrap",
     approved_content_hash: approvedContentHash,
@@ -4818,6 +5446,12 @@ function buildApprovalRecord(context, options, attribution, settings = {}) {
 function buildApprovalRecordScope(source, settings = {}) {
   const baseScope = defaultApprovalRecordScope(source, settings);
   const explicitScope = settings.scope;
+  if (source === "automation" && settings.authorization) {
+    return {
+      ...baseScope,
+      subject_scope: explicitScope ? String(explicitScope) : null,
+    };
+  }
   if (!explicitScope) {
     return baseScope;
   }
@@ -4856,6 +5490,9 @@ function defaultApprovalRecordScope(source, settings = {}) {
       requires_summary_or_evidence_of_delegation: true,
       does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions: true,
       ask_user_if_scope_changes: true,
+      authorization_ref: settings.authorization?.id || null,
+      approval_level: settings.authorization?.scope || null,
+      allowed_actions: settings.authorization?.allowed_actions || [],
     };
   }
   return settings.scope || undefined;
@@ -4879,6 +5516,9 @@ function normalizeApprovalSource(context, options, attribution, label, status) {
   const normalized = String(source).trim().toLowerCase();
   if (!APPROVAL_SOURCES.has(normalized) || !policy.accepted_sources.includes(normalized)) {
     fail(`Unknown approval source '${source}'. Valid sources: ${policy.accepted_sources.join(", ")}`);
+  }
+  if (normalized === "automation") {
+    requireAutomationAuthorization(context, options, attribution.action, { label });
   }
   return normalized;
 }
@@ -4945,6 +5585,31 @@ function validateFormalApprovalRecord(context, report, approval, label, actor) {
   }
   if (source === "automation" && !["agent", "system", "ci"].includes(actor?.type)) {
     report.errors.push(`${label} approval_source automation requires an agent, system, or CI approver`);
+  }
+  if (source === "automation" && report.strict) {
+    const authorizationId = approval.authorization_ref || approval.scope?.authorization_ref || null;
+    if (!authorizationId) {
+      report.errors.push(`${label} automation approval has no persistent authorization_ref`);
+    } else {
+      const authorization = readAuthorization(context, authorizationId, { missingOk: true });
+      const action = approval.authorization_action || null;
+      if (!authorization) {
+        report.errors.push(`${label} references missing authorization ${authorizationId}`);
+      } else {
+        if (authorization.status !== "active") {
+          report.errors.push(`${label} authorization ${authorizationId} is ${authorization.status || "inactive"}`);
+        }
+        if (authorization.expires_at && Date.parse(authorization.expires_at) <= Date.now()) {
+          report.errors.push(`${label} authorization ${authorizationId} expired at ${authorization.expires_at}`);
+        }
+        if (authorization.approved_content_hash !== hashAuthorizationRecord(authorization)) {
+          report.errors.push(`${label} authorization ${authorizationId} changed after grant`);
+        }
+        if (!action || !authorizationAllowsAction(authorization, action)) {
+          report.errors.push(`${label} is missing an authorized action or authorization ${authorizationId} does not allow it`);
+        }
+      }
+    }
   }
   if (
     report.strict &&
@@ -6008,12 +6673,19 @@ function buildBaselineDocumentEvidence(context, rawPath) {
   const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
   assertNotDerivedArtifact(context, resolved, "Baseline document");
   const content = fs.readFileSync(resolved);
+  const text = content.toString("utf8");
   return {
     type: "document",
     path: toProjectPath(context, resolved),
     sha256: hashBuffer(content),
     size_bytes: content.length,
-    excerpt: normalizeText(content.toString("utf8")).slice(0, 800),
+    title: inferTitle(resolved, text),
+    headings: text
+      .split(/\r?\n/)
+      .map((line) => line.match(/^#{1,4}\s+(.+)$/)?.[1]?.trim())
+      .filter(Boolean)
+      .slice(0, 12),
+    excerpt: normalizeText(text).slice(0, 800),
   };
 }
 
@@ -6044,10 +6716,31 @@ function buildRepositorySnapshot(context, detectedStack = detectProjectStack(con
     detected_stack: detectedStack,
     key_files: keyFiles,
     package_scripts: readPackageScripts(context),
+    package_summary: readPackageSummary(context),
     source_roots: inferSourceRoots(context),
     test_roots: inferTestRoots(context),
     ci_files: keyFiles.filter((item) => item.path.startsWith(".github/") || item.path.includes("ci") || item.path.includes("workflow")),
   };
+}
+
+function readPackageSummary(context) {
+  const packageJsonPath = path.join(context.root, "package.json");
+  if (!fs.existsSync(packageJsonPath)) {
+    return null;
+  }
+  try {
+    const pkg = readProjectJson(context, packageJsonPath);
+    return {
+      name: pkg.name || null,
+      description: pkg.description || null,
+      version: pkg.version || null,
+      private: Boolean(pkg.private),
+      runtime_dependencies: Object.keys(pkg.dependencies || {}).sort(),
+      development_dependencies: Object.keys(pkg.devDependencies || {}).sort(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function collectProjectKeyFiles(context) {
@@ -6124,7 +6817,20 @@ function inferTestRoots(context) {
 }
 
 function buildInferredContext(repoSnapshot, detectedStack, documents) {
+  const primaryDocument = documents.find((document) => /(^|\/)readme\./i.test(document.path)) || documents[0] || null;
   return {
+    product_signal: repoSnapshot.package_summary?.description || primaryDocument?.excerpt || null,
+    document_map: documents.map((document) => ({
+      path: document.path,
+      title: document.title || null,
+      headings: document.headings || [],
+      summary: document.excerpt || null,
+    })),
+    architecture_signals: documents
+      .filter((document) => /architecture|design|adr|api|requirement/i.test(`${document.path} ${(document.headings || []).join(" ")}`))
+      .map((document) => ({ path: document.path, headings: document.headings || [], summary: document.excerpt || null })),
+    component_roots: repoSnapshot.source_roots || [],
+    runtime_and_validation_scripts: repoSnapshot.package_scripts || {},
     stack_summary: detectedStack.map((item) => `${item.type}:${item.name}`),
     likely_entrypoints: repoSnapshot.key_files.map((item) => item.path),
     test_surface: Object.keys(repoSnapshot.package_scripts || {}).filter((script) => /test|check|lint|smoke/i.test(script)),
@@ -6147,6 +6853,15 @@ function renderBaselineReport(baseline) {
     "## Summary",
     baseline.summary || "No summary provided.",
     "",
+    "## Product Signal",
+    baseline.inferred_context?.product_signal || "Not evidenced.",
+    "",
+    "## Architecture And Component Signals",
+    ...listOrNone([
+      ...(baseline.inferred_context?.component_roots || []).map((root) => `Source root: ${root}`),
+      ...(baseline.inferred_context?.architecture_signals || []).map((item) => `${item.path}: ${(item.headings || []).join(" > ") || item.summary || "architecture evidence"}`),
+    ]),
+    "",
     "## Detected Stack",
     ...listOrNone((baseline.repository_snapshot?.detected_stack || []).map((item) => `${item.type}: ${item.name}${item.source_path ? ` (${item.source_path})` : ""}`)),
     "",
@@ -6154,7 +6869,7 @@ function renderBaselineReport(baseline) {
     ...listOrNone((baseline.repository_snapshot?.key_files || []).map((item) => `${item.path} (${item.sha256})`)),
     "",
     "## Imported Documents",
-    ...listOrNone((baseline.imported_documents || []).map((item) => `${item.path} (${item.sha256})`)),
+    ...listOrNone((baseline.imported_documents || []).map((item) => `${item.path}: ${item.title || "Untitled"}; sections ${(item.headings || []).join(" > ") || "not detected"}; evidence ${item.sha256}`)),
     "",
     "## Open Questions",
     ...listOrNone(baseline.open_questions || []),
@@ -7534,6 +8249,7 @@ function proposeOutputTemplate(context, options) {
   return withOutputRegistryLock(context, () => {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const id = normalizeId(options.id || `${artifactType}-v1`);
+  const delivery = buildOutputDelivery(options);
   const registry = readOutputRegistry(context, { create: true, options, action: "output.template.propose" });
   if (findOutputTemplate(registry, id) && !options.force) {
     fail(`Output template ${id} already exists. Use --force to replace its proposal metadata.`);
@@ -7551,6 +8267,8 @@ function proposeOutputTemplate(context, options) {
     status: "draft",
     path: relativeTemplatePath,
     summary: getOptionString(options, "summary") || null,
+    preset: content.preset || null,
+    delivery,
     source_paths: content.source_paths,
     proposed_at: now(),
     approved_at: null,
@@ -7616,14 +8334,20 @@ function approveOutputTemplate(context, options) {
   const templatePath = resolveProjectFilePath(context, template.path, { mustExist: true, fileOnly: true });
   assertNotDerivedArtifact(context, templatePath, "Output template");
   const approvedContentHash = hashFile(templatePath);
+  const delivery = effectiveOutputDelivery(template);
+  const approvedDeliveryHash = hashApprovalSubject(delivery);
   const approvalEvidence = buildApprovalEvidence(context, options);
   const approvalSummaryOption = getOptionString(options, "summary") || null;
   const approvalSummary = approvalSummaryOption || template.approval_summary || null;
   const approvalSource = normalizeApprovalSource(context, options, attribution, `output template ${id}`, "approved");
+  const authorization = approvalSource === "automation"
+    ? requireAutomationAuthorization(context, options, attribution.action, { label: `output template ${id}`, subject_id: id, artifact_type: template.type })
+    : null;
   const approvalScope = buildApprovalRecordScope(approvalSource, {
     subject_id: id,
     label: `output template ${id}`,
     scope: String(options.scope || "output_template"),
+    authorization,
   });
   validateApprovalSourceForActor(context, {
     source: approvalSource,
@@ -7638,9 +8362,12 @@ function approveOutputTemplate(context, options) {
   template.approved_by = attribution.actor;
   template.approval_summary = approvalSummary;
   template.approved_content_hash = approvedContentHash;
+  template.approved_delivery_hash = approvedDeliveryHash;
   template.hash_algorithm = "sha256:file:v1";
   template.approval_evidence = approvalEvidence;
   template.approval_source = approvalSource;
+  template.authorization_ref = authorization?.id || null;
+  template.authorization_action = authorization ? attribution.action : null;
   template.approval_scope = approvalScope;
   template.explicit_user_confirmation = approvalSource === "explicit-user";
   template.provisional = approvalSource === "bootstrap";
@@ -7660,10 +8387,14 @@ function approveOutputTemplate(context, options) {
     status: "approved",
     evidence: template.approval_evidence,
     approval_source: approvalSource,
+    authorization_ref: authorization?.id || null,
+    authorization_action: authorization ? attribution.action : null,
     approval_scope: approvalScope,
     explicit_user_confirmation: approvalSource === "explicit-user",
     provisional: approvalSource === "bootstrap",
     approved_content_hash: approvedContentHash,
+    approved_delivery_hash: approvedDeliveryHash,
+    delivery,
     hash_algorithm: "sha256:file:v1",
     created_at: now(),
     audit: {
@@ -7724,6 +8455,7 @@ function resolveOutput(context, options) {
     [
       `Output resolution for ${storyId}/${artifactType}: ${resolution.recommendation}`,
       resolution.template_id ? `Template: ${resolution.template_id}` : "Template: missing approved template",
+      resolution.delivery ? `Canonical delivery: ${formatOutputDeliveryForHuman(resolution.delivery)}` : null,
       resolution.base_artifact ? `Base artifact: ${resolution.base_artifact}` : "Base artifact: none",
       resolution.next_action,
     ].filter(Boolean),
@@ -7766,11 +8498,18 @@ function linkOutputArtifact(context, options) {
     fail(`Output template ${templateId} is '${template.status}'. Approve it before linking output artifacts.`);
   }
 
+  const delivery = effectiveOutputDelivery(template);
+
   const artifactPath = resolveProjectFilePath(context, requireOption(options, "artifact"), {
     mustExist: true,
     fileOnly: true,
   });
   assertNotDerivedArtifact(context, artifactPath, "Output artifact");
+  validateArtifactDeliveryPath(artifactPath, delivery, `Output template ${templateId}`);
+  const verificationReceipt = verifyOutputArtifact(context, artifactPath, delivery, {
+    evidence: normalizeListOption(options.evidence),
+    requireVisualEvidence: true,
+  });
 
   const baseArtifact = options["base-artifact"]
     ? resolveProjectFilePath(context, options["base-artifact"], { mustExist: true, fileOnly: true })
@@ -7805,6 +8544,9 @@ function linkOutputArtifact(context, options) {
       fail("Creating an output override decision requires --rationale or --approval-evidence describing the approved exception.");
     }
     const approvalSource = normalizeApprovalSource(context, options, attribution, `output override ${decisionId}`, "approved");
+    const authorization = approvalSource === "automation"
+      ? requireAutomationAuthorization(context, options, attribution.action, { label: `output override ${decisionId}`, subject_id: normalizeId(decisionId), artifact_type: artifactType })
+      : null;
     validateApprovalSourceForActor(context, {
       source: approvalSource,
       status: "approved",
@@ -7833,6 +8575,8 @@ function linkOutputArtifact(context, options) {
       subject: decisionSubject,
       evidence: decisionEvidence,
       approval_source: approvalSource,
+      authorization_ref: authorization?.id || null,
+      authorization_action: authorization ? attribution.action : null,
       explicit_user_confirmation: approvalSource === "explicit-user",
       provisional: approvalSource === "bootstrap",
       approved_content_hash: hashApprovalSubject(decisionSubject),
@@ -7861,7 +8605,18 @@ function linkOutputArtifact(context, options) {
     requirements: linkedRequirements,
     decision_id: decisionId ? normalizeId(decisionId) : null,
     rationale: getOptionString(options, "rationale") || null,
-    source_paths: [relativeArtifactPath, relativeBaseArtifact, template.path].filter(Boolean),
+    delivery_format: delivery.format,
+    delivery_extension: delivery.extension,
+    media_type: delivery.media_type,
+    generator: delivery.generator,
+    delivery_mode: delivery.mode,
+    verification_receipt: verificationReceipt,
+    source_paths: [
+      relativeArtifactPath,
+      relativeBaseArtifact,
+      template.path,
+      ...verificationReceipt.evidence.map((item) => item.path),
+    ].filter(Boolean),
     fingerprints: {
       artifact_sha256: hashFile(artifactPath),
       base_artifact_sha256: baseArtifact ? hashFile(baseArtifact) : null,
@@ -9283,20 +10038,43 @@ function collectArchiveCandidates(context, beforeDate) {
 
 function buildOutputTemplateContent(context, options, artifactType, id) {
   const from = getOptionString(options, "from");
+  const body = getOptionString(options, "body");
+  const preset = getOptionString(options, "preset");
+  const contentSources = [from, body, preset].filter(Boolean);
+  if (contentSources.length > 1) {
+    fail("Use only one of --from, --body, or --preset when proposing an output template.");
+  }
   if (from) {
     const sourcePath = resolveProjectFilePath(context, from, { mustExist: true, fileOnly: true });
     assertNotDerivedArtifact(context, sourcePath, "Template source");
     return {
       text: fs.readFileSync(sourcePath, "utf8"),
       source_paths: [toProjectPath(context, sourcePath)],
+      preset: null,
     };
   }
 
-  const body = getOptionString(options, "body");
   if (body) {
     return {
       text: `${body.trim()}\n`,
       source_paths: [],
+      preset: null,
+    };
+  }
+
+  if (preset) {
+    const normalizedPreset = String(preset).trim().toLowerCase();
+    if (normalizedPreset !== "technical-assessment") {
+      fail(`Unknown output template preset '${preset}'. Valid presets: technical-assessment`);
+    }
+    const presetPath = path.join(context.templateDir, "technical-assessment.md");
+    if (!fs.existsSync(presetPath) || !fs.statSync(presetPath).isFile()) {
+      fail(`Bundled output template preset is missing: ${presetPath}`);
+    }
+    return {
+      text: fs.readFileSync(presetPath, "utf8"),
+      source_paths: [],
+      preset: normalizedPreset,
     };
   }
 
@@ -9323,6 +10101,7 @@ function buildOutputTemplateContent(context, options, artifactType, id) {
       "",
     ].join("\n"),
     source_paths: [],
+    preset: null,
   };
 }
 
@@ -9349,6 +10128,7 @@ function buildOutputResolution(context, storyId, artifactType, options = {}) {
     : [];
   const preferredRelated = relatedLinks[0] || null;
   const preferredTemplate = approvedTemplates.find((template) => template.id === preferredRelated?.template_id) || approvedTemplates[0] || null;
+  const delivery = preferredTemplate ? effectiveOutputDelivery(preferredTemplate) : null;
   let recommendation = "template_required";
   let nextAction = `Propose and approve a template: agentic-sdlc output template propose --type ${artifactType}`;
   let baseArtifact = null;
@@ -9369,7 +10149,7 @@ function buildOutputResolution(context, storyId, artifactType, options = {}) {
     recommendation = "new";
     nextAction = [
       "No related approved artifact was found.",
-      `Create the artifact with template ${preferredTemplate.id}, then link it with mode new.`,
+      `Create the ${delivery.label} artifact (${delivery.extension}) with template ${preferredTemplate.id}${delivery.generator ? ` using ${delivery.generator}` : ""}, then link it with mode new.`,
     ].join(" ");
   }
 
@@ -9379,6 +10159,7 @@ function buildOutputResolution(context, storyId, artifactType, options = {}) {
     requirements,
     recommendation,
     template_id: preferredTemplate?.id || existingLinks[0]?.template_id || null,
+    delivery,
     approved_templates: approvedTemplates.map((template) => template.id),
     existing_links: existingLinks,
     related_links: relatedLinks,
@@ -9631,6 +10412,272 @@ function normalizeOutputMode(value) {
     fail(`Invalid output mode '${value}'. Valid modes: ${Array.from(OUTPUT_LINK_MODES).join(", ")}`);
   }
   return normalized;
+}
+
+function buildOutputDelivery(options = {}, fallback = null) {
+  const requestedFormat = getOptionString(options, "format");
+  const formatAlias = String(requestedFormat || fallback?.format || "markdown").trim().toLowerCase();
+  const format = OUTPUT_FORMAT_ALIASES[formatAlias];
+  if (!format || !OUTPUT_FORMATS[format]) {
+    fail(`Invalid output format '${requestedFormat || formatAlias}'. Valid formats: ${Object.keys(OUTPUT_FORMATS).join(", ")}`);
+  }
+
+  const descriptor = OUTPUT_FORMATS[format];
+  const requestedMode = getOptionString(options, "delivery") || fallback?.mode || "artifact-plus-chat-summary";
+  const mode = String(requestedMode).trim().toLowerCase();
+  if (!OUTPUT_DELIVERY_MODES.has(mode)) {
+    fail(`Invalid delivery mode '${requestedMode}'. Valid modes: ${Array.from(OUTPUT_DELIVERY_MODES).join(", ")}`);
+  }
+
+  const requestedExtension = normalizeOutputExtension(getOptionString(options, "extension") || fallback?.extension || descriptor.extension);
+  const requestedMediaType = getOptionString(options, "media-type") || fallback?.media_type || descriptor.media_type;
+  const requestedGenerator = getOptionString(options, "generator") || fallback?.generator || descriptor.generator;
+
+  if (format !== "custom") {
+    if (getOptionString(options, "extension") && requestedExtension !== descriptor.extension) {
+      fail(`Output format ${format} requires extension ${descriptor.extension}; received ${requestedExtension}.`);
+    }
+    if (getOptionString(options, "media-type") && requestedMediaType !== descriptor.media_type) {
+      fail(`Output format ${format} requires media type ${descriptor.media_type}; received ${requestedMediaType}.`);
+    }
+    if (getOptionString(options, "generator") && requestedGenerator !== descriptor.generator) {
+      fail(`Output format ${format} uses generator ${descriptor.generator || "none"}; received ${requestedGenerator}.`);
+    }
+  } else if (!requestedExtension) {
+    fail("Custom output format requires --extension (for example --extension .drawio). ");
+  }
+
+  return {
+    format,
+    label: descriptor.label,
+    extension: format === "custom" ? requestedExtension : descriptor.extension,
+    media_type: format === "custom" ? requestedMediaType : descriptor.media_type,
+    generator: format === "custom" ? requestedGenerator : descriptor.generator,
+    mode,
+  };
+}
+
+function normalizeOutputExtension(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const extension = String(value).trim().toLowerCase();
+  if (!/^\.[a-z0-9][a-z0-9._-]*$/.test(extension)) {
+    fail(`Invalid output extension '${value}'. Use a value such as .md, .xlsx, or .drawio.`);
+  }
+  return extension;
+}
+
+function effectiveOutputDelivery(template = {}) {
+  return buildOutputDelivery({}, template.delivery || null);
+}
+
+function outputDeliveryIsFresh(template = {}) {
+  if (!template.delivery) {
+    return true;
+  }
+  return Boolean(
+    template.approved_delivery_hash &&
+    template.approved_delivery_hash === hashApprovalSubject(effectiveOutputDelivery(template)),
+  );
+}
+
+function formatOutputDeliveryForHuman(delivery) {
+  return [
+    `${delivery.label} (${delivery.extension})`,
+    delivery.generator ? `created with the ${delivery.generator} artifact capability` : "created directly",
+    delivery.mode === "artifact-plus-chat-summary" ? "plus a concise chat summary" : "as the canonical file",
+  ].join(", ");
+}
+
+function validateArtifactDeliveryPath(artifactPath, delivery, label = "Output") {
+  if (!delivery.extension) {
+    return;
+  }
+  if (!String(artifactPath).toLowerCase().endsWith(delivery.extension.toLowerCase())) {
+    fail(`${label} requires a ${delivery.extension} canonical artifact, but received ${path.basename(artifactPath)}.`);
+  }
+}
+
+function verifyOutputArtifact(context, artifactPath, delivery, options = {}) {
+  const stat = fs.statSync(artifactPath);
+  if (!stat.isFile() || stat.size === 0) {
+    fail(`Output artifact ${path.basename(artifactPath)} is empty or is not a file.`);
+  }
+  const checks = [`non-empty file (${stat.size} bytes)`, `extension ${delivery.extension}`];
+  let verifier = "file-structure-v1";
+
+  if (["docx", "xlsx", "pptx"].includes(delivery.format)) {
+    verifier = "ooxml-container-v1";
+    const requiredEntries = {
+      docx: ["[Content_Types].xml", "word/document.xml"],
+      xlsx: ["[Content_Types].xml", "xl/workbook.xml"],
+      pptx: ["[Content_Types].xml", "ppt/presentation.xml"],
+    }[delivery.format];
+    const entries = inspectZipContainer(artifactPath, requiredEntries);
+    checks.push(`valid OOXML ZIP container with ${entries.size} entries`);
+    checks.push(...requiredEntries.map((entry) => `contains ${entry}`));
+    const rootEntry = requiredEntries[1];
+    const xml = readZipEntry(artifactPath, entries.get(rootEntry)).toString("utf8");
+    const rootPatterns = {
+      docx: /<(?:\w+:)?document\b/i,
+      xlsx: /<(?:\w+:)?workbook\b/i,
+      pptx: /<(?:\w+:)?presentation\b/i,
+    };
+    if (!rootPatterns[delivery.format].test(xml)) {
+      fail(`${delivery.label} artifact has ${rootEntry}, but it does not contain the expected XML root.`);
+    }
+    checks.push(`valid ${rootEntry} root`);
+  } else if (delivery.format === "pdf") {
+    verifier = "pdf-container-v1";
+    const bytes = fs.readFileSync(artifactPath);
+    if (!bytes.subarray(0, 8).toString("latin1").startsWith("%PDF-")) {
+      fail("PDF artifact is missing a valid %PDF header.");
+    }
+    if (!bytes.subarray(Math.max(0, bytes.length - 2048)).toString("latin1").includes("%%EOF")) {
+      fail("PDF artifact is missing its %%EOF marker.");
+    }
+    checks.push("valid PDF header and EOF marker");
+  } else if (delivery.format === "json") {
+    verifier = "json-parse-v1";
+    try {
+      JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+    } catch (error) {
+      fail(`JSON output is not valid: ${error.message}`);
+    }
+    checks.push("valid JSON syntax");
+  } else if (delivery.format === "html") {
+    verifier = "html-structure-v1";
+    const html = fs.readFileSync(artifactPath, "utf8");
+    if (!/<(?:!doctype\s+html|html|body|main)\b/i.test(html)) {
+      fail("HTML output does not contain an HTML document structure.");
+    }
+    checks.push("recognizable HTML document structure");
+  } else if (delivery.format === "csv") {
+    verifier = "csv-structure-v1";
+    const csv = fs.readFileSync(artifactPath, "utf8");
+    if (csv.includes("\u0000") || !/[;,\t]/.test(csv.split(/\r?\n/, 1)[0] || "")) {
+      fail("CSV output does not contain a valid text header with a delimiter.");
+    }
+    checks.push("text CSV header with delimiter");
+  } else if (["markdown", "custom"].includes(delivery.format)) {
+    const bytes = fs.readFileSync(artifactPath);
+    if (bytes.includes(0)) {
+      fail(`${delivery.label} output contains binary NUL bytes.`);
+    }
+    checks.push("non-binary text content");
+  }
+
+  const evidence = normalizeListValue(options.evidence, []).map((rawPath) => {
+    const evidencePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, evidencePath, "Output verification evidence");
+    return {
+      path: toProjectPath(context, evidencePath),
+      sha256: hashFile(evidencePath),
+    };
+  });
+  if (options.requireVisualEvidence && OUTPUT_VISUAL_FORMATS.has(delivery.format) && evidence.length === 0) {
+    fail(`${delivery.label} output requires --evidence <render-or-visual-check-file> before it can be linked as canonical.`);
+  }
+  if (evidence.length > 0) {
+    checks.push(`${evidence.length} render or visual verification evidence file(s)`);
+  }
+
+  return {
+    status: "passed",
+    verifier,
+    format: delivery.format,
+    checks,
+    evidence,
+    artifact_sha256: hashFile(artifactPath),
+    verified_at: now(),
+  };
+}
+
+function inspectZipContainer(filePath, requiredEntries = []) {
+  const buffer = fs.readFileSync(filePath);
+  const minimumEocdSize = 22;
+  let eocdOffset = -1;
+  for (let offset = buffer.length - minimumEocdSize; offset >= Math.max(0, buffer.length - 65_557); offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) {
+      eocdOffset = offset;
+      break;
+    }
+  }
+  if (eocdOffset < 0) {
+    fail(`${path.basename(filePath)} is not a valid ZIP container.`);
+  }
+  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
+  const centralSize = buffer.readUInt32LE(eocdOffset + 12);
+  const centralOffset = buffer.readUInt32LE(eocdOffset + 16);
+  if (centralOffset + centralSize > buffer.length) {
+    fail(`${path.basename(filePath)} has an invalid ZIP central directory.`);
+  }
+  const entries = new Map();
+  let offset = centralOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) {
+      fail(`${path.basename(filePath)} has a malformed ZIP directory entry.`);
+    }
+    const flags = buffer.readUInt16LE(offset + 8);
+    const method = buffer.readUInt16LE(offset + 10);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const end = offset + 46 + nameLength + extraLength + commentLength;
+    if (end > buffer.length) {
+      fail(`${path.basename(filePath)} has a truncated ZIP directory entry.`);
+    }
+    const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+    entries.set(name, { name, flags, method, compressedSize, uncompressedSize, localOffset });
+    offset = end;
+  }
+  for (const required of requiredEntries) {
+    const entry = entries.get(required);
+    if (!entry) {
+      fail(`${path.basename(filePath)} is missing required OOXML entry ${required}.`);
+    }
+    if ((entry.flags & 0x1) !== 0) {
+      fail(`${path.basename(filePath)} encrypts required OOXML entry ${required}; it cannot be verified.`);
+    }
+    readZipEntry(filePath, entry);
+  }
+  return entries;
+}
+
+function readZipEntry(filePath, entry) {
+  const buffer = fs.readFileSync(filePath);
+  const offset = entry.localOffset;
+  if (offset + 30 > buffer.length || buffer.readUInt32LE(offset) !== 0x04034b50) {
+    fail(`${path.basename(filePath)} has an invalid local ZIP header for ${entry.name}.`);
+  }
+  const nameLength = buffer.readUInt16LE(offset + 26);
+  const extraLength = buffer.readUInt16LE(offset + 28);
+  const dataStart = offset + 30 + nameLength + extraLength;
+  const dataEnd = dataStart + entry.compressedSize;
+  if (dataEnd > buffer.length) {
+    fail(`${path.basename(filePath)} has truncated ZIP data for ${entry.name}.`);
+  }
+  const compressed = buffer.subarray(dataStart, dataEnd);
+  let value;
+  if (entry.method === 0) {
+    value = Buffer.from(compressed);
+  } else if (entry.method === 8) {
+    try {
+      value = zlib.inflateRawSync(compressed);
+    } catch (error) {
+      fail(`${path.basename(filePath)} cannot decompress ${entry.name}: ${error.message}`);
+    }
+  } else {
+    fail(`${path.basename(filePath)} uses unsupported ZIP compression ${entry.method} for ${entry.name}.`);
+  }
+  if (value.length !== entry.uncompressedSize) {
+    fail(`${path.basename(filePath)} has an invalid uncompressed size for ${entry.name}.`);
+  }
+  return value;
 }
 
 function resolveProjectFilePath(context, rawPath, options = {}) {
@@ -9959,6 +11006,7 @@ function appendTraceEvent(context, storyId, event) {
     requested_by: event.requested_by || null,
     authorized_by: event.authorized_by || null,
     request: event.request || null,
+    authorization_ref: event.authorization_ref || null,
     action: event.action || event.type,
     evidence: event.evidence || [],
     related: event.related || [],
@@ -10034,6 +11082,7 @@ function gateCheck(context, options) {
     fail("Gate scope 'story' requires --story.");
   }
   validateProject(context, report);
+  validateAuthorizations(context, report);
   validateBaselines(context, report, storyId && scope === "story" ? storyId : null);
   validateLocks(context, report);
 
@@ -10548,6 +11597,36 @@ function validateProject(context, report) {
   report.checked.push("project");
 }
 
+function validateAuthorizations(context, report) {
+  for (const authorization of collectJsonFiles(context, authorizationRoot(context))) {
+    const label = `authorization ${authorization.id || "unknown"}`;
+    for (const field of ["id", "status", "scope", "summary", "allowed_actions", "approval_source", "granted_by", "approved_content_hash"]) {
+      if (authorization[field] === undefined || authorization[field] === null || authorization[field] === "") {
+        report.errors.push(`${label} is missing ${field}`);
+      }
+    }
+    if (!Array.isArray(authorization.allowed_actions) || authorization.allowed_actions.length === 0) {
+      report.errors.push(`${label} must allow at least one explicit action`);
+    }
+    if (!Array.isArray(authorization.allowed_subjects)) {
+      report.errors.push(`${label} allowed_subjects must be an array`);
+    }
+    if (!['explicit-user', 'ci'].includes(authorization.approval_source)) {
+      report.errors.push(`${label} must be granted by explicit-user or ci approval`);
+    }
+    if (authorization.approval_source === "explicit-user" && authorization.granted_by?.type !== "human") {
+      report.errors.push(`${label} explicit-user grant requires a human actor`);
+    }
+    if (authorization.approved_content_hash && authorization.approved_content_hash !== hashAuthorizationRecord(authorization)) {
+      report.errors.push(`${label} changed after grant`);
+    }
+    if (authorization.status === "active" && authorization.expires_at && Date.parse(authorization.expires_at) <= Date.now()) {
+      report.warnings.push(`${label} expired at ${authorization.expires_at}`);
+    }
+    report.checked.push(label);
+  }
+}
+
 function validateBaselines(context, report, storyId = null) {
   const allBaselines = readBaselines(context);
   const referencedIds = storyId
@@ -10733,6 +11812,12 @@ function validateOutputContracts(context, report, storyId = null) {
     if (isDerivedArtifactPath(context, templatePath)) {
       report.errors.push(`${label} cannot live under cache or indexes`);
     }
+    let delivery = null;
+    try {
+      delivery = effectiveOutputDelivery(template);
+    } catch (error) {
+      report.errors.push(`${label} has invalid delivery metadata: ${error.message}`);
+    }
     if (template.status === "approved") {
       if (!hasFormalApprovalAttribution(template.approved_by, template.approval_source)) {
         report.errors.push(`${label} approved template is missing ${formalApprovalActorDescription(template.approval_source)} approval attribution`);
@@ -10745,6 +11830,9 @@ function validateOutputContracts(context, report, storyId = null) {
           summary: template.approval_summary,
           evidence: template.approval_evidence || [],
           approval_source: template.approval_source || null,
+          authorization_ref: template.authorization_ref || null,
+          authorization_action: template.authorization_action || null,
+          scope: template.approval_scope || null,
           explicit_user_confirmation: template.explicit_user_confirmation,
           provisional: template.provisional,
         },
@@ -10756,6 +11844,9 @@ function validateOutputContracts(context, report, storyId = null) {
         report[severity].push(`${label} is approved but has no approved_content_hash; re-approve the template`);
       } else if (fs.existsSync(templatePath) && hashFile(templatePath) !== template.approved_content_hash) {
         report.errors.push(`${label} changed after approval; re-approve the template`);
+      }
+      if (template.delivery && (!template.approved_delivery_hash || !delivery || template.approved_delivery_hash !== hashApprovalSubject(delivery))) {
+        report.errors.push(`${label} delivery format changed after approval; re-approve the template`);
       }
     }
     if (Array.isArray(template.source_paths)) {
@@ -10863,6 +11954,28 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
       const severity = report.strict ? "errors" : "warnings";
       report[severity].push(`${label} template ${link.template_id} is not approved`);
     }
+    try {
+      const delivery = effectiveOutputDelivery(template);
+      if (link.artifact_path) {
+        const artifactPath = resolveProjectFilePath(context, link.artifact_path, { mustExist: false });
+        if (delivery.extension && !String(artifactPath).toLowerCase().endsWith(delivery.extension.toLowerCase())) {
+          report.errors.push(`${label} artifact must use approved ${delivery.extension} delivery format`);
+        }
+      }
+      for (const [field, expected] of [
+        ["delivery_format", delivery.format],
+        ["delivery_extension", delivery.extension],
+        ["media_type", delivery.media_type],
+        ["generator", delivery.generator],
+        ["delivery_mode", delivery.mode],
+      ]) {
+        if (link[field] !== undefined && link[field] !== expected) {
+          report.errors.push(`${label} ${field} does not match approved template ${link.template_id}`);
+        }
+      }
+    } catch (error) {
+      report.errors.push(`${label} cannot validate delivery metadata: ${error.message}`);
+    }
   }
 
   if (link.artifact_path) {
@@ -10877,6 +11990,36 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
       report.errors.push(`${label} artifact ${link.artifact_path} changed after it was linked`);
     } else if (report.strict && fs.existsSync(artifactPath) && !link.fingerprints?.artifact_sha256) {
       report.errors.push(`${label} is missing artifact fingerprint; re-link the output artifact`);
+    }
+    if (template?.delivery && fs.existsSync(artifactPath)) {
+      const receipt = link.verification_receipt;
+      if (!receipt || receipt.status !== "passed") {
+        report.errors.push(`${label} is missing a passed format verification receipt; re-link the output artifact`);
+      } else {
+        try {
+          const currentReceipt = verifyOutputArtifact(context, artifactPath, effectiveOutputDelivery(template), {
+            evidence: [],
+            requireVisualEvidence: false,
+          });
+          if (receipt.format !== currentReceipt.format || receipt.verifier !== currentReceipt.verifier) {
+            report.errors.push(`${label} verification receipt does not match the approved artifact format`);
+          }
+          if (receipt.artifact_sha256 !== hashFile(artifactPath)) {
+            report.errors.push(`${label} verification receipt is stale for ${link.artifact_path}`);
+          }
+        } catch (error) {
+          report.errors.push(`${label} artifact format verification failed: ${error.message}`);
+        }
+        if (OUTPUT_VISUAL_FORMATS.has(effectiveOutputDelivery(template).format) && !(receipt.evidence || []).length) {
+          report.errors.push(`${label} is missing render or visual verification evidence`);
+        }
+        for (const evidence of receipt.evidence || []) {
+          const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: false });
+          if (!fs.existsSync(evidencePath) || (evidence.sha256 && hashFile(evidencePath) !== evidence.sha256)) {
+            report.errors.push(`${label} verification evidence ${evidence.path} is missing or changed`);
+          }
+        }
+      }
     }
   }
 
@@ -11252,6 +12395,8 @@ function validateContractOutputRefs(context, report, contract, label) {
       }
       if (report.strict && template.status !== "approved") {
         report.errors.push(`${refLabel} template ${ref.template_id} is not approved`);
+      } else if (report.strict && outputTemplateNeedsApproval(context, template)) {
+        report.errors.push(`${refLabel} template ${ref.template_id} structure or delivery approval is stale`);
       }
     }
     if (report.strict && requiresCoverage && contract.story_id) {
@@ -12315,6 +13460,7 @@ function printHelp() {
   console.log(`Agentic SDLC ${VERSION}
 
 Usage:
+  agentic-sdlc doctor [--root path] [--json]
   agentic-sdlc init [--project-name name] [--project-id id] [--root path]
   agentic-sdlc onboard existing-project [--project-name name] [--document path]
       [--source path] [--question text] [--summary text]
@@ -12361,9 +13507,16 @@ Usage:
   agentic-sdlc capability approve --id id --actor-type human|ci|agent|system --approval-source explicit-user|ci|automation|bootstrap [--approve-install]
   agentic-sdlc capability status [--story ST-001] [--profile profile-id] [--json]
   agentic-sdlc approval requests [--story ST-001] [--json]
+  agentic-sdlc authorization grant --id id --scope "exact delegated scope"
+      --allow-action contract.approve [--allow-action task.start.confirm]
+      --actor-type human|ci --approval-source explicit-user|ci --summary text
+      [--allow-artifact-type technical-analysis] [--expires-at iso]
+      [--allow-subject exact-artifact-or-story-id]
+  agentic-sdlc authorization status [--id id] [--json]
+  agentic-sdlc authorization revoke --id id --actor-type human|ci [--reason text]
   agentic-sdlc task start [--intent-json json | --intent-file path] [--text raw]
       [--story ST-001] [--phase phase] [--contract-id id]
-      [--confirm-start] [--revise-contract] [--json]
+      [--confirm-start] [--authorization id] [--revise-contract] [--json]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
@@ -12372,13 +13525,16 @@ Usage:
       [--request-summary text] [--git-event push|commit|merge|pull|rebase]
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
   agentic-sdlc output template propose --type artifact-type [--id id]
-      [--from path | --body text] [--summary text]
+      [--from path | --body text | --preset technical-assessment] [--summary text]
+      [--format markdown|docx|xlsx|pdf|pptx|html|json|csv|custom]
+      [--delivery artifact|artifact-plus-chat-summary]
+      [--extension .ext --media-type type --generator capability]
   agentic-sdlc output template approve --id template-id
       --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc output resolve --story ST-001 --type artifact-type
   agentic-sdlc output link --story ST-001 --type artifact-type
       --artifact path --template template-id --mode reuse|delta|new
-      [--base-artifact path] [--requirement REQ-001]
+      [--base-artifact path] [--requirement REQ-001] [--evidence render-or-verification-file]
       [--allow-unapproved-contract-output]
   agentic-sdlc output status --story ST-001 [--type artifact-type]
   agentic-sdlc route decide --intent-json json [--text raw] [--json]

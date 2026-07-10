@@ -32,6 +32,15 @@
         "null"
       ]
     },
+    "preset": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "delivery": {
+      "$ref": "#/$defs/delivery"
+    },
     "source_paths": {
       "type": "array",
       "items": {
@@ -57,6 +66,10 @@
     "approved_content_hash": {
       "type": "string"
     },
+    "approved_delivery_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "hash_algorithm": {
       "type": "string"
     },
@@ -70,6 +83,59 @@
     "audit": {
       "type": "object",
       "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "delivery": {
+      "type": "object",
+      "required": [
+        "format",
+        "label",
+        "extension",
+        "media_type",
+        "generator",
+        "mode"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "markdown",
+            "docx",
+            "xlsx",
+            "pdf",
+            "pptx",
+            "html",
+            "json",
+            "csv",
+            "custom"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "extension": {
+          "type": "string",
+          "pattern": "^\\.[a-z0-9][a-z0-9._-]*$"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "artifact",
+            "artifact-plus-chat-summary"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true
