@@ -1,12 +1,12 @@
 {
   "id": "contract-<phase>-v1",
-  "schema_version": "0.1.0",
-  "sdlc_version": "0.1.0",
+  "schema_version": "<schema-version>",
+  "sdlc_version": "<sdlc-version>",
   "project": {
     "project_id": "<project-id>",
     "project_name": "<project-name>"
   },
-  "phase": "<discovery|analysis|design|implementation|validation|release>",
+  "phase": "analysis",
   "story_id": null,
   "status": "draft",
   "purpose": "Describe why this phase exists and what decision it enables.",
@@ -21,7 +21,7 @@
     {
       "artifact_type": "functional-analysis",
       "template_id": "<approved-template-id>",
-      "mode": "reuse|delta|new"
+      "mode": "new"
     }
   ],
   "validation": [
@@ -155,7 +155,7 @@
       "thread_id": "<codex-thread-id-or-null>",
       "session_id": "<session-id-or-null>",
       "tool": "agentic-sdlc-cli",
-      "version": "0.1.0"
+      "version": "<sdlc-version>"
     }
   }
 }

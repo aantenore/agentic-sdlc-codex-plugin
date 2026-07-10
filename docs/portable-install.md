@@ -14,17 +14,14 @@ flowchart TB
   Skill --> SkillAssets["skills/agentic-sdlc/assets/"]
 ```
 
-All paths in the plugin manifest and skill agent card are relative to the repository. There are no absolute paths to Antonio's machine, no project-specific contracts, and no target-project `.sdlc/` data inside the plugin package.
+All paths in the plugin manifest and skill agent card are relative to the repository. The npm distribution is controlled by the `package.json` `files` whitelist, so it contains no absolute paths to Antonio's machine, project-specific contracts, target-project `.sdlc/` data, repository tests, or local metadata. The source repository may contain its own `.sdlc/` because it dogfoods Agentic SDLC; that project state is not part of the distributable plugin.
 
 ## Install On Another Codex
 
-Use the personal marketplace flow when you want this plugin to behave like other local Codex plugins.
+Use the personal marketplace flow when you want this plugin to behave like other local Codex plugins. Run the staging installer from any source checkout; the checkout must remain separate from the generated personal-plugin destination.
 
 ```bash
-git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git \
-  "$HOME/plugins/agentic-sdlc-codex-plugin"
-
-cd "$HOME/plugins/agentic-sdlc-codex-plugin"
+cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list | grep agentic-sdlc-codex-plugin
@@ -36,16 +33,9 @@ Expected result:
 agentic-sdlc-codex-plugin@personal  installed, enabled
 ```
 
-If you already have a working checkout elsewhere and want Codex to install directly from it, expose it through the personal plugin directory:
+The installer reads the `package.json` `files` allowlist and adds `package.json`, `README.md`, and `LICENSE`. It copies only that package surface into a clean sibling staging directory, excluding `.git`, `.sdlc`, `test`, `.DS_Store`, and unlisted root content, then swaps the staged tree into `~/plugins/agentic-sdlc-codex-plugin`. Rerunning it replaces the complete managed tree, so stale packaged files are removed.
 
-```bash
-mkdir -p "$HOME/plugins"
-ln -s "$(pwd)" "$HOME/plugins/agentic-sdlc-codex-plugin"
-python3 scripts/install-personal-marketplace.py
-codex plugin add agentic-sdlc-codex-plugin@personal
-```
-
-Use either a real directory or a symlink, not both. If `~/plugins/agentic-sdlc-codex-plugin` already exists, inspect it before replacing it.
+The destination is generated installation output, not a development checkout. The installer refuses to replace it when it is a symlink, a Git checkout, the source checkout itself, or a directory with unmanaged top-level entries. In those cases it leaves the destination untouched for manual inspection. It honors `HOME`, including for isolated installation tests.
 
 The install script creates or updates this machine-local marketplace entry:
 
@@ -70,18 +60,23 @@ After install or reinstall, start a new Codex thread so the app reloads plugin-p
 
 ## Update An Existing Local Install
 
+Update the source checkout using your normal source-control workflow, then rerun the staging installer from that checkout:
+
 ```bash
-cd "$HOME/plugins/agentic-sdlc-codex-plugin"
-git pull
+cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 ```
+
+Do not update `~/plugins/agentic-sdlc-codex-plugin` directly. Each successful rerun replaces that generated tree from the current source package allowlist.
 
 If the plugin version did not change and you still need Codex to refresh its cache during local development, add a Codex cachebuster to `.codex-plugin/plugin.json` before reinstalling:
 
 ```bash
 python3 /path/to/plugin-creator/scripts/update_plugin_cachebuster.py \
-  "$HOME/plugins/agentic-sdlc-codex-plugin"
+  /path/to/agentic-sdlc-codex-plugin
+cd /path/to/agentic-sdlc-codex-plugin
+python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 ```
 
@@ -90,9 +85,14 @@ Do not use the cachebuster for tagged releases; bump the plugin version instead.
 ## Validate Before Sharing
 
 ```bash
+node --check bin/agentic-sdlc.mjs
+npm test
+npm pack --dry-run --json
 python /path/to/plugin-creator/scripts/validate_plugin.py .
 python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
 ```
+
+The package listing must contain `.codex-plugin/`, `bin/`, `skills/`, `schemas/`, and `templates/`, and must not contain `.sdlc/` or `test/`.
 
 ## Project Knowledge Is Separate
 

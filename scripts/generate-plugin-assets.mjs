@@ -2,9 +2,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
-const ROOT = path.resolve(new URL("..", import.meta.url).pathname);
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const GLYPHS = {
   A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],

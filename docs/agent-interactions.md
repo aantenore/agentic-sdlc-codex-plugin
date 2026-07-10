@@ -386,6 +386,7 @@ node bin/agentic-sdlc.mjs trace append \
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type test \
+  --outcome passed \
   --summary "Unit and integration tests passed for the trigger-driven workflow." \
   --evidence .sdlc/tests/ST-001-test-run.json
 ```
@@ -467,6 +468,7 @@ Trace example:
 node bin/agentic-sdlc.mjs trace append \
   --story ST-001 \
   --type release \
+  --outcome ready \
   --summary "Released workflow MVP with provider signal monitoring." \
   --evidence .sdlc/releases/REL-001.md
 ```

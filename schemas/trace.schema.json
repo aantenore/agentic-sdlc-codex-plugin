@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aantenore/agentic-sdlc-codex-plugin/schemas/trace.schema.json",
+  "$id": "trace.schema.json",
   "title": "Agentic SDLC Trace Event",
   "type": "object",
   "required": [
@@ -18,7 +18,10 @@
       "type": "string"
     },
     "story_id": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "type": {
       "enum": [
@@ -37,6 +40,16 @@
     },
     "summary": {
       "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked",
+        "skipped",
+        "ready",
+        null
+      ]
     },
     "evidence": {
       "type": "array",
@@ -60,7 +73,10 @@
       "$ref": "#/$defs/actor"
     },
     "request": {
-      "type": "object",
+      "type": [
+        "object",
+        "null"
+      ],
       "properties": {
         "id": {
           "type": [
@@ -140,6 +156,9 @@
   "$defs": {
     "actor": {
       "oneOf": [
+        {
+          "type": "null"
+        },
         {
           "type": "string"
         },

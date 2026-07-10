@@ -144,12 +144,12 @@ Never store project contracts or project KB state inside the plugin installation
    node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
    ```
 
-15. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories:
+15. Capture durable decisions, assumptions, risks, tests, handoffs, sync/push events, dependency revalidation, and release evidence as traces. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories and explicit successful outcomes (`passed` for tests; `ready` or `passed` for release):
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "User-requested change"
-   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type test --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
+   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type test --outcome passed --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/agentic-sdlc/report-query.schema.json",
+  "$id": "report-query.schema.json",
   "title": "Agentic SDLC Report Query",
   "type": "object",
   "additionalProperties": false,
