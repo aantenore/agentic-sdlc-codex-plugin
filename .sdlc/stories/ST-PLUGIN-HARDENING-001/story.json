@@ -2,8 +2,8 @@
   "id": "ST-PLUGIN-HARDENING-001",
   "title": "Audit, harden, test, reinstall, and release the Agentic SDLC plugin",
   "schema_version": "0.1.0",
-  "status": "draft",
-  "phase": "design",
+  "status": "done",
+  "phase": "release",
   "contract_id": "contract-ST-PLUGIN-HARDENING-001-implementation",
   "work_breakdown_id": null,
   "acceptance": [
@@ -28,7 +28,7 @@
     "tests": []
   },
   "created_at": "2026-07-10T07:39:01.024Z",
-  "updated_at": "2026-07-10T07:41:38.729Z",
+  "updated_at": "2026-07-10T09:13:55.000Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -46,8 +46,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "main",
-      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "branch": "codex/ST-PLUGIN-HARDENING-001",
+      "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -62,7 +62,7 @@
       "thread_id": "019f1e28-87cf-70e1-9536-da89a3dfa840",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.4.20"
+      "version": "0.4.21"
     }
   }
 }

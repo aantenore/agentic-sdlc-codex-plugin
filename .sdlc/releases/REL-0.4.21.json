@@ -2,10 +2,10 @@
   "id": "REL-0.4.21",
   "version": "0.4.21",
   "story_id": "ST-PLUGIN-HARDENING-001",
-  "status": "ready_for_push",
+  "status": "pushed",
   "target_branch": "main",
   "created_at": "2026-07-10T08:55:54Z",
-  "summary": "Agentic SDLC 0.4.21 is validated, reinstalled locally, and ready for commit and push.",
+  "summary": "Agentic SDLC 0.4.21 is validated, reinstalled locally, and its principal release commit is present on origin/main.",
   "checks": {
     "full_test_suite": "passed:77/77",
     "plugin_validator": "passed:source-and-installed",
@@ -14,7 +14,13 @@
     "package_validation": "passed:60-files",
     "installed_plugin": "enabled:0.4.21",
     "strict_gate": "passed:story-scoped-no-errors-no-warnings",
-    "git_push": "pending"
+    "git_push": "passed:origin/main@2b119aab6f71d1a15d741bf01776de368ad818dd"
+  },
+  "delivery": {
+    "remote": "origin",
+    "ref": "refs/heads/main",
+    "commit": "2b119aab6f71d1a15d741bf01776de368ad818dd",
+    "pushed_at": "2026-07-10T09:13:28Z"
   },
   "evidence": [
     ".sdlc/tests/TEST-0.4.21-plugin-hardening.json",

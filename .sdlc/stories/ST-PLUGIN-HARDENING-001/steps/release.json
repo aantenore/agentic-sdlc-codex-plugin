@@ -1,10 +1,10 @@
 {
-  "id": "STEP-ST-PLUGIN-HARDENING-001-validation-20260710091323249-17b1d8",
+  "id": "STEP-ST-PLUGIN-HARDENING-001-release-20260710091351460-dcbd9c",
   "story_id": "ST-PLUGIN-HARDENING-001",
-  "step": "validation",
+  "step": "release",
   "status": "completed",
-  "phase": "validation",
-  "summary": "Validated 77/77 tests, official validators, schemas, package contents, path portability, generated plans, and installed-plugin parity.",
+  "phase": "release",
+  "summary": "Released Agentic SDLC 0.4.21 after complete validation, reinstall, and verified origin/main push.",
   "output_types": [
     "implementation-summary"
   ],
@@ -33,10 +33,15 @@
       "path": ".sdlc/tests/TEST-0.4.21-plugin-hardening.json",
       "sha256": "c84197272ba28459d6810c088b4711d9f96c3e4c48a3d058482f460620062325",
       "hash_algorithm": "sha256:file:v1"
+    },
+    {
+      "path": ".sdlc/releases/REL-0.4.21.json",
+      "sha256": "d5ca46b9025404f1598811701065fc6e2453049d612e68f8bf3076ab1815858f",
+      "hash_algorithm": "sha256:file:v1"
     }
   ],
-  "next_step": "release",
-  "completed_at": "2026-07-10T09:13:23.250Z",
+  "next_step": null,
+  "completed_at": "2026-07-10T09:13:51.461Z",
   "audit": {
     "completed_by": {
       "id": "codex",

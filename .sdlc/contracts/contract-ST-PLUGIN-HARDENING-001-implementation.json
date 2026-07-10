@@ -238,7 +238,7 @@
       "id": "CAP-REC-ST-PLUGIN-HARDENING-001",
       "profile_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
       "path": ".sdlc/capability-discovery/recommendations/CAP-REC-ST-PLUGIN-HARDENING-001.json",
-      "approved_content_hash": "3bbd5d3371e90afbd1cb2e0c707e45f85c2e3f37bc3b05e89952cf8e4bc1e35f"
+      "approved_content_hash": "2b13459bce01fdffa9d96b726d4be059fae2c0256dd58b1898b1c2c679a4b65e"
     }
   ],
   "contextualization": {
@@ -246,9 +246,9 @@
     "context_sources": [
       {
         "path": ".sdlc/baseline/BASELINE-PLUGIN-HARDENING-20260710.json",
-        "sha256": "e2c06403951c063ee415ba01c4cd6f4de9731ac97a9d4357eda41f0c3f6b680b",
-        "size_bytes": 19060,
-        "excerpt": "id BASELINE-PLUGIN-HARDENING-20260710 schema_version 0.1.0 sdlc_version 0.4.21 kind existing-project status approved summary Current observable state for the completed 2026-07-10 whole-plugin hardening covering runtime governance security schemas packaging installer tests documentation and release metadata. repository_snapshot root_name TravelOps git is_git_repo true branch codex/ST-PLUGIN-HARDENING-001 head_sha 252b516ff90e2c1ed10f28f13ac6c6bdc8068725 is_dirty true user name Antonio Antenore email a.antenore@reply.it remotes origin detected_stack name package-json type node source_path package.json name npm-scripts type automation source_path package.json scripts check smoke test key_files path package.json sha256 07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58 size_bytes 779 path README.md sha256 4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034 size_bytes 29708 package_scripts check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs smoke node bin/agentic-sdlc.mjs --help test node --test test/*.mjs source_roots bin test_roots test ci_files imported_documents type document path README.md sha256 4d89c992770fcedfb889"
+        "sha256": "5822efb6801fe099e7f944b8be1c6f92712631c38c12e2fb0b2113ea62f99ed8",
+        "size_bytes": 19044,
+        "excerpt": "id BASELINE-PLUGIN-HARDENING-20260710 schema_version 0.1.0 sdlc_version 0.4.21 kind existing-project status approved summary Current observable state for the completed 2026-07-10 whole-plugin hardening covering runtime governance security schemas packaging installer tests documentation and release metadata. repository_snapshot root_name TravelOps git is_git_repo true branch codex/ST-PLUGIN-HARDENING-001 head_sha 2b119aab6f71d1a15d741bf01776de368ad818dd is_dirty true user name Antonio Antenore email a.antenore@reply.it remotes origin detected_stack name package-json type node source_path package.json name npm-scripts type automation source_path package.json scripts check smoke test key_files path package.json sha256 07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58 size_bytes 779 path README.md sha256 4d89c992770fcedfb889f3ff8a4f10bab8354d0abc450979f794fcd2f7cfd034 size_bytes 29708 package_scripts check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs smoke node bin/agentic-sdlc.mjs --help test node --test test/*.mjs source_roots bin test_roots test ci_files imported_documents type document path README.md sha256 4d89c992770fcedfb889"
       },
       {
         "path": "package.json",
@@ -276,8 +276,8 @@
       },
       {
         "path": "test/cli.e2e.mjs",
-        "sha256": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52",
-        "size_bytes": 117383,
+        "sha256": "b0e912ab102d9a02e1e156b4efe95fe1f4f1b766d49d733da7a4e171162ec87c",
+        "size_bytes": 117532,
         "excerpt": "import test from node test ; import assert from node assert/strict ; import fs from node fs ; import os from node os ; import path from node path ; import spawn spawnSync from node child_process ; import fileURLToPath from node url ; const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const bin = path.join(repoRoot bin agentic-sdlc.mjs ); function tmpProject(name) return fs.mkdtempSync(path.join(os.tmpdir() `sdlc-$ name -`)); function run(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) delete env key ; Object.assign(env options.env || ); return spawnSync(process.execPath bin ...args cwd options.cwd || repoRoot encoding utf8 env timeout options.timeout || 30_000 maxBuffer 10 * 1024 * 1024 ); function runAsync(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) delete env key ; Object.assign(env options.env || ); return new Promise((resolve reject) => const child = spawn(process.execPath bin ...args cwd options.cwd || repoRoot env ); let stdout = ; let stderr = ; const timeout = setTimeout(() => child."
       },
       {
@@ -343,10 +343,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260710090649-6b1e50",
+      "id": "APR-20260710091322-ec87bf",
       "contract_id": "contract-ST-PLUGIN-HARDENING-001-implementation",
       "status": "approved",
-      "summary": "Antonio explicitly requested autonomous analysis, testing, correction of the complete plugin, reinstall, and final push; this seals the final tested work brief inside that exact scope.",
+      "summary": "Antonio requested autonomous whole-plugin analysis, correction, testing, reinstall, commit, and push; this final refresh includes the generated-plan regression inside the same scope.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "contract-ST-PLUGIN-HARDENING-001-implementation",
@@ -363,7 +363,7 @@
       "approval_source": "automation",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "0f936ce6661cb17ad36c1f30a85bf57771f80b6094fc645c71beefaa3b134e26",
+      "approved_content_hash": "7c8e91e22c6b194e7ff01e40b6c352db5ec2d0bb8cebcfa4ac3f8cc014547115",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -375,7 +375,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-PLUGIN-HARDENING-001",
-        "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+        "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -392,11 +392,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.4.21"
       },
-      "created_at": "2026-07-10T09:06:49.432Z"
+      "created_at": "2026-07-10T09:13:22.542Z"
     }
   ],
-  "created_at": "2026-07-10T09:06:49.291Z",
-  "updated_at": "2026-07-10T09:06:49.432Z",
+  "created_at": "2026-07-10T09:13:22.395Z",
+  "updated_at": "2026-07-10T09:13:22.542Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -415,7 +415,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-PLUGIN-HARDENING-001",
-      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

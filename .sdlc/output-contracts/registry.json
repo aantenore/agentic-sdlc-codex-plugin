@@ -321,13 +321,13 @@
         ".sdlc/output-contracts/templates/implementation-summary-v1.md"
       ],
       "fingerprints": {
-        "artifact_sha256": "2bc5afe7b6cb8ce851e6ac59e58f4bfc3263a1b5121815788315cd04e6ec458b",
+        "artifact_sha256": "4e9fad77e4a89bc02fb3dddd54e2edafcb00155161570e5217b4682ed7647e61",
         "base_artifact_sha256": null,
         "template_sha256": "2e6a635d7e6c6f801164518e3af24ce12961796e042f2f9d7e4884912ecd193b",
         "hash_algorithm": "sha256:file:v1"
       },
       "created_at": "2026-07-10T09:01:40.717Z",
-      "updated_at": "2026-07-10T09:06:49.568Z",
+      "updated_at": "2026-07-10T09:13:22.699Z",
       "audit": {
         "linked_by": {
           "id": "codex",
@@ -339,7 +339,7 @@
         "git": {
           "is_git_repo": true,
           "branch": "codex/ST-PLUGIN-HARDENING-001",
-          "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+          "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
           "is_dirty": true,
           "user": {
             "name": "Antonio Antenore",
@@ -515,7 +515,7 @@
     }
   ],
   "created_at": "2026-07-01T11:12:46.834Z",
-  "updated_at": "2026-07-10T09:06:49.568Z",
+  "updated_at": "2026-07-10T09:13:22.699Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -534,7 +534,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-PLUGIN-HARDENING-001",
-      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

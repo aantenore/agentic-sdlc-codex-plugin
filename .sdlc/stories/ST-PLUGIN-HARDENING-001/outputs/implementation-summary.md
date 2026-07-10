@@ -24,7 +24,7 @@
 - Official plugin validator: passed for both repository source and staged personal plugin.
 - Official skill validator: passed for both repository source and staged personal skill.
 - JSON Schema validation: 22 schemas, 8 JSON templates, and all applicable canonical records and traces passed.
-- Real npm tarball: version `0.4.21`, 60 files, 317049 bytes; no `.sdlc`, Git metadata, or test directory included.
+- Real npm tarball: version `0.4.21`, 60 files; no `.sdlc`, Git metadata, or test directory included.
 - Tarball extraction and installer smoke from paths containing spaces: passed; extracted and installed trees were identical.
 - Active Codex plugin: installed and enabled at version `0.4.21`; source, marketplace staging, and cache hashes match.
 - `git diff --check`: passed.

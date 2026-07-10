@@ -3,7 +3,7 @@
   "strict": true,
   "scope": "story",
   "story_id": "ST-PLUGIN-HARDENING-001",
-  "checked_at": "2026-07-10T09:08:06.493Z",
+  "checked_at": "2026-07-10T09:15:00.780Z",
   "root": "/Users/antonioantenore/Documents/TravelOps",
   "actor": {
     "id": "codex",
@@ -15,7 +15,7 @@
   "git": {
     "is_git_repo": true,
     "branch": "codex/ST-PLUGIN-HARDENING-001",
-    "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+    "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
     "is_dirty": true,
     "user": {
       "name": "Antonio Antenore",
@@ -43,6 +43,7 @@
     "capability recommendation CAP-REC-ST-PLUGIN-HARDENING-001",
     "trace traces/ST-PLUGIN-HARDENING-001.jsonl",
     "story step ST-PLUGIN-HARDENING-001/implementation",
+    "story step ST-PLUGIN-HARDENING-001/release",
     "story step ST-PLUGIN-HARDENING-001/validation",
     "story ST-PLUGIN-HARDENING-001",
     "output template implementation-summary-v1",

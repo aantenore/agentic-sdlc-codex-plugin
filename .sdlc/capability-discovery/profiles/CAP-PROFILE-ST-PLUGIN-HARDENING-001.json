@@ -76,8 +76,8 @@
     {
       "type": "context_file",
       "path": "test/cli.e2e.mjs",
-      "sha256": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52",
-      "size_bytes": 117383,
+      "sha256": "b0e912ab102d9a02e1e156b4efe95fe1f4f1b766d49d733da7a4e171162ec87c",
+      "size_bytes": 117532,
       "excerpt": "import test from node test ; import assert from node assert/strict ; import fs from node fs ; import os from node os ; import path from node path ; import spawn spawnSync from node child_process ; import fileURLToPath from node url ; const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)) .. ); const bin = path.join(repoRoot bin agentic-sdlc.mjs ); function tmpProject(name) return fs.mkdtempSync(path.join(os.tmpdir() `sdlc-$ name -`)); function run(args options = ) const env = ...process.env ; for (const key of CI GITHUB_ACTIONS GITHUB_ACTOR CODEX_AGENT_NAME CODEX_USER_ID ) "
     },
     {
@@ -108,14 +108,14 @@
     "package.json": "07784f6a19d6852ac7df6e43fbfa0965418b7cc8e6a3475a16b353e7837dae58",
     "scripts/install-personal-marketplace.py": "5b1a0022ee412b649710040b92fb67ddbf2eeaeb4bf3a2af254d4cc5127b66da",
     "skills/agentic-sdlc/SKILL.md": "15e620a542b7047cc8112d86dc60b6972c96a7e3b01bead2c7aa95f7f9c87885",
-    "test/cli.e2e.mjs": "bd213d41a0c23e13775061e875dd9addb4bbbed0c2d3359f83ea84557fd4ae52"
+    "test/cli.e2e.mjs": "b0e912ab102d9a02e1e156b4efe95fe1f4f1b766d49d733da7a4e171162ec87c"
   },
   "approvals": [
     {
-      "id": "APR-20260710090648-c34423",
+      "id": "APR-20260710091321-7d4e50",
       "profile_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
       "status": "approved",
-      "summary": "Antonio delegated autonomous repository read/write, local tests, plugin and skill validation, isolated installer checks, plugin reinstall, and Git delivery; this seals the final tested source hashes.",
+      "summary": "Antonio delegated autonomous repository read/write, tests, validators, plugin reinstall, and Git delivery; this refresh records the final generated-plan regression without widening scope.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "CAP-PROFILE-ST-PLUGIN-HARDENING-001",
@@ -132,7 +132,7 @@
       "approval_source": "automation",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "08921c062e56b6247d6deb047e38a9226031d4377a4d5f806cea184ff1912906",
+      "approved_content_hash": "48cbf581a7aaa8ae91b89eb8058908cfbf331730f6ba282f7d1752828a84fb8e",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -144,7 +144,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-PLUGIN-HARDENING-001",
-        "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+        "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -161,11 +161,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.4.21"
       },
-      "created_at": "2026-07-10T09:06:48.862Z"
+      "created_at": "2026-07-10T09:13:21.704Z"
     }
   ],
-  "created_at": "2026-07-10T09:06:48.733Z",
-  "updated_at": "2026-07-10T09:06:48.862Z",
+  "created_at": "2026-07-10T09:13:21.177Z",
+  "updated_at": "2026-07-10T09:13:21.704Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -177,7 +177,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-PLUGIN-HARDENING-001",
-      "head_sha": "252b516ff90e2c1ed10f28f13ac6c6bdc8068725",
+      "head_sha": "2b119aab6f71d1a15d741bf01776de368ad818dd",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
