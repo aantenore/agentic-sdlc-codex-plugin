@@ -21,7 +21,7 @@ Codex plugin for project contextualization, verified assessments, and traceable 
 ## Key Files
 - .github/workflows/ci.yml (59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3)
 - .github/workflows/release.yml (7bc5ce90a0b1c4c9ba80916c43e32dbb82ecba0e4f57a12bf3b02b3549017ccb)
-- package.json (2ba02f2644c5b01b417e473d7554eb4b241ccb8944ac255df7cafec3b912d896)
+- package.json (db5978d667eab1116cee974f50233c53ec032bc3e4803748eee20d9dda1b056c)
 - README.md (75009fa15121b82ae75a4fa41fede726248f9d523eaec660c3dab2f522f677a9)
 
 ## Imported Documents

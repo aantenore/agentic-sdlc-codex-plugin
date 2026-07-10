@@ -9,8 +9,8 @@
     "root_name": "TravelOps",
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-PRODUCT-JOURNEY-001",
-      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+      "branch": "codex/ST-CI-PORTABILITY-001",
+      "head_sha": "55c6e016fef938e4f40e21f3a85fb1569474c878",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -51,8 +51,8 @@
       },
       {
         "path": "package.json",
-        "sha256": "2ba02f2644c5b01b417e473d7554eb4b241ccb8944ac255df7cafec3b912d896",
-        "size_bytes": 841
+        "sha256": "db5978d667eab1116cee974f50233c53ec032bc3e4803748eee20d9dda1b056c",
+        "size_bytes": 830
       },
       {
         "path": "README.md",
@@ -64,7 +64,7 @@
       "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
-      "test": "node --test test/*.mjs"
+      "test": "node --test"
     },
     "package_summary": {
       "name": "agentic-sdlc-codex-plugin",
@@ -388,7 +388,7 @@
       "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
-      "test": "node --test test/*.mjs"
+      "test": "node --test"
     },
     "stack_summary": [
       "node:package-json",
@@ -496,7 +496,7 @@
     "docs/kb-structure.md": "aa02f1c80c199fc190d481e97db2bb0a2552d5e7c2755aa7dd6aab8e16345450",
     "docs/portable-install.md": "1c9893ce0a265cbc06d54a7d4927b18a06454db36ecc03151cc70dfb8d290da5",
     "docs/product-assessment.md": "9838fde0a0022df695b2468f7e8b00bb6fd0b077c652e1322bfef875d20c33fb",
-    "package.json": "2ba02f2644c5b01b417e473d7554eb4b241ccb8944ac255df7cafec3b912d896",
+    "package.json": "db5978d667eab1116cee974f50233c53ec032bc3e4803748eee20d9dda1b056c",
     "schemas/authorization.schema.json": "609f78e94adb85a6d04d67cfceea6932a36b6f1004f948c2ce75b3b8dba51f98",
     "schemas/baseline.schema.json": "d7eb36e7defdd0f1ed35591719ace7d1d6881f8f546e88edadaae11322060f61",
     "schemas/cache.schema.json": "0bc6744e2a29588c666fa39f6c2a376657e4046b96750c08a2b13fcab25c397a",
@@ -548,10 +548,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260710102955-1aca5d",
+      "id": "APR-20260710120940-604601",
       "baseline_id": "BASELINE-PRODUCT-JOURNEY-20260710",
       "status": "approved",
-      "summary": "Approved by Codex under Antonio's persisted whole-product authorization after reviewing the complete final 0.5.0 source set and validation evidence.",
+      "summary": "Approved by Codex under Antonio's persisted whole-product authorization after the shell-independent cross-platform test command was validated with 80 passing tests.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "BASELINE-PRODUCT-JOURNEY-20260710",
@@ -575,7 +575,7 @@
       "authorization_action": "baseline.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "ca5d31e7d5dd5d7a4f73c5bceb07010ea5b50b949b6d2e00843ea3d0288b1c39",
+      "approved_content_hash": "a219aea535b84074fc84b0c1742444755db0bb2d418e78215ac7323c90c800cc",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -586,8 +586,8 @@
       },
       "git": {
         "is_git_repo": true,
-        "branch": "codex/ST-PRODUCT-JOURNEY-001",
-        "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+        "branch": "codex/ST-CI-PORTABILITY-001",
+        "head_sha": "55c6e016fef938e4f40e21f3a85fb1569474c878",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -604,11 +604,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.5.0"
       },
-      "created_at": "2026-07-10T10:29:55.230Z"
+      "created_at": "2026-07-10T12:09:40.389Z"
     }
   ],
-  "created_at": "2026-07-10T10:29:45.325Z",
-  "updated_at": "2026-07-10T10:29:55.230Z",
+  "created_at": "2026-07-10T12:09:29.735Z",
+  "updated_at": "2026-07-10T12:09:40.389Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -619,8 +619,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-PRODUCT-JOURNEY-001",
-      "head_sha": "0a891580b34c4119bbd186e737173c78b3d8de4c",
+      "branch": "codex/ST-CI-PORTABILITY-001",
+      "head_sha": "55c6e016fef938e4f40e21f3a85fb1569474c878",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
