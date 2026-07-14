@@ -50,6 +50,13 @@ import {
   computeExactMeteringPolicyHash,
   validateMeteringAttestationForReceipt,
 } from "../lib/metering-attestations.mjs";
+import {
+  buildCodeBurnMeteringSnapshot,
+  calculateMeteringDelta,
+  executeCodeBurnReport,
+  validateMeteringDeltaIntegrity,
+  validateMeteringSnapshotIntegrity,
+} from "../lib/codeburn-metering-adapter.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -61,6 +68,14 @@ const PROJECT_CONFIG_FILE_NAME = "config.json";
 const INTERNAL_LOCK_WAIT_MS = 5000;
 const INTERNAL_LOCK_STALE_MS = 30000;
 const INTERNAL_LOCK_REMOTE_STALE_MS = 300000;
+const BUILT_IN_BUDGET_METER_ADAPTERS = Object.freeze({
+  codeburn: Object.freeze({
+    id: "codeburn",
+    execute: executeCodeBurnReport,
+    buildSnapshot: buildCodeBurnMeteringSnapshot,
+    calculateDelta: calculateMeteringDelta,
+  }),
+});
 const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const OUTPUT_DELIVERY_MODES = new Set(["artifact", "artifact-plus-chat-summary"]);
@@ -161,6 +176,7 @@ const KNOWN_OPTIONS = new Set([
   ...BOOLEAN_OPTIONS,
   "acceptance",
   "action",
+  "adapter",
   "active-time-seconds",
   "actor",
   "actor-email",
@@ -257,6 +273,8 @@ const KNOWN_OPTIONS = new Set([
   "profile-json",
   "project-id",
   "project-name",
+  "project",
+  "provider",
   "proposal",
   "proposal-hash",
   "qa",
@@ -325,6 +343,7 @@ const KNOWN_OPTIONS = new Set([
   "trace-limit",
   "type",
   "until",
+  "to",
   "validation",
   "view",
 ]);
@@ -455,7 +474,7 @@ const TRACE_TYPES = new Set([
 ]);
 const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready"]);
 
-function main() {
+async function main() {
   try {
     const parsed = parseArgs(process.argv.slice(2));
     if (parsed.version) {
@@ -520,6 +539,14 @@ function main() {
     }
     if (command === "budget" && subcommand === "usage" && rest[0] === "record") {
       recordBudgetUsage(context, parsed.options);
+      return;
+    }
+    if (command === "budget" && subcommand === "meter" && rest[0] === "start") {
+      await startBudgetMeter(context, parsed.options);
+      return;
+    }
+    if (command === "budget" && subcommand === "meter" && rest[0] === "record") {
+      await recordBudgetMeter(context, parsed.options);
       return;
     }
     if (command === "budget" && subcommand === "amend") {
@@ -5481,6 +5508,9 @@ function inspectExactMeteringSource(context, receipt, budget, metrics = exactMet
   }
   const errors = [...exactMeteringPolicyTrustErrors(context, budget)];
   const adapter = String(receipt.source?.adapter || "").trim();
+  if (adapter === "codeburn") {
+    errors.push("CodeBurn is permanently advisory_observed and cannot be trusted as exact metering");
+  }
   const configured = context.config.budget_policy?.exact_metering;
   const matchingSources = configured?.default_trust === "deny" && Array.isArray(configured.trusted_sources)
     ? configured.trusted_sources.filter((source) => source?.adapter === adapter)
@@ -5753,6 +5783,328 @@ function evaluateAssessmentBudgetUsage(context, proposalId, effectiveBudget, rec
   }
 }
 
+function budgetMeterRoot(context, proposalId, adapterId) {
+  return path.join(assessmentBudgetsRoot(context, proposalId), "metering", normalizeId(adapterId));
+}
+
+function budgetMeterBaselinePath(context, proposalId, adapterId, baselineId) {
+  return path.join(budgetMeterRoot(context, proposalId, adapterId), "baselines", `${normalizeId(baselineId)}.json`);
+}
+
+function budgetMeterAdapter(context, options) {
+  const adapterId = String(requireOption(options, "adapter")).trim().toLowerCase();
+  const adapter = BUILT_IN_BUDGET_METER_ADAPTERS[adapterId];
+  if (!adapter) {
+    fail(`Unsupported budget meter adapter '${adapterId}'. Built-in allowlist: ${Object.keys(BUILT_IN_BUDGET_METER_ADAPTERS).join(", ")}.`);
+  }
+  const config = context.config.budget_policy?.metering_adapters?.[adapterId];
+  if (!config || config.enabled !== true) {
+    fail(`Budget meter adapter '${adapterId}' is disabled or missing from budget_policy.metering_adapters.`);
+  }
+  return { adapter, config };
+}
+
+function resolveBudgetMeterMapping(budget, config) {
+  const allowedSources = new Set([
+    "tokens.total", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write", "calls", "cost",
+  ]);
+  if (!config.metric_mapping || typeof config.metric_mapping !== "object" || Array.isArray(config.metric_mapping)) {
+    fail("CodeBurn metric_mapping must be a configuration object.");
+  }
+  const mapping = {};
+  for (const [metric, source] of Object.entries(config.metric_mapping)) {
+    if (!Object.hasOwn(budget.limits, metric)) {
+      continue;
+    }
+    if (!allowedSources.has(source)) {
+      fail(`CodeBurn metric_mapping.${metric} uses unsupported source '${source}'.`);
+    }
+    const spec = budget.limits[metric];
+    if (source === "cost" && !spec.currency) {
+      fail(`CodeBurn cost mapping requires budget metric '${metric}' to declare currency.`);
+    }
+    if (source.startsWith("tokens.") && spec.unit !== "tokens") {
+      fail(`CodeBurn token source '${source}' requires budget metric '${metric}' to use unit 'tokens'.`);
+    }
+    mapping[metric] = source;
+  }
+  if (Object.keys(mapping).length === 0) {
+    fail(`CodeBurn has no configured mapping for this budget. Budget metrics: ${Object.keys(budget.limits).join(", ")}.`);
+  }
+  return Object.fromEntries(Object.entries(mapping).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function codeBurnQuery(context, options, config, stored = null) {
+  if (stored) {
+    return stored;
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  return {
+    provider: getOptionString(options, "provider") || config.provider || "codex",
+    project: getOptionString(options, "project") || readProjectSafe(context)?.project_name || path.basename(context.root),
+    from: getOptionString(options, "from") || date,
+    to: getOptionString(options, "to") || getOptionString(options, "from") || date,
+  };
+}
+
+async function collectBudgetMeterSnapshot(context, proposalId, adapter, query, idPrefix) {
+  let execution;
+  try {
+    execution = await adapter.execute(query, { cwd: context.root });
+  } catch (error) {
+    fail(`CodeBurn collection failed: ${error.message}${error.stderr ? `; ${error.stderr}` : ""}`);
+  }
+  const reportHash = shortHashFull(stableJson(execution.report));
+  return adapter.buildSnapshot({
+    id: normalizeId(`${idPrefix}-${reportHash.slice(0, 12)}`),
+    report: execution.report,
+    query: execution.query,
+    tool_version: execution.tool_version,
+    argv: execution.argv,
+  });
+}
+
+function buildBudgetMeterBaseline(context, proposal, budget, adapterId, baselineId, mapping, snapshot) {
+  const body = {
+    kind: "budget_meter_baseline",
+    schema_version: "budget-meter-baseline:v1",
+    id: baselineId,
+    proposal_ref: { id: proposal.id, hash: proposal.proposal_hash },
+    budget_ref: { id: budget.id, hash: budget.budget_hash },
+    adapter: adapterId,
+    metric_mapping: mapping,
+    snapshot,
+    created_at: snapshot.captured_at,
+  };
+  return { ...body, baseline_hash: shortHashFull(stableJson(body)), hash_algorithm: "sha256:stable-json:v1" };
+}
+
+function validateBudgetMeterBaseline(baseline, proposal, budget, adapterId, mapping) {
+  const { baseline_hash: hash, hash_algorithm: algorithm, ...body } = baseline || {};
+  if (algorithm !== "sha256:stable-json:v1" || hash !== shortHashFull(stableJson(body))) {
+    fail("Budget meter baseline failed immutable content validation.");
+  }
+  if (baseline.proposal_ref?.id !== proposal.id || baseline.proposal_ref?.hash !== proposal.proposal_hash ||
+      baseline.budget_ref?.id !== budget.id || baseline.budget_ref?.hash !== budget.budget_hash || baseline.adapter !== adapterId) {
+    fail("Budget meter baseline is not bound to the current proposal, effective budget, and adapter.");
+  }
+  if (stableJson(baseline.metric_mapping) !== stableJson(mapping)) {
+    fail("CodeBurn metric mapping changed after baseline capture; create a new named baseline before recording usage.");
+  }
+  const integrity = validateMeteringSnapshotIntegrity(baseline.snapshot);
+  if (!integrity.valid) {
+    fail(`Budget meter baseline snapshot is invalid: ${integrity.errors.join("; ")}`);
+  }
+  return baseline;
+}
+
+function writeImmutableMeterRecord(context, filePath, record, hashField, label) {
+  ensureDir(path.dirname(filePath));
+  if (fs.existsSync(filePath)) {
+    const existing = readProjectJson(context, filePath);
+    if (existing[hashField] !== record[hashField] || stableJson(existing) !== stableJson(record)) {
+      fail(`${label} already exists with different immutable content.`);
+    }
+    return false;
+  }
+  writeJsonFile(filePath, record);
+  return true;
+}
+
+async function startBudgetMeter(context, options) {
+  ensureInitialized(context);
+  const proposalId = normalizeId(requireOption(options, "proposal"));
+  const proposal = readAssessmentProposal(context, proposalId);
+  const workflow = readAssessmentWorkflow(context, proposalId);
+  if (workflow.state !== "authorized") {
+    fail(`Budget meter baseline must be captured after approval and before execution; ${proposalId} is ${workflow.state}.`);
+  }
+  const budget = effectiveAssessmentBudget(context, proposalId);
+  const { adapter, config } = budgetMeterAdapter(context, options);
+  const baselineId = normalizeId(options.id || `METER-${proposalId}-${adapter.id}`);
+  const mapping = resolveBudgetMeterMapping(budget, config);
+  const baselinePath = budgetMeterBaselinePath(context, proposalId, adapter.id, baselineId);
+  if (fs.existsSync(baselinePath)) {
+    const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+    output(options, { status: "idempotent_replay", idempotent: true, baseline: existing, baseline_path: toProjectPath(context, baselinePath) }, [
+      `CodeBurn baseline ${baselineId} already exists with the same immutable content.`,
+    ]);
+    return;
+  }
+  const query = codeBurnQuery(context, options, config);
+  const snapshot = await collectBudgetMeterSnapshot(context, proposalId, adapter, query, `${baselineId}-SNAPSHOT`);
+  const baseline = buildBudgetMeterBaseline(context, proposal, budget, adapter.id, baselineId, mapping, snapshot);
+  const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
+  try {
+    if (fs.existsSync(baselinePath)) {
+      const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+      output(options, { status: "idempotent_replay", idempotent: true, baseline: existing, baseline_path: toProjectPath(context, baselinePath) }, [
+        `Concurrent start already created immutable CodeBurn baseline ${baselineId}; reused it.`,
+      ]);
+      return;
+    }
+    const created = writeImmutableMeterRecord(context, baselinePath, baseline, "baseline_hash", `CodeBurn baseline ${baselineId}`);
+    output(options, { status: created ? "created" : "idempotent_replay", idempotent: !created, baseline, baseline_path: toProjectPath(context, baselinePath) }, [
+      `${created ? "Created" : "Reused"} immutable CodeBurn baseline ${baselineId}.`,
+      "Assurance: estimated/advisory_observed; this baseline is not an exact or signed attestation.",
+    ]);
+  } finally {
+    releaseLock();
+  }
+}
+
+function mappedCodeBurnUsage(delta, budget, mapping) {
+  const token = delta.usage.tokens;
+  const total = [token.input, token.output, token.cache_read, token.cache_write]
+    .reduce((sum, value) => sum + BigInt(value), 0n);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) {
+    fail("CodeBurn total token delta exceeds the JavaScript safe integer range.");
+  }
+  const sourceValues = {
+    "tokens.total": Number(total),
+    "tokens.input": token.input,
+    "tokens.output": token.output,
+    "tokens.cache_read": token.cache_read,
+    "tokens.cache_write": token.cache_write,
+    calls: delta.usage.calls,
+    cost: delta.usage.cost,
+  };
+  const usage = {};
+  for (const [metric, source] of Object.entries(mapping)) {
+    if (source === "cost") {
+      if (delta.usage.cost.currency !== budget.limits[metric].currency) {
+        fail(`CodeBurn currency ${delta.usage.cost.currency} does not match budget metric ${metric} currency ${budget.limits[metric].currency}.`);
+      }
+      usage[metric] = delta.usage.cost;
+    } else {
+      usage[metric] = sourceValues[source];
+    }
+  }
+  return usage;
+}
+
+function readCodeBurnSnapshotReference(context, proposalId, reference) {
+  if (!reference?.path || !reference?.hash) {
+    fail("CodeBurn usage history has a missing current snapshot reference.");
+  }
+  const filePath = resolveProjectFilePath(context, reference.path, { mustExist: true, fileOnly: true });
+  const expectedRoot = path.join(budgetMeterRoot(context, proposalId, "codeburn"), "snapshots");
+  if (!isInsidePath(expectedRoot, filePath)) {
+    fail("CodeBurn current snapshot reference escapes its project-local metering directory.");
+  }
+  const snapshot = readProjectJson(context, filePath);
+  const integrity = validateMeteringSnapshotIntegrity(snapshot);
+  if (!integrity.valid || snapshot.snapshot_hash !== reference.hash) {
+    fail(`CodeBurn current snapshot ${reference.path} failed integrity validation.`);
+  }
+  return snapshot;
+}
+
+async function recordBudgetMeter(context, options) {
+  ensureInitialized(context);
+  const proposalId = normalizeId(requireOption(options, "proposal"));
+  const proposal = readAssessmentProposal(context, proposalId);
+  const workflow = readAssessmentWorkflow(context, proposalId);
+  if (!["running", "verifying", "exception_pending"].includes(workflow.state)) {
+    fail(`CodeBurn usage can be recorded only while running, verifying, or exception_pending; ${proposalId} is ${workflow.state}.`);
+  }
+  const budget = effectiveAssessmentBudget(context, proposalId);
+  const { adapter, config } = budgetMeterAdapter(context, options);
+  const baselineId = normalizeId(options.baseline || `METER-${proposalId}-${adapter.id}`);
+  const baselinePath = budgetMeterBaselinePath(context, proposalId, adapter.id, baselineId);
+  if (!fs.existsSync(baselinePath)) {
+    fail(`CodeBurn baseline ${baselineId} does not exist. Run budget meter start first.`);
+  }
+  const mapping = resolveBudgetMeterMapping(budget, config);
+  const baseline = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+  const current = await collectBudgetMeterSnapshot(
+    context,
+    proposalId,
+    adapter,
+    codeBurnQuery(context, options, config, baseline.snapshot.scope),
+    `METER-${proposalId}-${adapter.id}-CURRENT`,
+  );
+  const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
+  try {
+    const lockedBudget = effectiveAssessmentBudget(context, proposalId);
+    const lockedBaseline = validateBudgetMeterBaseline(
+      readProjectJson(context, baselinePath), proposal, lockedBudget, adapter.id, resolveBudgetMeterMapping(lockedBudget, config),
+    );
+    const priorReceipts = readAssessmentUsageReceipts(context, proposalId)
+      .filter((receipt) => receipt.source?.adapter === adapter.id && receipt.source?.baseline_ref?.hash === lockedBaseline.baseline_hash)
+      .sort((left, right) => String(left.ended_at).localeCompare(String(right.ended_at)));
+    const latest = priorReceipts.at(-1) || null;
+    const previous = latest
+      ? readCodeBurnSnapshotReference(context, proposalId, latest.source.current_snapshot_ref)
+      : lockedBaseline.snapshot;
+    if (current.snapshot_hash === previous.snapshot_hash && latest) {
+      recordBudgetUsageLocked(context, options, proposalId, latest, {
+        meter: { adapter: adapter.id, baseline: lockedBaseline, current, replayed_receipt: latest.id },
+      });
+      return;
+    }
+    let delta;
+    try {
+      delta = adapter.calculateDelta(previous, current, {
+        id: normalizeId(`DELTA-${proposalId}-${previous.snapshot_hash.slice(0, 8)}-${current.snapshot_hash.slice(0, 8)}`),
+      });
+    } catch (error) {
+      fail(`CodeBurn counters are not a monotonic continuation of the recorded cursor: ${error.message}`);
+    }
+    const deltaIntegrity = validateMeteringDeltaIntegrity(delta);
+    if (!deltaIntegrity.valid) {
+      fail(`CodeBurn delta failed integrity validation: ${deltaIntegrity.errors.join("; ")}`);
+    }
+    const meterRoot = budgetMeterRoot(context, proposalId, adapter.id);
+    const currentPath = path.join(meterRoot, "snapshots", `${current.snapshot_hash}.json`);
+    const deltaPath = path.join(meterRoot, "deltas", `${delta.delta_hash}.json`);
+    writeImmutableMeterRecord(context, currentPath, current, "snapshot_hash", `CodeBurn snapshot ${current.id}`);
+    writeImmutableMeterRecord(context, deltaPath, delta, "delta_hash", `CodeBurn delta ${delta.id}`);
+    const usage = mappedCodeBurnUsage(delta, lockedBudget, lockedBaseline.metric_mapping);
+    const metering = Object.fromEntries(Object.keys(usage).map((metric) => [metric, "estimated"]));
+    const receipt = buildExecutionUsageReceipt({
+      id: options.id ? normalizeId(options.id) : normalizeId(`USAGE-${proposalId}-CODEBURN-${delta.delta_hash.slice(0, 12)}`),
+      execution_id: proposalId,
+      budget: lockedBudget,
+      usage,
+      metering,
+      started_at: delta.interval.started_at,
+      ended_at: delta.interval.ended_at,
+      source: {
+        adapter: adapter.id,
+        assurance: "advisory_observed",
+        aggregation: "delta",
+        attestation_ref: null,
+        baseline_ref: { id: lockedBaseline.id, path: toProjectPath(context, baselinePath), hash: lockedBaseline.baseline_hash },
+        previous_snapshot_hash: previous.snapshot_hash,
+        current_snapshot_ref: { id: current.id, path: toProjectPath(context, currentPath), hash: current.snapshot_hash },
+        delta_ref: { id: delta.id, path: toProjectPath(context, deltaPath), hash: delta.delta_hash },
+        metric_mapping: lockedBaseline.metric_mapping,
+        trusted_exact: false,
+      },
+      pricing_ref: Object.hasOwn(usage, "cost") ? {
+        estimator: adapter.id,
+        classification: "estimated",
+        authoritative: false,
+        adapter_version: current.adapter.version,
+        currency: current.cumulative.cost.currency,
+        report_hash: current.source.report_hash,
+      } : null,
+      evidence: [
+        { path: toProjectPath(context, baselinePath), hash: lockedBaseline.baseline_hash },
+        { path: toProjectPath(context, currentPath), hash: current.snapshot_hash },
+        { path: toProjectPath(context, deltaPath), hash: delta.delta_hash },
+      ],
+    });
+    recordBudgetUsageLocked(context, options, proposalId, receipt, {
+      meter: { adapter: adapter.id, baseline: lockedBaseline, current, delta },
+      assurance: "advisory_observed",
+    });
+  } finally {
+    releaseLock();
+  }
+}
+
 function budgetUsageFromOptions(context, options, proposalId, budget) {
   const provided = loadOptionalJsonInput(context, options, "receipt-json", "receipt-file", "execution usage receipt");
   if (provided.kind === "execution_usage_receipt") {
@@ -5857,11 +6209,11 @@ function recordBudgetUsage(context, options) {
   }
 }
 
-function recordBudgetUsageLocked(context, options, proposalId) {
+function recordBudgetUsageLocked(context, options, proposalId, suppliedReceipt = null, extraOutput = {}) {
   const proposal = readAssessmentProposal(context, proposalId);
   const workflow = readAssessmentWorkflow(context, proposalId);
   const budget = effectiveAssessmentBudget(context, proposalId);
-  const receipt = budgetUsageFromOptions(context, options, proposalId, budget);
+  const receipt = suppliedReceipt || budgetUsageFromOptions(context, options, proposalId, budget);
   const validation = validateExecutionUsageReceipt(receipt, budget);
   if (!validation.valid) {
     fail(`Usage receipt failed integrity validation: ${validation.errors.join("; ")}`);
@@ -5910,6 +6262,7 @@ function recordBudgetUsageLocked(context, options, proposalId) {
     ? buildBudgetExceptionQuestion(proposalId, budget, decision, reserveRisks)
     : null;
   output(options, {
+    ...extraOutput,
     status: mustPause ? "exception_pending" : decision.status,
     registration_status: idempotent ? "idempotent_replay" : "created",
     idempotent,
@@ -20127,6 +20480,11 @@ Usage:
       [--input-tokens n] [--output-tokens n] [--cost-amount decimal --currency EUR]
       [--metering-accuracy estimated|unavailable] [--metering-source id]
       [--subagent id] [--receipt-json json | --receipt-file path]
+  agentic-sdlc budget meter start --proposal ASSESS-001 --adapter codeburn
+      [--id METER-ASSESS-001-CODEBURN] [--provider codex] [--project ProjectName]
+      [--from YYYY-MM-DD --to YYYY-MM-DD]
+  agentic-sdlc budget meter record --proposal ASSESS-001 --adapter codeburn
+      [--baseline METER-ASSESS-001-CODEBURN] [--id USAGE-ID]
   agentic-sdlc budget status --proposal ASSESS-001
   agentic-sdlc budget amend --proposal ASSESS-001 --budget-json json --reason text
       --actor-type human|ci --approval-source explicit-user|ci [--host-receipt-file path]
@@ -20475,4 +20833,4 @@ Principle:
 `);
 }
 
-main();
+await main();

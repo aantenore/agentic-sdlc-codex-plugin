@@ -167,6 +167,31 @@ test("execution usage receipts are immutable and budget-bound", () => {
   );
 });
 
+test("advisory observations for hard metrics are recorded but fail closed at evaluation", () => {
+  const budget = normalizeExecutionBudget(budgetInput());
+  const receipt = buildExecutionUsageReceipt({
+    id: "usage-codeburn-advisory",
+    execution_id: "execution-001",
+    budget,
+    usage: { tokens: 20 },
+    metering: { tokens: "estimated" },
+    started_at: "2026-07-14T08:00:00.000Z",
+    ended_at: "2026-07-14T09:00:00.000Z",
+    source: {
+      adapter: "codeburn",
+      assurance: "advisory_observed",
+      aggregation: "delta",
+      attestation_ref: null,
+    },
+  });
+
+  assert.equal(validateExecutionUsageReceipt(receipt, budget).valid, true);
+  const decision = evaluateBudgetUsage(budget, [receipt]);
+  assert.equal(decision.status, "metering_violation");
+  assert.equal(decision.allowed_to_start_next, false);
+  assert.equal(decision.metering_violations[0].actual, "estimated");
+});
+
 test("amended budgets preserve immutable receipts from their approved ancestor lineage", () => {
   const base = normalizeExecutionBudget({
     id: "budget-lineage",

@@ -102,6 +102,30 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function createFakeCodeBurn(project, report) {
+  const toolRoot = path.join(project, "fake-codeburn");
+  fs.mkdirSync(toolRoot, { recursive: true });
+  const reportPath = path.join(toolRoot, "report.json");
+  const runnerPath = path.join(toolRoot, "runner.mjs");
+  writeJson(reportPath, report);
+  fs.writeFileSync(runnerPath, [
+    "import fs from 'node:fs';",
+    "if (process.argv.includes('--version')) process.stdout.write('codeburn 0.9.15\\n');",
+    "else process.stdout.write(fs.readFileSync(process.env.CODEBURN_TEST_REPORT, 'utf8'));",
+  ].join("\n"));
+  const executable = path.join(toolRoot, "codeburn");
+  fs.writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${runnerPath}" "$@"\n`);
+  fs.chmodSync(executable, 0o755);
+  fs.writeFileSync(`${executable}.cmd`, `@"${process.execPath}" "${runnerPath}" %*\r\n`);
+  return {
+    reportPath,
+    env: {
+      PATH: `${toolRoot}${path.delimiter}${process.env.PATH || ""}`,
+      CODEBURN_TEST_REPORT: reportPath,
+    },
+  };
+}
+
 function initProject(project, extra = []) {
   mustRun(["init", "--root", project, "--project-name", "E2E", "--force", ...extra]);
 }
@@ -1852,6 +1876,16 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(recoveredApproval.authorization.authorization_hash, approved.authorization.authorization_hash);
   assert.equal(recoveredApproval.workflow.state, "authorized");
 
+  const codeBurnReport = readJson(path.join(repoRoot, "test", "fixtures", "codeburn", "report-v0.9.15.json"));
+  const fakeCodeBurn = createFakeCodeBurn(project, codeBurnReport);
+  const meterStart = JSON.parse(mustRun([
+    "budget", "meter", "start", "--root", project,
+    "--proposal", "ASSESS-E2E", "--adapter", "codeburn",
+    "--project", "TravelOps", "--from", "2026-07-14", "--to", "2026-07-14", "--json",
+  ], { env: fakeCodeBurn.env }).stdout);
+  assert.equal(meterStart.status, "created");
+  assert.equal(meterStart.baseline.snapshot.assurance.classification, "advisory_observed");
+
   const applied = JSON.parse(mustRun([
     "assessment",
     "proposal",
@@ -1868,6 +1902,28 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(applied.application.proposal_hash, prepared.proposal.proposal_hash);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "requirements", "REQ-ASSESS-E2E.json")), true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-ASSESS-E2E", "task-start.json")), true);
+
+  codeBurnReport.generated = "2026-07-14T10:00:00.000Z";
+  codeBurnReport.overview.tokens.input += 100;
+  codeBurnReport.overview.tokens.output += 50;
+  codeBurnReport.overview.calls += 2;
+  codeBurnReport.overview.cost += 0.01;
+  codeBurnReport.projects[0].calls += 2;
+  codeBurnReport.projects[0].cost += 0.01;
+  writeJson(fakeCodeBurn.reportPath, codeBurnReport);
+  const metered = JSON.parse(mustRun([
+    "budget", "meter", "record", "--root", project,
+    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
+  ], { env: fakeCodeBurn.env }).stdout);
+  assert.equal(metered.registration_status, "created");
+  assert.equal(metered.receipt.source.assurance, "advisory_observed");
+  assert.equal(metered.receipt.metering.tokens, "estimated");
+  assert.equal(metered.receipt.usage.tokens, 150);
+  const meteredReplay = JSON.parse(mustRun([
+    "budget", "meter", "record", "--root", project,
+    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
+  ], { env: fakeCodeBurn.env }).stdout);
+  assert.equal(meteredReplay.idempotent, true);
 
   mustFail([
     "assessment",
@@ -1973,7 +2029,9 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(replayedUsage.idempotent, true);
   assert.equal(replayedUsage.registration_status, "idempotent_replay");
   assert.equal(replayedUsage.aggregate.usage.active_time_seconds, 120);
-  assert.equal(fs.readdirSync(path.dirname(usageFile)).filter((name) => name.endsWith(".json")).length, 1);
+  const usageReceiptNames = fs.readdirSync(path.dirname(usageFile)).filter((name) => name.endsWith(".json"));
+  assert.equal(usageReceiptNames.length, 2);
+  assert.equal(usageReceiptNames.filter((name) => name === "USAGE-ASSESS-E2E.json").length, 1);
 
   const conflictingUsageFixture = writeTrustedUsageReceipt(project, {
     proposalId: "ASSESS-E2E",

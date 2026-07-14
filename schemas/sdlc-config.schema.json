@@ -342,6 +342,29 @@
           },
           "additionalProperties": false
         },
+        "metering_adapters": {
+          "type": "object",
+          "properties": {
+            "codeburn": {
+              "type": "object",
+              "required": ["enabled", "provider", "metric_mapping"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+                "metric_mapping": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$" },
+                  "additionalProperties": {
+                    "enum": ["tokens.total", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write", "calls", "cost"]
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
         "defaults": {
           "$ref": "#/$defs/budget_defaults"
         },
