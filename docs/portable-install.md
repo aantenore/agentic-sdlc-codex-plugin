@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.5.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.6.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -11,6 +11,7 @@ The staged plugin contains:
 assets/
 bin/
 docs/
+lib/
 schemas/
 scripts/
 skills/agentic-sdlc/
@@ -54,7 +55,7 @@ A successful list result contains an installed, enabled entry with:
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "installed": true,
   "enabled": true
 }
@@ -133,7 +134,7 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.5.0` | Rerun staging, add again, then open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.6.0` | Rerun staging, add again, then open a new task |
 | `npm run doctor` or CLI doctor | Reports runtime, version, entry point, both skills, agent card, preset, and optional project KB checks as passed | Repair the failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
 | Package dry run | Contains manifest, both skills, agent card, CLI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |

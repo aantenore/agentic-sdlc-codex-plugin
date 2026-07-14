@@ -345,6 +345,21 @@
       "completion_freshness_seconds": 60,
       "trusted_sources": []
     },
+    "metering_adapters": {
+      "codeburn": {
+        "enabled": true,
+        "provider": "codex",
+        "metric_mapping": {
+          "tokens": "tokens.total",
+          "input_tokens": "tokens.input",
+          "output_tokens": "tokens.output",
+          "cache_read_tokens": "tokens.cache_read",
+          "cache_write_tokens": "tokens.cache_write",
+          "model_calls": "calls",
+          "cost": "cost"
+        }
+      }
+    },
     "defaults": {
       "warning_thresholds_percent": [
         70,

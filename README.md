@@ -1,6 +1,6 @@
 # Agentic SDLC Codex Plugin
 
-Agentic SDLC 0.5.0 gives Codex a guided way to understand an existing software project and deliver a verified technical or functional assessment. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.6.0 gives Codex a guided way to understand an existing software project and deliver a verified technical or functional assessment. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains only reusable skills, templates, schemas, and the cross-platform Node.js CLI.
 
@@ -182,6 +182,8 @@ node bin/agentic-sdlc.mjs doctor --root /path/to/project --json
 node bin/agentic-sdlc.mjs status --root /path/to/project
 node bin/agentic-sdlc.mjs approval requests --root /path/to/project --json
 node bin/agentic-sdlc.mjs assessment proposal status --root /path/to/project --id ASSESSMENT-001 --json
+node bin/agentic-sdlc.mjs budget meter start --root /path/to/project --proposal ASSESSMENT-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14
+node bin/agentic-sdlc.mjs budget meter record --root /path/to/project --proposal ASSESSMENT-001 --adapter codeburn --baseline METER-ASSESSMENT-001-CODEBURN
 node bin/agentic-sdlc.mjs budget status --root /path/to/project --proposal ASSESSMENT-001 --json
 node bin/agentic-sdlc.mjs gate check --root /path/to/project --scope release-manifest --release-manifest RELEASE-ASSESSMENT-001 --strict --json
 node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-manifest RELEASE-ASSESSMENT-001
@@ -189,6 +191,8 @@ node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-man
 ```
 
 Natural-language interpretation stays in Codex. The CLI accepts canonical structured intent and performs deterministic state, format, authorization, and evidence checks.
+
+CodeBurn 0.9.x is an optional, separately installed prerequisite for `budget meter`; the plugin never installs it. Capture the baseline after proposal approval and before `apply`. `record` reuses the exact persisted provider/project/date query and advances an incremental monotonic cursor. CodeBurn evidence is always `estimated`/`advisory_observed`, never signed or exact; a mapped hard metric is recorded but stops the workflow with `metering_violation`. For multi-day work, pass an explicit stable `--from/--to` window at `start`.
 
 `migration active` is deliberately dry-run first. It validates the immutable records referenced by one exact release manifest, upgrades only missing configuration defaults when `--apply` is present, and never rewrites an approved record. Evidence referenced only by older valid releases remains where it is and is listed in an `archive-record:v1`; this logical archive changes gate scope, not filesystem location. Use the separate `archive closed --apply` workflow only when old closed reports or trace compactions must physically move.
 
