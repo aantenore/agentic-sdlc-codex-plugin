@@ -1,0 +1,51 @@
+{
+  "generated": "2026-07-14T09:15:30.000Z",
+  "period": "2026-07-14 to 2026-07-14",
+  "periodKey": "custom",
+  "currency": "USD",
+  "overview": {
+    "cost": 12.3456,
+    "proxiedCost": 0,
+    "netCost": 12.3456,
+    "savings": 0,
+    "calls": 120,
+    "sessions": 2,
+    "cacheHitPercent": 88.5,
+    "tokens": {
+      "input": 100000,
+      "output": 25000,
+      "cacheRead": 800000,
+      "cacheWrite": 5000
+    }
+  },
+  "projects": [
+    {
+      "name": "Users-antonioantenore-Documents-TravelOps",
+      "path": "Users/antonioantenore/Documents/TravelOps",
+      "cost": 12.3456,
+      "savings": 0,
+      "avgCostPerSession": 6.1728,
+      "calls": 120
+    }
+  ],
+  "models": [
+    {
+      "name": "gpt-example",
+      "calls": 120,
+      "inputTokens": 100000,
+      "outputTokens": 25000,
+      "cacheReadTokens": 800000,
+      "cacheWriteTokens": 5000,
+      "cost": 12.3456
+    }
+  ],
+  "daily": [],
+  "activities": [],
+  "topSessions": [],
+  "tools": [],
+  "shellCommands": [],
+  "mcpServers": [],
+  "skills": [],
+  "subagents": [],
+  "claudeAgentTypes": []
+}

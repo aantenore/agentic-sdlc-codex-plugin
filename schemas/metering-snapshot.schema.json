@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metering-snapshot.schema.json",
+  "title": "Provider-neutral advisory metering snapshot v1",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "adapter",
+    "scope",
+    "captured_at",
+    "cumulative",
+    "metering",
+    "assurance",
+    "source",
+    "snapshot_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "metering_snapshot" },
+    "schema_version": { "const": "metering-snapshot:v1" },
+    "version": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "scope": { "$ref": "#/$defs/scope" },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "cumulative": { "$ref": "#/$defs/cumulative" },
+    "metering": { "$ref": "#/$defs/metering" },
+    "assurance": { "$ref": "#/$defs/assurance" },
+    "source": { "$ref": "#/$defs/source" },
+    "snapshot_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "decimal": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "counter": { "type": "integer", "minimum": 0 },
+    "adapter": {
+      "type": "object",
+      "required": ["id", "version", "report_contract"],
+      "properties": {
+        "id": { "const": "codeburn" },
+        "version": { "type": "string", "pattern": "^0\\.9\\.[0-9]+$" },
+        "report_contract": { "const": "codeburn-report:v0.9.x" }
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["provider", "project", "from", "to"],
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "project": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "format": "date" },
+        "to": { "type": "string", "format": "date" }
+      },
+      "additionalProperties": false
+    },
+    "tokens": {
+      "type": "object",
+      "required": ["input", "output", "cache_read", "cache_write"],
+      "properties": {
+        "input": { "$ref": "#/$defs/counter" },
+        "output": { "$ref": "#/$defs/counter" },
+        "cache_read": { "$ref": "#/$defs/counter" },
+        "cache_write": { "$ref": "#/$defs/counter" }
+      },
+      "additionalProperties": false
+    },
+    "money": {
+      "type": "object",
+      "required": ["amount", "currency"],
+      "properties": {
+        "amount": { "$ref": "#/$defs/decimal" },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+      },
+      "additionalProperties": false
+    },
+    "cumulative": {
+      "type": "object",
+      "required": ["tokens", "calls", "sessions", "cost"],
+      "properties": {
+        "tokens": { "$ref": "#/$defs/tokens" },
+        "calls": { "$ref": "#/$defs/counter" },
+        "sessions": { "$ref": "#/$defs/counter" },
+        "cost": { "$ref": "#/$defs/money" }
+      },
+      "additionalProperties": false
+    },
+    "metering": {
+      "type": "object",
+      "required": ["tokens", "calls", "cost"],
+      "properties": {
+        "tokens": { "const": "estimated" },
+        "calls": { "const": "estimated" },
+        "cost": { "const": "estimated" }
+      },
+      "additionalProperties": false
+    },
+    "assurance": {
+      "type": "object",
+      "required": ["classification", "enforcement", "trusted_exact", "metrics", "reasons"],
+      "properties": {
+        "classification": { "const": "advisory_observed" },
+        "enforcement": { "const": "advisory" },
+        "trusted_exact": { "const": false },
+        "metrics": { "$ref": "#/$defs/metering" },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "project_match": {
+      "type": "object",
+      "required": ["name", "path", "calls", "cost"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "calls": { "$ref": "#/$defs/counter" },
+        "cost": { "$ref": "#/$defs/money" }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["argv", "report_hash", "report_generated_at", "report_period", "matched_projects"],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "items": { "type": "string" }
+        },
+        "report_hash": { "$ref": "#/$defs/sha256" },
+        "report_generated_at": { "type": "string", "format": "date-time" },
+        "report_period": { "type": "string", "minLength": 1 },
+        "matched_projects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/project_match" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
