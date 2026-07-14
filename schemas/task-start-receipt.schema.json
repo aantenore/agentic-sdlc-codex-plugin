@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task-start-receipt.schema.json",
+  "title": "Agentic SDLC Proposal-Bound Task Start Receipt v2",
+  "description": "Internal receipt proving that the approved assessment proposal materialized and authorized one exact story start without adding another normal user checkpoint.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "story_id",
+    "phase",
+    "route",
+    "contract_id",
+    "contract_approval_hash",
+    "proposal_ref",
+    "budget_ref",
+    "status",
+    "authorization_ref",
+    "authorization_use_ref",
+    "authority_assurance",
+    "confirmed_by",
+    "confirmed_at",
+    "audit"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "task_start_receipt" },
+    "schema_version": { "const": "task-start-receipt:v2" },
+    "story_id": { "type": "string", "minLength": 1 },
+    "phase": { "type": "string", "minLength": 1 },
+    "route": { "type": "string", "minLength": 1 },
+    "contract_id": { "type": "string", "minLength": 1 },
+    "contract_approval_hash": { "$ref": "#/$defs/sha256" },
+    "proposal_ref": { "$ref": "#/$defs/hashed_id_ref" },
+    "budget_ref": { "$ref": "#/$defs/hashed_id_ref" },
+    "status": { "const": "confirmed" },
+    "authorization_ref": { "type": "string", "minLength": 1 },
+    "authorization_use_ref": { "type": "string", "minLength": 1 },
+    "authority_assurance": { "$ref": "content-authorization.schema.json#/$defs/authority_assurance" },
+    "confirmed_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "confirmed_at": { "type": "string", "format": "date-time" },
+    "audit": { "$ref": "common.schema.json#/$defs/audit" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "hashed_id_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

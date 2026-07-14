@@ -10,8 +10,12 @@ The sample records below use neutral placeholders. The structure is generic and 
     project.json
     README.md
     baseline/
+    assessments/
+    budgets/
     contracts/
     authorizations/
+    authorization-uses/
+    receipts/
     capability-discovery/
     output-contracts/
     requirements/
@@ -51,7 +55,11 @@ Manifests and archive plans are canonical KB files. Cache and indexes are not. T
 flowchart TB
   Source["Source of truth"]
   Source --> Baseline["baseline"]
+  Source --> Assessments["assessments"]
+  Source --> Budgets["budgets"]
   Source --> Contracts["contracts"]
+  Source --> AuthorizationUses["authorization uses"]
+  Source --> Receipts["receipts"]
   Source --> Capabilities["capability-discovery"]
   Source --> OutputContracts["output-contracts"]
   Source --> Requirements["requirements"]
@@ -67,7 +75,11 @@ flowchart TB
   Source --> Reports["reports as evidence"]
 
   Baseline --> Cache["cache"]
+  Assessments --> Cache
+  Budgets --> Cache
   Contracts --> Cache
+  AuthorizationUses --> Cache
+  Receipts --> Cache
   Capabilities --> Cache
   OutputContracts --> Cache
   Requirements --> Cache
@@ -175,6 +187,54 @@ node bin/agentic-sdlc.mjs baseline approve \
   --approval-source explicit-user \
   --summary "Confirmed baseline scope and current-state assumptions"
 ```
+
+## `assessments/`
+
+Assessment proposal and workflow control records. Paths are configured in `.sdlc/config.json`; the default layout is:
+
+```text
+.sdlc/assessments/proposals/ASSESSMENT-001.json
+.sdlc/assessments/workflows/ASSESSMENT-001.json
+.sdlc/budgets/ASSESSMENT-001/BUDGET-ASSESSMENT-001.json
+.sdlc/budgets/ASSESSMENT-001/AMEND-ASSESSMENT-001-01.json
+```
+
+The proposal is the immutable checkpoint 2 approval payload (`assessment-proposal:v1`). Its hash binds the approved baseline, scope/requirement, story reservation, deliverable, capabilities, contract draft, route intent, write-set, budget, security, and application plan. Mutable progress, failure, retry, exception, and receipt references live in `assessment-workflow:v1`. Storage roots are configured through `assessment_workflow.storage_root` and `budget_policy.storage_root`; the paths above are defaults.
+
+`execution-budget:v1` aggregates the full proposal execution tree, including subagents. The shipped defaults are exact active time (soft 2,700 seconds, hard 3,600), exact steps (soft 40, hard 60), and estimated tokens (soft 200,000, no hard limit). It records exact/estimated/unavailable metering, configurable warnings, verification reserve, and limit behavior. No default cost limit exists: cost remains unavailable and non-binding until a trustworthy metering/pricing adapter, pricing reference, and currency are configured. `budget-amendment:v1` is append-only and references the base hashes; `execution-usage-receipt:v1` records actual or estimated usage and source.
+
+```text
+assessment proposal prepare
+assessment proposal approve
+assessment proposal apply
+assessment proposal status
+budget usage record
+budget status
+budget amend
+assessment proposal complete
+```
+
+## `receipts/`
+
+Immutable evidence of authority and execution. Exact paths are configurable; categories include:
+
+```text
+.sdlc/receipts/host-approvals/
+.sdlc/authorization-uses/
+.sdlc/receipts/generation/
+.sdlc/receipts/verification/
+.sdlc/receipts/execution-usage/
+```
+
+- `host-approval-receipt:v2` binds the question, subject hash, constraints, answer, actor, and host/CI message, then authenticates the canonical payload hash with an Ed25519 key configured in `authority_policy.trusted_host_keys`.
+- `authorization-usage-receipt:v2` freezes authorization state, the exact action-subject `use_hash`, and validity at the use timestamp. Ambiguous v1 action/subject sets fail closed.
+- `artifact-generator-receipt:v1` identifies which capability produced the exact artifact hash.
+- `verification-receipt:v1` separates container, content, render, and optional independent verification.
+- `execution-usage-receipt:v1` reports budget consumption, reservations, metering accuracy, and source.
+
+Receipts are canonical evidence. Screenshots and rendered pages remain separate evidence files referenced by the verification receipt.
+
+`authority_policy.usage_receipts_root` configures authorization-use storage; `authorization-uses` is only the portable default for new projects. `authority_policy.trusted_host_keys` is an array of `{ key_id, algorithm: "Ed25519", public_key }`; `host_verified` requires at least one trusted public key.
 
 ## `contracts/`
 
@@ -606,7 +666,10 @@ Examples:
 .sdlc/releases/REL-001.md
 .sdlc/releases/observability-plan.md
 .sdlc/releases/feedback-loop.md
+.sdlc/releases/manifests/REL-001.json
 ```
+
+A `release-manifest:v1` inventories source revision, proposal/requirement/story hashes, delivered artifacts, authorization-use receipts, execution usage, verification receipts, gates, and rollback instructions. It is release evidence, distinct from the compact KB manifest below.
 
 ## `manifests/`
 
@@ -628,7 +691,10 @@ The manifest summarizes stories, claims, completed steps, contracts, output link
 
 ## `archive/`
 
-Archive plans and applied archive records for closed, old evidence.
+Two intentionally distinct archive records live here:
+
+- `archive-plan.schema.json` governs the existing plan-first filesystem move performed by `archive closed`;
+- `archive-record:v1` is an immutable logical declaration that specific legacy artifacts are retained as history but excluded from a named release manifest.
 
 Example:
 
@@ -642,7 +708,18 @@ Create a plan with:
 node bin/agentic-sdlc.mjs archive closed --root <target-project> --before 90d
 ```
 
-The command is plan-first. It only moves old reports and trace compactions when `--apply` is explicitly provided. Live story files, contracts, approvals, dependency graphs, output links, and raw trace JSONL are not moved by this command.
+The command is plan-first and emits `kind: archive_plan`. It verifies source hashes under a lock, applies the move atomically, and rolls back on failure. It only moves configured closed evidence when `--apply` is explicitly provided. Live story files, contracts, approvals, dependency graphs, output links, and raw trace JSONL are not moved by this command.
+
+Create a separate `archive-record:v1` only when a release must make the historical exclusion explicit. That logical record references the release manifest and the exact paths and hashes, but does not itself move or delete anything.
+
+Use the dry-run-first active migration to create it from prior valid releases without guessing which unfinished records are historical:
+
+```bash
+node bin/agentic-sdlc.mjs migration active --root <target-project> --release-manifest RELEASE-ASSESSMENT-001
+node bin/agentic-sdlc.mjs migration active --root <target-project> --release-manifest RELEASE-ASSESSMENT-001 --apply
+```
+
+Only missing configuration defaults are written during migration. Immutable records in the selected manifest are schema- and hash-validated, not rewritten. Older release evidence uses `retention: retain-in-place`, so `physical_files_moved` remains zero.
 
 ## `traces/compactions/`
 

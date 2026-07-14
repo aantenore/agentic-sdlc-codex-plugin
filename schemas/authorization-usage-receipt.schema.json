@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "authorization-usage-receipt.schema.json",
+  "title": "Agentic SDLC Authorization Usage Receipt",
+  "description": "Immutable proof of the complete authorization snapshot and its validity for one exact action-subject pair and historical use time.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "authorization_snapshot",
+    "authorization_id",
+    "authorization_hash",
+    "action",
+    "subject",
+    "subject_hash",
+    "used_at",
+    "decision",
+    "valid_at_use",
+    "errors",
+    "effective_revocation",
+    "proposal_ref",
+    "historical_at_use_time",
+    "evidence",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "authorization_usage_receipt" },
+    "schema_version": { "enum": ["authorization-usage-receipt:v1", "authorization-usage-receipt:v2"] },
+    "version": { "enum": [1, 2] },
+    "id": { "type": "string", "minLength": 1 },
+    "authorization_snapshot": { "$ref": "content-authorization.schema.json" },
+    "authorization_id": { "type": "string", "minLength": 1 },
+    "authorization_hash": { "$ref": "#/$defs/sha256" },
+    "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "subject": {
+      "description": "Exact JSON value whose canonical hash is subject_hash. Null is used only when the caller supplied a precomputed subject hash."
+    },
+    "subject_hash": { "$ref": "#/$defs/sha256" },
+    "use_hash": { "$ref": "#/$defs/sha256" },
+    "used_at": { "type": "string", "format": "date-time" },
+    "decision": { "enum": ["allow", "deny"] },
+    "valid_at_use": { "type": "boolean" },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "effective_revocation": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/revocation" }
+      ]
+    },
+    "proposal_ref": { "$ref": "#/$defs/proposal_ref" },
+    "historical_at_use_time": { "const": true },
+    "evidence": {
+      "description": "Evidence references are application records and are included verbatim in the immutable receipt hash.",
+      "type": "array"
+    },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "schema_version": { "const": "authorization-usage-receipt:v2" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": { "version": { "const": 2 } },
+        "required": ["use_hash"]
+      },
+      "else": {
+        "properties": { "version": { "const": 1 } },
+        "not": { "required": ["use_hash"] }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "proposal_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "revocation": {
+      "type": "object",
+      "required": [
+        "kind",
+        "schema_version",
+        "version",
+        "id",
+        "authorization_id",
+        "authorization_hash",
+        "effective_at",
+        "reason",
+        "revoked_by",
+        "revocation_hash",
+        "hash_algorithm"
+      ],
+      "properties": {
+        "kind": { "const": "authorization_revocation" },
+        "schema_version": { "const": "authorization-revocation:v1" },
+        "version": { "const": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "authorization_id": { "type": "string", "minLength": 1 },
+        "authorization_hash": { "$ref": "#/$defs/sha256" },
+        "effective_at": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "minLength": 1 },
+        "revoked_by": { "$ref": "common.schema.json#/$defs/actor" },
+        "revocation_hash": { "$ref": "#/$defs/sha256" },
+        "hash_algorithm": { "const": "sha256:stable-json:v1" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

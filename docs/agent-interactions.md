@@ -1,136 +1,231 @@
 # Assessment Interactions
 
-This document defines the user-facing behavior of the `Project Assessment` skill. The goal is a useful project assessment, not a lesson in internal workflow records.
+This document defines the user-facing behavior of the `Project Assessment` skill. The product asks for two business decisions and keeps SDLC bookkeeping behind them.
 
 ## Activation
 
-The skill is visible in Codex through its agent card and allows implicit invocation. The first starter prompt is exactly:
+The first starter prompt is:
 
 ```text
 Contextualize this project and prepare an initial technical assessment.
 ```
 
-Equivalent natural requests should select the same journey, for example:
+Equivalent requests in any language select the same journey, including “Contestualizza il progetto e prepara un assessment tecnico”, “Assess the architecture and risks”, and requests for Word, Excel, PDF, PowerPoint, HTML, JSON, CSV, or Markdown delivery.
 
-- "Assess the current architecture and technical risks."
-- "Contestualizza il progetto e prepara un assessment tecnico iniziale."
-- "Prepare a functional assessment of this existing application."
-- "Review this repository and give me a Word assessment."
+Preserve any root, format, destination, exclusions, evidence sources, autonomy boundary, or budget already provided. Do not ask for the same choice twice.
 
-The request may name a project root, format, destination, exclusions, evidence sources, or autonomy boundary. Preserve those choices; do not ask for them again when they are already clear.
+## Exactly Two Normal Checkpoints
 
-## Two-Checkpoint Rule
+The normal local assessment always has these two logical checkpoints:
 
-A normal low-risk assessment has at most two user checkpoints:
+1. project context;
+2. immutable combined proposal and complete execution tranche.
 
-1. inferred project context;
-2. one combined work proposal.
+There is no separate normal decision for requirement, story, capabilities, template, contract, start, verification, or budget. A fresh approved context may make checkpoint 1 short, but it remains correctable when the user requested contextualization.
 
-Internal context, tool, output, work-brief, and routing records are implementation details. Prepare them behind these two plain-language decisions instead of exposing one approval per record.
+An additional decision is exceptional and allowed only for an install, external access, secret, production access, destructive action, out-of-scope write, material proposal change, or unapproved budget extension.
 
-When project context is still proposed or stale, `approval requests` returns only that context decision. Format, capability, contract, and start decisions cannot leak into checkpoint 1. After context is approved, checkpoint 2 may present the represented work records as one combined bundle.
+```mermaid
+stateDiagram-v2
+  [*] --> context_pending
+  context_pending --> proposal_pending: "Checkpoint 1 approved"
+  proposal_pending --> authorized: "Checkpoint 2 approved"
+  authorized --> running: "Idempotent apply and task start"
+  running --> verifying
+  verifying --> completed
+  running --> exception_pending: "Boundary or budget exception"
+  exception_pending --> running: "Versioned amendment approved"
+  exception_pending --> cancelled: "Rejected or stopped"
+  running --> failed
+  verifying --> failed
+```
 
-An additional decision is allowed only when the work cannot continue inside the approved proposal, such as a new installation, external or production access, secrets, a destructive action, a write outside the displayed paths, or a material change to scope, format, evidence, or tools.
+## Contract For Every Question
 
-## Checkpoint 1: Project Context
+Every question shown to the user—including a clarification, exception, or budget-extension request—must include:
 
-Inspect the repository and any user-provided local files read-only. Present a decision-ready summary in the user's language that covers:
+- what is being asked;
+- why it is required now;
+- what the response authorizes;
+- what it does not authorize;
+- valid answer examples in Italian and English.
 
-- evidenced product purpose, users, and current lifecycle state;
-- stack, runtimes, deployment model, and integrations;
-- architecture boundaries and important components;
-- documents, directories, and files inspected;
-- constraints and explicit non-goals;
-- observed facts, inferences, assumptions, contradictions, and confidence;
-- important facts that repository evidence cannot recover.
+A bare “Proceed?” or “Approve?” is invalid. The host or CI system must persist the direct answer as `host_approval_receipt:v1`; an agent cannot create authority by declaring itself a human actor.
 
-Do not substitute a list of paths or an internal JSON file for the summary. Paths are supporting evidence.
+Open questions use the configurable `open_question_guidance` policy. It classifies questions as objective, users/stakeholders, constraints/NFRs, output/delivery, integrations, approval boundaries, or budget/time; each category supplies keywords, why the answer matters, Italian and English examples, and the exact proposal effect. An unmatched question uses the configured fallback. The original question is always the “what”; guidance must not replace it with an internal category label.
 
-End with one clear decision:
+Assessment routing is also data-driven. `assessment_workflow.requested_actions` lists the normalized actions that must enter the baseline-plus-combined-proposal journey. Adding an action there changes routing policy without changing CLI code; it must never be used to bypass either logical checkpoint.
 
-> Approve or correct this project context. This confirms only the context I may rely on; it does not approve the assessment scope, format, tools, writes, or start.
+## Checkpoint 1 — Project Context
 
-Apply corrections and ask again within the same checkpoint. Reuse a fresh, already-confirmed context when possible, while still letting the user correct it when contextualization was requested.
+Inspect the repository and user-provided local files read-only. Explain:
 
-## Checkpoint 2: Combined Proposal
+- evidenced product purpose, users, and lifecycle state;
+- stack, runtime, deployment model, integrations, boundaries, and components;
+- exact evidence inspected;
+- constraints and non-goals;
+- observed facts versus inferences;
+- assumptions, contradictions, confidence, open questions, and facts that cannot be recovered.
 
-Resolve reuse before proposing a new artifact. Prefer an existing approved assessment plus a delta when that fully addresses the request.
+Paths are supporting evidence, not the explanation.
 
-Present one proposal with concrete values under these headings:
+### Required question
 
-1. **Outcome**: assessment type, intended decision, and audience.
-2. **Assessment record**: the explicit story ID, whether it will be created or reused, and why it represents this assessment.
-3. **Scope**: included and excluded areas, depth, and new/reuse/delta mode.
-4. **Evidence**: exact directories, files, local commands, project records, and any approved external sources.
-5. **Sections**: ordered report sections and how missing evidence will be marked.
-6. **Artifact**: canonical format, aliases normalized, extension, media type, destination, delivery mode, generator, and verifier.
-7. **Tools and actions**: installed tools, read/write permissions, targets, and checks that will run.
-8. **Limits**: assumptions, missing information, non-goals, access boundaries, and triggers for a new decision.
-9. **Start and delivery**: creation/reuse of the story, persistent authorization, represented records, authorized task start, exact artifact, and final chat summary.
-10. **Approval boundary**: what this answer covers and what remains outside it.
+- **What is being asked:** approve or correct only the displayed project context.
+- **Why:** the assessment needs a canonical baseline and cannot convert inference into fact silently.
+- **Authorizes:** approval of the represented baseline content hash.
+- **Does not authorize:** assessment scope, requirement/story creation, format, tools, writes, external access, budget, contract, or start.
+- **Question:** “Do you approve this context, or what should I correct?”
+- **Italian examples:** “Approvo il contesto”; “Correggi: usiamo Kubernetes, non ECS.”
+- **English examples:** “I approve the context”; “Correct this: we use Kubernetes, not ECS.”
 
-Ask one question: approve this exact proposal or describe changes. Do not split format, tools, report structure, work brief, and start into separate questions.
+Apply corrections inside this same checkpoint. Internally use `onboard existing-project` and `baseline approve`. The baseline approval must never be reused as checkpoint 2 approval.
 
-A short answer applies only to the visible bundle. If any internal representation differs materially from that bundle, revise the proposal before work starts.
+## Prepare The Immutable Proposal
 
-## Execute Without A Third Checkpoint
+After checkpoint 1, run `assessment proposal prepare`. It creates:
 
-After checkpoint 2 is approved:
+- an `assessment_proposal:v1` in `proposal_pending` state;
+- an `assessment_workflow:v1` resumable state record;
+- a complete `execution_budget:v1`;
+- stable reservations for requirement, story, template, contract, authorization, output, and receipts.
 
-1. create or reuse the explicit assessment story shown in the proposal;
-2. persist the proposal with `authorization grant`, including the exact approval actions and `task.start.confirm`;
-3. create the story-scoped output records and contract, using `--authorization <id>` on every automation approval;
-4. confirm execution with `task start --confirm-start --authorization <id>`;
-5. perform the agreed read-only analysis and only the displayed writes;
-6. generate the artifact in its real canonical format;
-7. verify content, container, and visual rendering where required;
-8. link the artifact with its evidence and persist the verification receipt;
-9. run the applicable deterministic checks;
-10. return the artifact path and concise assessment summary.
+The proposal binds `baseline_ref.approved_content_hash` and hashes the complete approval payload with `proposal_hash`. It includes:
 
-Do not add a routine approval round for the completed assessment. The user can request revisions after delivery.
+- scope ID/title/summary and real requirement ID;
+- story reservation and acceptance criteria;
+- artifact type, preset, sections, canonical delivery, generator, verifier, and destination;
+- capabilities, permissions, targets, and evidence plan;
+- contract draft and route intent;
+- exact `write_set[]` actions, subject IDs/hashes, paths, and artifact types;
+- execution budget and stop policy;
+- security boundaries, approval boundary, and idempotent application plan.
+
+The system may not fill in material content after approval. Changing any bound field creates a new proposal hash and requires checkpoint 2 again.
+
+## Checkpoint 2 — Combined Proposal And Complete Tranche
+
+Use five primary blocks:
+
+1. **Outcome, scope, evidence** — supported decision, audience, inclusions/exclusions, depth, requirement/story, reuse mode, sources, and checks.
+2. **Deliverable, verification** — sections, format, extension, media type, path, delivery mode, generator, verifier, and required verification dimensions.
+3. **Tools, security, writes** — installed capabilities, permissions, targets, full write-set, and excluded risky operations.
+4. **Budget and stop policy** — the complete execution tranche.
+5. **Start and boundary** — internal records/actions, task start, final delivery, exception triggers, and exclusions.
+
+Put proposal/baseline hashes, requirement/story/template/contract IDs, subject hashes, authorization actions, artifact types, and idempotency key in a compact technical appendix. It may be collapsible, but not hidden from the decision.
+
+### Budget in the same checkpoint
+
+Show concrete values and metering accuracy/source for:
+
+- target and maximum active time, excluding user and approved external waiting; the default is exact, soft at 2,700 seconds and hard at 3,600 seconds;
+- aggregate main-agent and subagent steps; the default is exact, soft at 40 and hard at 60;
+- aggregate main-agent and subagent tokens; the default is an estimated soft threshold of 200,000 with no hard limit;
+- cost/currency only when both a reliable metering/pricing adapter and a currency are configured;
+- configured warnings, normally 70% and 90%;
+- completion and verification reserve, normally 15%;
+- action at limit: request extension, partial delivery, or stop;
+- any bounded automatic extension. Default is none.
+
+Label every metric `exact`, `estimated`, or `unavailable`. Estimated or unavailable limits cannot be presented as hard enforcement. In particular, when no trustworthy pricing adapter, pricing reference, or currency is available, checkpoint 2 must label cost `unavailable` and non-binding; it must not invent or imply a cost cap. The tranche includes analysis, generation, verification, linking, gates, receipts, and final delivery.
+
+### Required question
+
+- **What is being asked:** approve the exact proposal ID/hash and complete tranche, or request a change.
+- **Why:** one decision can replace fragmented approvals only when every authorized subject, write, tool, verification step, and budget limit is fixed and visible.
+- **Authorizes:** only the displayed requirement/story, exact subject hashes and write-set, proposal-bound automation uses, task start, analysis, artifact, layered verification, KB linking, budget policy, and final summary.
+- **Does not authorize:** installs; undisplayed external/production access; secrets; destructive actions; different subjects, paths, or artifacts; material changes; or unbounded budget extensions.
+- **Question:** “Do you approve proposal `<id>` at hash `<hash>`, including this budget and stop policy, or what should I change?”
+- **Italian examples:** “Approvo la proposta `<id>` con questo budget”; “Modifica: massimo 45 minuti, nessuna fonte esterna, DOCX.”
+- **English examples:** “I approve proposal `<id>` with this budget”; “Change it: 45 minutes maximum, no external sources, DOCX.”
+
+One short approval covers only the visible hash-bound bundle. It does not approve the eventual findings themselves.
+
+## Internal Command Choreography
+
+The supported assessment lifecycle is:
+
+```text
+onboard existing-project
+baseline approve
+assessment proposal prepare
+assessment proposal approve
+assessment proposal apply
+assessment proposal status
+budget usage record
+budget status
+assessment proposal complete
+```
+
+Supporting commands are `requirement create|status` and, for an approved exceptional change, `budget amend`.
+
+- `assessment proposal approve` validates the unchanged proposal hash, records the host approval, and creates a proposal-bound content authorization.
+- `assessment proposal apply` applies the displayed write-set idempotently. A partial failure is resumed through workflow state, not a new normal checkpoint.
+- Every automation approval and task start writes an immutable usage receipt with the authorization snapshot and `valid_at_use`. Canonical assessment authorization uses `authorization-usage-receipt:v2`; the compatibility CLI uses pair-bound `authorization-usage-receipt:legacy-v2`. Later closure or revocation does not invalidate historically valid uses.
+- `assessment proposal complete` is internal and succeeds only after required output, verification, linkage, usage accounting, and gates. It is not a third decision.
+
+## Requirement And Story Lineage
+
+The assessment uses one real requirement such as `REQ-INITIAL-ASSESSMENT` and one story such as `ST-INITIAL-ASSESSMENT`. Every example and record must use those same IDs consistently:
+
+```text
+Requirement: REQ-INITIAL-ASSESSMENT
+Story: ST-INITIAL-ASSESSMENT
+Profile: CAP-PROFILE-ST-INITIAL-ASSESSMENT
+Recommendation: CAP-REC-ST-INITIAL-ASSESSMENT
+Template: technical-analysis-v1
+Contract: contract-ST-INITIAL-ASSESSMENT-analysis
+Authorization: AUTH-ST-INITIAL-ASSESSMENT
+```
+
+Use `requirement create|status`. Reuse only when identity and scope match. Never write a fake `REQ-001` merely to satisfy output linking.
+
+## Proposal-Bound Authorization
+
+New assessments use `content-authorization:v2`, not a free-text grant alone. It contains:
+
+- exact proposal ID/hash;
+- canonical `allowed_uses` bindings for each exact action + subject-content hash pair, plus derived action/subject indexes;
+- bounded use policy and terminal closure rule;
+- host or CI authority assurance;
+- validity window and immutable authorization hash.
+
+Empty arrays are not wildcards. Legacy v1 snapshots with multiple actions and multiple subjects are ambiguous and fail closed; only v1 snapshots with one action or one subject can be mapped safely. Each use is evaluated at its own timestamp and persisted as an `authorization-usage-receipt:v2` before the authorized mutation.
+
+For direct `authorization grant` usage outside the assessment proposal, declare repeated `--allow-use action=subject` values whenever both dimensions are plural. `--allow-action` plus `--allow-subject` remains compatible only when one side has a single value, so it cannot silently grant the cross-product of two independent lists.
+
+`host_verified` additionally requires `host-approval-receipt:v2`: the host signs the canonical unsigned payload hash with Ed25519, and `attestation.key_id` must resolve to exactly one public key in `authority_policy.trusted_host_keys`. The signed question contract must name what is and is not authorized, and `constraints.subject_hash` must equal the approved subject hash. Missing trust roots, signatures, question fields, or subject-bound constraints fail closed and remain `audit_only`.
+
+## Budget Monitoring And Amendment
+
+Warnings are non-blocking progress updates. Before exceeding a non-automatic limit, ask one exception question using the full question contract. Show remaining budget, accuracy, completed/remaining work, requested increment/new total, reason, and partial-delivery alternative.
+
+- **Authorizes:** only the displayed budget delta.
+- **Does not authorize:** wider scope, tools, access, paths, or subjects.
+- **Italian examples:** “Approvo altri 20 minuti, totale 60”; “Consegna parziale senza estensione.”
+- **English examples:** “Approve 20 more minutes, 60 total”; “Deliver the partial result without extending.”
+
+`budget amend` creates `budget_amendment:v1` against the base budget/proposal hashes. Never mutate the approved base budget. `budget usage record` persists actual/estimated values, reservations, source, and accuracy; the final response reports them honestly.
 
 ## Canonical Formats
 
-Normalize requested aliases before presenting checkpoint 2.
-
-| Canonical format | Accepted aliases | Extension | Media type | Required capability |
+| Canonical format | Aliases | Extension | Media type | Generator/verifier |
 | --- | --- | --- | --- | --- |
-| `markdown` | `md`, `markdown` | `.md` | `text/markdown` | Native checks |
+| `markdown` | `md`, `markdown` | `.md` | `text/markdown` | native checks |
 | `docx` | `word`, `doc`, `docx` | `.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `documents` |
 | `xlsx` | `excel`, `spreadsheet`, `workbook`, `xlsx` | `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | `spreadsheets` |
 | `pdf` | `pdf` | `.pdf` | `application/pdf` | `pdf` |
 | `pptx` | `powerpoint`, `slides`, `pptx` | `.pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | `presentations` |
-| `html` | `html` | `.html` | `text/html` | Native generation plus browser rendering |
-| `json` | `json` | `.json` | `application/json` | Native parse validation |
+| `html` | `html` | `.html` | `text/html` | native generation plus browser rendering |
+| `json` | `json` | `.json` | `application/json` | native schema/syntax checks |
 | `csv` | `csv` | `.csv` | `text/csv` | `spreadsheets` |
 
-Use `artifact` or `artifact-plus-chat-summary` as the delivery mode. Default to `artifact-plus-chat-summary` for assessments.
+Use `artifact` or `artifact-plus-chat-summary`, defaulting to the latter. Never fake a format by changing an extension.
 
-Never create a fake format by renaming Markdown. Extension and media type must match the approved canonical format.
+## Generation Receipt And Layered Verification
 
-## Format Verification
-
-Use the format capability before generating and inspecting a non-native artifact:
-
-- `documents` for DOCX generation and rendered inspection;
-- `spreadsheets` for XLSX/CSV generation, recalculation where relevant, structural checks, and workbook inspection;
-- `pdf` for PDF generation, page rendering, and page inspection;
-- `presentations` for PPTX generation, slide rendering, and deck inspection;
-- a browser renderer for HTML layout and viewport inspection.
-
-Verify that:
-
-- every material finding distinguishes fact from inference and cites evidence;
-- required sections exist, using `Not evidenced` or `Not assessed` when appropriate;
-- risks, recommendations, roadmap items, evidence, and open decisions have stable IDs;
-- the target application opens the file;
-- rendered content is legible, complete, and free of overlap or clipping;
-- the extension and media type match the proposal.
-
-DOCX, XLSX, PDF, PPTX, and HTML require at least one render or visual-check evidence file when linking the output. Store evidence inside the project, but not under `.sdlc/cache/` or `.sdlc/indexes/`:
-
-The evidence must be a separate file from the delivered artifact. Passing the artifact itself, including through a symlink alias, is rejected both when linking and during strict-gate revalidation.
+The format capability emits `artifact_generator_receipt:v1` for the exact artifact. Pass it separately from render evidence:
 
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs output link \
@@ -140,155 +235,45 @@ node <plugin-root>/bin/agentic-sdlc.mjs output link \
   --artifact docs/technical-assessment.docx \
   --template technical-analysis-v1 \
   --mode new \
-  --requirement REQ-001 \
-  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render-check.md
+  --requirement REQ-INITIAL-ASSESSMENT \
+  --authorization <authorization-id-from-assessment-proposal-approve> \
+  --receipt-file .sdlc/receipts/generation/GEN-ST-INITIAL-ASSESSMENT.json \
+  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render.png
 ```
 
-Use repeatable `--evidence` options when multiple pages, sheets, slides, or viewports matter. A valid OOXML, PDF, or HTML container without visual evidence is insufficient for these formats.
+`--authorization` is the exact proposal-bound ID emitted by approval; the link consumes only its `output.link` action/subject pair and stores a use receipt. `--receipt-file` attests which generator produced the exact artifact hash. `--evidence` supplies separate render/content proof; neither substitutes for the other.
 
-## Verification Receipt
+The `verification_receipt:v1` reports separately:
 
-Linking stores a `verification_receipt` with:
+- `container_verified` — real format/container syntax;
+- `content_verified` — required sections, stable IDs, evidence lineage, and semantic checks;
+- `render_verified` — pages/sheets/slides/viewports are complete and legible;
+- optionally `independent_verified` — a genuinely separate verifier.
 
-- `status` and verifier;
-- canonical format;
-- deterministic checks performed;
-- evidence paths and SHA-256 values;
-- artifact SHA-256;
-- verification timestamp.
+Say “verified” only when all proposal-required dimensions pass. Otherwise qualify the claim. A legacy `status: passed` structural receipt is not evidence of semantic or rendered correctness.
 
-There is no separate receipt command. Retrieve the persisted output link and receipt with:
+## Release And Archive
+
+Completion produces lineage from baseline and proposal through requirement/story, authorization uses, artifact generation, layered verification, and execution usage. A `release-manifest:v1` inventories those hashes, while `release-gate-receipt:v1` records the deterministic checks that admitted that exact manifest. An `archive-record:v1` is a logical, hash-bound declaration that identified legacy artifacts remain historical but are outside that release scope; it does not move files. The historical `archive closed` command instead emits a distinct `archive_plan` governed by `archive-plan.schema.json`; applying that plan verifies source hashes under a lock and rolls back incomplete moves.
+
+For an existing KB, run an active-only migration as a dry run first:
 
 ```bash
-node <plugin-root>/bin/agentic-sdlc.mjs output status \
-  --root <target-project> \
-  --story ST-INITIAL-ASSESSMENT \
-  --type technical-analysis \
-  --json
+agentic-sdlc migration active --release-manifest RELEASE-ASSESSMENT-001
+agentic-sdlc migration active --release-manifest RELEASE-ASSESSMENT-001 --apply
 ```
 
-The chat delivery should state the artifact path, verification performed, evidence used, limitations, and any open decisions without dumping the raw receipt.
+The selected release manifest answers the otherwise ambiguous question “what is active?” The command validates every immutable requirement, story, contract, proposal, workflow, receipt, budget, gate, and artifact reference in that manifest. `--apply` persists missing configuration defaults but does not rewrite those approved records. Evidence belonging only to older valid release manifests is retained in place and bound into an `archive-record:v1`; unfinished work outside both releases is not classified as history.
 
-## Story And Persistent Authorization
+## Completion Message
 
-After the user approves checkpoint 2, create the displayed assessment story before any contract or output operation:
+After `assessment proposal complete`, return:
 
-```bash
-node <plugin-root>/bin/agentic-sdlc.mjs story create \
-  --root <target-project> \
-  --id ST-INITIAL-ASSESSMENT \
-  --title "Initial project assessment" \
-  --acceptance "Deliver the approved assessment artifact with verification evidence"
-```
+- verdict and decision implications;
+- major risks and prioritized recommendations;
+- artifact path and hash;
+- exact verification dimensions and evidence;
+- budget target/actual, metering accuracy/source, and amendments;
+- limitations and open decisions.
 
-If that story already exists, reuse it only when its scope, requirement links, and output lineage match the proposal; do not overwrite it with `--force`. Resolve reuse with `output resolve --story ST-INITIAL-ASSESSMENT --type technical-analysis` before persisting the output template and story contract.
-
-The checkpoint approval itself must be persisted with `authorization grant`. Free-text scope is not enough. Use the human or CI actor that approved the proposal, include the story in the exact scope, and enumerate every covered action:
-
-```bash
-node <plugin-root>/bin/agentic-sdlc.mjs authorization grant \
-  --root <target-project> \
-  --id AUTH-ASSESSMENT-001 \
-  --scope "ST-INITIAL-ASSESSMENT: technical assessment, read-only repository analysis, agreed local artifact" \
-  --allow-action capability.profile.approve \
-  --allow-action capability.approve \
-  --allow-action output.template.approve \
-  --allow-action contract.approve \
-  --allow-action task.start.confirm \
-  --allow-artifact-type technical-analysis \
-  --allow-subject CAP-PROFILE-ST-001 \
-  --allow-subject CAP-REC-ST-001 \
-  --allow-subject technical-analysis-v1 \
-  --allow-subject contract-ST-001-analysis \
-  --allow-subject ST-001 \
-  --actor antonio \
-  --actor-type human \
-  --approval-source explicit-user \
-  --summary "Antonio delegated these exact assessment approvals within the displayed proposal."
-```
-
-Then cite that persistent ID on every covered automation approval:
-
-The CLI enforces every non-empty authorization dimension together: action, exact subject, artifact type, expiry, approved authorization hash, and declared scope. Contract approval and task-start confirmation inherit artifact types from the contract output references. Strict gates repeat these checks and reject a receipt or approval whose authorization no longer covers the same work.
-
-`task start` also requires the explicit `--story`, normalized intent story, selected contract, and `contract.story_id` to agree. Bootstrap-only, revoked, expired, stale, or incorrectly attributed approvals cannot start normal work. Capability installation remains outside delegated automation even when the automation actor is CI. Any other contract boundary declared through `approval_required_for` is excluded unless the direct authorization grant names that exact boundary with `--allow-boundary`; an omitted boundary is never inferred from free text.
-
-```bash
-node <plugin-root>/bin/agentic-sdlc.mjs contract approve \
-  --root <target-project> \
-  --id contract-ST-INITIAL-ASSESSMENT-analysis \
-  --actor codex \
-  --actor-type agent \
-  --approval-source automation \
-  --authorization AUTH-ASSESSMENT-001 \
-  --summary "Approved within AUTH-ASSESSMENT-001 and the unchanged combined proposal."
-```
-
-After the contract is approved and unchanged, use the same authorization for the agent-confirmed start:
-
-```bash
-node <plugin-root>/bin/agentic-sdlc.mjs task start \
-  --root <target-project> \
-  --story ST-INITIAL-ASSESSMENT \
-  --contract-id contract-ST-INITIAL-ASSESSMENT-analysis \
-  --intent-json '<canonical-route-intent-json>' \
-  --confirm-start \
-  --actor codex \
-  --actor-type agent \
-  --authorization AUTH-ASSESSMENT-001 \
-  --json
-```
-
-The rule is strict:
-
-- `--scope` describes a boundary but never replaces `--authorization <id>`;
-- the authorization must be active, unexpired, unchanged, and allow the exact action;
-- an artifact type restriction must cover the assessment artifact;
-- every later automated approval must reference the authorization;
-- every agent-confirmed `task start --confirm-start` must use the authorization and the grant must allow `task.start.confirm`;
-- installs, external systems, secrets, production, destructive actions, and unrelated writes remain outside scope unless explicitly decided, and installations require a direct human or CI decision.
-
-Inspect or revoke persistent delegation with supported commands:
-
-```bash
-node <plugin-root>/bin/agentic-sdlc.mjs authorization status \
-  --root <target-project> \
-  --id AUTH-ASSESSMENT-001 \
-  --json
-
-node <plugin-root>/bin/agentic-sdlc.mjs authorization revoke \
-  --root <target-project> \
-  --id AUTH-ASSESSMENT-001 \
-  --actor antonio \
-  --actor-type human \
-  --reason "Assessment completed"
-```
-
-## Exception Handling
-
-| Condition | Agent behavior |
-| --- | --- |
-| Project root cannot be identified | Ask one immediate clarification |
-| Request could mean implementation rather than assessment | Clarify intent before checkpoint 1 |
-| Missing local read-only capability | Include the installation decision in checkpoint 2 or stop at the boundary |
-| External evidence becomes necessary | Present source, access, and data boundary before use |
-| Requested format cannot be generated or verified | Propose a supported alternative; do not fake the extension |
-| Evidence changes after approval | Refresh internally if meaning is unchanged; otherwise revise the affected checkpoint |
-| Scope, destination, tools, or access changes materially | Present one revised combined proposal |
-| Assessment story is missing or does not match the proposal | Create a matching story or revise checkpoint 2 before contract/output work |
-| Visual evidence is missing for DOCX/XLSX/PDF/PPTX/HTML | Do not link or claim completion |
-
-## Internal Command Choreography
-
-The agent may use project onboarding, canonical intent, capability records, output templates, work briefs, task start, output links, traces, and deterministic gates. Keep those details behind the product language above.
-
-The internal sequence must preserve these invariants:
-
-- no assessment findings before project context and the combined proposal are approved;
-- no more than the two normal checkpoints;
-- no assessment contract or output without an explicit matching story;
-- no automation approval without a persistent authorization reference;
-- no agent-confirmed task start without the same authorization and `task.start.confirm` action;
-- no visual-format output link without evidence;
-- no final completion claim without a passed verification receipt;
-- no project-specific state inside the plugin installation.
+Do not add a routine post-delivery approval. The user may request a revision, which either stays inside the approved proposal or becomes a material exception.

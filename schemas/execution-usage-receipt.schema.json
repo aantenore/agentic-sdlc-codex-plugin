@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-usage-receipt.schema.json",
+  "title": "Agentic SDLC Execution Usage Receipt v1",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "version", "id", "execution_id", "budget_id", "budget_hash",
+    "usage", "metering", "started_at", "ended_at", "source", "pricing_ref", "evidence",
+    "receipt_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "execution_usage_receipt" },
+    "schema_version": { "const": "execution-usage-receipt:v1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "execution_id": { "type": "string", "minLength": 1 },
+    "proposal_ref": { "$ref": "#/$defs/nullable_hashed_ref" },
+    "budget_id": { "type": "string", "minLength": 1 },
+    "budget_hash": { "$ref": "#/$defs/sha256" },
+    "amendment_refs": { "type": "array", "items": { "$ref": "#/$defs/hashed_ref" } },
+    "usage": { "type": "object", "additionalProperties": { "$ref": "#/$defs/quantity" } },
+    "reservations": { "type": "object", "additionalProperties": true },
+    "metering": {
+      "type": "object",
+      "additionalProperties": { "enum": ["exact", "estimated", "unavailable"] }
+    },
+    "started_at": { "type": ["string", "null"], "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "source": { "$ref": "#/$defs/usage_source" },
+    "pricing_ref": { "type": ["object", "null"], "additionalProperties": true },
+    "evidence": { "type": "array" },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "quantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" }
+      ]
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string" },
+        "path": { "type": ["string", "null"] },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "attested_hashed_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "nullable_hashed_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hashed_ref" }] },
+    "usage_source": {
+      "type": "object",
+      "required": ["adapter", "assurance", "aggregation", "attestation_ref"],
+      "properties": {
+        "adapter": { "type": "string", "minLength": 1 },
+        "assurance": { "enum": ["manual_declared", "trusted_attested"] },
+        "aggregation": { "enum": ["delta", "cumulative"] },
+        "attestation_ref": { "$ref": "#/$defs/nullable_hashed_ref" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "metering": {
+            "type": "object",
+            "additionalProperties": { "not": { "const": "exact" } }
+          }
+        },
+        "required": ["metering"]
+      },
+      "else": {
+        "properties": {
+          "source": {
+            "properties": {
+              "assurance": { "const": "trusted_attested" },
+              "aggregation": { "const": "cumulative" },
+              "attestation_ref": { "$ref": "#/$defs/attested_hashed_ref" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

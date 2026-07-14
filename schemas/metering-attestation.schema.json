@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metering-attestation.schema.json",
+  "title": "Agentic SDLC Signed Metering Attestation v1",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "measurement",
+    "measurement_hash",
+    "issued_at",
+    "valid_from",
+    "expires_at",
+    "attestation",
+    "attestation_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "metering_attestation" },
+    "schema_version": { "const": "metering-attestation:v1" },
+    "version": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "measurement": { "$ref": "#/$defs/measurement" },
+    "measurement_hash": { "$ref": "#/$defs/sha256" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "valid_from": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "attestation": { "$ref": "#/$defs/signature" },
+    "attestation_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "quantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" }
+      ]
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "measurement": {
+      "type": "object",
+      "required": [
+        "execution_id",
+        "budget_id",
+        "budget_hash",
+        "adapter",
+        "usage",
+        "metering",
+        "cumulative",
+        "started_at",
+        "ended_at",
+        "coverage_started_at",
+        "coverage_ended_at",
+        "final_observation_at",
+        "enforcement_hook_receipt_ref",
+        "pricing_ref",
+        "evidence"
+      ],
+      "properties": {
+        "execution_id": { "type": "string", "minLength": 1 },
+        "budget_id": { "type": "string", "minLength": 1 },
+        "budget_hash": { "$ref": "#/$defs/sha256" },
+        "adapter": { "type": "string", "minLength": 1 },
+        "usage": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/quantity" }
+        },
+        "metering": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "enum": ["exact", "estimated", "unavailable"] }
+        },
+        "cumulative": { "type": "boolean" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "coverage_started_at": { "type": "string", "format": "date-time" },
+        "coverage_ended_at": { "type": "string", "format": "date-time" },
+        "final_observation_at": { "type": "string", "format": "date-time" },
+        "enforcement_hook_receipt_ref": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/hashed_ref" }
+          ]
+        },
+        "pricing_ref": { "type": ["object", "null"], "additionalProperties": true },
+        "evidence": { "type": "array" }
+      },
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "payload_hash", "signature"],
+      "properties": {
+        "algorithm": { "const": "Ed25519" },
+        "key_id": { "type": "string", "minLength": 1 },
+        "payload_hash": { "$ref": "#/$defs/sha256" },
+        "signature": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

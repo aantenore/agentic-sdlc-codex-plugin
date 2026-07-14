@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "assessment-workflow.schema.json",
+  "title": "Agentic SDLC Assessment Workflow v1",
+  "description": "Mutable, hash-chained, resumable state for a proposal whose context checkpoint is already complete.",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "version", "proposal_id", "proposal_hash", "initial_state", "state", "revision",
+    "terminal", "created_at", "updated_at", "authorization_ref", "history", "metadata",
+    "workflow_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "assessment_workflow" },
+    "schema_version": { "const": "assessment-workflow:v1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "proposal_id": { "type": "string", "minLength": 1 },
+    "proposal_hash": { "$ref": "#/$defs/sha256" },
+    "initial_state": { "enum": ["context_pending", "proposal_pending"] },
+    "state": { "$ref": "#/$defs/state" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "terminal": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "authorization_ref": { "type": ["string", "null"] },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "at", "proposal_hash", "authorization_ref", "idempotency_key", "actor", "reason", "evidence"],
+        "properties": {
+          "from": { "$ref": "#/$defs/state" },
+          "to": { "$ref": "#/$defs/state" },
+          "at": { "type": "string", "format": "date-time" },
+          "proposal_hash": { "$ref": "#/$defs/sha256" },
+          "authorization_ref": { "type": ["string", "null"] },
+          "idempotency_key": { "type": ["string", "null"] },
+          "actor": {},
+          "reason": { "type": ["string", "null"] },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "workflow_kind": { "type": "string" },
+        "normal_checkpoint_count": { "const": 2 },
+        "receipts": { "type": "object", "additionalProperties": true },
+        "recovery": { "type": "object", "additionalProperties": true },
+        "failure": { "type": ["object", "null"], "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "workflow_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "state": {
+      "enum": [
+        "context_pending", "proposal_pending", "authorized", "running", "verifying", "completed",
+        "exception_pending", "failed", "cancelled"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

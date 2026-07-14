@@ -37,6 +37,8 @@
     "traces"
   ],
   "human_gate": true,
+  "proposal_ref": null,
+  "execution_budget_ref": null,
   "metrics": [
     "phase_specific_metric"
   ],

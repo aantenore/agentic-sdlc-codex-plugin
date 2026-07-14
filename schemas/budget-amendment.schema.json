@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budget-amendment.schema.json",
+  "title": "Agentic SDLC Budget Amendment v1",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "version", "id", "base_budget_id", "base_budget_hash",
+    "changes", "change_policy", "result_budget", "result_budget_hash", "proposal_ref", "reason", "created_at",
+    "requested_by", "approved_by", "approval_source", "approval_evidence", "host_approval_receipt_ref",
+    "extensions", "amendment_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "budget_amendment" },
+    "schema_version": { "const": "budget-amendment:v1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "base_budget_id": { "type": "string", "minLength": 1 },
+    "base_budget_hash": { "$ref": "#/$defs/sha256" },
+    "proposal_ref": { "$ref": "#/$defs/nullable_hashed_ref" },
+    "changes": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "warning_thresholds_percent": { "type": "array", "items": { "type": "integer" } },
+        "completion_reserve_percent": { "type": "integer", "minimum": 0, "maximum": 50 },
+        "limit_policy": {
+          "type": "object",
+          "properties": {
+            "on_warning": { "type": "string", "minLength": 1 },
+            "on_soft_limit": { "enum": ["checkpoint", "partial_delivery", "stop"] },
+            "on_hard_limit": { "const": "stop" },
+            "on_metering_violation": { "const": "stop" }
+          },
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "unit": { "type": "string", "minLength": 1 },
+              "metering": { "enum": ["exact", "estimated", "unavailable"] },
+              "soft": { "$ref": "#/$defs/nullable_quantity" },
+              "hard": { "$ref": "#/$defs/nullable_quantity" },
+              "currency": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9]{2,7}$" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "change_policy": {
+      "type": "object",
+      "required": ["allow_decrease"],
+      "properties": {
+        "allow_decrease": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "result_budget": { "$ref": "execution-budget.schema.json" },
+    "result_budget_hash": { "$ref": "#/$defs/sha256" },
+    "reason": { "type": "string", "minLength": 1 },
+    "remaining_work": { "type": "array", "items": { "type": "string" } },
+    "partial_delivery_alternative": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "requested_by": { "type": ["object", "null"], "additionalProperties": true },
+    "approved_by": { "type": ["object", "null"], "additionalProperties": true },
+    "approval_source": { "type": ["string", "null"], "minLength": 1 },
+    "approval_evidence": { "type": "array" },
+    "host_approval_receipt_ref": { "$ref": "#/$defs/nullable_hashed_ref" },
+    "extensions": { "type": "object" },
+    "amendment_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "decimal_string": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "quantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "$ref": "#/$defs/decimal_string" }
+      ]
+    },
+    "nullable_quantity": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/quantity" }
+      ]
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "nullable_hashed_ref": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hashed_ref" }]
+    }
+  },
+  "additionalProperties": false
+}
