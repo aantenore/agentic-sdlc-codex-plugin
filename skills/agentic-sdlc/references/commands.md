@@ -299,6 +299,17 @@ If a cached output resolution differs from canonical KB files, the CLI rejects i
 
 `migration active` is dry-run by default. The release manifest defines the exact active scope; the command validates every referenced immutable record, upgrades only missing configuration defaults on `--apply`, and emits a logical `archive-record:v1` for evidence referenced only by older valid releases. It rewrites no approved record and moves no file.
 
+## Optional CodeBurn metering
+
+CodeBurn 0.9.x must be installed separately; never install it automatically. Capture before execution and record incremental observations with the same persisted query:
+
+```bash
+node bin/agentic-sdlc.mjs budget meter start --root <project> --proposal ASSESS-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14
+node bin/agentic-sdlc.mjs budget meter record --root <project> --proposal ASSESS-001 --adapter codeburn --baseline METER-ASSESS-001-CODEBURN
+```
+
+CodeBurn is always `estimated` and `advisory_observed`. It never satisfies exact/hard enforcement or emits an attestation; mapped hard metrics deliberately produce `metering_violation` after the evidence is recorded.
+
 ## Activity Reports
 
 ```bash

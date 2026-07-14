@@ -66,7 +66,7 @@
       "required": ["adapter", "assurance", "aggregation", "attestation_ref"],
       "properties": {
         "adapter": { "type": "string", "minLength": 1 },
-        "assurance": { "enum": ["manual_declared", "trusted_attested"] },
+        "assurance": { "enum": ["manual_declared", "advisory_observed", "trusted_attested"] },
         "aggregation": { "enum": ["delta", "cumulative"] },
         "attestation_ref": { "$ref": "#/$defs/nullable_hashed_ref" }
       },

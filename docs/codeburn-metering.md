@@ -2,9 +2,9 @@
 
 The CodeBurn adapter converts a local CodeBurn 0.9.x JSON report into a provider-neutral, immutable metering snapshot. It is intentionally an observation source, not an authority source: token, call, and cost measurements are always `estimated`, the assurance classification is always `advisory_observed`, and `trusted_exact` is always `false`.
 
-This distinction matters. A CodeBurn delta is useful for visibility, warnings, estimates, and later reconciliation. By itself it must not satisfy an exact hard token or cost limit.
+The CLI integration requires CodeBurn 0.9.x to be installed separately; it never installs or upgrades CodeBurn. Use `budget meter start --proposal ASSESS-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14` after approval and before execution, then `budget meter record --proposal ASSESS-001 --adapter codeburn [--baseline id]`. The stored query is reused exactly, deltas advance from the last recorded snapshot, and identical observations replay idempotently. Multi-day work should declare its full stable date window at start.
 
-The adapter is currently a library boundary only. It does not add an `agentic-sdlc` CLI command and does not write files automatically.
+This distinction matters. A CodeBurn delta is useful for visibility, warnings, estimates, and later reconciliation. By itself it must not satisfy an exact hard token or cost limit.
 
 ## What each input means
 
@@ -84,7 +84,7 @@ await fs.writeFile(
 );
 ```
 
-The delta contains separate `input`, `output`, `cache_read`, and `cache_write` token quantities, plus calls, sessions, and decimal cost. It does not invent one ambiguous `total_tokens` number. A later budget mapper must map only explicitly configured metrics and must preserve `estimated`/`advisory_observed` assurance.
+The delta contains separate `input`, `output`, `cache_read`, and `cache_write` token quantities, plus calls, sessions, and decimal cost. The configurable budget mapper can bind `tokens` to the explicit sum of those four counters, or bind individual token components, `model_calls`, and same-currency `cost`. It maps only metrics present in the approved budget and preserves `estimated`/`advisory_observed` assurance.
 
 Both snapshot references carry their IDs, hashes, and capture times. Any counter decrease, source reset, filter drift, currency change, adapter patch change, reversed timestamp, or tampered snapshot fails closed instead of producing a negative or incomparable delta.
 
@@ -100,6 +100,8 @@ Both snapshot references carry their IDs, hashes, and capture times. Any counter
 - advisory assurance fields and a stable snapshot hash.
 
 The normalized record does not embed CodeBurn's potentially large raw report. If independent replay is required, persist the raw JSON as separate evidence and verify that its canonical SHA-256 equals `source.report_hash`.
+
+When `cost` is mapped into the approved budget, the usage receipt also records a non-authoritative `pricing_ref` with CodeBurn as the estimator, `estimated` classification, adapter version, currency, and source report hash. This identifies the estimate without turning it into provider billing evidence.
 
 ## Limitations and enforcement boundary
 
