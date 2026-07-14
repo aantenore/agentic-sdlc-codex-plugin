@@ -12,7 +12,12 @@ Codex plugin
 Target project
      -> .sdlc/
         -> baseline
+        -> assessments
+        -> budgets
         -> contracts
+        -> authorizations
+        -> authorization-uses
+        -> receipts
         -> capability-discovery
         -> output-contracts
      -> work-items
@@ -44,6 +49,8 @@ flowchart TB
   subgraph Project["Target project"]
     KB[".sdlc source of truth"]
     Baseline["Project baseline"]
+    Assessments["Assessment proposals and workflows"]
+    Receipts["Approval, use, generation, verification, and budget receipts"]
     Capabilities["Capability discovery"]
     OutputRegistry["Output contracts registry"]
     Breakdown["Work breakdown agreements"]
@@ -60,6 +67,8 @@ flowchart TB
   Schemas --> CLI
   CLI --> KB
   CLI --> Baseline
+  CLI --> Assessments
+  CLI --> Receipts
   CLI --> Capabilities
   CLI --> OutputRegistry
   CLI --> Breakdown
@@ -69,6 +78,8 @@ flowchart TB
   CLI --> Archive
   KB --> Cache
   Baseline --> Cache
+  Assessments --> Cache
+  Receipts --> Cache
   Capabilities --> Cache
   KB --> Indexes
   OutputRegistry --> Cache
@@ -126,6 +137,29 @@ flowchart TD
   Canonical --> Cache["Local cache"]
 ```
 
+## Assessment Control Plane
+
+The assessment journey is a dedicated state machine with exactly two normal checkpoints. Checkpoint 1 approves only the project baseline. `assessment proposal prepare` then builds a complete immutable approval payload containing baseline hash, requirement/story reservation, deliverable, capabilities, contract draft, route intent, write-set, execution budget, security, approval boundary, and idempotent application plan.
+
+Checkpoint 2 approves the `proposal_hash`, not a free-text intention. `assessment proposal approve` records host/CI authority and creates a proposal-bound content authorization. `assessment proposal apply` applies only the displayed write-set and can resume after a partial failure without duplicating records. Runtime state lives in `assessment_workflow:v1`; it is not part of the immutable approval payload.
+
+```mermaid
+flowchart LR
+  Baseline["Approved baseline hash"] --> Prepare["proposal prepare"]
+  Prepare --> Proposal["Immutable proposal hash"]
+  Proposal --> HostReceipt["Host/CI checkpoint receipt"]
+  HostReceipt --> Authorization["Proposal-bound authorization"]
+  Authorization --> Apply["Idempotent apply"]
+  Apply --> Uses["Validity-at-use receipts"]
+  Apply --> Budget["Aggregate budget usage"]
+  Apply --> Artifact["Generator receipt + layered verification"]
+  Uses --> Release["Release manifest"]
+  Budget --> Release
+  Artifact --> Release
+```
+
+Budget policy is data-driven. Project configuration supplies metric templates, maxima, warning thresholds, completion reserve, and stop/extension rules. A hard limit is valid only for exactly metered usage. Amendments reference the approved base budget and proposal hashes; they never mutate the base tranche or widen scope.
+
 ## Intent Routing Layer
 
 The routing layer separates language understanding from deterministic SDLC control. Codex or another LLM normalizes the user conversation into the canonical intent schema; the CLI consumes only that JSON plus project-local `.sdlc/` state.
@@ -142,6 +176,8 @@ flowchart LR
 ```
 
 This keeps the deterministic layer language-agnostic: it does not search for words in the user's sentence. It validates configured `requested_action` values, confidence, referenced entities, missing context, artifact type, phase skips, story claims, contracts, and output registry state. `route decide` does not create source-of-truth artifacts; it returns a plan that the agent and user can accept, adjust, or rerun with a corrected intent.
+
+`assessment_workflow.requested_actions` is the configurable route boundary for the dedicated assessment journey. When an intent matches, task start must require the approved baseline and immutable combined proposal instead of entering a generic contract path. `open_question_guidance` separately maps unresolved questions to configurable reasons, bilingual examples, and proposal effects, with an explicit fallback; classification never grants authority or changes the question itself.
 
 ## Contract Model
 
@@ -182,7 +218,7 @@ flowchart LR
 
 ## Approval Governance
 
-The approval model separates operational authorization from formal SDLC approval. A user saying "implement and push" lets the agent work, but it does not automatically approve a contract, output template, baseline, capability recommendation, dependency graph, or duplicate-output decision.
+The approval model separates operational authorization from formal SDLC approval. A user saying "implement and push" does not automatically approve a contract, output template, baseline, capability recommendation, dependency graph, duplicate-output decision, or assessment proposal.
 
 Formal approvals store:
 
@@ -192,17 +228,19 @@ Formal approvals store:
 - approved content hash;
 - Git and Codex run metadata.
 
-For `approval_source: explicit-user`, the CLI requires a human actor plus summary or evidence. `bootstrap` is available for migrations, but is provisional and does not satisfy strict gates by default.
+For new assessment workflows, a human actor flag plus summary is insufficient by itself. A host/CI receipt binds the exact question, immutable subject hash, response, actor, host message, and timestamp. The derived content authorization enumerates exact actions, subject IDs/hashes, artifact types, validity, and use policy. Each mutation writes a snapshot receipt evaluated at the use timestamp; closing or revoking the grant blocks future use without rewriting history. `bootstrap` remains provisional and does not satisfy strict gates by default.
 
 ```mermaid
 flowchart LR
   WorkAuth["User asks agent to work"] --> Implementation["Agent may implement"]
   WorkAuth -.-> FormalApproval["Formal approval"]
   Artifact["Contract/template/baseline/etc."] --> ApprovalCommand["approve command"]
-  Human["Explicit user confirmation"] --> ApprovalCommand
-  Evidence["Summary or evidence"] --> ApprovalCommand
-  ApprovalCommand --> Hash["Approved content hash"]
-  Hash --> Gate["Strict gate"]
+  Human["Explicit user confirmation"] --> HostReceipt["Host/CI approval receipt"]
+  Artifact["Immutable proposal or subject"] --> Hash["Approved content hash"]
+  HostReceipt --> Authorization["Proposal-bound authorization"]
+  Hash --> Authorization
+  Authorization --> UseReceipt["Validity-at-use receipt"]
+  UseReceipt --> Gate["Strict gate"]
 ```
 
 ## Capability Discovery Layer
@@ -262,7 +300,7 @@ Phase and story contracts define what work must happen. Output contracts define 
 
 Before creating a functional analysis, technical analysis, test plan, or similar artifact, an agent resolves the output type for the story. If a related story already covers the same requirement, the default recommendation is `reuse_delta`: reuse the approved base artifact and create only a targeted delta. A new template or incompatible output structure requires explicit user approval before it becomes canonical.
 
-Template approvals store the approved template hash. Output links store fingerprints for the artifact, base artifact, and template. Override decisions are bound to a specific link subject, so the same decision id cannot be reused for a different duplicate output. Registry mutations are serialized with a local lock file to avoid lost updates when multiple chats work in one workspace.
+Template approvals store the approved template hash. Output links store fingerprints for the artifact, base artifact, and template. Non-native files also reference an artifact-generator receipt for the exact delivered hash. Verification receipts report container, content, and render dimensions separately; render evidence is distinct from generator attestation. Override decisions are bound to a specific link subject, so the same decision id cannot be reused for a different duplicate output. Registry mutations are serialized with a local lock file to avoid lost updates when multiple chats work in one workspace.
 
 ```mermaid
 flowchart TB
@@ -319,7 +357,7 @@ For phase-by-phase examples, see [Agent Interactions](agent-interactions.md).
 
 Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, invalid statuses or expiry dates, unapproved or changed output templates, unjustified duplicate outputs, stale cache warnings, and test/release evidence gaps. Use `gate check --out <path>` to persist JSON or Markdown reports under `.sdlc/reports/`.
 
-Canonical KB and trace paths always use `/` separators so the same records remain stable across Linux, macOS, and Windows. IDs reject names that cannot be represented portably, including Windows device names and trailing periods. Delegated approvals and task-start receipts are revalidated against the current authorization action, subject, artifact types, scope, expiry, and content hash rather than trusting the stored authorization ID alone.
+Canonical KB and trace paths always use `/` separators so the same records remain stable across Linux, macOS, and Windows. IDs reject names that cannot be represented portably, including Windows device names and trailing periods. Assessment gates validate the baseline/proposal hashes, requirement/story lineage, exact authorization-use receipts, generator receipt, required verification dimensions, execution budget/usage/amendments, and release manifest rather than trusting IDs or a single `passed` flag.
 
 Release tags run the complete Linux, macOS, and Windows matrix for every supported Node line before the package job can publish. The package regression test creates a real tarball, installs it into a clean prefix, and runs the installed CLI doctor so source-tree success cannot hide a missing packaged resource.
 

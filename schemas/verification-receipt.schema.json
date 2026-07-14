@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "verification-receipt.schema.json",
+  "title": "Agentic SDLC Layered Verification Receipt v1",
+  "description": "Persistent verification artifact with explicit existence, container, semantic content, render, and independent dimensions.",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "version", "id", "subject_ref", "artifact", "generator_receipt",
+    "required_level", "achieved_level", "passed", "status", "artifact_present", "existence_verified",
+    "container_verified", "content_verified", "render_verified", "independent_verified",
+    "required_dimensions", "missing_checks", "failed_checks", "evidence", "limitations",
+    "verified_at", "verifier", "extensions", "receipt_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "verification_receipt" },
+    "schema_version": { "const": "verification-receipt:v1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "subject_ref": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/subject_ref" }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "format": { "type": "string" },
+        "media_type": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "generator_receipt": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/hashed_ref" }
+      ]
+    },
+    "required_level": { "$ref": "#/$defs/level" },
+    "achieved_level": { "$ref": "#/$defs/level" },
+    "passed": { "type": "boolean" },
+    "status": { "enum": ["passed", "partial", "failed"] },
+    "artifact_present": { "type": "boolean" },
+    "existence_verified": { "$ref": "#/$defs/verification_dimension" },
+    "container_verified": { "$ref": "#/$defs/verification_dimension" },
+    "content_verified": { "$ref": "#/$defs/verification_dimension" },
+    "render_verified": { "$ref": "#/$defs/verification_dimension" },
+    "independent_verified": { "$ref": "#/$defs/verification_dimension" },
+    "required_dimensions": {
+      "type": "object",
+      "required": ["existence", "container", "content", "render", "independent"],
+      "properties": {
+        "existence": { "type": "boolean" },
+        "container": { "type": "boolean" },
+        "content": { "type": "boolean" },
+        "render": { "type": "boolean" },
+        "independent": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "missing_checks": { "type": "array", "items": { "type": "string" } },
+    "failed_checks": { "type": "array", "items": { "type": "string" } },
+    "evidence": { "type": "array" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "verified_at": { "type": "string", "format": "date-time" },
+    "verifier": { "type": ["string", "null"] },
+    "extensions": { "type": "object", "additionalProperties": true },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "level": { "enum": ["none", "existence", "structural", "semantic", "rendered", "independent"] },
+    "verification_dimension": {
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "required": ["status", "verifier", "checks", "evidence", "verified_at", "reason"],
+          "properties": {
+            "status": {
+              "enum": ["verified", "failed", "not-required", "not-run"]
+            },
+            "verifier": { "type": ["string", "null"] },
+            "checks": { "type": "array", "items": { "type": "string" } },
+            "evidence": { "type": "array" },
+            "verified_at": { "type": ["string", "null"], "format": "date-time" },
+            "reason": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "subject_ref": {
+      "type": "object",
+      "required": ["id", "kind", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

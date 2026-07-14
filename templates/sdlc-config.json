@@ -1,9 +1,14 @@
 {
+  "config_schema_version": "sdlc-config:v1",
   "schema_version": "0.1.0",
   "kb_directories": [
     "baseline",
+    "assessments",
+    "budgets",
     "contracts",
     "authorizations",
+    "authorization-uses",
+    "receipts",
     "capability-discovery",
     "output-contracts",
     "requirements",
@@ -82,6 +87,353 @@
       "medium",
       "high"
     ]
+  },
+  "assessment_workflow": {
+    "principle": "A normal assessment has exactly two user checkpoints: canonical project context and one immutable combined proposal. Internal records are applied idempotently after proposal authorization.",
+    "normal_checkpoint_count": 2,
+    "normal_checkpoints": [
+      "context",
+      "combined-proposal"
+    ],
+    "requested_actions": [
+      "functional_analysis",
+      "technical_analysis",
+      "technical_assessment",
+      "initial_technical_assessment",
+      "project_technical_assessment",
+      "project_assessment",
+      "architecture_assessment",
+      "technical_review"
+    ],
+    "proposal_schema": "schemas/assessment-proposal.schema.json",
+    "workflow_schema": "schemas/assessment-workflow.schema.json",
+    "approval_schema": "schemas/assessment-proposal-approval.schema.json",
+    "application_schema": "schemas/assessment-application.schema.json",
+    "task_start_receipt_schema": "schemas/task-start-receipt.schema.json",
+    "storage_root": "assessments",
+    "paths": {
+      "proposals": "proposals",
+      "workflows": "workflows",
+      "approvals": "approvals",
+      "applications": "applications"
+    },
+    "require_approved_baseline_before_proposal": true,
+    "require_proposal_hash_for_authorization": true,
+    "require_idempotent_application": true,
+    "exception_triggers": [
+      "install",
+      "external-access",
+      "secret",
+      "production-access",
+      "destructive-action",
+      "out-of-scope-write",
+      "material-proposal-change",
+      "budget-extension"
+    ]
+  },
+  "open_question_guidance": {
+    "fallback": {
+      "why_needed": "The answer replaces an unstated assumption with an explicit, reviewable proposal input.",
+      "example_answers": {
+        "it": [
+          "Confermo l'opzione proposta.",
+          "Non è ancora deciso: usa l'ipotesi indicata e segnala il limite."
+        ],
+        "en": [
+          "I confirm the proposed option.",
+          "It is not decided yet: use the stated assumption and record the limitation."
+        ]
+      },
+      "effect_of_answer": "The answer is recorded in the relevant scope, assumption, or delivery field; a material change after approval creates a new proposal hash.",
+      "does_not_authorize": "Answering an open question does not authorize execution, writes, external access, production access, or additional budget unless those boundaries are displayed in the proposal."
+    },
+    "categories": {
+      "objective": {
+        "keywords": [
+          "objective",
+          "goal",
+          "outcome",
+          "decision",
+          "purpose",
+          "obiettivo",
+          "risultato",
+          "decisione",
+          "scopo"
+        ],
+        "why_needed": "The objective determines which evidence and recommendations are decision-relevant and prevents a generic assessment.",
+        "example_answers": {
+          "it": [
+            "L'obiettivo è decidere se modernizzare l'architettura nei prossimi sei mesi."
+          ],
+          "en": [
+            "The objective is to decide whether to modernize the architecture in the next six months."
+          ]
+        },
+        "effect_of_answer": "It updates the assessment objective, scope emphasis, acceptance criteria, and intended decision in checkpoint 2."
+      },
+      "users_stakeholders": {
+        "keywords": [
+          "user",
+          "users",
+          "audience",
+          "stakeholder",
+          "owner",
+          "utente",
+          "utenti",
+          "destinatario",
+          "portatore di interesse",
+          "responsabile"
+        ],
+        "why_needed": "Audience and stakeholder needs determine terminology, depth, prioritization, and which trade-offs must be made explicit.",
+        "example_answers": {
+          "it": [
+            "Il documento è per CTO, team platform e responsabile sicurezza."
+          ],
+          "en": [
+            "The document is for the CTO, platform team, and security owner."
+          ]
+        },
+        "effect_of_answer": "It changes the audience, explanation depth, decision framing, and stakeholder-specific recommendations."
+      },
+      "constraints_nfr": {
+        "keywords": [
+          "constraint",
+          "non-functional",
+          "nfr",
+          "security",
+          "privacy",
+          "performance",
+          "availability",
+          "compliance",
+          "vincolo",
+          "sicurezza",
+          "prestazioni",
+          "disponibilità",
+          "conformità"
+        ],
+        "why_needed": "Constraints and non-functional requirements are architectural boundaries; omitting them can reverse a recommendation.",
+        "example_answers": {
+          "it": [
+            "Dati in UE, disponibilità 99,9%, nessun downtime durante la migrazione."
+          ],
+          "en": [
+            "EU data residency, 99.9% availability, and no migration downtime."
+          ]
+        },
+        "effect_of_answer": "It updates explicit constraints, risk severity, architecture options, acceptance criteria, and excluded approaches."
+      },
+      "output_delivery": {
+        "keywords": [
+          "output",
+          "artifact",
+          "format",
+          "delivery",
+          "document",
+          "report",
+          "path",
+          "formato",
+          "consegna",
+          "documento",
+          "rapporto",
+          "percorso"
+        ],
+        "why_needed": "The requested format and destination select the real generator, verification dimensions, artifact path, and delivery mode.",
+        "example_answers": {
+          "it": [
+            "Consegna un DOCX in docs/assessment.docx più un riepilogo breve in chat."
+          ],
+          "en": [
+            "Deliver a DOCX at docs/assessment.docx plus a short chat summary."
+          ]
+        },
+        "effect_of_answer": "It changes the canonical artifact metadata, generator capability, render evidence, output path, and verification plan."
+      },
+      "integrations": {
+        "keywords": [
+          "integration",
+          "api",
+          "service",
+          "database",
+          "external",
+          "endpoint",
+          "integrazione",
+          "servizio",
+          "archivio dati",
+          "esterno"
+        ],
+        "why_needed": "Integrations define system boundaries and may require separate credentials, external access, or production approval.",
+        "example_answers": {
+          "it": [
+            "Considera Stripe e Salesforce solo dalla documentazione locale; non accedere ai tenant."
+          ],
+          "en": [
+            "Assess Stripe and Salesforce from local documentation only; do not access the tenants."
+          ]
+        },
+        "effect_of_answer": "It updates the component boundary, evidence sources, access policy, risks, and any exceptional authorization needed."
+      },
+      "approval_boundaries": {
+        "keywords": [
+          "approve",
+          "approval",
+          "authorize",
+          "permission",
+          "write",
+          "install",
+          "production",
+          "boundary",
+          "approvare",
+          "approvazione",
+          "autorizzare",
+          "permesso",
+          "scrittura",
+          "installazione",
+          "produzione"
+        ],
+        "why_needed": "An explicit boundary prevents a short answer from being reused as authority for unseen writes, tools, environments, or future artifacts.",
+        "example_answers": {
+          "it": [
+            "Autorizzo solo lettura locale e scritture in .sdlc/ e docs/assessment.pdf; niente installazioni o produzione."
+          ],
+          "en": [
+            "Authorize local reads and writes only to .sdlc/ and docs/assessment.pdf; no installs or production."
+          ]
+        },
+        "effect_of_answer": "It changes the proposal write-set, capability constraints, authorization subjects/actions, and exception triggers."
+      },
+      "budget_time": {
+        "keywords": [
+          "budget",
+          "cost",
+          "time",
+          "duration",
+          "token",
+          "deadline",
+          "costo",
+          "tempo",
+          "durata",
+          "scadenza"
+        ],
+        "why_needed": "A concrete, meterable tranche defines warning, reserve, stop, and partial-delivery behavior before work starts.",
+        "example_answers": {
+          "it": [
+            "Massimo 60 minuti di tempo attivo; avvisa al 70% e 90%, riserva il 15% alla verifica."
+          ],
+          "en": [
+            "At most 60 minutes of active time; warn at 70% and 90%, reserve 15% for verification."
+          ]
+        },
+        "effect_of_answer": "It updates the immutable execution budget, metering policy, completion reserve, stop action, and amendment boundary."
+      }
+    }
+  },
+  "budget_policy": {
+    "principle": "Checkpoint 2 approves the complete execution tranche. Active time and steps use hard limits, but exact values are accepted only from an explicitly configured trusted adapter with verified attestation; no adapter is trusted by default. Tokens are estimated and advisory. Cost is unavailable and non-binding unless a reliable metering/pricing adapter and currency are configured.",
+    "schema": "schemas/execution-budget.schema.json",
+    "amendment_schema": "schemas/budget-amendment.schema.json",
+    "usage_receipt_schema": "schemas/execution-usage-receipt.schema.json",
+    "metering_attestation_schema": "schemas/metering-attestation.schema.json",
+    "storage_root": "budgets",
+    "warning_thresholds_percent": [
+      70,
+      90
+    ],
+    "completion_reserve_percent": 15,
+    "on_limit": "request_extension",
+    "exact_metering": {
+      "default_trust": "deny",
+      "completion_freshness_seconds": 60,
+      "trusted_sources": []
+    },
+    "defaults": {
+      "warning_thresholds_percent": [
+        70,
+        90
+      ],
+      "completion_reserve_percent": 15,
+      "scope": "proposal_execution_tree",
+      "limits": {
+        "active_time_seconds": {
+          "unit": "seconds",
+          "metering": "exact",
+          "soft": 2700,
+          "hard": 3600
+        },
+        "steps": {
+          "unit": "steps",
+          "metering": "exact",
+          "soft": 40,
+          "hard": 60
+        },
+        "tokens": {
+          "unit": "tokens",
+          "metering": "estimated",
+          "soft": 200000
+        }
+      },
+      "limit_policy": {
+        "on_warning": "notify",
+        "on_soft_limit": "checkpoint",
+        "on_hard_limit": "stop",
+        "on_metering_violation": "stop"
+      },
+      "extensions": {
+        "on_limit": "request_extension",
+        "automatic_extension": false,
+        "active_time_excludes_user_wait": true,
+        "active_time_excludes_external_wait": true,
+        "aggregation": "proposal_execution_tree"
+      }
+    },
+    "maxima": {},
+    "presentation": {
+      "require_concrete_values_in_checkpoint_2": true,
+      "show_metering_accuracy": true,
+      "show_completion_reserve": true,
+      "show_limit_action": true,
+      "omit_unreliable_cost_claims": true
+    },
+    "aggregation_scope": "story-including-subagents",
+    "hard_limit_requires_exact_metering": true,
+    "extensions_require_versioned_amendment": true
+  },
+  "verification_policy": {
+    "principle": "Verification claims are dimensioned; container validity never implies semantic or rendered correctness.",
+    "receipt_schema": "schemas/verification-receipt.schema.json",
+    "generator_receipt_schema": "schemas/artifact-generator-receipt.schema.json",
+    "receipt_directory": ".sdlc/receipts/verification",
+    "generator_receipt_directory": ".sdlc/receipts/generation",
+    "dimensions": [
+      "container_verified",
+      "content_verified",
+      "render_verified",
+      "independent_verified"
+    ],
+    "require_generator_receipt": true,
+    "non_native_requires_generator_receipt": true,
+    "render_evidence_is_separate_from_generator_receipt": true,
+    "legacy_passed_receipt_claim": "structurally-verified"
+  },
+  "authority_policy": {
+    "mode": "audit_only",
+    "usage_receipts_root": "authorization-uses",
+    "allow_wildcards": false,
+    "default_ttl_seconds": 86400,
+    "trusted_host_keys": [],
+    "require_proposal_binding_for_assessments": true,
+    "require_validity_at_use_receipt": true
+  },
+  "release_evidence_policy": {
+    "manifest_schema": "schemas/release-manifest.schema.json",
+    "gate_receipt_schema": "schemas/release-gate-receipt.schema.json",
+    "archive_schema": "schemas/archive-record.schema.json",
+    "archive_plan_schema": "schemas/archive-plan.schema.json",
+    "manifest_directory": ".sdlc/releases/manifests",
+    "gate_receipt_directory": ".sdlc/releases/gates",
+    "archive_directory": ".sdlc/archive",
+    "max_future_skew_seconds": 300,
+    "require_proposal_and_receipt_lineage": true,
+    "archive_transactional": true
   },
   "parallel_work": {
     "principle": "Parallel work is story-scoped. Each active story lane has one active claim, an auditable actor, a branch, trace events, and explicit release or handoff.",
@@ -359,6 +711,15 @@
     "require_summary_or_evidence_for_automation": true,
     "allow_bootstrap_approvals_in_strict_gate": false,
     "legacy_approval_behavior": "error",
+    "content_authorization_schema": "schemas/content-authorization.schema.json",
+    "host_approval_receipt_schema": "schemas/host-approval-receipt.schema.json",
+    "authorization_usage_receipt_schema": "schemas/authorization-usage-receipt.schema.json",
+    "host_approval_receipt_directory": ".sdlc/receipts/host-approvals",
+    "authorization_usage_receipt_directory": ".sdlc/authorization-uses",
+    "require_proposal_bound_authorization_for_assessments": true,
+    "require_host_assurance_for_direct_human_or_ci_approval": false,
+    "require_usage_receipt_for_automation": true,
+    "close_authorization_on_workflow_terminal": true,
     "accepted_sources": [
       "explicit-user",
       "ci",
@@ -384,8 +745,12 @@
     ],
     "source_of_truth_dirs": [
       "baseline",
+      "assessments",
+      "budgets",
       "contracts",
       "authorizations",
+      "authorization-uses",
+      "receipts",
       "capability-discovery",
       "requirements",
       "stories",
@@ -421,7 +786,8 @@
   "claim_policy": {
     "one_active_claim_per_story": true,
     "require_branch_pattern": true,
-    "release_before_reclaim": true
+    "release_before_reclaim": true,
+    "default_ttl_seconds": 86400
   },
   "handoff_policy": {
     "required_for_phase_transfer": true,

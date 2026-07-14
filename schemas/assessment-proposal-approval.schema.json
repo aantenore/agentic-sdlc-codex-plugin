@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "assessment-proposal-approval.schema.json",
+  "title": "Agentic SDLC Assessment Proposal Approval v1",
+  "description": "Checkpoint-2 decision bound to the exact immutable assessment proposal hash.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "status",
+    "proposal_id",
+    "proposal_hash",
+    "summary",
+    "approval_source",
+    "authority_assurance",
+    "authority_assurance_label",
+    "host_receipt_ref",
+    "evidence",
+    "approved_by",
+    "authorization_ref",
+    "approved_at",
+    "audit",
+    "approval_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "assessment_proposal_approval" },
+    "schema_version": { "const": "assessment-proposal-approval:v1" },
+    "status": { "const": "approved" },
+    "proposal_id": { "type": "string", "minLength": 1 },
+    "proposal_hash": { "$ref": "#/$defs/sha256" },
+    "summary": { "type": "string", "minLength": 1 },
+    "approval_source": { "enum": ["explicit-user", "ci"] },
+    "authority_assurance": { "$ref": "content-authorization.schema.json#/$defs/authority_assurance" },
+    "authority_assurance_label": { "enum": ["audit_only", "host_verified"] },
+    "host_receipt_ref": { "type": ["string", "null"] },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence_ref" }
+    },
+    "approved_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "authorization_ref": { "type": "string", "minLength": 1 },
+    "authorization_snapshot": {
+      "description": "Optional immutable recovery seed. New approvals embed the exact authorization so an interrupted approval can be replayed without widening scope; legacy approvals remain readable when their external authorization still exists.",
+      "$ref": "content-authorization.schema.json"
+    },
+    "approved_at": { "type": "string", "format": "date-time" },
+    "audit": { "$ref": "common.schema.json#/$defs/audit" },
+    "approval_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "evidence_ref": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

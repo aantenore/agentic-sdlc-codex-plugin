@@ -1,0 +1,565 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sdlc-config.schema.json",
+  "title": "Agentic SDLC Configuration v1",
+  "type": "object",
+  "required": [
+    "config_schema_version",
+    "schema_version",
+    "kb_directories",
+    "phase_order",
+    "execution_policy",
+    "assessment_workflow",
+    "open_question_guidance",
+    "budget_policy",
+    "approval_policy",
+    "authority_policy",
+    "verification_policy",
+    "release_evidence_policy"
+  ],
+  "properties": {
+    "config_schema_version": {
+      "const": "sdlc-config:v1"
+    },
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kb_directories": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+      }
+    },
+    "phase_order": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "execution_policy": {
+      "type": "object",
+      "required": [
+        "runtime"
+      ],
+      "properties": {
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "assessment_workflow": {
+      "$ref": "#/$defs/assessment_policy"
+    },
+    "open_question_guidance": {
+      "$ref": "#/$defs/open_question_guidance"
+    },
+    "budget_policy": {
+      "$ref": "#/$defs/budget_policy"
+    },
+    "approval_policy": {
+      "$ref": "#/$defs/approval_policy"
+    },
+    "authority_policy": {
+      "type": "object",
+      "required": ["mode", "usage_receipts_root", "allow_wildcards", "trusted_host_keys"],
+      "properties": {
+        "mode": { "enum": ["audit_only", "host_verified"] },
+        "usage_receipts_root": { "type": "string", "minLength": 1 },
+        "allow_wildcards": { "type": "boolean" },
+        "default_ttl_seconds": { "type": "integer", "minimum": 0 },
+        "trusted_host_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["key_id", "algorithm", "public_key"],
+            "properties": {
+              "key_id": { "type": "string", "minLength": 1 },
+              "algorithm": { "const": "Ed25519" },
+              "public_key": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "host_verified" } }, "required": ["mode"] },
+          "then": { "properties": { "trusted_host_keys": { "minItems": 1 } } }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "verification_policy": {
+      "$ref": "#/$defs/verification_policy"
+    },
+    "release_evidence_policy": {
+      "$ref": "#/$defs/release_policy"
+    }
+  },
+  "$defs": {
+    "assessment_policy": {
+      "type": "object",
+      "required": [
+        "normal_checkpoint_count",
+        "normal_checkpoints",
+        "requested_actions",
+        "proposal_schema",
+        "workflow_schema",
+        "approval_schema",
+        "application_schema",
+        "task_start_receipt_schema",
+        "storage_root",
+        "paths",
+        "exception_triggers"
+      ],
+      "properties": {
+        "normal_checkpoint_count": {
+          "const": 2
+        },
+        "normal_checkpoints": {
+          "prefixItems": [
+            {
+              "const": "context"
+            },
+            {
+              "const": "combined-proposal"
+            }
+          ],
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "requested_actions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "functional_analysis",
+              "technical_analysis",
+              "technical_assessment",
+              "initial_technical_assessment",
+              "project_technical_assessment",
+              "project_assessment",
+              "architecture_assessment",
+              "technical_review"
+            ]
+          }
+        },
+        "proposal_schema": {
+          "const": "schemas/assessment-proposal.schema.json"
+        },
+        "workflow_schema": {
+          "const": "schemas/assessment-workflow.schema.json"
+        },
+        "approval_schema": {
+          "const": "schemas/assessment-proposal-approval.schema.json"
+        },
+        "application_schema": {
+          "const": "schemas/assessment-application.schema.json"
+        },
+        "task_start_receipt_schema": {
+          "const": "schemas/task-start-receipt.schema.json"
+        },
+        "storage_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "paths": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "exception_triggers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "open_question_guidance": {
+      "type": "object",
+      "required": ["fallback", "categories"],
+      "properties": {
+        "fallback": { "$ref": "#/$defs/question_guidance_fallback" },
+        "categories": {
+          "type": "object",
+          "required": [
+            "objective",
+            "users_stakeholders",
+            "constraints_nfr",
+            "output_delivery",
+            "integrations",
+            "approval_boundaries",
+            "budget_time"
+          ],
+          "properties": {
+            "objective": { "$ref": "#/$defs/question_guidance_category" },
+            "users_stakeholders": { "$ref": "#/$defs/question_guidance_category" },
+            "constraints_nfr": { "$ref": "#/$defs/question_guidance_category" },
+            "output_delivery": { "$ref": "#/$defs/question_guidance_category" },
+            "integrations": { "$ref": "#/$defs/question_guidance_category" },
+            "approval_boundaries": { "$ref": "#/$defs/question_guidance_category" },
+            "budget_time": { "$ref": "#/$defs/question_guidance_category" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "question_guidance_fallback": {
+      "type": "object",
+      "required": ["why_needed", "example_answers", "effect_of_answer", "does_not_authorize"],
+      "properties": {
+        "why_needed": { "type": "string", "minLength": 1 },
+        "example_answers": { "$ref": "#/$defs/bilingual_examples" },
+        "effect_of_answer": { "type": "string", "minLength": 1 },
+        "does_not_authorize": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "question_guidance_category": {
+      "type": "object",
+      "required": ["keywords", "why_needed", "example_answers", "effect_of_answer"],
+      "properties": {
+        "keywords": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "why_needed": { "type": "string", "minLength": 1 },
+        "example_answers": { "$ref": "#/$defs/bilingual_examples" },
+        "effect_of_answer": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "bilingual_examples": {
+      "type": "object",
+      "required": ["it", "en"],
+      "properties": {
+        "it": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "en": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "budget_policy": {
+      "type": "object",
+      "required": [
+        "schema",
+        "amendment_schema",
+        "usage_receipt_schema",
+        "metering_attestation_schema",
+        "storage_root",
+        "exact_metering",
+        "defaults",
+        "maxima",
+        "presentation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "schemas/execution-budget.schema.json"
+        },
+        "amendment_schema": {
+          "const": "schemas/budget-amendment.schema.json"
+        },
+        "usage_receipt_schema": {
+          "const": "schemas/execution-usage-receipt.schema.json"
+        },
+        "metering_attestation_schema": {
+          "const": "schemas/metering-attestation.schema.json"
+        },
+        "storage_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact_metering": {
+          "type": "object",
+          "required": ["default_trust", "completion_freshness_seconds", "trusted_sources"],
+          "properties": {
+            "default_trust": { "const": "deny" },
+            "completion_freshness_seconds": {
+              "description": "Maximum age of the signed final cumulative observation at the completion checkpoint when no signed continuous-enforcement hook receipt is present.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600
+            },
+            "trusted_sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["adapter", "metrics", "trusted_keys"],
+                "properties": {
+                  "adapter": { "type": "string", "minLength": 1 },
+                  "metrics": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$" }
+                  },
+                  "trusted_keys": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "object",
+                      "required": ["key_id", "algorithm", "public_key"],
+                      "properties": {
+                        "key_id": { "type": "string", "minLength": 1 },
+                        "algorithm": { "const": "Ed25519" },
+                        "public_key": { "type": "string", "minLength": 1 }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "defaults": {
+          "$ref": "#/$defs/budget_defaults"
+        },
+        "maxima": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "presentation": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "budget_defaults": {
+      "type": "object",
+      "required": [
+        "warning_thresholds_percent",
+        "completion_reserve_percent",
+        "scope",
+        "limits",
+        "limit_policy",
+        "extensions"
+      ],
+      "properties": {
+        "warning_thresholds_percent": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 99 }
+        },
+        "completion_reserve_percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limits": {
+          "type": "object",
+          "required": ["active_time_seconds", "steps", "tokens"],
+          "properties": {
+            "active_time_seconds": {
+              "allOf": [
+                { "$ref": "#/$defs/budget_limit_input" },
+                {
+                  "required": ["soft", "hard"],
+                  "properties": {
+                    "unit": { "const": "seconds" },
+                    "metering": { "const": "exact" }
+                  }
+                }
+              ]
+            },
+            "steps": {
+              "allOf": [
+                { "$ref": "#/$defs/budget_limit_input" },
+                {
+                  "required": ["soft", "hard"],
+                  "properties": {
+                    "unit": { "const": "steps" },
+                    "metering": { "const": "exact" }
+                  }
+                }
+              ]
+            },
+            "tokens": {
+              "allOf": [
+                { "$ref": "#/$defs/budget_limit_input" },
+                {
+                  "required": ["soft"],
+                  "properties": {
+                    "unit": { "const": "tokens" },
+                    "metering": { "const": "estimated" }
+                  },
+                  "not": { "required": ["hard"] }
+                }
+              ]
+            }
+          },
+          "additionalProperties": { "$ref": "#/$defs/budget_limit_input" }
+        },
+        "limit_policy": {
+          "type": "object",
+          "required": ["on_warning", "on_soft_limit", "on_hard_limit", "on_metering_violation"],
+          "additionalProperties": true
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "budget_limit_input": {
+      "type": "object",
+      "required": ["unit", "metering"],
+      "properties": {
+        "unit": { "type": "string", "minLength": 1 },
+        "metering": { "enum": ["exact", "estimated", "unavailable"] },
+        "soft": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" }
+          ]
+        },
+        "hard": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" }
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]{2,7}$"
+        }
+      },
+      "anyOf": [
+        { "required": ["soft"] },
+        { "required": ["hard"] }
+      ],
+      "allOf": [
+        {
+          "if": { "required": ["hard"] },
+          "then": { "properties": { "metering": { "const": "exact" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "approval_policy": {
+      "type": "object",
+      "required": [
+        "formal_approval_requires_explicit_source"
+      ],
+      "additionalProperties": true
+    },
+    "verification_policy": {
+      "type": "object",
+      "required": [
+        "receipt_schema",
+        "generator_receipt_schema",
+        "dimensions",
+        "require_generator_receipt"
+      ],
+      "properties": {
+        "receipt_schema": {
+          "const": "schemas/verification-receipt.schema.json"
+        },
+        "generator_receipt_schema": {
+          "const": "schemas/artifact-generator-receipt.schema.json"
+        },
+        "require_generator_receipt": {
+          "type": "boolean"
+        },
+        "dimensions": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "container_verified"
+            },
+            {
+              "const": "content_verified"
+            },
+            {
+              "const": "render_verified"
+            }
+          ],
+          "minItems": 3
+        }
+      },
+      "additionalProperties": true
+    },
+    "release_policy": {
+      "type": "object",
+      "required": [
+        "manifest_schema",
+        "gate_receipt_schema",
+        "archive_schema",
+        "archive_plan_schema",
+        "manifest_directory",
+        "gate_receipt_directory",
+        "archive_directory"
+      ],
+      "properties": {
+        "manifest_schema": {
+          "const": "schemas/release-manifest.schema.json"
+        },
+        "gate_receipt_schema": {
+          "const": "schemas/release-gate-receipt.schema.json"
+        },
+        "archive_schema": {
+          "const": "schemas/archive-record.schema.json"
+        },
+        "archive_plan_schema": {
+          "const": "schemas/archive-plan.schema.json"
+        },
+        "manifest_directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gate_receipt_directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "archive_directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_future_skew_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

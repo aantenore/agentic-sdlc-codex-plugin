@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-approval-receipt.schema.json",
+  "title": "Agentic SDLC Signed Host Approval Receipt v2",
+  "description": "Ed25519-attested host evidence that a human or CI actor answered a specific checkpoint question for one exact action and subject-content hash.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "action",
+    "subject",
+    "subject_hash",
+    "subject_ref",
+    "checkpoint",
+    "question_contract",
+    "decision",
+    "response",
+    "decided_at",
+    "issued_at",
+    "expires_at",
+    "decided_by",
+    "issued_by",
+    "host",
+    "host_message",
+    "constraints",
+    "authorization_ref",
+    "attestation",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "host_approval_receipt" },
+    "schema_version": { "const": "host-approval-receipt:v2" },
+    "version": { "const": 2 },
+    "id": { "type": "string", "minLength": 1 },
+    "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "subject": {
+      "description": "Exact JSON value approved by the host. Null is permitted only when subject_hash was supplied independently."
+    },
+    "subject_hash": { "$ref": "#/$defs/sha256" },
+    "subject_ref": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/subject_ref" }
+      ]
+    },
+    "checkpoint": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/checkpoint" }
+      ]
+    },
+    "question_contract": { "$ref": "#/$defs/question_contract" },
+    "decision": { "enum": ["approved", "denied", "changes_requested", "rejected"] },
+    "response": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/response" }
+      ]
+    },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "decided_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "issued_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "host": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/host" }
+      ]
+    },
+    "host_message": {
+      "description": "Optional immutable host-native message or attestation payload."
+    },
+    "constraints": {
+      "description": "Additional limits stated by the approving host, explicitly bound to the approved subject hash.",
+      "type": "object",
+      "required": ["subject_hash"],
+      "properties": {
+        "subject_hash": { "$ref": "#/$defs/sha256" },
+        "max_authorization_ttl_seconds": { "type": "integer", "minimum": 1 },
+        "no_scope_expansion": { "type": "boolean" },
+        "no_budget_extension": { "type": "boolean" },
+        "no_production_access": { "type": "boolean" },
+        "no_external_access": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "authorization_ref": { "type": ["string", "null"], "minLength": 1 },
+    "attestation": { "$ref": "#/$defs/attestation" },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "attestation": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "payload_hash", "signature"],
+      "properties": {
+        "algorithm": { "const": "Ed25519" },
+        "key_id": { "type": "string", "minLength": 1 },
+        "payload_hash": { "$ref": "#/$defs/sha256" },
+        "signature": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "subject_ref": {
+      "type": "object",
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": { "enum": ["baseline", "assessment_proposal", "budget_amendment", "exception_request"] },
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "required": ["type", "normal_checkpoint"],
+      "properties": {
+        "type": { "enum": ["context", "proposal", "exception", "budget-amendment"] },
+        "normal_checkpoint": {
+          "oneOf": [
+            { "enum": [1, 2] },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "question_contract": {
+      "type": "object",
+      "required": ["asked", "why", "authorizes", "does_not_authorize", "examples"],
+      "properties": {
+        "asked": { "type": "string", "minLength": 1 },
+        "why": { "type": "string", "minLength": 1 },
+        "authorizes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "does_not_authorize": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "examples": {
+          "type": "object",
+          "minProperties": 1,
+          "properties": {
+            "it": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "en": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": ["raw", "normalized_summary", "message_hash"],
+      "properties": {
+        "raw": { "type": "string", "minLength": 1 },
+        "normalized_summary": { "type": "string", "minLength": 1 },
+        "message_hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "host": {
+      "type": "object",
+      "required": ["provider", "thread_id", "message_id", "trust"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "message_id": { "type": "string", "minLength": 1 },
+        "session_id": { "type": ["string", "null"] },
+        "trust": { "enum": ["host-attested", "ci-attested"] },
+        "signature": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

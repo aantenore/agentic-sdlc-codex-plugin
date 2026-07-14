@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-manifest.schema.json",
+  "title": "Agentic SDLC Release Manifest v1",
+  "description": "Immutable, closed inventory of one released assessment: source revision, canonical records, proposal/workflow lineage, verified artifacts, authority uses, execution usage, budget decision, release gates, and rollback instructions.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "status",
+    "project",
+    "source_revision",
+    "requirements",
+    "stories",
+    "contracts",
+    "proposals",
+    "workflow",
+    "artifacts",
+    "authorization_usage_receipts",
+    "execution_usage_receipts",
+    "budget_decision",
+    "gate_receipts",
+    "rollback",
+    "legacy_history_policy",
+    "generated_at",
+    "released_at",
+    "manifest_hash",
+    "hash_algorithm",
+    "audit"
+  ],
+  "properties": {
+    "kind": { "const": "release_manifest" },
+    "schema_version": { "const": "release-manifest:v1" },
+    "version": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["prepared", "released", "failed", "rolled_back"] },
+    "project": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "source_revision": {
+      "type": "object",
+      "required": ["type", "value", "branch", "dirty"],
+      "properties": {
+        "type": { "enum": ["git", "snapshot", "other"] },
+        "value": { "type": "string", "minLength": 1 },
+        "branch": { "type": ["string", "null"] },
+        "dirty": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "stories": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "proposals": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "workflow": { "$ref": "#/$defs/workflow_ref" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "authorization_usage_receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "execution_usage_receipts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "budget_decision": { "$ref": "#/$defs/budget_decision" },
+    "gate_receipts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "rollback": { "$ref": "#/$defs/rollback" },
+    "legacy_history_policy": { "const": "logically_archived_out_of_release_scope" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "released_at": { "type": "string", "format": "date-time" },
+    "manifest_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "audit": { "$ref": "#/$defs/audit" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "decimal_string": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "quantity": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "$ref": "#/$defs/decimal_string" }
+      ]
+    },
+    "nullable_quantity": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/quantity" }
+      ]
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "workflow_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" },
+        "state": { "const": "completed" }
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["id", "artifact_type", "path", "sha256", "verification_receipt_ref"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "verification_receipt_ref": { "$ref": "#/$defs/hashed_ref" }
+      },
+      "additionalProperties": false
+    },
+    "budget_decision": {
+      "type": "object",
+      "required": ["budget_ref", "status", "receipt_count", "usage", "remaining", "completion_reserve_risks"],
+      "properties": {
+        "budget_ref": { "$ref": "#/$defs/hashed_ref" },
+        "status": {
+          "enum": ["within_budget", "warning", "completion_reserve", "soft_limit", "hard_limit", "metering_violation"]
+        },
+        "receipt_count": { "type": "integer", "minimum": 0 },
+        "usage": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/quantity" }
+        },
+        "remaining": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/nullable_quantity" }
+        },
+        "completion_reserve_risks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/completion_reserve_risk" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "completion_reserve_risk": {
+      "type": "object",
+      "required": ["metric", "utilization_percent", "reserve_percent"],
+      "properties": {
+        "metric": { "type": "string", "minLength": 1 },
+        "utilization_percent": { "type": "number", "minimum": 0 },
+        "reserve_percent": { "type": "integer", "minimum": 0, "maximum": 50 }
+      },
+      "additionalProperties": false
+    },
+    "rollback": {
+      "type": "object",
+      "required": ["available", "instructions", "target_revision"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "instructions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "target_revision": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "audit": {
+      "type": "object",
+      "required": ["actor", "git", "run"],
+      "properties": {
+        "actor": { "$ref": "common.schema.json#/$defs/actor" },
+        "git": { "$ref": "common.schema.json#/$defs/git" },
+        "run": { "$ref": "common.schema.json#/$defs/run" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

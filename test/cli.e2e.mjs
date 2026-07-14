@@ -1,17 +1,37 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { computeStableHash } from "../lib/canonical.mjs";
+import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
+import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
+import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
+const tempProjects = new Set();
+const meteringFixtureKeys = new Map();
 
 function tmpProject(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `sdlc-${name}-`));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), `sdlc-${name}-`));
+  tempProjects.add(project);
+  return project;
 }
+
+after(() => {
+  if (process.env.AGENTIC_SDLC_KEEP_TEST_TMP === "1") {
+    return;
+  }
+  for (const project of tempProjects) {
+    fs.rmSync(project, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+  tempProjects.clear();
+  meteringFixtureKeys.clear();
+});
 
 function run(args, options = {}) {
   const env = { ...process.env };
@@ -115,6 +135,7 @@ function grantAutomationAuthorization(project, id, actions, options = {}) {
   const artifactTypes = options.artifactTypes || [];
   const boundaries = options.boundaries || [];
   const subjects = options.subjects || [];
+  const uses = options.uses || [];
   const granted = JSON.parse(mustRun([
     "authorization",
     "grant",
@@ -130,6 +151,7 @@ function grantAutomationAuthorization(project, id, actions, options = {}) {
     ...artifactTypes.flatMap((type) => ["--allow-artifact-type", type]),
     ...boundaries.flatMap((boundary) => ["--allow-boundary", boundary]),
     ...subjects.flatMap((subject) => ["--allow-subject", subject]),
+    ...uses.flatMap((use) => ["--allow-use", use]),
     "--actor-type",
     "human",
     "--approval-source",
@@ -139,7 +161,35 @@ function grantAutomationAuthorization(project, id, actions, options = {}) {
   return granted.authorization;
 }
 
+function ensureRequirement(project, requirementId) {
+  const requirementPath = path.join(project, ".sdlc", "requirements", `${requirementId}.json`);
+  if (!fs.existsSync(requirementPath)) {
+    const createdAt = new Date().toISOString();
+    writeJson(requirementPath, {
+      id: requirementId,
+      kind: "requirement",
+      schema_version: "requirement:v1",
+      title: `Requirement ${requirementId}`,
+      summary: `Canonical outcome and boundary for ${requirementId}`,
+      status: "active",
+      acceptance_criteria: [`The linked story output provides observable evidence for ${requirementId}`],
+      source_paths: [],
+      proposal_ref: null,
+      created_at: createdAt,
+      updated_at: createdAt,
+      audit: { fixture: true },
+    });
+  }
+}
+
 function story(project, id, extra = []) {
+  const requirements = new Set([
+    "REQ-001",
+    ...extra.flatMap((value, index) => value === "--requirement" ? [extra[index + 1]] : []).filter(Boolean),
+  ]);
+  for (const requirementId of requirements) {
+    ensureRequirement(project, requirementId);
+  }
   mustRun([
     "story",
     "create",
@@ -160,11 +210,137 @@ function createApprovedTemplate(project, type = "functional-analysis") {
   mustRun(["output", "template", "approve", "--root", project, "--id", `${type}-v1`, ...humanApproval("Approved template")]);
 }
 
-function writeArtifact(project, relativePath, body = "# Artifact\n") {
+function writeArtifact(
+  project,
+  relativePath,
+  body = "# Canonical artifact\n\nThis artifact contains substantive, reviewable evidence for the approved story output.\n",
+) {
   const filePath = path.join(project, relativePath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, body);
   return relativePath;
+}
+
+function sha256File(filePath) {
+  return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function ensureTrustedMeteringFixture(project, {
+  adapter = "e2e-runtime-meter-v1",
+  metrics = ["active_time_seconds", "steps"],
+} = {}) {
+  const fixtureId = `${project}\u0000${adapter}`;
+  let keyPair = meteringFixtureKeys.get(fixtureId);
+  if (!keyPair) {
+    keyPair = generateKeyPairSync("ed25519");
+    meteringFixtureKeys.set(fixtureId, keyPair);
+  }
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  const policy = config.budget_policy.exact_metering;
+  const trustedSources = policy.trusted_sources || [];
+  const publicKey = keyPair.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const trustedKey = {
+    key_id: `${adapter}-key-1`,
+    algorithm: "Ed25519",
+    public_key: publicKey,
+  };
+  const existing = trustedSources.find((source) => source.adapter === adapter);
+  if (existing) {
+    existing.metrics = Array.from(new Set([...existing.metrics, ...metrics])).sort();
+    existing.trusted_keys = [trustedKey];
+  } else {
+    trustedSources.push({ adapter, metrics: [...metrics].sort(), trusted_keys: [trustedKey] });
+  }
+  config.budget_policy.exact_metering = {
+    default_trust: "deny",
+    completion_freshness_seconds: policy.completion_freshness_seconds ?? 60,
+    trusted_sources: trustedSources,
+  };
+  writeJson(configPath, config);
+  return { ...keyPair, keyId: trustedKey.key_id };
+}
+
+function writeTrustedUsageReceipt(project, {
+  proposalId,
+  id,
+  usage,
+  metering,
+  adapter = "e2e-runtime-meter-v1",
+  endedAt = null,
+  fixtureKey = id,
+  configureTrust = true,
+}) {
+  const exactMetrics = Object.entries(metering)
+    .filter(([, level]) => level === "exact")
+    .map(([metric]) => metric);
+  const application = readJson(path.join(project, ".sdlc", "assessments", "applications", `${proposalId}.json`));
+  const workflow = readJson(path.join(project, ".sdlc", "assessments", "workflows", `${proposalId}.json`));
+  const executionStartedAt = workflow.history.find((entry) => entry.to === "running")?.at;
+  assert.ok(executionStartedAt, `Fixture workflow ${proposalId} has no running transition`);
+  const observationAt = endedAt || new Date().toISOString();
+  const configuredKey = meteringFixtureKeys.get(`${project}\u0000${adapter}`);
+  const keyPair = configureTrust
+    ? configuredKey
+    : generateKeyPairSync("ed25519");
+  if (exactMetrics.length > 0 && configureTrust) {
+    assert.ok(keyPair, `Trusted metering fixture ${adapter} must be configured before proposal approval`);
+  }
+  const attestationRelativePath = `.sdlc/receipts/metering/${fixtureKey}.attestation.json`;
+  const attestationPath = path.join(project, attestationRelativePath);
+  let attestation = null;
+  if (exactMetrics.length > 0) {
+    const measurement = {
+      execution_id: proposalId,
+      budget_id: application.effective_budget.id,
+      budget_hash: application.effective_budget.budget_hash,
+      adapter,
+      usage,
+      metering,
+      cumulative: true,
+      started_at: executionStartedAt,
+      ended_at: observationAt,
+      coverage_started_at: executionStartedAt,
+      coverage_ended_at: observationAt,
+      final_observation_at: observationAt,
+      enforcement_hook_receipt_ref: null,
+      pricing_ref: null,
+      evidence: [],
+    };
+    attestation = buildMeteringAttestation({
+      id: `${id}-ATTESTATION`,
+      measurement,
+      issued_at: new Date(Date.parse(observationAt) + 1).toISOString(),
+      valid_from: executionStartedAt,
+      expires_at: null,
+      signing: {
+        key_id: configureTrust ? `${adapter}-key-1` : `${adapter}-untrusted-key`,
+        private_key: keyPair.privateKey,
+      },
+    });
+    fs.mkdirSync(path.dirname(attestationPath), { recursive: true });
+    writeJson(attestationPath, attestation);
+  }
+  const receipt = buildExecutionUsageReceipt({
+    id,
+    execution_id: proposalId,
+    budget: application.effective_budget,
+    usage,
+    metering,
+    started_at: exactMetrics.length > 0 ? executionStartedAt : null,
+    ended_at: observationAt,
+    source: {
+      adapter,
+      assurance: exactMetrics.length > 0 ? "trusted_attested" : "manual_declared",
+      aggregation: exactMetrics.length > 0 ? "cumulative" : "delta",
+      attestation_ref: exactMetrics.length > 0
+        ? { id: attestation.id, path: attestationRelativePath, hash: sha256File(attestationPath) }
+        : null,
+    },
+  });
+  const receiptRelativePath = `.sdlc/receipts/metering/${fixtureKey}.receipt.json`;
+  writeJson(path.join(project, receiptRelativePath), receipt);
+  return { receipt, receiptRelativePath, attestationRelativePath: exactMetrics.length > 0 ? attestationRelativePath : null };
 }
 
 function crc32(buffer) {
@@ -299,6 +475,131 @@ function createStrictReadyStory(project, id, artifactType = "functional-analysis
   ]);
 }
 
+function completeAssessmentReleaseFixture(project, suffix, baselineId) {
+  const proposalId = `ASSESS-${suffix}`;
+  const storyId = `ST-${suffix}`;
+  const requirementId = `REQ-${suffix}`;
+  const templateId = `technical-analysis-${suffix.toLowerCase()}-v1`;
+  const artifact = `.sdlc/stories/${storyId}/outputs/technical-assessment.md`;
+  const budget = {
+    scope: { level: "proposal", proposal_id: proposalId, includes_subagents: true },
+    limits: {
+      active_time_seconds: { unit: "seconds", metering: "exact", soft: 300, hard: 900 },
+      tokens: { unit: "tokens", metering: "estimated", soft: 20000 },
+    },
+  };
+  ensureTrustedMeteringFixture(project, { metrics: ["active_time_seconds"] });
+  const prepared = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "prepare",
+    "--root",
+    project,
+    "--id",
+    proposalId,
+    "--baseline",
+    baselineId,
+    "--story",
+    storyId,
+    "--requirement",
+    requirementId,
+    "--template",
+    templateId,
+    "--scope-title",
+    `Assessment release ${suffix}`,
+    "--scope-summary",
+    `Produce the evidence-backed, active release scope for ${suffix} without external access.`,
+    "--format",
+    "Markdown",
+    "--delivery",
+    "artifact",
+    "--artifact",
+    artifact,
+    "--budget-json",
+    JSON.stringify(budget),
+    "--json",
+  ]).stdout);
+  const approved = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    proposalId,
+    "--json",
+    ...humanApproval(`Approve exact fixture release ${suffix}`),
+  ]).stdout);
+  mustRun([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    proposalId,
+    "--actor-type",
+    "agent",
+  ]);
+  const usageFixture = writeTrustedUsageReceipt(project, {
+    proposalId,
+    id: `USAGE-${suffix}`,
+    usage: { active_time_seconds: 30, tokens: 500 },
+    metering: { active_time_seconds: "exact", tokens: "estimated" },
+  });
+  mustRun([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    proposalId,
+    "--receipt-file",
+    usageFixture.receiptRelativePath,
+  ]);
+  writeArtifact(
+    project,
+    artifact,
+    `# Assessment ${suffix}\n\nThis immutable release records evidence, findings, risks, and configurable improvements for ${suffix}.\n`,
+  );
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    storyId,
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    templateId,
+    "--mode",
+    "new",
+    "--requirement",
+    requirementId,
+    "--authorization",
+    approved.authorization.id,
+  ]);
+  const completed = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "complete",
+    "--root",
+    project,
+    "--id",
+    proposalId,
+    "--actor-type",
+    "agent",
+    "--json",
+  ]).stdout);
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.release_manifest.proposals[0].hash, prepared.proposal.proposal_hash);
+  return completed;
+}
+
 test("--version is not shadowed by help and boolean --json does not consume query", () => {
   const version = mustRun(["--version"]);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
@@ -401,6 +702,75 @@ test("invalid statuses and invalid expiry values are rejected or gated", () => {
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /invalid expires_at/);
 });
 
+test("terminal stories cannot be claimed or scheduled and status counts story records", () => {
+  const project = tmpProject("terminal-story-lifecycle");
+  initProject(project);
+  story(project, "ST-DONE");
+  story(project, "ST-READY");
+
+  const donePath = path.join(project, ".sdlc", "stories", "ST-DONE", "story.json");
+  const doneStory = readJson(donePath);
+  writeJson(donePath, { ...doneStory, status: "done", phase: "release" });
+
+  mustFail(
+    ["story", "claim", "--root", project, "--id", "ST-DONE", "--agent", "codex"],
+    /terminal status 'done'/,
+  );
+  mustFail(
+    ["story", "claim", "--root", project, "--id", "ST-DONE", "--agent", "codex", "--force", "--actor-type", "human"],
+    /terminal status 'done'/,
+  );
+  const orchestration = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const terminal = orchestration.stories.find((item) => item.id === "ST-DONE");
+  assert.equal(terminal.orchestration_state, "terminal");
+  assert.equal(orchestration.summary.terminal, 1);
+
+  const plan = JSON.parse(mustRun(["orchestrate", "plan", "--root", project, "--json"]).stdout);
+  assert.equal(plan.candidates.some((candidate) => candidate.story_id === "ST-DONE"), false);
+  assert.equal(plan.candidates.some((candidate) => candidate.story_id === "ST-READY"), true);
+
+  const status = JSON.parse(mustRun(["status", "--root", project, "--json"]).stdout);
+  assert.equal(status.counts.stories, 2);
+});
+
+test("claim TTL is config-driven and legacy unbounded claims become stale", () => {
+  const project = tmpProject("claim-ttl-policy");
+  initProject(project);
+  story(project, "ST-TTL");
+
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.claim_policy.default_ttl_seconds = 0;
+  writeJson(configPath, config);
+  mustFail(["status", "--root", project], /default_ttl_seconds must be a positive integer or null/);
+  config.claim_policy.default_ttl_seconds = 90;
+  writeJson(configPath, config);
+
+  const claimed = JSON.parse(mustRun([
+    "story",
+    "claim",
+    "--root",
+    project,
+    "--id",
+    "ST-TTL",
+    "--agent",
+    "codex",
+    "--json",
+  ]).stdout).claim;
+  assert.equal(Date.parse(claimed.expires_at) - Date.parse(claimed.claimed_at), 90_000);
+
+  const claimPath = path.join(project, ".sdlc", "stories", "ST-TTL", "claim.json");
+  writeJson(claimPath, {
+    ...claimed,
+    claimed_at: new Date(Date.now() - 120_000).toISOString(),
+    expires_at: null,
+  });
+  const orchestration = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const stale = orchestration.stories.find((item) => item.id === "ST-TTL");
+  assert.equal(stale.orchestration_state, "stale");
+  assert.match(stale.blockers.join("\n"), /active claim (?:is )?expired/);
+});
+
 test("contract approval becomes stale after contract mutation", () => {
   const project = tmpProject("stale-approval");
   initProject(project);
@@ -494,6 +864,30 @@ test("delegated automation approvals require persistent action and scope authori
     "--approval-source",
     "explicit-user",
   ], /approval_source explicit-user require --actor-type human/);
+  mustFail([
+    "authorization",
+    "grant",
+    "--root",
+    project,
+    "--id",
+    "AUTH-AMBIGUOUS-PAIRS",
+    "--scope",
+    "test",
+    "--summary",
+    "Ambiguous independent action and subject lists",
+    "--allow-action",
+    "contract.approve",
+    "--allow-action",
+    "output.template.approve",
+    "--allow-subject",
+    "contract-ST-001-implementation",
+    "--allow-subject",
+    "implementation-summary-v1",
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "explicit-user",
+  ], /cannot combine multiple --allow-action and multiple --allow-subject/);
   story(project, "ST-001", ["--contract", "contract-ST-001-implementation"]);
   const authorization = grantAutomationAuthorization(
     project,
@@ -502,6 +896,24 @@ test("delegated automation approvals require persistent action and scope authori
     {
       artifactTypes: ["implementation-summary"],
       subjects: ["implementation-summary-v1", "contract-ST-001-implementation", "ST-001"],
+      uses: [
+        "output.template.approve=implementation-summary-v1",
+        "contract.approve=contract-ST-001-implementation",
+        "task.start.confirm=ST-001",
+      ],
+    },
+  );
+  const crossPairAuthorization = grantAutomationAuthorization(
+    project,
+    "AUTH-CROSS-PAIR",
+    ["output.template.approve", "contract.approve"],
+    {
+      artifactTypes: ["implementation-summary"],
+      subjects: ["another-template", "implementation-summary-v1"],
+      uses: [
+        "output.template.approve=another-template",
+        "contract.approve=implementation-summary-v1",
+      ],
     },
   );
   const wrongActionAuthorization = grantAutomationAuthorization(
@@ -638,6 +1050,23 @@ test("delegated automation approvals require persistent action and scope authori
       ),
     ],
     /does not allow subject implementation-summary-v1/,
+  );
+  mustFail(
+    [
+      "output",
+      "template",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      "implementation-summary-v1",
+      ...delegatedAutomationApproval(
+        "Attempt to combine an action and subject that are allowed only in different pairs",
+        delegatedApprovalScope,
+        crossPairAuthorization.id,
+      ),
+    ],
+    /does not allow action output\.template\.approve for subject implementation-summary-v1/,
   );
   mustFail(
     [
@@ -863,14 +1292,25 @@ test("delegated automation approvals require persistent action and scope authori
     "--reason",
     "Delegation withdrawn",
   ]);
-  const revokedApprovalStart = JSON.parse(mustRun([
-    ...startArguments,
-    "--authorization",
-    wrongStartArtifactAuthorization.id,
+  const afterRevocation = JSON.parse(run([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--strict",
+    "--json",
   ]).stdout);
-  assert.equal(revokedApprovalStart.execution_allowed, false);
-  assert.equal(revokedApprovalStart.status, "needs_user_input");
-  assert.notEqual(revokedApprovalStart.status, "ready_to_execute");
+  assert.equal(
+    afterRevocation.errors.some((error) => /AUTH-DELEGATED-ASSESSMENT.*(?:revoked|closed|inactive)/i.test(error)),
+    false,
+    `A later revocation must not invalidate usage receipts that were valid at use time: ${afterRevocation.errors.join("; ")}`,
+  );
+  mustFail(
+    [...startArguments, "--authorization", wrongStartArtifactAuthorization.id],
+    /does not allow artifact type implementation-summary/,
+  );
 });
 
 test("output delivery canonicalizes Excel and verifies OOXML evidence before linking", () => {
@@ -970,8 +1410,16 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "human",
     "--json",
   ]).stdout);
-  assert.equal(started.status, "ready_to_execute");
-  assert.equal(started.task_start_receipt, ".sdlc/stories/ST-XLSX/task-start.json");
+  assert.equal(started.status, "needs_user_input");
+  assert.equal(started.execution_allowed, false);
+  assert.ok(started.blocking_reasons.includes("baseline_missing"));
+  assert.ok(started.questions.some((question) => (
+    question.includes("Checkpoint 1 of 2")
+    && question.includes("What I need:")
+    && question.includes("Why:")
+    && question.includes("Example answer:")
+    && question.includes("Effect:")
+  )));
   const wrongExtension = writeArtifact(
     project,
     ".sdlc/stories/ST-XLSX/outputs/technical-assessment.md",
@@ -992,9 +1440,14 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "technical-analysis-v1",
     "--mode",
     "new",
+    "--allow-unapproved-contract-output",
   ], /requires a \.xlsx canonical artifact/);
 
-  const evidence = writeArtifact(project, ".sdlc/evidence/ST-XLSX-workbook-render.txt", "Workbook rendered and inspected.\n");
+  const rejectedTextEvidence = writeArtifact(
+    project,
+    ".sdlc/evidence/ST-XLSX-workbook-render.txt",
+    "Workbook rendered and inspected. This untyped text assertion is intentionally insufficient.\n",
+  );
   const fakeWorkbook = writeArtifact(
     project,
     ".sdlc/stories/ST-XLSX/outputs/not-a-workbook.xlsx",
@@ -1015,13 +1468,14 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "technical-analysis-v1",
     "--mode",
     "new",
+    "--allow-unapproved-contract-output",
     "--evidence",
-    evidence,
+    rejectedTextEvidence,
   ], /not a valid ZIP container/);
 
-  const workbook = writeStoredZip(
+  const emptyWorkbook = writeStoredZip(
     project,
-    ".sdlc/stories/ST-XLSX/outputs/technical-assessment.xlsx",
+    ".sdlc/stories/ST-XLSX/outputs/empty-technical-assessment.xlsx",
     {
       "[Content_Types].xml": [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -1058,14 +1512,111 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "--type",
     "technical-analysis",
     "--artifact",
+    emptyWorkbook,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--allow-unapproved-contract-output",
+    "--evidence",
+    emptyWorkbook,
+  ], /workbook container but no declared worksheet/);
+
+  const workbook = writeStoredZip(
+    project,
+    ".sdlc/stories/ST-XLSX/outputs/technical-assessment.xlsx",
+    {
+      "[Content_Types].xml": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+        "</Types>",
+      ].join(""),
+      "_rels/.rels": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+        "</Relationships>",
+      ].join(""),
+      "xl/workbook.xml": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ',
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+        '<sheets><sheet name="Assessment" sheetId="1" r:id="rId1"/></sheets></workbook>',
+      ].join(""),
+      "xl/_rels/workbook.xml.rels": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>',
+        "</Relationships>",
+      ].join(""),
+      "xl/worksheets/sheet1.xml": [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">',
+        '<c r="A1" t="inlineStr"><is><t>Finding</t></is></c>',
+        '<c r="B1" t="inlineStr"><is><t>Replace manual handoffs with typed receipts</t></is></c>',
+        "</row></sheetData></worksheet>",
+      ].join(""),
+    },
+  );
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
     workbook,
     "--template",
     "technical-analysis-v1",
     "--mode",
     "new",
+    "--allow-unapproved-contract-output",
     "--evidence",
     workbook,
   ], /evidence must be a separate render or inspection record/);
+
+  const workbookPath = path.join(project, workbook);
+  const artifactSha256 = sha256File(workbookPath);
+  const evidence = ".sdlc/evidence/ST-XLSX-workbook-render.json";
+  const renderReceiptContent = {
+    id: "RENDER-ST-XLSX",
+    kind: "render_verification_receipt",
+    schema_version: "render-verification-receipt:v1",
+    status: "passed",
+    artifact_path: workbook,
+    artifact_sha256: artifactSha256,
+    renderer: "spreadsheets",
+    rendered_at: new Date().toISOString(),
+    checks: ["Workbook opened and Assessment sheet rendered with populated cells"],
+  };
+  writeJson(path.join(project, evidence), {
+    ...renderReceiptContent,
+    receipt_hash: computeStableHash(renderReceiptContent),
+    hash_algorithm: "sha256:stable-json:v1",
+  });
+  const generatorReceipt = ".sdlc/evidence/ST-XLSX-generator.json";
+  const generatorReceiptContent = {
+    kind: "artifact_generator_receipt",
+    schema_version: "artifact-generator-receipt:v1",
+    id: "GEN-ST-XLSX",
+    artifact_path: workbook,
+    artifact_sha256: artifactSha256,
+    generator: "spreadsheets",
+    status: "succeeded",
+    generated_at: new Date().toISOString(),
+  };
+  writeJson(path.join(project, generatorReceipt), {
+    ...generatorReceiptContent,
+    receipt_hash: computeStableHash(generatorReceiptContent),
+    hash_algorithm: "sha256:stable-json:v1",
+  });
   const linked = JSON.parse(mustRun([
     "output",
     "link",
@@ -1081,10 +1632,13 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "technical-analysis-v1",
     "--mode",
     "new",
+    "--allow-unapproved-contract-output",
     "--requirement",
     "REQ-XLSX",
     "--evidence",
     evidence,
+    "--receipt-file",
+    generatorReceipt,
     "--json",
   ]).stdout);
   assert.deepEqual(
@@ -1104,11 +1658,16 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     },
   );
   assert.equal(linked.link.verification_receipt.status, "passed");
-  assert.equal(linked.link.verification_receipt.verifier, "ooxml-container-v1");
-  assert.equal(linked.link.verification_receipt.format, "xlsx");
-  assert.equal(linked.link.verification_receipt.artifact_sha256, linked.link.fingerprints.artifact_sha256);
+  assert.equal(linked.link.verification_receipt.verifier, "ooxml-content-v2");
+  assert.equal(linked.link.verification_receipt.container_verified.status, "verified");
+  assert.equal(linked.link.verification_receipt.content_verified.status, "verified");
+  assert.equal(linked.link.verification_receipt.render_verified.status, "verified");
+  assert.equal(linked.link.verification_receipt.artifact.format, "xlsx");
+  assert.equal(linked.link.verification_receipt.artifact.sha256, linked.link.fingerprints.artifact_sha256);
   assert.deepEqual(linked.link.verification_receipt.evidence.map((item) => item.path), [evidence]);
-  assert.ok(linked.link.verification_receipt.checks.some((check) => check.includes("valid OOXML ZIP container")));
+  assert.ok(linked.link.verification_receipt.container_verified.checks.some(
+    (check) => check.includes("valid OOXML ZIP container"),
+  ));
 
   const registry = readJson(path.join(project, ".sdlc", "output-contracts", "registry.json"));
   const storedLink = registry.links.find((item) => item.id === linked.link.id);
@@ -1116,7 +1675,7 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
   const originalEvidence = storedLink.verification_receipt.evidence;
   storedLink.verification_receipt.evidence = [{
     path: workbook,
-    sha256: storedLink.verification_receipt.artifact_sha256,
+    sha256: storedLink.verification_receipt.artifact.sha256,
   }];
   writeJson(path.join(project, ".sdlc", "output-contracts", "registry.json"), registry);
   const selfEvidenceGate = JSON.parse(run([
@@ -1146,6 +1705,931 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "--json",
   ]).stdout);
   assert.deepEqual(status.links[0].verification_receipt, linked.link.verification_receipt);
+});
+
+test("assessment tranche runs from precise checkpoints through budgeted release-manifest gate", async () => {
+  const project = tmpProject("assessment-tranche");
+  initProject(project);
+  fs.writeFileSync(
+    path.join(project, "README.md"),
+    "# Travel Operations\n\nA modular travel workflow with replaceable providers and contract-driven delivery.\n",
+  );
+
+  const checkpointOne = mustFail([
+    "assessment",
+    "proposal",
+    "prepare",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+  ], /Checkpoint 1 is required/);
+  const checkpointOneMessage = `${checkpointOne.stdout}\n${checkpointOne.stderr}`;
+  for (const requiredExplanation of ["What I need:", "Why:", "Example commands:", "Example answer in chat:"]) {
+    assert.match(
+      checkpointOneMessage,
+      new RegExp(requiredExplanation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `Checkpoint 1 did not explain ${requiredExplanation}`,
+    );
+  }
+
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-ASSESS-E2E",
+    "--source",
+    "README.md",
+    "--summary",
+    "Current modular travel workflow and repository boundary",
+  ]);
+  mustRun([
+    "baseline",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-ASSESS-E2E",
+    ...humanApproval("The baseline sources and current-state summary are accurate"),
+  ]);
+  ensureTrustedMeteringFixture(project, {
+    metrics: ["active_time_seconds", "steps"],
+  });
+
+  const budgetInput = {
+    scope: { level: "proposal", proposal_id: "ASSESS-E2E", includes_subagents: true },
+    completion_reserve_percent: 15,
+    limits: {
+      active_time_seconds: { unit: "seconds", metering: "exact", soft: 600, hard: 1200 },
+      steps: { unit: "steps", metering: "exact", soft: 10, hard: 20 },
+      tokens: { unit: "tokens", metering: "estimated", soft: 50000 },
+    },
+  };
+  const artifact = ".sdlc/stories/ST-ASSESS-E2E/outputs/technical-assessment.md";
+  const prepared = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "prepare",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    "--baseline",
+    "BASELINE-ASSESS-E2E",
+    "--story",
+    "ST-ASSESS-E2E",
+    "--requirement",
+    "REQ-ASSESS-E2E",
+    "--scope-title",
+    "Assess the contract-driven workflow",
+    "--scope-summary",
+    "Find evidence-backed failures and propose configurable improvements without external or production access.",
+    "--format",
+    "Markdown",
+    "--delivery",
+    "artifact",
+    "--artifact",
+    artifact,
+    "--budget-json",
+    JSON.stringify(budgetInput),
+    "--json",
+  ]).stdout);
+  assert.equal(prepared.status, "proposal_pending");
+  assert.equal(prepared.checkpoint, 2);
+  assert.equal(prepared.proposal.execution_budget.limits.active_time_seconds.hard, 1200);
+  assert.equal(prepared.proposal.execution_budget.limits.active_time_seconds.metering, "exact");
+  assert.equal(prepared.proposal.execution_budget.limits.tokens.hard, null);
+  assert.equal(prepared.proposal.execution_budget.limits.tokens.metering, "estimated");
+  assert.match(prepared.assistant_message, /Cosa ti sto chiedendo/);
+  assert.match(prepared.assistant_message, /Perché serve/);
+  assert.match(prepared.assistant_message, /Cosa autorizza il tuo sì/);
+  assert.match(prepared.assistant_message, /Cosa non autorizza/);
+  assert.match(prepared.assistant_message, /Esempi di risposta completi/);
+  assert.match(prepared.assistant_message, /Tempo attivo:[^\n]*hard stop/);
+  assert.match(prepared.assistant_message, /Token:[^\n]*(?:stima|advisory)/i);
+  assert.match(prepared.assistant_message, /non configurato[^\n]*pricing\/metering/i);
+  const pendingWorkflow = readJson(path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json"));
+
+  const approved = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    ...humanApproval("Approvo esattamente scope, write set, strumenti e budget mostrati"),
+    "--json",
+  ]).stdout);
+  assert.equal(approved.status, "authorized");
+  assert.equal(approved.approval.proposal_hash, prepared.proposal.proposal_hash);
+  assert.equal(approved.approval.authority_assurance_label, "audit_only");
+  assert.match(approved.authority_note, /cannot independently prove/i);
+  assert.ok(approved.authorization.allowed_actions.includes("assessment.proposal.apply"));
+  assert.ok(approved.authorization.allowed_actions.includes("assessment.proposal.complete"));
+  assert.equal(approved.approval.authorization_snapshot.authorization_hash, approved.authorization.authorization_hash);
+
+  // Simulate a process interruption after the approval seed was persisted but
+  // before the authorization and workflow writes completed. Replaying the same
+  // command must restore the exact embedded authorization, never mint a broader one.
+  fs.rmSync(path.join(project, ".sdlc", "authorizations", `${approved.authorization.id}.json`));
+  writeJson(path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json"), pendingWorkflow);
+  const recoveredApproval = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    "--json",
+  ]).stdout);
+  assert.equal(recoveredApproval.idempotent, true);
+  assert.equal(recoveredApproval.recovery_status, "repaired");
+  assert.deepEqual(recoveredApproval.repaired.sort(), ["authorization", "workflow"]);
+  assert.equal(recoveredApproval.authorization.authorization_hash, approved.authorization.authorization_hash);
+  assert.equal(recoveredApproval.workflow.state, "authorized");
+
+  const applied = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    "--actor-type",
+    "agent",
+    "--json",
+  ]).stdout);
+  assert.equal(applied.status, "running");
+  assert.equal(applied.application.proposal_hash, prepared.proposal.proposal_hash);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "requirements", "REQ-ASSESS-E2E.json")), true);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-ASSESS-E2E", "task-start.json")), true);
+
+  mustFail([
+    "assessment",
+    "proposal",
+    "complete",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    "--actor-type",
+    "agent",
+  ], /needs exact metering but received missing/);
+
+  mustFail([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "USAGE-MANUAL-EXACT",
+    "--receipt-json",
+    JSON.stringify({ usage: { tokens: 1 }, metering: { tokens: "exact" } }),
+  ], /Manual usage input cannot declare exact metering/);
+
+  const untrustedFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-UNTRUSTED-EXACT",
+    usage: { steps: 1 },
+    metering: { steps: "exact" },
+    adapter: "untrusted-e2e-meter",
+    fixtureKey: "USAGE-UNTRUSTED-EXACT",
+    configureTrust: false,
+  });
+  mustFail([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    untrustedFixture.receiptRelativePath,
+  ], /is not trusted by this project/);
+
+  mustFail([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E-EARLY",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { soft: 20, hard: 30 } } }),
+    "--reason",
+    "An amendment must not be accepted before the budget exception checkpoint",
+    ...humanApproval("Do not bypass the exception checkpoint"),
+  ], /allowed only while .*exception_pending/);
+
+  const initialUsageFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-ASSESS-E2E",
+    usage: { active_time_seconds: 120, steps: 3, tokens: 1500 },
+    metering: { active_time_seconds: "exact", steps: "exact", tokens: "estimated" },
+  });
+  const usage = JSON.parse(mustRun([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    initialUsageFixture.receiptRelativePath,
+    "--json",
+  ]).stdout);
+  assert.equal(usage.aggregate.usage.active_time_seconds, 120);
+  assert.equal(usage.aggregate.usage.tokens, 1500);
+  assert.equal(usage.receipt.metering.active_time_seconds, "exact");
+  assert.equal(usage.receipt.metering.tokens, "estimated");
+  assert.equal(usage.aggregate.metering_violations.length, 0);
+
+  const usageFile = path.join(project, ".sdlc", "budgets", "ASSESS-E2E", "usage", "USAGE-ASSESS-E2E.json");
+  const originalUsageBytes = fs.readFileSync(usageFile);
+  const replayedUsage = JSON.parse(mustRun([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    initialUsageFixture.receiptRelativePath,
+    "--json",
+  ]).stdout);
+  assert.equal(replayedUsage.idempotent, true);
+  assert.equal(replayedUsage.registration_status, "idempotent_replay");
+  assert.equal(replayedUsage.aggregate.usage.active_time_seconds, 120);
+  assert.equal(fs.readdirSync(path.dirname(usageFile)).filter((name) => name.endsWith(".json")).length, 1);
+
+  const conflictingUsageFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-ASSESS-E2E",
+    usage: { active_time_seconds: 1, steps: 1, tokens: 1 },
+    metering: { active_time_seconds: "exact", steps: "exact", tokens: "estimated" },
+    fixtureKey: "USAGE-ASSESS-E2E-CONFLICT",
+  });
+  mustFail([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    conflictingUsageFixture.receiptRelativePath,
+    "--force",
+  ], /append-only|different canonical content/);
+  assert.deepEqual(fs.readFileSync(usageFile), originalUsageBytes);
+
+  const concurrentUsageFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-ASSESS-E2E-CONCURRENT",
+    usage: { tokens: 100 },
+    metering: { tokens: "estimated" },
+    fixtureKey: "USAGE-ASSESS-E2E-CONCURRENT",
+  });
+  const concurrentUsageArgs = [
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    concurrentUsageFixture.receiptRelativePath,
+    "--json",
+  ];
+  const concurrentUsageRuns = await Promise.all([
+    runAsync(concurrentUsageArgs),
+    runAsync(concurrentUsageArgs),
+  ]);
+  for (const result of concurrentUsageRuns) {
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const concurrentUsageOutputs = concurrentUsageRuns.map((result) => JSON.parse(result.stdout));
+  assert.deepEqual(
+    concurrentUsageOutputs.map((result) => result.registration_status).sort(),
+    ["created", "idempotent_replay"],
+  );
+  assert.equal(concurrentUsageOutputs[1].aggregate.usage.tokens, 1600);
+
+  const softLimitFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-ASSESS-E2E-SOFT-LIMIT",
+    usage: { steps: 10 },
+    metering: { steps: "exact" },
+  });
+  const exception = JSON.parse(mustRun([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    softLimitFixture.receiptRelativePath,
+    "--json",
+  ]).stdout);
+  assert.equal(exception.status, "exception_pending");
+  assert.equal(exception.aggregate.status, "soft_limit");
+  assert.match(exception.assistant_message, /What happened/);
+  assert.match(exception.assistant_message, /What I need from you/);
+  assert.match(exception.assistant_message, /What an extension authorizes/);
+  assert.match(exception.assistant_message, /- Extend:/);
+  assert.match(exception.assistant_message, /- Partial:/);
+  assert.match(exception.assistant_message, /- Stop:/);
+  assert.match(exception.assistant_message, /will not silently raise/i);
+
+  mustFail([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E-LOWER-RESERVE",
+    "--budget-json",
+    JSON.stringify({ completion_reserve_percent: 10 }),
+    "--reason",
+    "A completion reserve decrease must fail closed",
+    ...humanApproval("Do not consume the reserved completion tranche"),
+  ], /cannot lower completion_reserve_percent/);
+
+  const hostVerifiedConfigPath = path.join(project, ".sdlc", "config.json");
+  const hostVerifiedConfig = readJson(hostVerifiedConfigPath);
+  const { publicKey: hostPublicKey, privateKey: hostPrivateKey } = generateKeyPairSync("ed25519");
+  hostVerifiedConfig.authority_policy.mode = "host_verified";
+  hostVerifiedConfig.authority_policy.trusted_host_keys = [{
+    key_id: "host-test-key",
+    algorithm: "Ed25519",
+    public_key: hostPublicKey.export({ type: "spki", format: "pem" }).toString(),
+  }];
+  writeJson(hostVerifiedConfigPath, hostVerifiedConfig);
+  mustFail([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E-HOST-REQUIRED",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { hard: 25 } } }),
+    "--reason",
+    "Host-verified mode must bind approval to base, changes, and result",
+    ...humanApproval("A CLI actor declaration is not a host receipt"),
+  ], /Provide --host-receipt-file/);
+
+  const insufficientId = "BAMEND-ASSESS-E2E-INSUFFICIENT";
+  const insufficientChanges = { limits: { steps: { hard: 25 } } };
+  const insufficientReason = "Raising only the hard stop leaves the reached soft checkpoint unchanged";
+  const hostApprovedActor = {
+    id: "antonio",
+    type: "human",
+    name: "Antonio",
+    email: "antonio@example.test",
+    source: "cli",
+  };
+  const currentApplication = readJson(path.join(project, ".sdlc", "assessments", "applications", "ASSESS-E2E.json"));
+  const proposalForHost = readJson(path.join(project, ".sdlc", "assessments", "proposals", "ASSESS-E2E.json"));
+  const provisionalHostAmendment = buildBudgetAmendment(
+    currentApplication.effective_budget,
+    insufficientChanges,
+    {
+      id: insufficientId,
+      reason: insufficientReason,
+      created_at: new Date().toISOString(),
+      requested_by: hostApprovedActor,
+      approved_by: hostApprovedActor,
+      proposal_ref: { id: proposalForHost.id, hash: proposalForHost.proposal_hash },
+      approval_source: "explicit-user",
+    },
+  );
+  const hostAmendmentSubject = {
+    kind: "budget_amendment",
+    id: insufficientId,
+    proposal_ref: { id: proposalForHost.id, hash: proposalForHost.proposal_hash },
+    base_budget_ref: {
+      id: provisionalHostAmendment.base_budget_id,
+      hash: provisionalHostAmendment.base_budget_hash,
+    },
+    result_budget_ref: {
+      id: provisionalHostAmendment.result_budget.id,
+      hash: provisionalHostAmendment.result_budget_hash,
+    },
+    changes: insufficientChanges,
+    changes_hash: computeStableHash(insufficientChanges),
+    reason: insufficientReason,
+    reason_hash: createHash("sha256").update(insufficientReason).digest("hex"),
+    approved_by: hostApprovedActor,
+  };
+  const signedHostReceipt = buildHostApprovalReceipt({
+    id: `HOST-${insufficientId}`,
+    action: "budget.amend",
+    subject: hostAmendmentSubject,
+    subject_ref: {
+      kind: "assessment_proposal",
+      id: proposalForHost.id,
+      path: ".sdlc/assessments/proposals/ASSESS-E2E.json",
+      hash: proposalForHost.proposal_hash,
+    },
+    checkpoint: { type: "budget-amendment", normal_checkpoint: 2 },
+    question_contract: {
+      asked: `Approve only budget amendment ${insufficientId}?`,
+      why: "The recorded steps reached the approved soft checkpoint.",
+      authorizes: ["Only the exact hard-limit increase represented by the resulting budget hash."],
+      does_not_authorize: ["Scope, tool, production, external-access, or later budget changes."],
+      examples: {
+        it: [`Approvo solo ${insufficientId} e nessun'altra estensione.`],
+        en: [`I approve only ${insufficientId} and no other extension.`],
+      },
+    },
+    decision: "approved",
+    response: {
+      raw: `I approve ${insufficientId}`,
+      normalized_summary: `Approved exact budget amendment ${insufficientId}.`,
+      message_hash: createHash("sha256").update(`I approve ${insufficientId}`).digest("hex"),
+    },
+    decided_at: new Date(Date.now() - 1000).toISOString(),
+    decided_by: hostApprovedActor,
+    issued_by: { id: "codex-host", type: "system" },
+    host: {
+      provider: "codex-test-host",
+      thread_id: "thread-budget-test",
+      message_id: "message-budget-test",
+      trust: "host-attested",
+    },
+    constraints: {
+      subject_hash: computeStableHash(hostAmendmentSubject),
+      no_scope_expansion: true,
+      no_production_access: true,
+      no_external_access: true,
+    },
+    signing: { key_id: "host-test-key", private_key: hostPrivateKey },
+  });
+  const signedHostReceiptRelativePath = `.sdlc/receipts/host/${insufficientId}.json`;
+  fs.mkdirSync(path.dirname(path.join(project, signedHostReceiptRelativePath)), { recursive: true });
+  writeJson(path.join(project, signedHostReceiptRelativePath), signedHostReceipt);
+
+  const insufficientAmendment = JSON.parse(mustRun([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    insufficientId,
+    "--budget-json",
+    JSON.stringify(insufficientChanges),
+    "--reason",
+    insufficientReason,
+    "--actor-type",
+    "human",
+    "--actor",
+    "antonio",
+    "--actor-name",
+    "Antonio",
+    "--actor-email",
+    "antonio@example.test",
+    "--approval-source",
+    "explicit-user",
+    "--summary",
+    "Approve only the hard-stop increase and keep the soft checkpoint",
+    "--host-receipt-file",
+    signedHostReceiptRelativePath,
+    "--json",
+  ]).stdout);
+  assert.equal(insufficientAmendment.status, "exception_pending");
+  assert.equal(insufficientAmendment.aggregate.status, "soft_limit");
+  assert.equal(insufficientAmendment.workflow.state, "exception_pending");
+  assert.equal(insufficientAmendment.amendment.host_approval_receipt_ref.id, signedHostReceipt.id);
+  const replayedHostAmendment = JSON.parse(mustRun([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    insufficientId,
+    "--budget-json",
+    JSON.stringify(insufficientChanges),
+    "--reason",
+    insufficientReason,
+    "--actor-type",
+    "human",
+    "--actor",
+    "antonio",
+    "--actor-name",
+    "Antonio",
+    "--actor-email",
+    "antonio@example.test",
+    "--approval-source",
+    "explicit-user",
+    "--summary",
+    "Approve only the hard-stop increase and keep the soft checkpoint",
+    "--json",
+  ]).stdout);
+  assert.equal(replayedHostAmendment.idempotent, true);
+  assert.equal(replayedHostAmendment.recovered, false);
+  assert.equal(replayedHostAmendment.amendment.host_approval_receipt_ref.id, signedHostReceipt.id);
+  hostVerifiedConfig.authority_policy.mode = "audit_only";
+  writeJson(hostVerifiedConfigPath, hostVerifiedConfig);
+
+  const amendmentRecoveryPaths = {
+    application: path.join(project, ".sdlc", "assessments", "applications", "ASSESS-E2E.json"),
+    snapshot: path.join(project, ".sdlc", "budgets", "ASSESS-E2E", "effective-budget.json"),
+    workflow: path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json"),
+    amendment: path.join(project, ".sdlc", "budgets", "ASSESS-E2E", "amendments", "BAMEND-ASSESS-E2E.json"),
+  };
+  const beforeSufficientAmendment = {
+    application: readJson(amendmentRecoveryPaths.application),
+    snapshot: readJson(amendmentRecoveryPaths.snapshot),
+    workflow: readJson(amendmentRecoveryPaths.workflow),
+  };
+  const sufficientAmendmentArgs = [
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { soft: 20, hard: 30 } } }),
+    "--reason",
+    "Ten exact steps were used; twenty soft and thirty hard preserve room for verification and delivery",
+    ...humanApproval("Approve only the stated step limit amendment"),
+    "--json",
+  ];
+  const concurrentAmendmentRuns = await Promise.all([
+    runAsync(sufficientAmendmentArgs),
+    runAsync(sufficientAmendmentArgs),
+  ]);
+  for (const result of concurrentAmendmentRuns) {
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const concurrentAmendmentOutputs = concurrentAmendmentRuns.map((result) => JSON.parse(result.stdout));
+  assert.deepEqual(
+    concurrentAmendmentOutputs.map((result) => result.registration_status).sort(),
+    ["created", "idempotent_replay"],
+  );
+  const amended = concurrentAmendmentOutputs.find((result) => result.registration_status === "created");
+  assert.equal(amended.status, "amended");
+  assert.equal(amended.workflow.state, "running");
+  assert.equal(amended.effective_budget.limits.steps.soft, 20);
+  assert.equal(amended.effective_budget.limits.steps.hard, 30);
+  assert.equal(amended.effective_budget.limits.tokens.metering, "estimated");
+
+  const afterSufficientAmendment = {
+    application: readJson(amendmentRecoveryPaths.application),
+    snapshot: readJson(amendmentRecoveryPaths.snapshot),
+    workflow: readJson(amendmentRecoveryPaths.workflow),
+    amendment: readJson(amendmentRecoveryPaths.amendment),
+  };
+  const amendmentRecoveryCutPoints = [
+    {
+      name: "amendment_seed",
+      application: beforeSufficientAmendment.application,
+      snapshot: beforeSufficientAmendment.snapshot,
+      workflow: beforeSufficientAmendment.workflow,
+      expectedActions: ["effective_budget_snapshot", "assessment_application", "assessment_workflow"],
+    },
+    {
+      name: "budget_snapshot",
+      application: beforeSufficientAmendment.application,
+      snapshot: afterSufficientAmendment.snapshot,
+      workflow: beforeSufficientAmendment.workflow,
+      expectedActions: ["assessment_application", "assessment_workflow"],
+    },
+    {
+      name: "assessment_application",
+      application: afterSufficientAmendment.application,
+      snapshot: afterSufficientAmendment.snapshot,
+      workflow: beforeSufficientAmendment.workflow,
+      expectedActions: ["assessment_workflow"],
+    },
+    {
+      name: "assessment_workflow",
+      application: afterSufficientAmendment.application,
+      snapshot: afterSufficientAmendment.snapshot,
+      workflow: afterSufficientAmendment.workflow,
+      expectedActions: [],
+    },
+  ];
+  for (const cutPoint of amendmentRecoveryCutPoints) {
+    writeJson(amendmentRecoveryPaths.application, cutPoint.application);
+    writeJson(amendmentRecoveryPaths.snapshot, cutPoint.snapshot);
+    writeJson(amendmentRecoveryPaths.workflow, cutPoint.workflow);
+    writeJson(amendmentRecoveryPaths.amendment, afterSufficientAmendment.amendment);
+    const recovered = JSON.parse(mustRun(sufficientAmendmentArgs).stdout);
+    assert.equal(recovered.idempotent, true, cutPoint.name);
+    assert.equal(recovered.recovered, cutPoint.expectedActions.length > 0, cutPoint.name);
+    assert.deepEqual(recovered.recovery_actions, cutPoint.expectedActions, cutPoint.name);
+    assert.deepEqual(readJson(amendmentRecoveryPaths.application), afterSufficientAmendment.application, cutPoint.name);
+    assert.deepEqual(readJson(amendmentRecoveryPaths.snapshot), afterSufficientAmendment.snapshot, cutPoint.name);
+    assert.deepEqual(readJson(amendmentRecoveryPaths.workflow), afterSufficientAmendment.workflow, cutPoint.name);
+  }
+
+  const replayedAmendment = JSON.parse(mustRun([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { soft: 20, hard: 30 } } }),
+    "--reason",
+    "Ten exact steps were used; twenty soft and thirty hard preserve room for verification and delivery",
+    ...humanApproval("Approve only the stated step limit amendment"),
+    "--json",
+  ]).stdout);
+  assert.equal(replayedAmendment.idempotent, true);
+  assert.equal(replayedAmendment.registration_status, "idempotent_replay");
+  const applicationAfterReplay = readJson(path.join(project, ".sdlc", "assessments", "applications", "ASSESS-E2E.json"));
+  assert.equal(applicationAfterReplay.budget_amendments.length, 2);
+
+  mustFail([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { soft: 21, hard: 31 } } }),
+    "--reason",
+    "Ten exact steps were used; twenty soft and thirty hard preserve room for verification and delivery",
+    ...humanApproval("Approve only the stated step limit amendment"),
+    "--force",
+  ], /already bound to different canonical content/);
+
+  const finalMeteringFixture = writeTrustedUsageReceipt(project, {
+    proposalId: "ASSESS-E2E",
+    id: "USAGE-ASSESS-E2E-FINAL",
+    usage: { active_time_seconds: 120, steps: 10 },
+    metering: { active_time_seconds: "exact", steps: "exact" },
+  });
+  const finalMetering = JSON.parse(mustRun([
+    "budget",
+    "usage",
+    "record",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--receipt-file",
+    finalMeteringFixture.receiptRelativePath,
+    "--json",
+  ]).stdout);
+  assert.equal(finalMetering.aggregate.usage.active_time_seconds, 120);
+  assert.equal(finalMetering.aggregate.usage.steps, 10);
+
+  writeArtifact(
+    project,
+    artifact,
+    [
+      "# Technical assessment",
+      "",
+      "## Evidence",
+      "The approved baseline shows a modular provider boundary and contract-driven workflow.",
+      "",
+      "## Findings and improvements",
+      "Persist content-bound authorization usage and aggregate exact time and steps while treating estimated tokens as advisory.",
+      "",
+    ].join("\n"),
+  );
+  const linked = JSON.parse(mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-ASSESS-E2E",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    prepared.proposal.deliverable.template_id,
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-ASSESS-E2E",
+    "--authorization",
+    approved.authorization.id,
+    "--json",
+  ]).stdout);
+  assert.equal(linked.link.verification_receipt.container_verified.status, "verified");
+  assert.equal(linked.link.verification_receipt.content_verified.status, "verified");
+  assert.equal(linked.link.verification_receipt.render_verified.status, "not-required");
+
+  const completed = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "complete",
+    "--root",
+    project,
+    "--id",
+    "ASSESS-E2E",
+    "--actor-type",
+    "agent",
+    "--json",
+  ]).stdout);
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.workflow.state, "completed");
+  assert.equal(completed.release_manifest.status, "released");
+  assert.equal(completed.release_manifest.budget_decision.usage.tokens, 1600);
+  assert.equal(completed.release_manifest.legacy_history_policy, "logically_archived_out_of_release_scope");
+
+  mustFail([
+    "budget",
+    "amend",
+    "--root",
+    project,
+    "--proposal",
+    "ASSESS-E2E",
+    "--id",
+    "BAMEND-ASSESS-E2E-AFTER-COMPLETION",
+    "--budget-json",
+    JSON.stringify({ limits: { steps: { soft: 25, hard: 35 } } }),
+    "--reason",
+    "A completed release must not be retroactively re-budgeted",
+    ...humanApproval("Do not mutate a terminal workflow"),
+  ], /current state is completed/);
+
+  const gated = JSON.parse(mustRun([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--scope",
+    "release-manifest",
+    "--release-manifest",
+    completed.release_manifest.id,
+    "--strict",
+    "--json",
+  ]).stdout);
+  assert.equal(gated.status, "passed");
+  assert.equal(gated.scope, "release-manifest");
+  assert.equal(gated.release_manifest_id, completed.release_manifest.id);
+});
+
+test("active migration upgrades config and logically archives an older release without moving evidence", () => {
+  const project = tmpProject("active-migration");
+  initProject(project);
+
+  const missingManifest = mustFail([
+    "migration",
+    "active",
+    "--root",
+    project,
+  ], /Active-only migration needs --release-manifest/);
+  const missingManifestMessage = `${missingManifest.stdout}\n${missingManifest.stderr}`;
+  for (const explanation of ["What I need:", "Why:", "Example:", "Effect:"]) {
+    assert.match(missingManifestMessage, new RegExp(explanation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  fs.writeFileSync(
+    path.join(project, "README.md"),
+    "# Migration fixture\n\nTwo immutable releases exercise active-only migration and in-place historical retention.\n",
+  );
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-MIGRATION",
+    "--source",
+    "README.md",
+    "--summary",
+    "Stable evidence shared by two migration fixture releases",
+  ]);
+  mustRun([
+    "baseline",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "BASELINE-MIGRATION",
+    ...humanApproval("The migration fixture baseline is accurate"),
+  ]);
+
+  const olderRelease = completeAssessmentReleaseFixture(project, "LEGACY", "BASELINE-MIGRATION");
+  const activeRelease = completeAssessmentReleaseFixture(project, "ACTIVE", "BASELINE-MIGRATION");
+  assert.notEqual(olderRelease.release_manifest.id, activeRelease.release_manifest.id);
+
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const legacyConfig = readJson(configPath);
+  delete legacyConfig.claim_policy.default_ttl_seconds;
+  writeJson(configPath, legacyConfig);
+  const configBeforeDryRun = fs.readFileSync(configPath, "utf8");
+
+  const planned = JSON.parse(mustRun([
+    "migration",
+    "active",
+    "--root",
+    project,
+    "--release-manifest",
+    activeRelease.release_manifest.id,
+    "--json",
+  ]).stdout);
+  assert.equal(planned.status, "planned");
+  assert.equal(planned.mode, "active-only");
+  assert.equal(planned.config_update_required, true);
+  assert.equal(planned.config_updated, false);
+  assert.equal(planned.historical_releases, 1);
+  assert.ok(planned.historical_artifacts > 0);
+  assert.equal(planned.logical_archive.written, false);
+  assert.equal(planned.physical_files_moved, 0);
+  assert.equal(fs.readFileSync(configPath, "utf8"), configBeforeDryRun, "dry-run changed project config");
+  assert.equal(fs.existsSync(path.join(project, planned.logical_archive.path)), false, "dry-run wrote an archive record");
+
+  const applied = JSON.parse(mustRun([
+    "migration",
+    "active",
+    "--root",
+    project,
+    "--release-manifest",
+    activeRelease.release_manifest.id,
+    "--reason",
+    "Keep the older released evidence readable while excluding it from the exact active release gate",
+    "--apply",
+    "--actor-type",
+    "human",
+    "--json",
+  ]).stdout);
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.config_updated, true);
+  assert.equal(applied.logical_archive.written, true);
+  assert.equal(applied.logical_archive.idempotent, false);
+  assert.equal(applied.physical_files_moved, 0);
+  assert.equal(readJson(configPath).claim_policy.default_ttl_seconds, 86400);
+
+  const archivePath = path.join(project, applied.logical_archive.path);
+  const archiveRecord = readJson(archivePath);
+  assert.equal(archiveRecord.kind, "archive_record");
+  assert.equal(archiveRecord.schema_version, "archive-record:v1");
+  assert.equal(archiveRecord.release_manifest_ref.id, activeRelease.release_manifest.id);
+  assert.equal(archiveRecord.legacy_history_policy, "logically_archived_out_of_release_scope");
+  assert.ok(archiveRecord.source_paths.includes(olderRelease.application.release_manifest_ref.path));
+  for (const historicalArtifact of archiveRecord.artifacts) {
+    const originalPath = path.join(project, historicalArtifact.path);
+    assert.equal(fs.existsSync(originalPath), true, `${historicalArtifact.path} was moved or deleted`);
+    assert.equal(sha256File(originalPath), historicalArtifact.sha256, `${historicalArtifact.path} changed during migration`);
+    assert.equal(historicalArtifact.retention, "retain-in-place");
+    assert.equal(historicalArtifact.excluded_from_release, true);
+  }
+
+  const archiveFilesBeforeReplay = fs.readdirSync(path.dirname(archivePath)).filter((name) => name.startsWith("ARCH-") && name.endsWith(".json"));
+  const replay = JSON.parse(mustRun([
+    "migration",
+    "active",
+    "--root",
+    project,
+    "--release-manifest",
+    activeRelease.release_manifest.id,
+    "--apply",
+    "--actor-type",
+    "human",
+    "--json",
+  ]).stdout);
+  assert.equal(replay.status, "applied");
+  assert.equal(replay.config_update_required, false);
+  assert.equal(replay.config_updated, false);
+  assert.equal(replay.logical_archive.id, applied.logical_archive.id);
+  assert.equal(replay.logical_archive.idempotent, true);
+  assert.equal(replay.logical_archive.written, false);
+  assert.equal(replay.physical_files_moved, 0);
+  const archiveFilesAfterReplay = fs.readdirSync(path.dirname(archivePath)).filter((name) => name.startsWith("ARCH-") && name.endsWith(".json"));
+  assert.deepEqual(archiveFilesAfterReplay, archiveFilesBeforeReplay);
 });
 
 test("onboard existing project initializes KB and proposes approvable baseline", () => {
@@ -1579,7 +3063,7 @@ test("unsafe config directories and symlink context escapes are blocked", () => 
   const config = readJson(configPath);
   config.kb_directories = ["../../escape"];
   writeJson(configPath, config);
-  mustFail(["init", "--root", project, "--template-dir", templateDir], /unsafe/);
+  mustFail(["init", "--root", project, "--template-dir", templateDir], /unsafe|must match pattern/);
   assert.equal(fs.existsSync(path.resolve(project, "..", "escape")), false);
 
   initProject(project);
@@ -2341,8 +3825,16 @@ test("technical assessment aliases route through the contract front door", () =>
   assert.equal(start.status, "needs_user_input");
   assert.equal(start.execution_allowed, false);
   assert.notEqual(start.contract_action, "normalize_request");
-  assert.ok(start.blocking_reasons.includes("contract_incomplete"));
-  assert.equal(start.contract_id, "contract-analysis-v1");
+  assert.ok(start.blocking_reasons.includes("baseline_missing"));
+  assert.equal(start.contract_action, "approve_or_refresh_project_context");
+  assert.equal(start.contract_id, null);
+  assert.ok(start.questions.some((question) => (
+    question.includes("Checkpoint 1 of 2")
+    && question.includes("What I need:")
+    && question.includes("Why:")
+    && question.includes("Example answer:")
+    && question.includes("Effect:")
+  )));
 });
 
 test("cache rebuild includes capability discovery sources", () => {
@@ -2663,7 +4155,7 @@ test("task start is the SDLC front door before phase work", () => {
     readyProject,
     "AUTH-RESUME-ST-001",
     ["task.start.confirm"],
-    { subjects: ["ST-001"] },
+    { subjects: ["ST-001"], artifactTypes: ["implementation-summary"] },
   );
   mustRun([
     "story",
@@ -3979,6 +5471,46 @@ test("parallel contract approvals are serialized without losing records", async 
   assert.equal(contract.approvals.length, 2);
 });
 
+test("parallel story contract creation is serialized per story", async () => {
+  const project = tmpProject("parallel-story-contract-create");
+  initProject(project);
+  story(project, "ST-RACE");
+  createApprovedTemplate(project, "technical-analysis");
+
+  const ids = Array.from({ length: 8 }, (_, index) => `contract-ST-RACE-analysis-${index + 1}`);
+  const results = await Promise.all(ids.map((id) => runAsync([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-RACE",
+    "--id",
+    id,
+    "--context-summary",
+    `Concurrent contract ${id}`,
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--json",
+  ])));
+
+  const successful = results.filter((result) => result.status === 0);
+  const rejected = results.filter((result) => result.status !== 0);
+  assert.equal(successful.length, 1, results.map((result) => `${result.status}: ${result.stderr}`).join("\n"));
+  assert.equal(rejected.length, ids.length - 1);
+  assert.ok(rejected.every((result) => /already references contract/.test(result.stderr)));
+
+  const linkedStory = readJson(path.join(project, ".sdlc", "stories", "ST-RACE", "story.json"));
+  const contractsRoot = path.join(project, ".sdlc", "contracts");
+  const createdContracts = ids.filter((id) => fs.existsSync(path.join(contractsRoot, `${id}.json`)));
+  assert.deepEqual(createdContracts, [linkedStory.contract_id]);
+  assert.equal(fs.readdirSync(contractsRoot).some((name) => name.startsWith(".story-") && name.endsWith(".lock")), false);
+});
+
 test("parallel contract revision and approval preserve the revised content", async () => {
   const project = tmpProject("parallel-contract-revision");
   initProject(project);
@@ -4361,12 +5893,18 @@ test("schemas and JSON templates parse with portable local references", () => {
   assert.equal(outputTemplateSchema.properties.approved_delivery_hash.pattern, "^[a-f0-9]{64}$");
   const outputLinkSchema = readJson(path.join(repoRoot, "schemas", "output-link.schema.json"));
   assert.equal(outputLinkSchema.properties.delivery_format.description.includes("snapshot"), true);
-  assert.equal(outputLinkSchema.properties.verification_receipt.$ref, "#/$defs/verification_receipt");
-  assert.ok(outputLinkSchema.$defs.verification_receipt.required.includes("artifact_sha256"));
+  assert.equal(outputLinkSchema.properties.verification_receipt.$ref, "verification-receipt.schema.json");
+  const verificationReceiptSchema = readJson(path.join(repoRoot, "schemas", "verification-receipt.schema.json"));
+  assert.ok(verificationReceiptSchema.required.includes("container_verified"));
+  assert.ok(verificationReceiptSchema.required.includes("content_verified"));
+  assert.ok(verificationReceiptSchema.required.includes("render_verified"));
   const authorizationSchema = readJson(path.join(repoRoot, "schemas", "authorization.schema.json"));
   assert.ok(authorizationSchema.required.includes("allowed_actions"));
   assert.equal(authorizationSchema.properties.allowed_approval_boundaries.type, "array");
-  assert.equal(authorizationSchema.properties.hash_algorithm.const, "sha256:stable-json:v1");
+  assert.deepEqual(
+    authorizationSchema.properties.hash_algorithm.enum,
+    ["sha256:stable-json:v1", "sha256:stable-json:v2"],
+  );
   const releaseWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.match(releaseWorkflow, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
   assert.match(releaseWorkflow, /node: \[18\.18\.0, 20, 24\]/);

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "archive-plan.schema.json",
+  "title": "Agentic SDLC Historical Archive Plan",
+  "description": "Schema for the existing archive.closed command: a reviewable, optionally applied filesystem move plan. It is distinct from logical release-history archival.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "generated_at",
+    "cutoff_before",
+    "apply_requested",
+    "applied",
+    "candidates",
+    "source_paths",
+    "source_hashes",
+    "policy",
+    "audit"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "archive_plan" },
+    "schema_version": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "cutoff_before": { "type": "string", "format": "date-time" },
+    "apply_requested": { "type": "boolean" },
+    "applied": { "type": "boolean" },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "source_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "source_hashes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "policy": { "type": "string", "minLength": 1 },
+    "audit": { "$ref": "common.schema.json#/$defs/audit" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "candidate": {
+      "type": "object",
+      "required": ["source_path", "target_path", "reason", "size_bytes", "mtime", "sha256", "applied"],
+      "properties": {
+        "source_path": { "type": "string", "minLength": 1 },
+        "target_path": { "type": "string", "minLength": 1 },
+        "reason": { "enum": ["closed-report", "trace-compaction"] },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "mtime": { "type": "string", "format": "date-time" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "applied": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

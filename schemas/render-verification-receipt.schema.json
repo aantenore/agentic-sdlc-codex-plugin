@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "render-verification-receipt.schema.json",
+  "title": "Rendered Artifact Verification Receipt",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "status",
+    "artifact_path",
+    "artifact_sha256",
+    "renderer",
+    "rendered_at",
+    "checks",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "render_verification_receipt" },
+    "schema_version": { "const": "render-verification-receipt:v1" },
+    "status": { "const": "passed" },
+    "artifact_path": { "type": "string", "minLength": 1 },
+    "artifact_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "renderer": { "type": "string", "minLength": 1 },
+    "rendered_at": { "type": "string", "format": "date-time" },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "render_ref": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "media_type": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "receipt_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "additionalProperties": false
+}

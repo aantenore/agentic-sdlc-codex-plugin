@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "content-authorization.schema.json",
+  "title": "Agentic SDLC Proposal-Bound Content Authorization",
+  "description": "Immutable authorization snapshot bound to one proposal and exact action-subject pairs. Legacy v1 snapshots are accepted only when their pair mapping is unambiguous.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "status",
+    "proposal_ref",
+    "allowed_actions",
+    "allowed_subject_hashes",
+    "scope",
+    "scope_hash",
+    "use_policy",
+    "authority_assurance",
+    "valid_from",
+    "expires_at",
+    "granted_by",
+    "approval_source",
+    "constraints",
+    "created_at",
+    "updated_at",
+    "extensions",
+    "authorization_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "content_authorization" },
+    "schema_version": { "enum": ["content-authorization:v1", "content-authorization:v2"] },
+    "version": { "enum": [1, 2] },
+    "id": { "type": "string", "minLength": 1 },
+    "status": { "const": "active" },
+    "proposal_ref": { "$ref": "#/$defs/proposal_ref" },
+    "allowed_actions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+    },
+    "allowed_subject_hashes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "allowed_uses": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/allowed_use" }
+    },
+    "scope": {
+      "description": "Application-defined scope whose complete canonical content is protected by scope_hash.",
+      "type": "object",
+      "minProperties": 1
+    },
+    "scope_hash": { "$ref": "#/$defs/sha256" },
+    "use_policy": {
+      "type": "object",
+      "required": ["mode", "max_uses", "close_on_workflow_terminal", "require_usage_receipt"],
+      "properties": {
+        "mode": { "enum": ["single-use", "bounded", "per-action-once", "per-action-subject-once"] },
+        "max_uses": { "type": "integer", "minimum": 1 },
+        "close_on_workflow_terminal": { "const": true },
+        "require_usage_receipt": { "const": true },
+        "replay": { "enum": ["deny", "deny_same_action_subject", "allow"] }
+      },
+      "additionalProperties": false
+    },
+    "authority_assurance": { "$ref": "#/$defs/authority_assurance" },
+    "valid_from": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "granted_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "approval_source": { "type": ["string", "null"], "minLength": 1 },
+    "constraints": {
+      "description": "Explicit capability and environment constraints included in the authorization hash.",
+      "type": "object"
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "extensions": {
+      "description": "The only intentionally open extension point; its contents are still hash-bound.",
+      "type": "object"
+    },
+    "authorization_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "schema_version": { "const": "content-authorization:v2" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": { "version": { "const": 2 } },
+        "required": ["allowed_uses"]
+      },
+      "else": {
+        "properties": { "version": { "const": 1 } },
+        "not": { "required": ["allowed_uses"] },
+        "anyOf": [
+          { "properties": { "allowed_actions": { "maxItems": 1 } } },
+          { "properties": { "allowed_subject_hashes": { "maxItems": 1 } } }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "allowed_use": {
+      "type": "object",
+      "required": ["action", "subject_hash", "use_hash"],
+      "properties": {
+        "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "subject_hash": { "$ref": "#/$defs/sha256" },
+        "use_hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "proposal_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "authority_assurance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["mode", "source", "verified", "receipt_ref", "limitation"],
+          "properties": {
+            "mode": { "const": "audit_only" },
+            "source": { "const": "declared_cli_attribution" },
+            "verified": { "const": false },
+            "receipt_ref": { "type": "null" },
+            "limitation": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["mode", "source", "verified", "verified_at", "receipt_ref"],
+          "properties": {
+            "mode": { "const": "host_verified" },
+            "source": { "enum": ["host_approval_receipt", "ci_attestation"] },
+            "verified": { "const": true },
+            "verified_at": { "type": "string", "format": "date-time" },
+            "receipt_ref": { "$ref": "#/$defs/hashed_ref" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Provider-neutral compatibility representation emitted by the pure builder when the caller supplies an existing host assurance object.",
+          "type": "object",
+          "required": ["source", "receipt_ref", "verified", "verified_at"],
+          "properties": {
+            "source": { "enum": ["host-approval-receipt", "ci-attestation"] },
+            "receipt_ref": { "$ref": "#/$defs/hashed_ref" },
+            "verified": { "const": true },
+            "verified_at": { "type": "string", "format": "date-time" },
+            "verifier": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "common.schema.json#/$defs/actor" }
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}
