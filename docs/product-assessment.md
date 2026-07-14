@@ -10,13 +10,13 @@ The pre-change product has strong contract, approval, evidence, trace, and Git-f
 
 That is a product gap rather than a missing low-level feature. The engine is credible; the default user experience is not complete.
 
-### After The Complete Change Set
+### Target After The Complete Change Set
 
-**Verdict: go for bounded, local project assessments.**
+**Verdict: conditional go for bounded, local project assessments after the blocking evidence below passes.**
 
-The completed product accepts a natural project-contextualization request, activates a dedicated assessment journey, explains the inferred context before asking for approval, and uses no more than two normal checkpoints. Output format, extension, media type, delivery mode, generator, verification evidence, and approval scope are now canonical runtime data rather than presentation advice.
+The target product accepts a natural project-contextualization request, activates a dedicated assessment journey, explains inferred context, and uses exactly two normal checkpoints. Checkpoint 2 approves an immutable proposal hash binding the baseline, requirement/story reservation, deliverable, capabilities, contract draft, route intent, write-set, security boundary, verification plan, and complete execution budget.
 
-This verdict is supported by the full source suite, schema and plugin validators, a clean installed-plugin doctor run, a real Italian Codex interaction stopped at the explained context checkpoint, and real DOCX/XLSX artifacts generated, rendered, linked, and accepted by strict gates. Installs, external services, secrets, production, destructive actions, and writes outside the displayed output scope remain explicit decisions by design.
+The go decision requires a full source suite, schema and plugin validators, a clean installed-plugin run, multilingual two-checkpoint transcripts, and real format artifacts with generator, content, and render evidence. Installs, external services, secrets, production, destructive actions, out-of-scope writes, material proposal changes, and unapproved budget extensions remain explicit exceptions by design.
 
 ## Assessment Scope
 
@@ -44,10 +44,11 @@ Evidence considered includes the existing Agentic SDLC skill and interaction doc
 | --- | --- | --- |
 | Internal artifacts become user-facing checkpoints | A normal assessment can feel like configuring the SDLC engine instead of requesting an outcome | Collapse the journey into inferred context and one combined work proposal |
 | Baseline approval can be misunderstood as broader consent | A short confirmation may appear to authorize format, tools, contract, or execution | State and enforce that baseline approval applies only to baseline context |
-| Template, capability, contract, and start decisions are fragmented | Users repeat approvals for one conceptual task | Display scope, sources, sections, format, tools, limits, and start in one exact proposal |
-| Broader autonomy is easy to overstate or misattribute | Delegated approval may be recorded as direct human approval or silently widened | Preserve the declared scope and record covered decisions through `approval_source: automation` |
+| Template, capability, contract, start, and budget decisions are fragmented | Users repeat approvals for one conceptual task | Hash scope, sources, sections, format, tools, writes, contract, start, and budget into one proposal |
+| Broader autonomy is easy to overstate or misattribute | An agent can appear to self-declare human authority or silently widen it | Require a host/CI approval receipt, proposal-bound authorization, exact subject hashes, and validity-at-use receipts |
 | File format is presentation advice rather than a canonical contract | A `.md` file can be delivered when the user asked for Word or Excel | Store format, extension, media type, delivery mode, and generator capability; reject mismatches |
-| Format-specific creation and verification are not part of the journey | A renamed or structurally invalid artifact can appear complete | Require `documents`, `spreadsheets`, `pdf`, or `presentations` as appropriate and verify rendered output |
+| Structural verification is easy to overclaim | A valid container can appear semantically and visually verified | Separate generator attestation, container, content, render, and optional independent verification |
+| Execution has no explicit resource boundary | The agent may consume disproportionate time/tokens or stop before verification | Approve one concrete budget tranche with warnings, completion reserve, stop policy, usage receipt, and versioned amendments |
 | No assessment-specific preset | Assessments vary by agent and can omit product, security, evidence, or decision content | Provide one adaptable semantic preset for document and workbook delivery |
 | The starter prompts lead with engine operations | The primary assessment journey is difficult to discover without prior plugin knowledge | Make project contextualization plus assessment the first product prompt |
 | Installed-plugin behavior is not the primary release proof | Source-tree success can hide packaging or discovery defects | Exercise the realistic journey from the installed plugin |
@@ -56,7 +57,7 @@ Evidence considered includes the existing Agentic SDLC skill and interaction doc
 
 ### Checkpoint 1: Project Context
 
-The product explains what it inferred from repository and KB evidence: purpose, stack, components, constraints, important files, assumptions, contradictions, and unknowns. The user approves or corrects only those facts. No assessment finding is produced yet, and this approval does not leak into later records.
+The product explains what it inferred from repository and KB evidence: purpose, stack, components, constraints, important files, assumptions, contradictions, and unknowns. The question explains what is asked, why, what the answer authorizes and excludes, and gives Italian and English response examples. The user approves or corrects only those facts. No assessment finding is produced yet, and this approval does not leak into later records.
 
 ### Checkpoint 2: Combined Work Proposal
 
@@ -68,15 +69,17 @@ The product presents one concrete proposal containing:
 - ordered sections and format adaptation;
 - canonical format, extension, media type, path, delivery mode, generator, and verifier;
 - concrete tools, permissions, and targets;
+- exact write-set, subject IDs/hashes, contract draft, and route intent;
+- exact active-time and step defaults, an estimated token soft threshold with no hard limit, warning thresholds, verification reserve, and stop/extension policy; cost is unavailable and non-binding unless backed by a trustworthy pricing adapter, pricing reference, and currency;
 - assumptions, missing information, limits, and escalation boundaries;
 - the exact records and actions that approval will authorize;
 - the execution start and final delivery behavior.
 
-One answer covers only what is shown. A material change requires a revised proposal. A separately declared autonomy level applies only inside its exact boundary and is recorded as automation.
+One answer covers only the immutable proposal hash shown. The question explains what is asked, why, what it authorizes/excludes, and gives bilingual examples. A material change requires a revised proposal. A budget increase is a versioned amendment, never a mutation of the approved base budget.
 
 ### Execution And Delivery
 
-After approval, the product creates only the represented canonical records, confirms start, performs the assessment, creates the artifact using the required format skill, verifies the file and rendered result, links it to the approved output contract, records evidence, and summarizes the verdict in chat. There is no mandatory third approval before delivery.
+After approval, `assessment proposal approve` creates host approval evidence and a proposal-bound content authorization. `assessment proposal apply` idempotently creates only the represented records and each automation use gets a validity-at-use receipt. The product performs the assessment, records budget usage, creates the artifact using the required format skill, records a generator receipt, verifies container/content/render dimensions, links the output, and completes without a routine third approval.
 
 ## Format Product Contract
 
@@ -84,14 +87,16 @@ The first-class formats are `markdown`, `docx`, `xlsx`, `pdf`, `pptx`, `html`, `
 
 The semantic assessment model remains stable across formats. Word preserves headings and tables. Excel uses section-specific worksheets, stable row IDs, and evidence references. PowerPoint condenses the decision narrative and retains detailed evidence in an appendix. JSON preserves section keys and IDs. CSV explicitly flattens the hierarchy rather than pretending to preserve rich document layout.
 
-## Verified Product Evidence
+## Required Product Evidence
 
-- The complete automated source suite passes, including happy paths, stale-state checks, scoped delegated authorization, same-claimant resume, format aliases, extension rejection, structural verification, visual-evidence requirements, and installed-plugin discovery assumptions.
-- `doctor`, syntax checks, package checks, JSON Schema checks, plugin manifest validation, and both skill validators pass.
-- A clean local installation reports plugin version `0.5.0` and passes its bundled doctor checks.
-- A real Italian Codex request selected both the core and assessment skills, inspected the repository, ran the local test, explained facts, assumptions, missing components, unknowns, and approval scope, then stopped at Checkpoint 1 without producing the assessment.
-- Real DOCX and XLSX assessments were created through their format libraries, rendered for visual inspection, linked with verification receipts, and accepted by strict SDLC gates.
-- CI covers supported Node versions on Linux, macOS, and Windows; release automation packages and checksums tagged builds.
+Do not turn planned checks into historical claims. A release evidence bundle must contain:
+
+- passing source, schema, package, plugin, and skill validation outputs;
+- clean installed-package execution on supported platforms;
+- Italian and English transcripts showing exactly the two normal checkpoints and full question contracts;
+- negative tests for missing baseline, changed proposal hash, self-declared human approval, authorization replay, stale subject hash, and budget overrun;
+- real DOCX/XLSX/PDF/PPTX examples whose generator receipt, container checks, semantic checks, and renders all refer to the delivered artifact hash;
+- a release manifest linking proposal, requirement/story, authorization-use, execution-usage, verification, and gate evidence.
 
 ## Remaining Limits
 
@@ -99,7 +104,7 @@ These are product boundaries rather than incomplete happy-path behavior:
 
 - Generator skills are runtime dependencies. If one is missing, installation remains a direct decision and the product must not fabricate the requested format.
 - Static repository inspection cannot validate production topology, live security controls, data handling, or operational performance without separately approved access.
-- Structural and visual validation cannot guarantee strong reasoning. The assessment preset therefore requires evidence references, confidence, contradictions, and actionable recommendations.
+- Container and visual validation cannot guarantee strong reasoning. Content verification therefore applies an evidence/ID/section rubric and still records limitations.
 - PPTX and CSV are intentionally reduced views of a detailed assessment; appendices or flattened records preserve required evidence.
 - The two-checkpoint promise applies to the normal bounded path. A materially changed scope or risky capability properly creates an exceptional decision.
 
@@ -112,12 +117,20 @@ These are product boundaries rather than incomplete happy-path behavior:
 | Blocking | Context boundary | Checkpoint 1 presents evidence and inference clearly; its approval is stored only against the baseline | Approval-record assertions |
 | Blocking | Two-checkpoint journey | A low-risk local assessment completes with at most context plus combined proposal decisions | End-to-end interaction transcript/assertions |
 | Blocking | Combined proposal completeness | Scope, sources, sections, artifact metadata, tools, limits, missing information, approval meaning, and start are all displayed | Proposal snapshot or structured assertion |
+| Blocking | Immutable proposal | Baseline hash, requirement/story, deliverable, capabilities, contract draft, route intent, write-set, security, and budget are bound by one proposal hash | Hash mutation and replay tests |
+| Blocking | Question clarity | Every normal and exceptional question states what/why/authorizes/excludes and gives Italian/English examples; open-question category guidance and fallback are configuration-driven | Transcript and configuration-schema assertions |
 | Blocking | Exact approval scope | A short approval covers only displayed proposal elements; unseen or changed artifacts remain unapproved | Negative approval tests |
+| Blocking | Host authority | Direct human/CI approval has a host/CI receipt; an agent flag cannot impersonate authority | Provenance tests |
+| Blocking | Authorization history | Each automated use stores an authorization snapshot valid at use time; later close/revoke preserves valid history | Lifecycle and strict-gate tests |
 | Blocking | Delegated autonomy | Broader autonomy is preserved exactly and later covered approvals use `actor_type: agent` with `approval_source: automation` | Approval provenance tests |
 | Blocking | Local capability bookkeeping | Already-installed local read-only tools do not add a separate checkpoint when policy permits; installs/external/secrets/production/out-of-scope writes do | Happy-path and escalation tests |
 | Blocking | Canonical formats | All eight formats store format, extension, media type, delivery mode, and generator; aliases normalize deterministically | Schema and CLI tests |
 | Blocking | Extension enforcement | Linking an artifact whose extension contradicts the approved format fails consistently | Negative CLI test for every format family |
-| Blocking | Generator verification | DOCX, XLSX/CSV, PDF, and PPTX are generated and verified with `documents`, `spreadsheets`, `pdf`, and `presentations` respectively | Artifact and render evidence |
+| Blocking | Generator verification | DOCX, XLSX/CSV, PDF, and PPTX have a generator receipt for the exact hash, separate render evidence, and passed required verification dimensions | Generator receipt, artifact, semantic rubric, and renders |
+| Blocking | Budget tranche | Checkpoint 2 shows concrete meterable limits, accuracy, warnings, reserve, limit action, and extension policy; usage aggregates subagents | Budget snapshots, threshold, overrun, amendment, and usage-receipt tests |
+| Blocking | Requirement lineage | The assessment creates/reuses a real requirement and links the same ID through story, output, and release | Referential-integrity tests |
+| Blocking | Recovery | Apply is idempotent and a partial failure resumes without a new normal checkpoint or duplicate records | Fault-injection tests |
+| Blocking | Release evidence | Release manifest links proposal, receipts, output, verification, budget, and gate receipts; logical legacy exclusion and transactional filesystem archive plans are distinct | Manifest/gate/archive-record/archive-plan schema and rollback tests |
 | Blocking | Assessment coverage | The preset includes product/context, architecture/component inventory, quality/tests, privacy/security, risks, recommendations, roadmap, evidence, and open decisions | Template structure test |
 | Blocking | Word and Excel adaptation | The same semantic assessment renders as a readable Word document and a usable workbook without dropping required sections or evidence IDs | Rendered DOCX review and workbook inspection |
 | Blocking | Installed package | The installed plugin discovers the skill and preset and completes the realistic journey | Clean-install smoke/e2e evidence |
@@ -126,17 +139,19 @@ These are product boundaries rather than incomplete happy-path behavior:
 
 ## Representative Acceptance Scenarios
 
-1. An Italian request for a Markdown technical assessment uses two checkpoints and returns a verified `.md` artifact plus chat summary.
+1. An Italian request for a Markdown technical assessment uses exactly two normal checkpoints, each with the full question contract, and returns a content-verified `.md` artifact plus chat summary.
 2. A request for a "Word assessment" normalizes to DOCX, uses `documents`, renders the result, and links only `.docx`.
 3. A request for an "Excel architecture assessment" normalizes to XLSX and produces the prescribed worksheets with stable IDs and evidence references.
 4. A proposed Markdown template cannot link an `.xlsx` artifact, and a DOCX template cannot link a `.md` artifact.
-5. An approved baseline followed by "ok" does not approve capabilities, format, contract, or start.
+5. An approved baseline followed by "ok" does not approve capabilities, format, contract, budget, or start.
 6. Already-installed local read-only capability records are handled as policy-backed automation without a third checkpoint.
 7. A missing generator skill, external evidence source, secret-bearing endpoint, production target, or new write location produces an explicit decision before use.
 8. A user-declared autonomy scope is copied into automation approval evidence without adding installs or unrelated work.
 9. The same assessment preset produces coherent Markdown, Word, and Excel outputs with all mandatory sections represented.
-10. A clean plugin install shows the contextualization-and-assessment starter before low-level initialization, contract, or gate prompts.
+10. A budget reaches 70% and 90% with non-blocking warnings, preserves verification reserve, and requires a versioned amendment before an unapproved overrun.
+11. Revoking the authorization after completion blocks future use without invalidating historical validity-at-use receipts.
+12. A clean plugin install shows the contextualization-and-assessment starter before low-level initialization, contract, or gate prompts.
 
 ## Product Decision
 
-Ship `0.5.0` as a complete bounded project-assessment product. Describe its scope precisely: repository and local-tool assessments are autonomous after the displayed decisions; external systems, installations, secrets, production access, destructive operations, and new out-of-scope writes require a new explicit decision.
+Ship the self-service assessment claim only when every blocking criterion has durable release evidence. Describe the boundary precisely: repository and local-tool assessments may run after the two displayed decisions; external systems, installations, secrets, production access, destructive operations, new write paths, material proposal changes, and unapproved budget extensions require an explicit exception decision.

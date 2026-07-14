@@ -117,6 +117,26 @@
     "human_gate": {
       "type": "boolean"
     },
+    "proposal_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/hashed_ref"
+        }
+      ]
+    },
+    "execution_budget_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/hashed_ref"
+        }
+      ]
+    },
     "execution_policy": {
       "type": "object",
       "required": [
@@ -178,6 +198,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "budget": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "execution-budget.schema.json"
+            }
+          ]
         }
       },
       "additionalProperties": true
@@ -391,6 +421,30 @@
     }
   },
   "$defs": {
+    "hashed_ref": {
+      "type": "object",
+      "required": [
+        "id",
+        "hash"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "capability_set": {
       "type": "object",
       "additionalProperties": true,

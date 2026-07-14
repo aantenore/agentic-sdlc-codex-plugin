@@ -16,7 +16,7 @@ The dedicated `Project Assessment` skill is visible in Codex and can also be sel
 
 ## The Assessment Journey
 
-A normal local, read-only assessment has at most two user checkpoints.
+A normal local, read-only assessment has exactly two logical user checkpoints. Every question explains what is being asked, why, what the answer authorizes and excludes, and gives Italian and English reply examples.
 
 ### 1. Confirm Project Context
 
@@ -28,7 +28,7 @@ Codex inspects the repository and summarizes:
 - observed facts versus inferences;
 - assumptions, contradictions, confidence, and missing information.
 
-Approve or correct that summary. This decision confirms only the project context; it does not start the assessment.
+The first question asks the user to approve or correct that summary, explains why a canonical baseline is needed, and states that the answer confirms only project context. It does not approve or start the assessment.
 
 ### 2. Approve One Work Proposal
 
@@ -40,12 +40,16 @@ Codex then presents one concrete proposal containing:
 - ordered report sections;
 - real output format, destination, and delivery mode;
 - installed local tools and exact read/write boundaries;
+- the exact requirement/story, contract draft, route intent, subject hashes, and write-set;
+- exact active-time defaults (2,700/3,600 seconds), exact step defaults (40/60), an advisory estimated token threshold (200,000 with no hard limit), warning thresholds, verification reserve, stop policy, and extension boundary; hard limits require receipt coverage from a configured trusted adapter and fail closed without it, while cost stays unavailable and non-binding until a trustworthy pricing adapter, pricing reference, and currency are configured;
 - assumptions, limitations, and actions that would require a new decision;
 - what approval will authorize and what it will not authorize.
 
-One answer approves or changes that exact bundle. After approval, Codex first creates or reuses the displayed story, persists the bundle with `authorization grant`, and cites that authorization for internal approvals and `task start --confirm-start`. It then completes the assessment, verifies the artifact, records the result, and summarizes it in chat without adding a routine third checkpoint.
+One answer approves or changes that exact proposal hash. `assessment proposal approve` records host/CI authority and creates a proposal-bound authorization; `assessment proposal apply` creates or reuses only the displayed requirement/story and other write-set records idempotently. Each automated use gets a validity-at-use receipt. Codex then records aggregate budget usage, verifies the artifact in distinct dimensions, and summarizes it without a routine third checkpoint.
 
-An extra decision is required only when execution would cross a displayed boundary, for example a new installation, external or production access, secrets, destructive work, writes outside the agreed paths, or a material proposal change.
+Normalized assessment actions are configured in `assessment_workflow.requested_actions`. Open-question explanations are configured in `open_question_guidance`, including category keywords, why each answer is needed, bilingual examples, its proposal effect, and a safe fallback. New aliases or guidance therefore do not require hardcoded CLI branches.
+
+An extra decision is required only when execution would cross a displayed boundary, for example a new installation, external or production access, secrets, destructive work, writes outside the agreed paths, a material proposal change, or an unapproved budget extension.
 
 ## Canonical Output Formats
 
@@ -64,9 +68,9 @@ Requested formats are stored as canonical delivery metadata; a Markdown file ren
 
 Assessment delivery is either `artifact` or `artifact-plus-chat-summary`; the latter is the default.
 
-## Verification And Receipt
+## Generation And Layered Verification Receipts
 
-Every linked artifact receives deterministic format checks and a stored verification receipt. The receipt includes the canonical format, verifier, checks performed, artifact SHA-256, evidence hashes, and verification time.
+Every non-native artifact has an `artifact_generator_receipt` for the exact delivered hash. Verification then reports `container_verified`, `content_verified`, and `render_verified` separately, plus optional independent verification. A structurally valid container is never described as semantically or visually verified.
 
 DOCX, XLSX, PDF, PPTX, and HTML outputs also require render or visual-check evidence. The evidence must be a real project file outside `.sdlc/cache/` and `.sdlc/indexes/`, and it must be passed when the artifact is linked:
 
@@ -77,11 +81,13 @@ node bin/agentic-sdlc.mjs output link \
   --artifact docs/technical-assessment.pdf \
   --template technical-analysis-v1 \
   --mode new \
-  --requirement REQ-001 \
-  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-render-check.md
+  --requirement REQ-INITIAL-ASSESSMENT \
+  --authorization <authorization-id-from-assessment-proposal-approve> \
+  --receipt-file .sdlc/receipts/generation/GEN-ST-INITIAL-ASSESSMENT.json \
+  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-render.png
 ```
 
-There is no separate receipt command. Inspect the persisted output link and its `verification_receipt` with:
+`--authorization` is the exact proposal-bound ID returned by checkpoint 2; linking consumes its dedicated `output.link` action/subject pair and persists a usage receipt. `--receipt-file` identifies the real generator; `--evidence` is separate content/render proof. Inspect the persisted output link and layered receipt with:
 
 ```bash
 node bin/agentic-sdlc.mjs output status \
@@ -158,11 +164,12 @@ If the plugin is absent or shows an older version, rerun the installer and `code
 
 ## Safety Boundaries
 
-- Repository evidence is read-only unless the approved proposal names a write.
+- Repository application evidence is read-only unless the approved proposal names a write; proposed `.sdlc/` workflow records may be persisted before checkpoint 2.
 - Normal writes are limited to the agreed artifact and canonical `.sdlc/` records.
 - New installs, external systems, secrets, production access, destructive actions, and unrelated writes require an explicit decision.
 - Every assessment uses an explicit story before its contract or output is persisted.
-- A free-text scope is not an automation credential. Checkpoint 2 creates a persisted `authorization grant`; each covered approval and agent-confirmed `task start --confirm-start` must cite it with `--authorization <id>`.
+- A free-text scope or `actor-type human` flag is not authority. Checkpoint 2 binds a host/CI receipt and content authorization to the proposal hash; every covered use stores a validity-at-use receipt.
+- The approved budget aggregates main-agent and subagent usage, preserves a completion reserve, and changes only through a versioned amendment.
 - Cache and indexes are derived data and never count as canonical evidence.
 
 ## Advanced CLI
@@ -174,10 +181,16 @@ node bin/agentic-sdlc.mjs --help
 node bin/agentic-sdlc.mjs doctor --root /path/to/project --json
 node bin/agentic-sdlc.mjs status --root /path/to/project
 node bin/agentic-sdlc.mjs approval requests --root /path/to/project --json
-node bin/agentic-sdlc.mjs gate check --root /path/to/project --story ST-INITIAL-ASSESSMENT --strict --json
+node bin/agentic-sdlc.mjs assessment proposal status --root /path/to/project --id ASSESSMENT-001 --json
+node bin/agentic-sdlc.mjs budget status --root /path/to/project --proposal ASSESSMENT-001 --json
+node bin/agentic-sdlc.mjs gate check --root /path/to/project --scope release-manifest --release-manifest RELEASE-ASSESSMENT-001 --strict --json
+node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-manifest RELEASE-ASSESSMENT-001
+node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-manifest RELEASE-ASSESSMENT-001 --apply
 ```
 
 Natural-language interpretation stays in Codex. The CLI accepts canonical structured intent and performs deterministic state, format, authorization, and evidence checks.
+
+`migration active` is deliberately dry-run first. It validates the immutable records referenced by one exact release manifest, upgrades only missing configuration defaults when `--apply` is present, and never rewrites an approved record. Evidence referenced only by older valid releases remains where it is and is listed in an `archive-record:v1`; this logical archive changes gate scope, not filesystem location. Use the separate `archive closed --apply` workflow only when old closed reports or trace compactions must physically move.
 
 ## Repository Layout
 
@@ -188,6 +201,7 @@ bin/agentic-sdlc.mjs                         Cross-platform Node.js CLI
 docs/agent-interactions.md                   Two-checkpoint assessment interaction
 docs/portable-install.md                     Install and recovery guide
 schemas/                                     Canonical data contracts
+lib/                                         Pure proposal, authorization, budget, and workflow primitives
 skills/agentic-sdlc/                         Core project workflow skill
 skills/agentic-sdlc-assessment/              Guided assessment skill
 skills/agentic-sdlc-assessment/agents/       Assessment agent card

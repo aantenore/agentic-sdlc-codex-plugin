@@ -103,7 +103,27 @@
       ]
     },
     "verification_receipt": {
-      "$ref": "#/$defs/verification_receipt"
+      "$ref": "verification-receipt.schema.json"
+    },
+    "verification_receipt_ref": {
+      "description": "Optional v1 layered verification receipt stored as a canonical file.",
+      "$ref": "#/$defs/hashed_ref"
+    },
+    "authorization_ref": {
+      "description": "Content authorization consumed for a proposal-bound output link.",
+      "type": ["string", "null"]
+    },
+    "authorization_use_ref": {
+      "description": "Canonical historical-at-use receipt proving output.link authority.",
+      "type": ["string", "null"]
+    },
+    "authorization_action": {
+      "description": "Exact action consumed by authorization_use_ref.",
+      "enum": ["output.link", null]
+    },
+    "legacy_verification_receipt": {
+      "description": "Read-only compatibility payload for output links created before canonical verification-receipt:v1. New writers must use verification_receipt and verification_receipt_ref.",
+      "$ref": "#/$defs/legacy_verification_receipt"
     },
     "fingerprints": {
       "type": "object",
@@ -112,6 +132,15 @@
         "hash_algorithm"
       ],
       "properties": {
+        "kind": {
+          "const": "verification_receipt"
+        },
+        "schema_version": {
+          "const": "verification-receipt:v1"
+        },
+        "id": {
+          "type": "string"
+        },
         "artifact_sha256": {
           "type": "string"
         },
@@ -139,7 +168,7 @@
     }
   },
   "$defs": {
-    "verification_receipt": {
+    "legacy_verification_receipt": {
       "type": "object",
       "required": [
         "status",
@@ -191,9 +220,90 @@
         "verified_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "generator_receipt": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/legacy_receipt_ref"
+            }
+          ]
+        },
+        "container_verified": {
+          "$ref": "#/$defs/legacy_verification_dimension"
+        },
+        "content_verified": {
+          "$ref": "#/$defs/legacy_verification_dimension"
+        },
+        "render_verified": {
+          "$ref": "#/$defs/legacy_verification_dimension"
+        },
+        "receipt_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "additionalProperties": false
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "legacy_receipt_ref": {
+      "type": "object",
+      "required": [
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "legacy_verification_dimension": {
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "required": ["status", "checks"],
+          "properties": {
+            "status": {
+              "enum": ["passed", "failed", "not_required", "verified", "not-required", "not-run"]
+            },
+            "checks": { "type": "array", "items": { "type": "string" } },
+            "evidence": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      ]
     },
     "evidence": {
       "type": "object",
@@ -211,8 +321,13 @@
           "pattern": "^[a-f0-9]{64}$"
         }
       },
-      "additionalProperties": false
-    }
+  "dependentRequired": {
+    "authorization_ref": ["authorization_use_ref", "authorization_action"],
+    "authorization_use_ref": ["authorization_ref", "authorization_action"],
+    "authorization_action": ["authorization_ref", "authorization_use_ref"]
+  },
+  "additionalProperties": false
+}
   },
   "additionalProperties": true
 }
