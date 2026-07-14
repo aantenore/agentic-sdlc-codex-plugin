@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metering-delta.schema.json",
+  "title": "Provider-neutral advisory metering delta v1",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "adapter",
+    "scope",
+    "interval",
+    "baseline_ref",
+    "current_ref",
+    "usage",
+    "metering",
+    "assurance",
+    "delta_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "metering_delta" },
+    "schema_version": { "const": "metering-delta:v1" },
+    "version": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "adapter": { "$ref": "metering-snapshot.schema.json#/$defs/adapter" },
+    "scope": { "$ref": "metering-snapshot.schema.json#/$defs/scope" },
+    "interval": {
+      "type": "object",
+      "required": ["started_at", "ended_at"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "baseline_ref": { "$ref": "#/$defs/snapshot_ref" },
+    "current_ref": { "$ref": "#/$defs/snapshot_ref" },
+    "usage": {
+      "type": "object",
+      "required": ["tokens", "calls", "sessions", "cost"],
+      "properties": {
+        "tokens": { "$ref": "metering-snapshot.schema.json#/$defs/tokens" },
+        "calls": { "$ref": "metering-snapshot.schema.json#/$defs/counter" },
+        "sessions": { "$ref": "metering-snapshot.schema.json#/$defs/counter" },
+        "cost": { "$ref": "metering-snapshot.schema.json#/$defs/money" }
+      },
+      "additionalProperties": false
+    },
+    "metering": { "$ref": "metering-snapshot.schema.json#/$defs/metering" },
+    "assurance": { "$ref": "metering-snapshot.schema.json#/$defs/assurance" },
+    "delta_hash": { "$ref": "metering-snapshot.schema.json#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "snapshot_ref": {
+      "type": "object",
+      "required": ["id", "hash", "captured_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "metering-snapshot.schema.json#/$defs/sha256" },
+        "captured_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
