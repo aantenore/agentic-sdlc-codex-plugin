@@ -351,6 +351,19 @@
               "properties": {
                 "enabled": { "type": "boolean" },
                 "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+                "command": {
+                  "type": "object",
+                  "required": ["executable", "arguments"],
+                  "properties": {
+                    "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "arguments": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+                    }
+                  },
+                  "additionalProperties": false
+                },
                 "metric_mapping": {
                   "type": "object",
                   "minProperties": 1,

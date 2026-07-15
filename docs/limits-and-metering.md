@@ -366,6 +366,8 @@ CodeBurn is useful for local visibility into tokens, calls, and estimated cost. 
 
 The integration accepts CodeBurn `0.9.x`, which must be installed separately. The plugin does not install or upgrade it.
 
+The adapter command is replaceable in `.sdlc/config.json` through `budget_policy.metering_adapters.codeburn.command.executable` and `.arguments`. Arguments are passed as a vector with `shell: false`. This lets Windows hosts bypass npm's non-executable `.cmd` shim safely by invoking `node.exe` with CodeBurn's `dist/cli.js` entrypoint, and lets CI pin a hermetic executable without changing metering logic.
+
 ### Metric mapping
 
 The default project configuration maps CodeBurn sources as follows:

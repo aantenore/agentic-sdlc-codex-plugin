@@ -114,27 +114,35 @@ test("report argv is allowlisted and execution never uses a shell or real CodeBu
   const executor = async (executable, argv, options) => {
     calls.push({ executable, argv: [...argv], options });
     assert.equal(options.shell, false);
-    if (argv[0] === "--version") {
+    if (argv.at(-1) === "--version") {
       return { stdout: "0.9.15\n", stderr: "" };
     }
     return { stdout: FIXTURE_JSON, stderr: "" };
   };
+  const prefixArgs = ["/opt/tools/codeburn-cli.mjs"];
   const execution = await executeCodeBurnReport(QUERY, {
-    executable: "/opt/tools/codeburn",
+    executable: process.execPath,
+    prefix_args: prefixArgs,
     executor,
     cwd: "/tmp",
   });
   assert.equal(execution.tool_version, "0.9.15");
   assert.equal(execution.report.overview.calls, 120);
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].argv, buildCodeBurnReportArgv(QUERY));
+  assert.deepEqual(calls[0].argv, [...prefixArgs, "--version"]);
+  assert.deepEqual(calls[1].argv, [...prefixArgs, ...buildCodeBurnReportArgv(QUERY)]);
 
   const collected = await collectCodeBurnMeteringSnapshot(
     { id: "meter-collected", query: QUERY },
-    { executable: "/opt/tools/codeburn", executor, cwd: "/tmp" },
+    { executable: process.execPath, prefix_args: prefixArgs, executor, cwd: "/tmp" },
   );
   assert.equal(collected.id, "meter-collected");
   assert.equal(validateMeteringSnapshotIntegrity(collected).valid, true);
+
+  await assert.rejects(
+    () => detectCodeBurn({ prefix_args: "--loader" }),
+    /prefix_args must be an array/u,
+  );
 });
 
 test("detection is explicit for supported, unsupported, and missing executables", async () => {
