@@ -4,52 +4,171 @@ Agentic SDLC 0.6.0 gives Codex a guided way to understand an existing software p
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains only reusable skills, templates, schemas, and the cross-platform Node.js CLI.
 
-## Start Here
+## Documentation Map
 
-Install the plugin, open the target project in a new Codex task, and use the first starter prompt:
+- [Documentation home](docs/README.md) — choose the right guide without knowing the internal record names.
+- [How It Works](docs/how-it-works.md) — the complete two-checkpoint journey, state transitions, authorization, verification, and recovery.
+- [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
+- [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
+- [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
+
+## Quick Start
+
+Install from the `aantenore` source repository. Keep this checkout separate from the generated personal-plugin directory:
+
+```bash
+git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git
+cd agentic-sdlc-codex-plugin
+python3 scripts/install-personal-marketplace.py
+codex plugin add agentic-sdlc-codex-plugin@personal
+codex plugin list --json
+```
+
+Open the project you want to assess in a **new Codex task**, then ask naturally:
 
 ```text
 Contextualize this project and prepare an initial technical assessment.
 ```
 
-The dedicated `Project Assessment` skill is visible in Codex and can also be selected implicitly from equivalent natural-language requests, including requests in languages other than English.
+The dedicated `Project Assessment` skill is visible in Codex and is also selected implicitly from equivalent requests. Normal use is conversational: the low-level CLI commands are available for automation and recovery, but the user does not need to orchestrate them manually.
 
-## The Assessment Journey
+## How It Works
 
-A normal local, read-only assessment has exactly two logical user checkpoints. Every question explains what is being asked, why, what the answer authorizes and excludes, and gives Italian and English reply examples.
+A normal local assessment has **two user checkpoints**, not one approval for every internal record. The first confirms facts about the project; the second approves one immutable, complete execution tranche.
 
-### 1. Confirm Project Context
+```mermaid
+flowchart TD
+  A["Inspect repository and local evidence<br/>read-only"] --> B["Explain facts, inferences,<br/>assumptions, and missing information"]
+  B --> C{"Checkpoint 1<br/>Is the project context correct?"}
+  C -- "Correct it" --> B
+  C -- "Approve context only" --> D["Prepare complete proposal<br/>scope + output + tools + writes + budget"]
+  D --> E{"Checkpoint 2<br/>Approve this exact proposal hash?"}
+  E -- "Change it" --> D
+  E -- "Approve complete tranche" --> F["Create proposal-bound authorization<br/>for exact action × subject pairs"]
+  F --> G["Apply the displayed write-set<br/>idempotently"]
+  G --> H["Execute, meter, generate,<br/>and verify the real artifact"]
+  H --> I["Release gate and final result<br/>no routine third checkpoint"]
+  G -.->|"New boundary or budget exception"| X{"Exceptional decision"}
+  H -.->|"New boundary or budget exception"| X
+  X -- "Approve versioned change" --> H
+  X -- "Reject or stop" --> Y["Partial delivery or safe stop"]
+```
 
-Codex inspects the repository and summarizes:
+### What The Two Checkpoints Mean
 
-- the product purpose, users, and current state supported by evidence;
-- the detected stack, runtime, integrations, and architecture boundaries;
-- the files and documents used;
-- observed facts versus inferences;
-- assumptions, contradictions, confidence, and missing information.
+| Checkpoint | What Codex asks | What your answer authorizes | What it does **not** authorize | Example answer |
+| --- | --- | --- | --- | --- |
+| **1 — Project context** | Is the displayed understanding factually correct? | The exact baseline content hash | Starting work, creating the deliverable, tools, writes, budget, production, or external access | `I approve this project context.` or `Correction: we use Kubernetes, not ECS.` |
+| **2 — Complete proposal** | May Codex execute the displayed scope, output, tools, write-set, limits, and stop policy? | Only the exact proposal hash and its exact action × subject pairs | Undisplayed actions, future proposals, broader paths, secrets, production, destructive work, or silent budget extensions | `I approve this complete proposal.` or `Change the hard limit to 45 minutes and show the proposal again.` |
 
-The first question asks the user to approve or correct that summary, explains why a canonical baseline is needed, and states that the answer confirms only project context. It does not approve or start the assessment.
+Every question must say **what is being asked, why it is needed now, what the answer authorizes, what it excludes, and valid answer examples**. A bare “Proceed?” is not sufficient.
 
-### 2. Approve One Work Proposal
+Checkpoint 2 displays, in plain language:
 
-Codex then presents one concrete proposal containing:
+- outcome, audience, scope, exclusions, depth, evidence sources, and checks;
+- stable requirement/story IDs and whether each record will be created or reused;
+- report sections, real output format, destination, delivery mode, generator, and verifier;
+- installed tools plus exact read, write, external-access, and production boundaries;
+- contract draft, route intent, subject hashes, exact write-set, and idempotent recovery plan;
+- aggregate limits for the main agent and subagents, warning thresholds, completion reserve, stop policy, and extension boundary;
+- assumptions, limitations, and every action that would require a new decision.
 
-- outcome, audience, scope, exclusions, and depth;
-- the stable assessment record ID, for example `ST-INITIAL-ASSESSMENT`, and whether it will be created or reused;
-- evidence sources and checks;
-- ordered report sections;
-- real output format, destination, and delivery mode;
-- installed local tools and exact read/write boundaries;
-- the exact requirement/story, contract draft, route intent, subject hashes, and write-set;
-- exact active-time defaults (2,700/3,600 seconds), exact step defaults (40/60), an advisory estimated token threshold (200,000 with no hard limit), warning thresholds, verification reserve, stop policy, and extension boundary; hard limits require receipt coverage from a configured trusted adapter and fail closed without it, while cost stays unavailable and non-binding until a trustworthy pricing adapter, pricing reference, and currency are configured;
-- assumptions, limitations, and actions that would require a new decision;
-- what approval will authorize and what it will not authorize.
+The default budget has exact active-time targets of 2,700/3,600 seconds, exact step targets of 40/60, and an advisory estimated token threshold of 200,000 with no token hard limit. Cost remains unavailable and non-binding until a trustworthy metering adapter, immutable pricing reference, and currency are configured. See [Autonomy, Limits, and Metering](docs/limits-and-metering.md) before changing these defaults.
 
-One answer approves or changes that exact proposal hash. `assessment proposal approve` records host/CI authority and creates a proposal-bound authorization; `assessment proposal apply` creates or reuses only the displayed requirement/story and other write-set records idempotently. Each automated use gets a validity-at-use receipt. Codex then records aggregate budget usage, verifies the artifact in distinct dimensions, and summarizes it without a routine third checkpoint.
+Internally, `assessment proposal approve` records host/CI authority and creates proposal-bound authorization. `assessment proposal apply` materializes only the approved write-set and safely resumes partial attempts. Every automated use gets a validity-at-use receipt. Completion requires aggregate budget accounting, layered artifact verification, and a release gate.
 
-Normalized assessment actions are configured in `assessment_workflow.requested_actions`. Open-question explanations are configured in `open_question_guidance`, including category keywords, why each answer is needed, bilingual examples, its proposal effect, and a safe fallback. New aliases or guidance therefore do not require hardcoded CLI branches.
+Normalized actions are configured in `assessment_workflow.requested_actions`. Question explanations live in `open_question_guidance`, including category keywords, rationale, bilingual examples, proposal effects, and safe fallbacks. New aliases or guidance therefore do not require hardcoded CLI branches.
 
-An extra decision is required only when execution would cross a displayed boundary, for example a new installation, external or production access, secrets, destructive work, writes outside the agreed paths, a material proposal change, or an unapproved budget extension.
+An additional decision is exceptional: it is required for a new installation, external or production access, secrets, destructive work, an out-of-scope write, a material proposal change, or an unapproved budget extension.
+
+## Autonomy And Limits Are Separate Controls
+
+**Autonomy** answers “what may the agent do without asking again?” **Limits** answer “how much may it consume while doing it?” You can grant broad autonomy and still impose strict limits, or use narrow permissions with no numeric cap.
+
+```mermaid
+flowchart LR
+  A["Autonomy envelope"] --> A1["Exact actions"]
+  A --> A2["Exact subjects and paths"]
+  A --> A3["Tools and external boundaries"]
+  B["Execution budget"] --> B1["Time and steps"]
+  B --> B2["Tokens, calls, and cost"]
+  B --> B3["Warnings, reserve, and stop policy"]
+  A1 --> C["Approved execution tranche"]
+  A2 --> C
+  A3 --> C
+  B1 --> C
+  B2 --> C
+  B3 --> C
+  C --> D["Agent works autonomously<br/>only inside both envelopes"]
+```
+
+“Full autonomy” therefore means broad freedom **inside the displayed proposal**, not permanent or universal authority. For example:
+
+```text
+Proceed autonomously for the complete displayed tranche. You may read the repository,
+write only under docs/ and .sdlc/, run local tests, and create the final report.
+Do not access production, secrets, or external services. Hard limits: 60 active
+minutes and 60 steps; warn me at 70% and 90%; reserve 15% for verification and delivery.
+```
+
+Each requested control has a concrete effect:
+
+| Control | Simple example | Effect |
+| --- | --- | --- |
+| Action and subject | `output.link = docs/assessment.pdf` | Authorizes that action on that exact artifact, not every output |
+| Paths | `write: docs/ and .sdlc/` | Writes elsewhere remain outside the tranche |
+| External boundary | `no production, secrets, or external APIs` | Crossing one of those boundaries requires a new decision |
+| Active time | `soft 45 min, hard 60 min` | Warn or stop based on measured active work, excluding user wait time |
+| Steps | `soft 40, hard 60` | Aggregates main-agent and subagent execution steps |
+| Tokens or cost | `200k tokens soft` or `EUR 5 hard` | Enforceability depends on the assurance of the measurement source |
+| Completion reserve | `15%` | Protects capacity for verification and final delivery |
+| Stop policy | `request extension, otherwise partial delivery` | Defines behavior instead of silently exceeding the approved budget |
+
+A custom limit is meaningful only if a configured source can measure it. A hard limit fails closed when its required exact, trusted coverage is unavailable.
+
+## CodeBurn Versus Exact Metering
+
+CodeBurn is useful for local visibility and estimates; it is not provider-signed billing evidence and cannot by itself guarantee a real-time hard stop.
+
+```mermaid
+flowchart TD
+  A["Choose a token or cost limit"] --> B{"Must it enforce a hard stop?"}
+  B -- "No: warning or forecast" --> C["CodeBurn 0.9.x<br/>estimated + advisory_observed"]
+  C --> D["Store immutable baseline,<br/>incremental deltas, and receipts"]
+  B -- "Yes" --> E{"Trusted signed adapter<br/>covers this exact metric?"}
+  E -- "Yes" --> F["Exact cumulative receipts<br/>may satisfy the hard gate"]
+  E -- "No" --> G["Fail closed:<br/>do not claim hard enforcement"]
+```
+
+| Source | Best use | Assurance | Can satisfy an exact hard limit? |
+| --- | --- | --- | --- |
+| **CodeBurn** | Local token/call/cost visibility, warnings, estimates, and reconciliation | `estimated` / `advisory_observed` | **No**. A mapped hard metric records the evidence but stops with `metering_violation` |
+| **Trusted runtime/provider adapter** | Financial or operational enforcement | Signed, identity-bound, cumulative exact receipts | **Yes**, only for the explicitly trusted metrics and approved pricing reference |
+
+To use CodeBurn, install it separately, enable its adapter in project configuration, approve the proposal, then capture the baseline **before** `apply`:
+
+```bash
+node bin/agentic-sdlc.mjs budget meter start \
+  --root /path/to/project \
+  --proposal ASSESSMENT-001 \
+  --adapter codeburn \
+  --provider codex \
+  --project TravelOps \
+  --from 2026-07-15 \
+  --to 2026-07-15
+```
+
+During execution or before completion, record the incremental usage since that baseline:
+
+```bash
+node bin/agentic-sdlc.mjs budget meter record \
+  --root /path/to/project \
+  --proposal ASSESSMENT-001 \
+  --adapter codeburn \
+  --baseline METER-ASSESSMENT-001-CODEBURN
+```
+
+`--provider` selects the local session-log producer, `--project` narrows the CodeBurn aggregation, `--from/--to` fix an inclusive and reproducible date window, and `--baseline` identifies the immutable starting point. The same query is reused for every delta so filter drift, counter resets, currency changes, and tampering fail closed. Full setup and examples are in [Autonomy, Limits, and Metering](docs/limits-and-metering.md) and [CodeBurn Metering](docs/codeburn-metering.md).
 
 ## Canonical Output Formats
 
