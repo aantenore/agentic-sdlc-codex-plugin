@@ -110,19 +110,19 @@ function createFakeCodeBurn(project, report) {
   writeJson(reportPath, report);
   fs.writeFileSync(runnerPath, [
     "import fs from 'node:fs';",
+    `const reportPath = ${JSON.stringify(reportPath)};`,
     "if (process.argv.includes('--version')) process.stdout.write('codeburn 0.9.15\\n');",
-    "else process.stdout.write(fs.readFileSync(process.env.CODEBURN_TEST_REPORT, 'utf8'));",
+    "else process.stdout.write(fs.readFileSync(reportPath, 'utf8'));",
   ].join("\n"));
-  const executable = path.join(toolRoot, "codeburn");
-  fs.writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${runnerPath}" "$@"\n`);
-  fs.chmodSync(executable, 0o755);
-  fs.writeFileSync(`${executable}.cmd`, `@"${process.execPath}" "${runnerPath}" %*\r\n`);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.budget_policy.metering_adapters.codeburn.command = {
+    executable: process.execPath,
+    arguments: [runnerPath],
+  };
+  writeJson(configPath, config);
   return {
     reportPath,
-    env: {
-      PATH: `${toolRoot}${path.delimiter}${process.env.PATH || ""}`,
-      CODEBURN_TEST_REPORT: reportPath,
-    },
   };
 }
 
@@ -1734,6 +1734,8 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
 test("assessment tranche runs from precise checkpoints through budgeted release-manifest gate", async () => {
   const project = tmpProject("assessment-tranche");
   initProject(project);
+  const codeBurnReport = readJson(path.join(repoRoot, "test", "fixtures", "codeburn", "report-v0.9.15.json"));
+  const fakeCodeBurn = createFakeCodeBurn(project, codeBurnReport);
   fs.writeFileSync(
     path.join(project, "README.md"),
     "# Travel Operations\n\nA modular travel workflow with replaceable providers and contract-driven delivery.\n",
@@ -1876,13 +1878,11 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(recoveredApproval.authorization.authorization_hash, approved.authorization.authorization_hash);
   assert.equal(recoveredApproval.workflow.state, "authorized");
 
-  const codeBurnReport = readJson(path.join(repoRoot, "test", "fixtures", "codeburn", "report-v0.9.15.json"));
-  const fakeCodeBurn = createFakeCodeBurn(project, codeBurnReport);
   const meterStart = JSON.parse(mustRun([
     "budget", "meter", "start", "--root", project,
     "--proposal", "ASSESS-E2E", "--adapter", "codeburn",
     "--project", "TravelOps", "--from", "2026-07-14", "--to", "2026-07-14", "--json",
-  ], { env: fakeCodeBurn.env }).stdout);
+  ]).stdout);
   assert.equal(meterStart.status, "created");
   assert.equal(meterStart.baseline.snapshot.assurance.classification, "advisory_observed");
 
@@ -1914,7 +1914,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   const metered = JSON.parse(mustRun([
     "budget", "meter", "record", "--root", project,
     "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
-  ], { env: fakeCodeBurn.env }).stdout);
+  ]).stdout);
   assert.equal(metered.registration_status, "created");
   assert.equal(metered.receipt.source.assurance, "advisory_observed");
   assert.equal(metered.receipt.metering.tokens, "estimated");
@@ -1922,7 +1922,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   const meteredReplay = JSON.parse(mustRun([
     "budget", "meter", "record", "--root", project,
     "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
-  ], { env: fakeCodeBurn.env }).stdout);
+  ]).stdout);
   assert.equal(meteredReplay.idempotent, true);
 
   mustFail([

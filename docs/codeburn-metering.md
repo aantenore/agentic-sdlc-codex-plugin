@@ -17,6 +17,26 @@ Every collection uses the same four allowlisted CodeBurn filters:
 
 The adapter builds argv itself and launches CodeBurn without a shell. It rejects raw arguments, unknown query fields, control characters, option-like values such as `--all`, invalid dates, output over the configured bound, unsupported versions, and malformed JSON.
 
+## Shell-free command configuration
+
+The project configuration models the CodeBurn launcher as an executable plus discrete prefix arguments:
+
+```json
+{
+  "enabled": true,
+  "provider": "codex",
+  "command": {
+    "executable": "codeburn",
+    "arguments": []
+  },
+  "metric_mapping": {
+    "tokens": "tokens.total"
+  }
+}
+```
+
+The default works for a native executable on `PATH`. On Windows, npm installs command shims as `.cmd` files, which cannot be launched by Node's shell-free `execFile` API. Keep the no-shell boundary by pointing `executable` at `node.exe` and putting CodeBurn's installed `dist/cli.js` path in `arguments`. The adapter prepends those arguments to both `--version` and the allowlisted report argv; it never concatenates a command string or evaluates shell syntax. The same mechanism also supports hermetic tool paths in CI and other managed runtimes.
+
 ## Start snapshot
 
 Use a start snapshot immediately before the task begins. The example below asks CodeBurn to aggregate Codex sessions matching `TravelOps` on 14 July 2026, normalizes the cumulative counters, hashes the source report, and returns a persistible snapshot:
@@ -44,7 +64,7 @@ await fs.writeFile(
 );
 ```
 
-`collectCodeBurnMeteringSnapshot` first checks `codeburn --version`, accepts only 0.9.x, then runs the equivalent of:
+`collectCodeBurnMeteringSnapshot` first checks the configured command with `--version`, accepts only 0.9.x, then runs the equivalent of:
 
 ```text
 codeburn report --provider codex --project TravelOps --from 2026-07-14 --to 2026-07-14 --format json
