@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "edges": [],
+  "updated_at": "2026-07-15T15:16:58.433Z",
+  "audit": {
+    "created_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "default"
+    },
+    "updated_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "default"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "main",
+      "head_sha": "9856693c77a7bb755de3075312bfde144a7e8b48",
+      "is_dirty": false,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "50747458+aantenore@users.noreply.github.com"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.6.0"
+    }
+  }
+}
