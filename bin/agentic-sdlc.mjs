@@ -5847,10 +5847,21 @@ function codeBurnQuery(context, options, config, stored = null) {
   };
 }
 
-async function collectBudgetMeterSnapshot(context, proposalId, adapter, query, idPrefix) {
+function budgetMeterExecutionOptions(context, config) {
+  const command = config.command;
+  return {
+    cwd: context.root,
+    ...(command ? {
+      executable: command.executable,
+      prefix_args: command.arguments,
+    } : {}),
+  };
+}
+
+async function collectBudgetMeterSnapshot(context, proposalId, adapter, config, query, idPrefix) {
   let execution;
   try {
-    execution = await adapter.execute(query, { cwd: context.root });
+    execution = await adapter.execute(query, budgetMeterExecutionOptions(context, config));
   } catch (error) {
     fail(`CodeBurn collection failed: ${error.message}${error.stderr ? `; ${error.stderr}` : ""}`);
   }
@@ -5932,7 +5943,14 @@ async function startBudgetMeter(context, options) {
     return;
   }
   const query = codeBurnQuery(context, options, config);
-  const snapshot = await collectBudgetMeterSnapshot(context, proposalId, adapter, query, `${baselineId}-SNAPSHOT`);
+  const snapshot = await collectBudgetMeterSnapshot(
+    context,
+    proposalId,
+    adapter,
+    config,
+    query,
+    `${baselineId}-SNAPSHOT`,
+  );
   const baseline = buildBudgetMeterBaseline(context, proposal, budget, adapter.id, baselineId, mapping, snapshot);
   const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
   try {
@@ -6021,6 +6039,7 @@ async function recordBudgetMeter(context, options) {
     context,
     proposalId,
     adapter,
+    config,
     codeBurnQuery(context, options, config, baseline.snapshot.scope),
     `METER-${proposalId}-${adapter.id}-CURRENT`,
   );
