@@ -1,0 +1,46 @@
+{
+  "id": "AUSE-AUTH-CHANGE-OBSERVATORY-DISCOVERY-20260716082939942-3baca2",
+  "kind": "authorization_usage_receipt",
+  "schema_version": "authorization-usage-receipt:legacy-v2",
+  "authorization_id": "AUTH-CHANGE-OBSERVATORY-DISCOVERY",
+  "authorization_hash": "8d1e54119c808301965e2cde3fb58ad6531bc5d5cb7f6cb3f915582d0164c07d",
+  "proposal_ref": null,
+  "action": "contract.approve",
+  "subject_id": "contract-change-observatory-discovery-v1",
+  "artifact_types": [],
+  "approval_boundaries": [],
+  "scope": "Change Observatory discovery only: canonicalize the displayed project-specific discovery brief and confirm requirement intake; excludes installs, external services, deployment, secrets, destructive actions, and unrelated work.",
+  "authority_assurance": "audit_only",
+  "authorization_snapshot": {
+    "status_at_use": "active",
+    "expires_at": "2026-07-17T08:29:34.241Z",
+    "allowed_actions": [
+      "contract.approve",
+      "task.start.confirm"
+    ],
+    "allowed_subjects": [
+      "contract-change-observatory-discovery-v1",
+      "PROJECT"
+    ],
+    "allowed_uses": [
+      {
+        "action": "contract.approve",
+        "subject_id": "contract-change-observatory-discovery-v1",
+        "use_hash": "061bbffe365b2ff785eeb9313367a6e0880a6b402c08b83e8c76983cd0f9ca82"
+      },
+      {
+        "action": "task.start.confirm",
+        "subject_id": "PROJECT",
+        "use_hash": "3ec10edfb3d859b4478378910a2e539cf7c44c072735421a01b0a816fd5154a5"
+      }
+    ],
+    "allowed_artifact_types": [],
+    "allowed_approval_boundaries": []
+  },
+  "use_key": "2b50241757fb74afcc4813b2168eecfa8b7201fa701d1c868c0375621da7e77a",
+  "status": "accepted",
+  "used_at": "2026-07-16T08:29:39.942Z",
+  "valid_at_use": true,
+  "receipt_hash": "a0b52b222efc7dc12ea9177e4f4c59394f744f7fc2f294476908cd50ca88b790",
+  "hash_algorithm": "sha256:stable-json:v1"
+}
