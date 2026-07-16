@@ -221,16 +221,30 @@ Use phase locks for shared phase artifacts, not for normal story-scoped work. A 
 ```bash
 node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type test --outcome passed --summary "Unit tests passed" --evidence .sdlc/tests/ST-001-test-run.json --actor codex --actor-type agent
 node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type implementation --summary "Codex implemented a requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --authorized-by antonioantenore --authorized-by-type human --request-summary "Implement the requested feature"
+node bin/agentic-sdlc.mjs trace append --root <project> --story ST-001 --type implementation --summary "Added a local launcher" --input-summary "Approved contract" --output-summary "Installed observe command" --rationale-summary "Keep evidence local" --alternative "Hosted dashboard" --explanation "The plugin can now display recorded delivery lineage locally." --explanation-kind codex-generated
 ```
 
 Valid trace types: `assumption`, `decision`, `gate`, `claim`, `handoff`, `implementation`, `lock`, `release`, `risk`, `sync`, `test`.
 Valid trace outcomes are `passed`, `failed`, `blocked`, `skipped`, and `ready`. Strict validation requires a `test` trace with `passed`; strict release requires `ready` or `passed`.
+
+Narrative flags are optional and repeatable where applicable. `--explanation-kind` accepts `codex-generated`, `deterministic`, or `human-authored` and requires `--explanation`. The stored scope is always `recorded-evidence-only`; never record private chain-of-thought or hidden reasoning.
 
 Record push and merge events explicitly:
 
 ```bash
 node bin/agentic-sdlc.mjs sync record --root <project> --story ST-001 --event push --remote origin --summary "Pushed feature/ST-001"
 ```
+
+## Change Observatory
+
+From an npm/git/tarball installation with a bin shim:
+
+```bash
+agentic-sdlc observe --root <project>
+agentic-sdlc observe --root <project> --host 127.0.0.1 --port 0 --no-open --json
+```
+
+From a Codex plugin installation, use the `change-observatory` skill so it resolves `<plugin-root>/bin/agentic-sdlc.mjs` directly. The returned URL contains an ephemeral token in the fragment. Keep the process alive while viewing the app and stop it with `SIGINT` or `SIGTERM`.
 
 ## Gate Check
 

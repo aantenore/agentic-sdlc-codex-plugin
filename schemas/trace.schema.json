@@ -63,6 +63,60 @@
         "type": "string"
       }
     },
+    "narrative": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "trace-narrative:v1"
+        },
+        "input_summaries": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "output_summaries": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rationale_summary": {
+          "type": ["string", "null"]
+        },
+        "alternatives": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "explanation": {
+          "type": "object",
+          "required": ["text", "kind", "scope"],
+          "properties": {
+            "text": { "type": "string" },
+            "kind": {
+              "enum": ["codex-generated", "deterministic", "human-authored"]
+            },
+            "scope": { "const": "recorded-evidence-only" }
+          },
+          "additionalProperties": false
+        },
+        "input_summary": {
+          "type": ["string", "array"],
+          "items": { "type": "string" }
+        },
+        "output_summary": {
+          "type": ["string", "array"],
+          "items": { "type": "string" }
+        },
+        "rationale": { "type": "string" },
+        "generated_explanation": { "type": "string" },
+        "explanation_source": {
+          "enum": ["codex-generated", "deterministic", "human", "human-authored"]
+        },
+        "chain_of_thought_included": { "const": false }
+      },
+      "additionalProperties": false
+    },
     "actor": {
       "$ref": "#/$defs/actor"
     },

@@ -151,11 +151,12 @@ Never store project contracts or project KB state inside the plugin installation
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type decision --summary "..." --actor codex --actor-type agent
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type implementation --summary "Codex implemented the requested change" --actor codex --actor-type agent --requested-by antonioantenore --requested-by-type human --request-summary "User-requested change"
+   node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type implementation --summary "Added the requested launcher" --input-summary "Approved contract" --output-summary "Installed launcher" --rationale-summary "Keep evidence local" --alternative "Hosted dashboard" --explanation "The installed plugin now opens recorded project lineage locally." --explanation-kind codex-generated
    node <plugin-root>/bin/agentic-sdlc.mjs trace append --root <target-project> --story ST-001 --type test --outcome passed --summary "Tests passed" --evidence .sdlc/tests/ST-001-test-run.json
    node <plugin-root>/bin/agentic-sdlc.mjs sync record --root <target-project> --story ST-001 --event push --summary "Pushed feature/ST-001"
    ```
 
-   Keep `actor` as the executor. When an agent acts because a human or another system requested it, record `requested_by`; when execution was explicitly authorized, record `authorized_by`. This lets reports answer both "what did Codex execute?" and "what was done on Antonio's request?" without rewriting attribution.
+   Keep `actor` as the executor. When an agent acts because a human or another system requested it, record `requested_by`; when execution was explicitly authorized, record `authorized_by`. This lets reports answer both "what did Codex execute?" and "what was done on Antonio's request?" without rewriting attribution. Narrative flags are optional; when used, store only shareable summaries derived from recorded evidence. Never put private chain-of-thought, hidden scratch reasoning, or secrets in a trace narrative.
 
 16. When a phase lane is complete, record the step with hashed evidence. `story complete-step` requires the story contract to be approved and fresh unless `--allow-unapproved-contract-output` is being used for explicit migration/recovery. If the step produced a durable artifact, pass `--type` so the CLI verifies the output is linked in the registry:
 
@@ -208,6 +209,8 @@ Never store project contracts or project KB state inside the plugin installation
    ```
 
 22. When upgrading an existing KB, migrate only a manifest-defined active release. Run `migration active --release-manifest <id>` first without `--apply`, explain the planned config changes and exact historical evidence set, then apply only after the release manifest and every referenced immutable record validate. The command may add missing configuration defaults and a logical `archive-record:v1`; it must never rewrite approved records or move historical files. Use `archive closed --apply` separately only for an explicitly requested filesystem move.
+
+23. When the user asks for a visual explanation of what was requested, changed, decided, or verified, load `../change-observatory/SKILL.md`. It launches the bundled read-only app through the installed plugin-local CLI; do not copy assets, add a build, or depend on global `PATH`.
 
 ## References
 

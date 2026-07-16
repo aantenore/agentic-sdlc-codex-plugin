@@ -1,0 +1,371 @@
+{
+  "schemaVersion": "change-observatory:view:v1",
+  "generatedAt": "2026-07-16T09:42:00.000Z",
+  "project": {
+    "id": "visual-qa-fixture",
+    "name": "Visual QA Fixture",
+    "branch": "codex/change-observatory"
+  },
+  "snapshots": {
+    "counts": {
+      "requirements": 1,
+      "stories": 3,
+      "contracts": 3,
+      "changes": 7,
+      "verification": 6
+    },
+    "phaseCounts": {
+      "discovery": 3,
+      "analysis": 3,
+      "design": 3,
+      "implementation": 2,
+      "validation": 1,
+      "release": 0
+    }
+  },
+  "summary": {
+    "asked": [
+      {
+        "id": "REQ-VISUAL-QA",
+        "type": "requirement",
+        "title": "Install-integrated visual lineage",
+        "summary": "Ship a local visual application that reconstructs what was requested, changed, decided, and verified across SDLC iterations.",
+        "status": "proposed",
+        "phase": "discovery",
+        "timestamp": "2026-07-16T08:29:59.536Z",
+        "provenance": "recorded",
+        "sourceRefs": [
+          { "path": ".sdlc/requirements/REQ-VISUAL-QA.json" }
+        ]
+      }
+    ],
+    "changed": [
+      {
+        "id": "CHANGE-VISUAL-QA-UI",
+        "type": "implementation",
+        "title": "Browser-native Change Observatory",
+        "summary": "Added the evidence workspace, lineage matrix, explainability inspector, contract and change views, verification evidence, and a raw-record drawer.",
+        "status": "active",
+        "phase": "implementation",
+        "timestamp": "2026-07-16T09:35:00.000Z",
+        "provenance": "recorded",
+        "sourceRefs": [
+          { "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }
+        ],
+        "narrative": {
+          "input_summary": "Approved visual concept, versioned view-model contract, accessibility constraints, and canonical SDLC evidence.",
+          "output_summary": "Build-free HTML, CSS, and modular JavaScript with read-only source inspection.",
+          "rationale": "Browser-native modules keep the installed plugin dependency-free while preserving a rich, inspectable experience.",
+          "generated_explanation": "The plugin now turns project records into a readable map: non-technical readers see the request, outcome, and decision first, while technical evidence remains one interaction away.",
+          "explanation_source": "codex-generated from recorded evidence",
+          "alternatives": [
+            "A hosted dashboard was rejected because local project evidence must remain local.",
+            "A framework build was rejected because installation must not require a separate build step."
+          ],
+          "evidence": [
+            {
+              "title": "Approved implementation contract",
+              "sourceRefs": [
+                { "path": ".sdlc/contracts/contract-ST-VISUAL-QA-implementation.json" }
+              ]
+            }
+          ],
+          "chain_of_thought_included": false
+        }
+      }
+    ],
+    "decided": [
+      {
+        "id": "DEC-VISUAL-QA-001",
+        "type": "decision",
+        "title": "Local-first, build-free delivery",
+        "summary": "Use browser-native ES modules and a loopback read-only API so the app ships with the plugin and launches without cloud infrastructure.",
+        "status": "approved",
+        "phase": "design",
+        "timestamp": "2026-07-16T08:35:04.379Z",
+        "provenance": "recorded",
+        "sourceRefs": [
+          { "path": ".sdlc/decisions/DEC-VISUAL-QA-001.json" }
+        ]
+      }
+    ]
+  },
+  "iterations": [
+    {
+      "id": "ITERATION-01",
+      "type": "iteration",
+      "title": "Iteration 1",
+      "summary": "Product scope and delivery boundaries.",
+      "status": "complete",
+      "phase": "discovery",
+      "timestamp": "2026-07-16T08:20:00.000Z",
+      "provenance": "recorded",
+      "currentPhase": null,
+      "sourceRefs": [
+        { "path": ".sdlc/stories/ST-VISUAL-QA/story.json" }
+      ],
+      "phases": [
+        { "phase": "discovery", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/contracts/contract-VISUAL-QA-discovery.json" }] },
+        { "phase": "analysis", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/traces/ST-VISUAL-QA.jsonl" }] },
+        { "phase": "design", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/decisions/DEC-VISUAL-QA-001.json" }] },
+        { "phase": "implementation", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }] },
+        { "phase": "validation", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }] },
+        { "phase": "release", "status": "missing", "provenance": "missing", "sourceRefs": [] }
+      ]
+    },
+    {
+      "id": "ITERATION-02",
+      "type": "iteration",
+      "title": "Iteration 2",
+      "summary": "View-model and security normalization.",
+      "status": "complete",
+      "phase": "validation",
+      "timestamp": "2026-07-16T08:52:00.000Z",
+      "provenance": "recorded",
+      "currentPhase": null,
+      "sourceRefs": [
+        { "path": ".sdlc/stories/ST-VISUAL-QA/story.json" }
+      ],
+      "phases": [
+        { "phase": "discovery", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "analysis", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "design", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "implementation", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "validation", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }] },
+        { "phase": "release", "status": "inProgress", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/gates/ST-VISUAL-QA.json" }] }
+      ]
+    },
+    {
+      "id": "ITERATION-03",
+      "type": "iteration",
+      "title": "Iteration 3",
+      "summary": "Visual lineage experience.",
+      "status": "active",
+      "phase": "implementation",
+      "timestamp": "2026-07-16T09:35:00.000Z",
+      "provenance": "recorded",
+      "currentPhase": "implementation",
+      "sourceRefs": [
+        { "path": ".sdlc/stories/ST-VISUAL-QA/story.json" }
+      ],
+      "phases": [
+        { "phase": "discovery", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "analysis", "status": "complete", "provenance": "recorded", "sourceRefs": [] },
+        { "phase": "design", "status": "complete", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/outputs/concept.png" }] },
+        { "phase": "implementation", "status": "inProgress", "provenance": "recorded", "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }] },
+        { "phase": "validation", "status": "inProgress", "provenance": "inferred", "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }] },
+        { "phase": "release", "status": "missing", "provenance": "missing", "sourceRefs": [] }
+      ]
+    },
+    {
+      "id": "ITERATION-04",
+      "type": "iteration",
+      "title": "Iteration 4",
+      "summary": "No evidence recorded yet.",
+      "status": "missing",
+      "phase": null,
+      "timestamp": null,
+      "provenance": "missing",
+      "currentPhase": null,
+      "sourceRefs": [],
+      "phases": []
+    }
+  ],
+  "contracts": [
+    {
+      "id": "contract-ST-VISUAL-QA-implementation",
+      "type": "contract",
+      "title": "Visual lineage implementation contract",
+      "summary": "Build an accessible, evidence-dense interface using browser-native modules.",
+      "status": "approved",
+      "phase": "implementation",
+      "timestamp": "2026-07-16T08:37:30.797Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/contracts/contract-ST-VISUAL-QA-implementation.json" }]
+    },
+    {
+      "id": "contract-ST-VISUAL-QA-core",
+      "type": "contract",
+      "title": "Evidence normalization contract",
+      "summary": "Normalize partial and legacy knowledge bases without inventing project history.",
+      "status": "approved",
+      "phase": "implementation",
+      "timestamp": "2026-07-16T08:36:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/contracts/contract-ST-VISUAL-QA-core.json" }]
+    },
+    {
+      "id": "contract-ST-VISUAL-QA-integration",
+      "type": "contract",
+      "title": "Installed launcher contract",
+      "summary": "Ship and launch the app from the installed package.",
+      "status": "approved",
+      "phase": "implementation",
+      "timestamp": "2026-07-16T08:36:20.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/contracts/contract-ST-VISUAL-QA-integration.json" }]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "DEC-VISUAL-QA-001",
+      "type": "decision",
+      "title": "Local-first, build-free delivery",
+      "summary": "Use browser-native modules and a read-only loopback API.",
+      "status": "approved",
+      "phase": "design",
+      "timestamp": "2026-07-16T08:35:04.379Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/decisions/DEC-VISUAL-QA-001.json" }]
+    },
+    {
+      "id": "DEC-VISUAL-QA-002",
+      "type": "decision",
+      "title": "Evidence before explanation",
+      "summary": "Every explanation remains linked to raw canonical records and labels inference explicitly.",
+      "status": "approved",
+      "phase": "design",
+      "timestamp": "2026-07-16T08:35:30.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/decisions/DEC-VISUAL-QA-002.json" }]
+    }
+  ],
+  "changes": [
+    {
+      "id": "CHANGE-UI-001",
+      "type": "file-change",
+      "title": "ui/change-observatory/index.html",
+      "summary": "Semantic application shell and accessible navigation.",
+      "status": "complete",
+      "phase": "implementation",
+      "intent": "visual lineage workspace",
+      "timestamp": "2026-07-16T09:21:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }]
+    },
+    {
+      "id": "CHANGE-UI-002",
+      "type": "file-change",
+      "title": "ui/change-observatory/styles.css",
+      "summary": "Responsive evidence-dense design system.",
+      "status": "complete",
+      "phase": "implementation",
+      "intent": "visual lineage workspace",
+      "timestamp": "2026-07-16T09:25:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }]
+    },
+    {
+      "id": "CHANGE-UI-003",
+      "type": "file-change",
+      "title": "ui/change-observatory/components.js",
+      "summary": "Reusable lineage, inspector, contract, change, and verification components.",
+      "status": "complete",
+      "phase": "implementation",
+      "intent": "visual lineage workspace",
+      "timestamp": "2026-07-16T09:31:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }]
+    },
+    {
+      "id": "CHANGE-API-001",
+      "type": "file-change",
+      "title": "ui/change-observatory/api.js",
+      "summary": "Strict versioned API client and bounded raw evidence loader.",
+      "status": "complete",
+      "phase": "implementation",
+      "intent": "evidence boundary",
+      "timestamp": "2026-07-16T09:29:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }]
+    },
+    {
+      "id": "CHANGE-MODEL-001",
+      "type": "file-change",
+      "title": "ui/change-observatory/model.js",
+      "summary": "Defensive model normalization and explicit missing provenance.",
+      "status": "complete",
+      "phase": "implementation",
+      "intent": "evidence boundary",
+      "timestamp": "2026-07-16T09:27:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md" }]
+    }
+  ],
+  "verification": [
+    {
+      "id": "TEST-VISUAL-QA-UNIT",
+      "type": "test",
+      "title": "View-model unit tests",
+      "summary": "Normalization, filters, narrative, and raw path invariants.",
+      "status": "passed",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:38:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    },
+    {
+      "id": "TEST-VISUAL-QA-STATIC",
+      "type": "test",
+      "title": "Static asset invariants",
+      "summary": "Build-free modules, no external resources, semantic landmarks, and reduced-motion support.",
+      "status": "passed",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:38:20.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    },
+    {
+      "id": "TEST-VISUAL-QA-DESKTOP",
+      "type": "browser-check",
+      "title": "Desktop visual comparison",
+      "summary": "Native concept viewport fidelity review.",
+      "status": "inProgress",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:40:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    },
+    {
+      "id": "TEST-VISUAL-QA-MOBILE",
+      "type": "browser-check",
+      "title": "360px responsive check",
+      "summary": "Navigation, summary, matrix scrolling, inspector, and raw evidence remain usable.",
+      "status": "inProgress",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:40:20.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    },
+    {
+      "id": "TEST-VISUAL-QA-ACCESSIBILITY",
+      "type": "review",
+      "title": "Keyboard and screen-reader semantics",
+      "summary": "Focus states, landmarks, labels, live regions, and keyboard navigation.",
+      "status": "passed",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:39:00.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    },
+    {
+      "id": "TEST-VISUAL-QA-CSP",
+      "type": "security-check",
+      "title": "Client security boundary",
+      "summary": "Same-origin API, canonical raw paths, restrictive CSP, and no external dependencies.",
+      "status": "passed",
+      "phase": "validation",
+      "timestamp": "2026-07-16T09:39:20.000Z",
+      "provenance": "recorded",
+      "sourceRefs": [{ "path": ".sdlc/tests/ST-VISUAL-QA.json" }]
+    }
+  ],
+  "records": [
+    { "path": ".sdlc/requirements/REQ-VISUAL-QA.json", "kind": "requirement", "provenance": "recorded", "rawHref": "/api/v1/source?path=.sdlc%2Frequirements%2FREQ-VISUAL-QA.json" },
+    { "path": ".sdlc/contracts/contract-ST-VISUAL-QA-implementation.json", "kind": "contract", "provenance": "recorded", "rawHref": "/api/v1/source?path=.sdlc%2Fcontracts%2Fcontract-ST-VISUAL-QA-implementation.json" },
+    { "path": ".sdlc/decisions/DEC-VISUAL-QA-001.json", "kind": "decision", "provenance": "recorded", "rawHref": "/api/v1/source?path=.sdlc%2Fdecisions%2FDEC-VISUAL-QA-001.json" },
+    { "path": ".sdlc/stories/ST-VISUAL-QA/implementation-log.md", "kind": "implementation-log", "provenance": "recorded", "rawHref": "/api/v1/source?path=.sdlc%2Fstories%2FST-VISUAL-QA%2Fimplementation-log.md" },
+    { "path": ".sdlc/tests/ST-VISUAL-QA.json", "kind": "test-evidence", "provenance": "recorded", "rawHref": "/api/v1/source?path=.sdlc%2Ftests%2FST-VISUAL-QA.json" }
+  ],
+  "diagnostics": []
+}

@@ -7,6 +7,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 - [Project overview](../README.md) — what the plugin does, installation, the normal two-checkpoint experience, and maintainer commands.
 - [How it works](how-it-works.md) — the end-to-end lifecycle from project context to an approved proposal, execution, verification, and release evidence.
 - [Limits and metering](limits-and-metering.md) — how to grant broad autonomy while constraining actions, files, capabilities, time, steps, tokens, calls, cost, and custom metrics.
+- [Change Observatory](change-observatory.md) — open and interpret the bundled visual request/change/decision lineage.
 
 ## Find a page by goal
 
@@ -18,6 +19,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 | Measure local Codex usage with CodeBurn | [Limits and metering](limits-and-metering.md#codeburn-advisory-metering) | The complete `start` and `record` workflow, option meanings, and metric mappings |
 | Integrate the CodeBurn library adapter | [CodeBurn adapter reference](codeburn-metering.md) | Snapshot and delta contracts, integrity rules, and library APIs |
 | Understand the architecture and trust model | [Architecture](architecture.md) | Components, canonical records, validation, and release evidence |
+| Open visual project lineage | [Change Observatory](change-observatory.md) | Launch paths, explainability, raw evidence, and local security boundaries |
 | Understand `.sdlc/` storage | [Knowledge-base structure](kb-structure.md) | Which files are canonical, derived, append-only, or releasable |
 | Install, update, or repair the plugin | [Portable install](portable-install.md) | Cross-platform installation, local marketplace setup, and troubleshooting |
 | Understand the product assessment | [Product assessment](product-assessment.md) | Product intent, strengths, gaps, and improvement direction |
@@ -41,8 +43,9 @@ This page is the documentation map. Start with the goal that matches what you wa
 
 1. [Project overview](../README.md)
 2. [Architecture](architecture.md)
-3. [Knowledge-base structure](kb-structure.md)
-4. [Portable install](portable-install.md)
+3. [Change Observatory](change-observatory.md)
+4. [Knowledge-base structure](kb-structure.md)
+5. [Portable install](portable-install.md)
 
 ## The core idea in one diagram
 

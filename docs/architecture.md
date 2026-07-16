@@ -318,6 +318,29 @@ flowchart TB
   Link --> Registry
 ```
 
+## Change Observatory Presentation Layer
+
+Change Observatory is a read-only projection over canonical project evidence. It is packaged as browser-native assets under `ui/change-observatory/`; no generated bundle, frontend dependency, CDN, telemetry, or hosted component is required.
+
+```mermaid
+flowchart LR
+  Skill["Installed Change Observatory skill"] --> CLI["Plugin-local observe CLI"]
+  CLI --> Server["Loopback server + per-run token"]
+  Server --> Normalizer["Versioned evidence normalizer"]
+  Normalizer --> KB["Canonical .sdlc records"]
+  Server --> Source["Constrained raw source reader"]
+  Source --> KB
+  UI["Bundled browser-native UI"] -->|"Bearer token, same origin"| Server
+```
+
+`observe` is dispatched before mutable SDLC workflow configuration is built, so it can diagnose a partial or malformed project without attempting initialization or writes. The launcher resolves assets relative to the installed module, binds only to `127.0.0.1`, selects an ephemeral port by default, and opens a fragment-token URL through shell-free platform commands.
+
+The server pins the device/inode identity of the project and asset roots for the session. `.sdlc` and every requested source component must be non-symlink canonical paths. Raw inspection is restricted to JSON, JSONL, Markdown, and text; cache/index paths, traversal, case-variant policy bypasses, unsupported formats, oversized files, and malformed structured bytes fail closed. Evidence APIs require the per-run bearer capability, while static assets and health remain non-sensitive.
+
+The normalizer emits `change-observatory:view:v1` and preserves `recorded`, `inferred`, `missing`, and `malformed` provenance. Overview selection is delegated to the configurable policy in `lib/change-observatory/summary-ranking.mjs`, preventing newer operational bookkeeping from displacing more meaningful implementation or approval evidence. Equivalent diagnostics are aggregated server-side and again in the browser model as a defensive boundary.
+
+Optional `trace-narrative:v1` records contain only shareable inputs, outputs, rationale summaries, alternatives, and labeled explanations with `recorded-evidence-only` scope. Sensitive reasoning keys and narratives explicitly marked as containing private reasoning are removed from both normalized and raw surfaces.
+
 ## Local Optimization Layer
 
 `.sdlc/cache/` contains regenerable lookup data such as full-text entries, story-requirement graphs, artifact fingerprints, template resolution, compact KB summaries, dependency graphs, and output resolution results.

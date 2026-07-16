@@ -1,7 +1,7 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.6.0",
-  "description": "A Codex plugin for project contextualization, verified assessments, and traceable software delivery.",
+  "version": "0.7.0",
+  "description": "A Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
   "author": {
     "name": "Antonio Antenore",
     "url": "https://github.com/aantenore"
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Agentic SDLC",
     "shortDescription": "Project context and verified assessments for Codex.",
-    "longDescription": "Agentic SDLC helps Codex understand an existing software project, agree a focused assessment in plain language, produce the requested artifact in its real format, verify it, and retain a traceable project record for later work.",
+    "longDescription": "Agentic SDLC helps Codex understand an existing software project, agree work in plain language, produce and verify real artifacts, and open a local Change Observatory that explains requests, decisions, contracts, changes, and delivery lineage.",
     "developerName": "Antonio Antenore",
     "category": "Productivity",
     "composerIcon": "./assets/icon.png",
@@ -36,7 +36,7 @@
     "defaultPrompt": [
       "Contextualize this project and prepare an initial technical assessment.",
       "Assess this project's architecture, risks, and priorities.",
-      "Prepare a functional assessment for this project."
+      "Open the Change Observatory and explain this project's recorded delivery lineage."
     ],
     "brandColor": "#0EA5E9"
   }
