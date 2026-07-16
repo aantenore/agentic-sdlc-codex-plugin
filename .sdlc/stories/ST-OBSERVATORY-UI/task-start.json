@@ -1,27 +1,27 @@
 {
-  "id": "START-ST-OBSERVATORY-UI-20260716083742155-945099",
+  "id": "START-ST-OBSERVATORY-UI-20260716091159479-9da5f6",
   "story_id": "ST-OBSERVATORY-UI",
   "phase": "implementation",
   "route": "claim_and_implement",
-  "contract_id": "contract-ST-OBSERVATORY-UI-implementation",
-  "contract_approval_hash": "e4a125eafccb2bd5b070a9a9c562534b1d143457d73e0f5fd2ee5a01cb1da894",
+  "contract_id": "contract-ST-OBSERVATORY-UI-implementation-v3",
+  "contract_approval_hash": "e033eae527cae9d46d996932c266d8360a4b4963914b41a07d61aff32b7732fa",
   "status": "confirmed",
-  "authorization_ref": "AUTH-CHANGE-OBSERVATORY-REFRESH",
-  "authorization_use_ref": ".sdlc/authorization-uses/AUTH-CHANGE-OBSERVATORY-REFRESH/AUSE-AUTH-CHANGE-OBSERVATORY-REFRESH-20260716083742152-37bdc8.json",
+  "authorization_ref": "AUTH-OBSERVATORY-UI-V3",
+  "authorization_use_ref": ".sdlc/authorization-uses/AUTH-OBSERVATORY-UI-V3/AUSE-AUTH-OBSERVATORY-UI-V3-20260716091159476-872850.json",
   "authority_assurance": "audit_only",
   "confirmed_by": {
-    "id": "codex",
+    "id": "codex-ui",
     "type": "agent",
-    "name": "Codex",
+    "name": "Codex UI",
     "email": null,
     "source": "cli"
   },
-  "confirmed_at": "2026-07-16T08:37:42.155Z",
+  "confirmed_at": "2026-07-16T09:11:59.479Z",
   "audit": {
     "git": {
       "is_git_repo": true,
-      "branch": "codex/change-observatory",
-      "head_sha": "e15856040e88661d7d97a924d1091d0a95cb55b1",
+      "branch": "codex/ST-OBSERVATORY-UI",
+      "head_sha": "5c8370e56dfcdcd87e54e161800c8501a0d396a3",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

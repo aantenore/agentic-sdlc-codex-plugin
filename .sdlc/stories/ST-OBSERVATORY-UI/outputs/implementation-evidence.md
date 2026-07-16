@@ -4,7 +4,7 @@
 
 Deliver the accessible visual lineage experience for Change Observatory inside the Agentic SDLC plugin. The primary screen must explain what was requested, what changed, and why; expose iteration and phase lineage, contracts, decisions, changes, verification, explainability, and raw records; and remain useful from 360px to desktop without a framework or build step.
 
-Canonical request: [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json). Story: [ST-OBSERVATORY-UI](../story.json). Approved contract: [contract-ST-OBSERVATORY-UI-implementation](../../../contracts/contract-ST-OBSERVATORY-UI-implementation.json).
+Canonical request: [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json). Story: [ST-OBSERVATORY-UI](../story.json). The [original execution contract](../../../contracts/contract-ST-OBSERVATORY-UI-implementation.json) and [freshness-safe v2 contract](../../../contracts/contract-ST-OBSERVATORY-UI-implementation-v2.json) are retained in lineage; [contract-ST-OBSERVATORY-UI-implementation-v3](../../../contracts/contract-ST-OBSERVATORY-UI-implementation-v3.json) preserves the exact scope and records this UI evidence as a delta of the core implementation evidence.
 
 ## Scope and non-goals
 
@@ -28,9 +28,10 @@ Explicit non-goals:
 
 - [Requirement](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json)
 - [Story](../story.json)
-- [Approved implementation contract](../../../contracts/contract-ST-OBSERVATORY-UI-implementation.json)
+- [Original approved implementation contract](../../../contracts/contract-ST-OBSERVATORY-UI-implementation.json)
+- [Output-consistent completion contract](../../../contracts/contract-ST-OBSERVATORY-UI-implementation-v3.json)
 - [Task-start receipt](../task-start.json)
-- [Approved visual concept](change-observatory-concept.png)
+- [Approved visual concept](../../../tests/ST-OBSERVATORY-UI-concept.png)
 - `change-observatory:view:v1` API contract coordinated with ST-OBSERVATORY-CORE
 - Existing dependency-free Node.js package conventions in `package.json` and `docs/architecture.md`
 
@@ -55,7 +56,7 @@ Verification support:
 
 - `test/unit/change-observatory-ui.test.mjs` covers schema normalization, missing states, narrative fidelity, grouping/filtering, canonical raw paths, API behavior, self-contained assets, accessibility signals, responsive rules, reduced motion, and absence of gradients/external dependencies.
 - `test/fixtures/change-observatory/view-model.json` and `test/helpers/change-observatory-preview-server.mjs` are explicitly synthetic test-only browser-QA support and are not imported by production code.
-- `change-observatory-render.png` captures the final 1536×1058 implementation render used for comparison.
+- [ST-OBSERVATORY-UI-render.png](../../../tests/ST-OBSERVATORY-UI-render.png) captures the final 1536×1058 implementation render used for comparison.
 
 ## Why was it decided?
 
@@ -85,7 +86,8 @@ Trade-offs:
 - Installable, build-free UI asset tree: `ui/change-observatory/`.
 - Reusable pure model/API modules and safe DOM component module.
 - Test-only preview fixture/server and ten targeted Node tests.
-- Accepted concept and final native-size render stored with the story outputs.
+- Accepted concept and final native-size render stored as canonical visual test evidence under `.sdlc/tests/`.
+- Structured test evidence: [ST-OBSERVATORY-UI-test-evidence.json](../../../tests/ST-OBSERVATORY-UI-test-evidence.json).
 - This implementation evidence record and the story claim/trace lineage.
 
 ## Verification
@@ -100,7 +102,7 @@ Outcome: 10 tests passed, 0 failed.
 
 Acceptance mapping:
 
-1. “What was asked?”, “What changed?”, and “Why was it decided?” are visible with source actions: verified by static invariants and `change-observatory-render.png`.
+1. “What was asked?”, “What changed?”, and “Why was it decided?” are visible with source actions: verified by static invariants and [ST-OBSERVATORY-UI-render.png](../../../tests/ST-OBSERVATORY-UI-render.png).
 2. Lineage, contract evolution, changed-files-by-intent, verification, inspector, and raw drawer are implemented as interactive components: verified by module checks, model/filter tests, and browser render against the test-only API.
 3. Generated explanations are labeled and missing narrative stays explicit; private chain-of-thought is never rendered: verified by narrative unit tests and the inspector render.
 4. Keyboard labels/landmarks, focus states, 360px breakpoints, and reduced motion are present: verified by static invariants. Final 360px interaction replay remains part of root integration QA against the packaged launcher.
@@ -130,10 +132,11 @@ Codex-generated from the recorded requirement, approved contract, implementation
 
 - Requirement: [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json)
 - Story: [ST-OBSERVATORY-UI](../story.json)
-- Contract and approval: [contract-ST-OBSERVATORY-UI-implementation](../../../contracts/contract-ST-OBSERVATORY-UI-implementation.json)
+- Completion contract and approval: [contract-ST-OBSERVATORY-UI-implementation-v3](../../../contracts/contract-ST-OBSERVATORY-UI-implementation-v3.json), approved content hash `e033eae527cae9d46d996932c266d8360a4b4963914b41a07d61aff32b7732fa`; the original and v2 contracts remain in lineage.
 - Capability boundary: [CAP-REC-CHANGE-OBSERVATORY](../../../capability-discovery/recommendations/CAP-REC-CHANGE-OBSERVATORY.json)
 - Trace: [ST-OBSERVATORY-UI trace](../../../traces/ST-OBSERVATORY-UI.jsonl)
 - Claim: [active story claim](../claim.json)
-- Visual concept: [change-observatory-concept.png](change-observatory-concept.png)
-- Visual verification: [change-observatory-render.png](change-observatory-render.png)
+- Visual concept: [ST-OBSERVATORY-UI-concept.png](../../../tests/ST-OBSERVATORY-UI-concept.png)
+- Visual verification: [ST-OBSERVATORY-UI-render.png](../../../tests/ST-OBSERVATORY-UI-render.png)
+- Test evidence: [ST-OBSERVATORY-UI-test-evidence.json](../../../tests/ST-OBSERVATORY-UI-test-evidence.json)
 - Commit, handoff, output registry link, and packaged-launcher verification are recorded by the root integration story after this story commit is consumed.

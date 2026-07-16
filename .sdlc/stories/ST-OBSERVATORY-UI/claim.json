@@ -2,9 +2,9 @@
   "story_id": "ST-OBSERVATORY-UI",
   "agent": "codex-ui",
   "branch": "codex/ST-OBSERVATORY-UI",
-  "status": "active",
-  "claimed_at": "2026-07-16T08:38:20.236Z",
-  "expires_at": "2026-07-17T08:38:20.236Z",
+  "status": "released",
+  "claimed_at": "2026-07-16T09:08:35.221Z",
+  "expires_at": "2026-07-17T09:08:35.221Z",
   "notes": null,
   "audit": {
     "claimed_by": {
@@ -17,8 +17,8 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-OBSERVATORY-UI",
-      "head_sha": "9c94d79fa7b4e6dc419326bc9628dc17184ba287",
-      "is_dirty": false,
+      "head_sha": "5c8370e56dfcdcd87e54e161800c8501a0d396a3",
+      "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
         "email": "50747458+aantenore@users.noreply.github.com"
@@ -33,6 +33,15 @@
       "session_id": null,
       "tool": "agentic-sdlc-cli",
       "version": "0.6.0"
+    },
+    "released_by": {
+      "id": "codex-ui",
+      "type": "agent",
+      "name": "Codex UI",
+      "email": null,
+      "source": "cli"
     }
-  }
+  },
+  "released_at": "2026-07-16T09:13:10.598Z",
+  "release_reason": "UI implementation evidence linked as a delta and strict story gate passed."
 }
