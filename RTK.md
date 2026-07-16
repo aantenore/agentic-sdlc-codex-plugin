@@ -1,37 +1,41 @@
 # RTK - Rust Token Killer (Codex CLI)
 
-**Usage**: Token-optimized CLI proxy for shell commands.
+**Usage**: Token-optimized command output through the Agentic SDLC gateway.
 
 ## Rule
 
-Prefer `rtk` for supported read, search, Git, test, build, and log commands whose
-output enters the model context. Use the native command or `rtk proxy` when
-byte-exact output, full JSON, an interactive process, or unresolved diagnostics
-are required. Canonical `.sdlc` records are never rewritten or compressed.
+Prefer the shell-free `agentic-sdlc optimization run` gateway for supported
+read-only Git/search commands and fixed test commands whose output enters model
+context. Pass commands as JSON argument vectors, never shell strings. The
+gateway uses native fallback when RTK is unavailable. Add `--exact` for
+unfiltered output or full/machine-readable formats of an otherwise allowlisted
+command. Exact and native routes still suppress ripgrep config loading and Git
+external diff/textconv helpers; Git signature-verification helpers are rejected.
+The gateway does not allow mutations, unknown
+executables, external preprocessors, or interactive commands. Canonical `.sdlc` records are never
+filtered or compressed. When an assessment is active, include its `--proposal`;
+the cost gate can block the command before either RTK or the native fallback runs.
 
 Examples:
 
 ```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk test npm test
-rtk pytest -q
-rtk rg "pattern" path
+agentic-sdlc optimization run --proposal ASSESS-001 --command-json '["git","status","--short"]'
+agentic-sdlc optimization run --proposal ASSESS-001 --command-json '["rg","pattern","path"]'
+agentic-sdlc optimization run --proposal ASSESS-001 --command-json '["npm","test"]'
+agentic-sdlc optimization run --proposal ASSESS-001 --command-json '["git","diff","--binary"]' --exact
 ```
 
 ## Meta Commands
 
 ```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
+agentic-sdlc optimization status --json
+rtk gain --project --format json
 ```
 
 ## Verification
 
 ```bash
+agentic-sdlc doctor --json
 rtk --version
-rtk gain
-which rtk
+rtk gain --project --format json
 ```

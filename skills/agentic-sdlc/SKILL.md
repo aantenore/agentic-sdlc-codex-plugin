@@ -204,13 +204,38 @@ Never store project contracts or project KB state inside the plugin installation
    Keep retrieval token-efficient: prefer the human-readable CLI view when it
    contains enough information. JSON from `kb search` and `cache status` is
    compact by default; add `--full` only when the omitted derived payload is
-   genuinely needed. If RTK is installed, use it for supported noisy shell,
-   search, Git, test, build, and log commands. Bypass RTK for byte-exact output,
-   full JSON, interactive programs, unresolved failures, and canonical SDLC
-   evidence.
+   genuinely needed.
 
-   For test suites, prefer RTK's test-aware form (for example,
-   `rtk test npm test`) rather than only wrapping the package manager.
+   For supported noisy test, Git, and `rg` commands, use the project-configured
+   RTK gateway rather than invoking an assumed global wrapper directly:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs optimization status --root <target-project> --proposal <proposal-id> --json
+   node <plugin-root>/bin/agentic-sdlc.mjs optimization run --root <target-project> --proposal <proposal-id> --command-json '["npm","test"]'
+   ```
+
+   Add `--exact` for byte-exact or complete output from an already allowlisted
+   command. It preserves argv but never allows mutations, external preprocessors,
+   unknown executables, or arbitrary diagnostics. The gateway is shell-free and
+   applies the configured native fallback only after the active proposal cost
+   gate permits new work. A custom provider command requires the invocation-local
+   `--trust-custom-rtk-command` switch after its exact argv has been reviewed.
+
+   In an assessment execution, let the lifecycle capture optimization evidence
+   automatically at apply, budget checkpoints, and completion. Use manual
+   capture only for an explicit diagnostic:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs optimization capture --root <target-project> --proposal <proposal-id> --phase manual --json
+   ```
+
+   Never fabricate lifecycle phases with manual capture. Treat RTK counters as
+   project-cumulative and the hash-linked proposal delta as interval-only,
+   advisory evidence. RTK always applies zero usage credit and no gate override:
+   budget usage comes only from receipts, and soft limits, completion reserve,
+   hard limits, and metering violations remain sovereign. A release manifest
+   may reference validated optimization observations without changing its
+   `budget_decision`.
 
 21. Use activity reports or report queries when the user asks what happened, who changed something, which stories were created, which outputs changed, or similar history questions. For raw natural language, normalize the request into canonical report query JSON first; do not keyword-match the user's language in the CLI. Reports must cite canonical source files and must not infer unstored history:
 

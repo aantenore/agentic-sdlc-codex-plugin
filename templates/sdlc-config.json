@@ -5,6 +5,7 @@
     "baseline",
     "assessments",
     "budgets",
+    "context-optimization",
     "contracts",
     "authorizations",
     "authorization-uses",
@@ -415,6 +416,35 @@
     "aggregation_scope": "story-including-subagents",
     "hard_limit_requires_exact_metering": true,
     "extensions_require_versioned_amendment": true
+  },
+  "context_optimization_policy": {
+    "enabled": true,
+    "mode": "automatic",
+    "fallback": "native",
+    "storage_root": "context-optimization",
+    "observation_schema": "schemas/context-optimization-observation.schema.json",
+    "provider": {
+      "id": "rtk",
+      "minimum_version": "0.43.0",
+      "command": {
+        "executable": "rtk",
+        "arguments": []
+      }
+    },
+    "telemetry": {
+      "enabled": true,
+      "include_in_budget_status": true,
+      "auto_capture": [
+        "apply",
+        "checkpoint",
+        "complete"
+      ]
+    },
+    "budget_trigger_statuses": [
+      "warning",
+      "soft_limit",
+      "completion_reserve"
+    ]
   },
   "verification_policy": {
     "principle": "Verification claims are dimensioned; container validity never implies semantic or rendered correctness.",

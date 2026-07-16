@@ -57,6 +57,19 @@ import {
   validateMeteringDeltaIntegrity,
   validateMeteringSnapshotIntegrity,
 } from "../lib/codeburn-metering-adapter.mjs";
+import {
+  RTK_ADAPTER_ID,
+  collectRtkOptimizationTelemetry,
+  detectRtk,
+  routeRtkCommand,
+} from "../lib/rtk-optimization-adapter.mjs";
+import {
+  buildContextOptimizationObservation,
+  buildContextOptimizationLineageDelta,
+  optimizationBudgetAdvisory,
+  validateContextOptimizationObservation,
+  validateContextOptimizationLineage,
+} from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 
@@ -166,6 +179,7 @@ const BOOLEAN_OPTIONS = new Set([
   "confirm-start",
   "force",
   "full",
+  "exact",
   "help",
   "json",
   "no-open",
@@ -174,6 +188,7 @@ const BOOLEAN_OPTIONS = new Set([
   "replace-story-contract",
   "revise-contract",
   "strict",
+  "trust-custom-rtk-command",
   "version",
 ]);
 const KNOWN_OPTIONS = new Set([
@@ -224,6 +239,7 @@ const KNOWN_OPTIONS = new Set([
   "context-summary",
   "contract",
   "contract-id",
+  "command-json",
   "cost-amount",
   "currency",
   "decision-id",
@@ -524,7 +540,19 @@ async function main() {
       return;
     }
     if (command === "doctor") {
-      runDoctor(context, parsed.options);
+      await runDoctor(context, parsed.options);
+      return;
+    }
+    if (command === "optimization" && subcommand === "status") {
+      await showOptimizationStatus(context, parsed.options);
+      return;
+    }
+    if (command === "optimization" && subcommand === "capture") {
+      await captureOptimizationFromCommand(context, parsed.options);
+      return;
+    }
+    if (command === "optimization" && subcommand === "run") {
+      await runOptimizedCommand(context, parsed.options);
       return;
     }
     if (command === "onboard" && subcommand === "existing-project") {
@@ -552,11 +580,11 @@ async function main() {
       return;
     }
     if (command === "assessment" && subcommand === "proposal" && rest[0] === "apply") {
-      applyAssessmentProposal(context, parsed.options);
+      await applyAssessmentProposal(context, parsed.options);
       return;
     }
     if (command === "assessment" && subcommand === "proposal" && rest[0] === "complete") {
-      completeAssessmentProposal(context, parsed.options);
+      await completeAssessmentProposal(context, parsed.options);
       return;
     }
     if (command === "assessment" && subcommand === "proposal" && rest[0] === "status") {
@@ -568,7 +596,7 @@ async function main() {
       return;
     }
     if (command === "budget" && subcommand === "usage" && rest[0] === "record") {
-      recordBudgetUsage(context, parsed.options);
+      await recordBudgetUsage(context, parsed.options);
       return;
     }
     if (command === "budget" && subcommand === "meter" && rest[0] === "start") {
@@ -584,7 +612,7 @@ async function main() {
       return;
     }
     if (command === "budget" && subcommand === "status") {
-      showBudgetStatus(context, parsed.options);
+      await showBudgetStatus(context, parsed.options);
       return;
     }
     if (command === "requirement" && subcommand === "create") {
@@ -3176,7 +3204,7 @@ function initProject(context, options) {
   output(options, result.payload, result.messages);
 }
 
-function runDoctor(context, options) {
+async function runDoctor(context, options) {
   const checks = [];
   const add = (id, status, details) => checks.push({ id, status, details });
   const nodeVersion = process.versions.node;
@@ -3204,6 +3232,9 @@ function runDoctor(context, options) {
     ["assessment-skill", "skills/agentic-sdlc-assessment/SKILL.md"],
     ["assessment-agent-card", "skills/agentic-sdlc-assessment/agents/openai.yaml"],
     ["assessment-preset", "templates/technical-assessment.md"],
+    ["rtk-optimization-adapter", "lib/rtk-optimization-adapter.mjs"],
+    ["context-optimization-domain", "lib/context-optimization.mjs"],
+    ["context-optimization-schema", "schemas/context-optimization-observation.schema.json"],
     ["observatory-entry-point", "lib/change-observatory/index.mjs"],
     ["observatory-launcher", "lib/change-observatory/cli.mjs"],
     ["observatory-skill", "skills/change-observatory/SKILL.md"],
@@ -3214,6 +3245,26 @@ function runDoctor(context, options) {
   ]) {
     const filePath = path.join(PLUGIN_ROOT, relativePath);
     add(id, fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? "passed" : "failed", relativePath);
+  }
+
+  const optimizationPolicy = readContextOptimizationPolicy(context);
+  if (!optimizationPolicy.enabled || optimizationPolicy.mode === "disabled") {
+    add("rtk-optimization-provider", "not_applicable", "Context optimization is disabled by policy.");
+  } else {
+    const telemetry = await verifyConfiguredRtk(context, contextOptimizationRuntimeOptions(options));
+    const detection = telemetry.detection;
+    const required = optimizationPolicy.fallback === "error";
+    const operational = telemetry.status === "operational";
+    const status = operational ? "passed" : required ? "failed" : "not_applicable";
+    add(
+      "rtk-optimization-provider",
+      status,
+      operational
+        ? `RTK ${detection.version}; automatic provider and gain contract are operational`
+        : detection?.available
+          ? `RTK ${detection.version || "unknown"} failed provider validation (${telemetry.reason || detection.reason || telemetry.status})`
+          : `RTK unavailable (${detection?.reason || telemetry.reason || telemetry.status}); native fallback remains enabled`,
+    );
   }
 
   if (fs.existsSync(context.sdlcRoot)) {
@@ -3239,6 +3290,622 @@ function runDoctor(context, options) {
     `Agentic SDLC doctor: ${payload.status}`,
     ...checks.map((check) => `${check.status === "passed" ? "PASS" : check.status === "not_applicable" ? "N/A" : "FAIL"} ${check.id}: ${check.details}`),
   ]);
+}
+
+function readContextOptimizationPolicy(context) {
+  const configured = context.config.context_optimization_policy || {};
+  const provider = configured.provider || {};
+  const command = provider.command || {};
+  return {
+    enabled: configured.enabled !== false,
+    mode: configured.mode || "automatic",
+    fallback: configured.fallback || "native",
+    storage_root: configured.storage_root || "context-optimization",
+    provider: {
+      id: provider.id || RTK_ADAPTER_ID,
+      minimum_version: provider.minimum_version || "0.43.0",
+      command: {
+        executable: command.executable || "rtk",
+        arguments: Array.isArray(command.arguments) ? command.arguments : [],
+      },
+    },
+    telemetry: {
+      enabled: configured.telemetry?.enabled !== false,
+      include_in_budget_status: configured.telemetry?.include_in_budget_status !== false,
+      auto_capture: Array.isArray(configured.telemetry?.auto_capture)
+        ? configured.telemetry.auto_capture
+        : ["apply", "checkpoint", "complete"],
+    },
+    budget_trigger_statuses: Array.isArray(configured.budget_trigger_statuses)
+      ? configured.budget_trigger_statuses
+      : ["warning", "soft_limit", "completion_reserve"],
+  };
+}
+
+function configuredRtkOptions(context, trust) {
+  const policy = readContextOptimizationPolicy(context);
+  if (!trust?.allowed || !trust.execution_executable) {
+    throw new Error("RTK provider options require an allowed, resolved invocation");
+  }
+  return {
+    executable: trust.execution_executable,
+    prefix_args: policy.provider.command.arguments,
+    minimum_version: policy.provider.minimum_version,
+    cwd: context.root,
+  };
+}
+
+function contextOptimizationRuntimeOptions(options = {}, extra = {}) {
+  return {
+    ...extra,
+    allow_custom_provider: options["trust-custom-rtk-command"] === true,
+  };
+}
+
+function configuredRtkTrust(context, options = {}) {
+  const policy = readContextOptimizationPolicy(context);
+  const configuredExecutable = policy.provider.command.executable;
+  const configuredCustom = configuredExecutable !== "rtk" || policy.provider.command.arguments.length > 0;
+  if (configuredCustom) {
+    const allowed = options.allow_custom_provider === true;
+    return {
+      allowed,
+      custom: true,
+      configured_executable: configuredExecutable,
+      executable: configuredExecutable,
+      execution_executable: allowed ? configuredExecutable : null,
+      resolved_executable: null,
+      reason: allowed ? null : "custom_provider_command_requires_explicit_trust",
+    };
+  }
+
+  const resolved = resolveExecutableFromPath(configuredExecutable, context.root);
+  if (!resolved) {
+    return {
+      allowed: false,
+      custom: false,
+      configured_executable: configuredExecutable,
+      executable: configuredExecutable,
+      execution_executable: null,
+      resolved_executable: null,
+      reason: "standard_provider_not_found",
+    };
+  }
+
+  let canonicalRoot;
+  try {
+    canonicalRoot = fs.realpathSync(context.root);
+  } catch {
+    canonicalRoot = path.resolve(context.root);
+  }
+  const projectLocal = isInsidePath(context.root, resolved.candidate)
+    || isInsidePath(context.root, resolved.realpath)
+    || isInsidePath(canonicalRoot, resolved.candidate)
+    || isInsidePath(canonicalRoot, resolved.realpath);
+  const allowed = !projectLocal || options.allow_custom_provider === true;
+  return {
+    allowed,
+    custom: projectLocal,
+    configured_executable: configuredExecutable,
+    executable: resolved.realpath,
+    execution_executable: allowed ? resolved.realpath : null,
+    resolved_executable: resolved.realpath,
+    reason: allowed ? null : "project_local_standard_provider_requires_explicit_trust",
+  };
+}
+
+function resolveExecutableFromPath(executable, cwd) {
+  const pathValue = Object.entries(process.env)
+    .find(([key]) => key.toLowerCase() === "path")?.[1];
+  if (!pathValue) return null;
+  const extensions = process.platform === "win32" && path.extname(executable) === ""
+    ? [
+      "",
+      ...String(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+        .split(";")
+        .map((extension) => extension.trim())
+        .filter(Boolean),
+    ]
+    : [""];
+  for (const rawEntry of String(pathValue).split(path.delimiter)) {
+    const entry = rawEntry.startsWith('"') && rawEntry.endsWith('"')
+      ? rawEntry.slice(1, -1)
+      : rawEntry;
+    const directory = entry === ""
+      ? cwd
+      : path.isAbsolute(entry) ? entry : path.resolve(cwd, entry);
+    for (const extension of extensions) {
+      const candidate = path.resolve(directory, `${executable}${extension}`);
+      try {
+        const stat = fs.statSync(candidate);
+        if (!stat.isFile()) continue;
+        fs.accessSync(candidate, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+        return {
+          candidate,
+          realpath: fs.realpathSync(candidate),
+        };
+      } catch {
+        // Match PATH lookup by continuing to the next candidate.
+      }
+    }
+  }
+  return null;
+}
+
+async function detectConfiguredRtk(context, options = {}) {
+  const trust = configuredRtkTrust(context, options);
+  if (!trust.allowed) {
+    return {
+      available: false,
+      supported: false,
+      executable: trust.executable,
+      minimum_version: readContextOptimizationPolicy(context).provider.minimum_version,
+      version: null,
+      gain_contract: null,
+      reason: trust.reason,
+    };
+  }
+  return detectRtk(configuredRtkOptions(context, trust));
+}
+
+async function verifyConfiguredRtk(context, options = {}) {
+  const trust = configuredRtkTrust(context, options);
+  if (!trust.allowed) {
+    return {
+      provider: RTK_ADAPTER_ID,
+      status: trust.custom ? "custom_provider_untrusted" : "unavailable",
+      detection: await detectConfiguredRtk(context, options),
+      classification: "estimated",
+      enforcement: "advisory",
+      trusted_exact: false,
+      scope: "project_cumulative",
+      usage_credit_tokens: 0,
+      source: null,
+      savings: null,
+      reason: trust.reason,
+    };
+  }
+  const configuredOptions = configuredRtkOptions(context, trust);
+  try {
+    return await collectRtkOptimizationTelemetry(configuredOptions);
+  } catch (error) {
+    return {
+      provider: RTK_ADAPTER_ID,
+      status: "telemetry_unavailable",
+      detection: await detectRtk(configuredOptions),
+      classification: "estimated",
+      enforcement: "advisory",
+      trusted_exact: false,
+      scope: "project_cumulative",
+      usage_credit_tokens: 0,
+      source: null,
+      savings: null,
+      reason: error.code || "telemetry_collection_failed",
+    };
+  }
+}
+
+async function inspectContextOptimization(context, options = {}) {
+  const policy = readContextOptimizationPolicy(context);
+  if (!policy.enabled || policy.mode === "disabled") {
+    return {
+      provider: policy.provider.id,
+      status: "disabled",
+      detection: null,
+      classification: "estimated",
+      enforcement: "advisory",
+      trusted_exact: false,
+      scope: "project_cumulative",
+      usage_credit_tokens: 0,
+      savings: null,
+    };
+  }
+  if (!policy.telemetry.enabled) {
+    const detection = await detectConfiguredRtk(context, options);
+    return {
+      provider: policy.provider.id,
+      status: detection.available && detection.supported ? "available" : detection.available ? "unsupported" : "unavailable",
+      detection,
+      classification: "estimated",
+      enforcement: "advisory",
+      trusted_exact: false,
+      scope: "project_cumulative",
+      usage_credit_tokens: 0,
+      savings: null,
+    };
+  }
+  return verifyConfiguredRtk(context, options);
+}
+
+function contextOptimizationExecutionRoot(context, proposalId) {
+  const configured = readContextOptimizationPolicy(context).storage_root;
+  assertSafeSdlcRelativeDirectory(configured, "context_optimization_policy.storage_root");
+  return path.join(context.sdlcRoot, configured, normalizeId(proposalId));
+}
+
+function contextOptimizationObservationsRoot(context, proposalId) {
+  return path.join(contextOptimizationExecutionRoot(context, proposalId), "observations");
+}
+
+function readContextOptimizationObservations(context, proposalId) {
+  const observations = safeReadDir(contextOptimizationObservationsRoot(context, proposalId))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => ({
+      filePath: path.join(contextOptimizationObservationsRoot(context, proposalId), name),
+    }))
+    .map((item) => ({ ...item, observation: readProjectJson(context, item.filePath) }))
+    .map((item) => {
+      const validation = validateContextOptimizationObservation(item.observation);
+      if (!validation.valid) {
+        fail(`Context optimization observation ${toProjectPath(context, item.filePath)} is invalid: ${validation.errors.join("; ")}`);
+      }
+      assertRecordSchema(item.observation, "context-optimization-observation.schema.json", `Context optimization observation ${item.observation.id}`);
+      return item;
+    });
+  const lineage = validateContextOptimizationLineage(observations.map((item) => item.observation));
+  if (!lineage.valid) {
+    fail(`Context optimization lineage for ${proposalId} is invalid: ${lineage.errors.join("; ")}`);
+  }
+  const byHash = new Map(observations.map((item) => [item.observation.observation_hash, item]));
+  return lineage.ordered.map((observation) => byHash.get(observation.observation_hash));
+}
+
+async function captureContextOptimization(context, proposalId, phase, options = {}) {
+  const policy = readContextOptimizationPolicy(context);
+  const allowed = options.manual === true || (policy.mode === "automatic" && policy.telemetry.auto_capture.includes(phase));
+  if (!policy.enabled || policy.mode === "disabled" || !policy.telemetry.enabled || !allowed) {
+    return { status: "disabled", persisted: false, telemetry: await inspectContextOptimization(context, options), observation: null, path: null };
+  }
+  const proposal = readAssessmentProposal(context, proposalId);
+  const projectScopeHash = crypto.createHash("sha256").update(fs.realpathSync(context.root), "utf8").digest("hex");
+  const releaseLock = acquireFileLock(path.join(context.sdlcRoot, "locks", "context-optimization", `${normalizeId(proposalId)}.lock`));
+  try {
+    const telemetry = await inspectContextOptimization(context, options);
+    if (telemetry.status !== "operational") {
+      if (policy.fallback === "error" && options.manual === true) {
+        fail(`RTK context optimization is required but unavailable: ${telemetry.reason || telemetry.detection?.reason || telemetry.status}`);
+      }
+      return { status: telemetry.status, persisted: false, telemetry, observation: null, path: null };
+    }
+    const currentCounters = {
+      total_commands: telemetry.savings.total_commands,
+      estimated_command_output_tokens_before: telemetry.savings.estimated_input_tokens,
+      estimated_command_output_tokens_after: telemetry.savings.estimated_output_tokens,
+      estimated_tokens_avoided: telemetry.savings.estimated_tokens_avoided,
+      estimated_savings_percent: telemetry.savings.estimated_savings_percent,
+    };
+    const observations = readContextOptimizationObservations(context, proposalId);
+    const latest = observations.at(-1) || null;
+    const existingLifecycle = ["apply", "complete"].includes(phase)
+      ? observations.find((item) => item.observation.phase === phase)
+      : null;
+    if (existingLifecycle) {
+      return {
+        status: "idempotent_replay",
+        persisted: true,
+        telemetry,
+        observation: existingLifecycle.observation,
+        path: toProjectPath(context, existingLifecycle.filePath),
+      };
+    }
+    if (latest?.observation.phase === "complete") {
+      return {
+        status: "lineage_closed",
+        persisted: false,
+        telemetry,
+        observation: latest.observation,
+        path: toProjectPath(context, latest.filePath),
+      };
+    }
+    if (
+      latest?.observation.phase === phase &&
+      stableJson(latest.observation.counters) === stableJson(currentCounters) &&
+      latest.observation.provider.id === telemetry.provider &&
+      latest.observation.provider.version === telemetry.detection.version &&
+      latest.observation.provider.contract === telemetry.detection.gain_contract &&
+      latest.observation.proposal_hash === proposal.proposal_hash &&
+      latest.observation.scope.project_scope_hash === projectScopeHash
+    ) {
+      return {
+        status: "idempotent_replay",
+        persisted: true,
+        telemetry,
+        observation: latest.observation,
+        path: toProjectPath(context, latest.filePath),
+      };
+    }
+    const observation = buildContextOptimizationObservation({
+      id: normalizeId(`OPT-${proposalId}-${phase}-${uniqueRecordSuffix()}`),
+      execution_id: proposalId,
+      proposal_hash: proposal.proposal_hash,
+      phase,
+      observed_at: now(),
+      project_scope_hash: projectScopeHash,
+      telemetry,
+      previous: latest?.observation || null,
+    });
+    assertRecordSchema(observation, "context-optimization-observation.schema.json", `Context optimization observation ${observation.id}`);
+    const prospectiveLineage = validateContextOptimizationLineage([
+      ...observations.map((item) => item.observation),
+      observation,
+    ]);
+    if (!prospectiveLineage.valid) {
+      return {
+        status: "lineage_rejected",
+        persisted: false,
+        telemetry,
+        observation: null,
+        path: null,
+        errors: prospectiveLineage.errors,
+      };
+    }
+    const observationRoot = contextOptimizationObservationsRoot(context, proposalId);
+    ensureDir(observationRoot);
+    const observationPath = path.join(observationRoot, `${observation.id}.json`);
+    writeJsonFile(observationPath, observation, { atomicCreate: true });
+    return {
+      status: observation.delta.status,
+      persisted: true,
+      telemetry,
+      observation,
+      path: toProjectPath(context, observationPath),
+    };
+  } finally {
+    releaseLock();
+  }
+}
+
+async function showOptimizationStatus(context, options) {
+  const telemetry = await inspectContextOptimization(context, contextOptimizationRuntimeOptions(options));
+  const proposalId = getOptionString(options, "proposal");
+  const observations = proposalId ? readContextOptimizationObservations(context, normalizeId(proposalId)) : [];
+  const latest = observations.at(-1) || null;
+  const proposalDelta = proposalId ? buildProposalContextOptimizationDelta(observations) : null;
+  const policy = readContextOptimizationPolicy(context);
+  output(options, {
+    status: telemetry.status,
+    policy,
+    rtk_project_cumulative: telemetry,
+    proposal_optimization_delta: proposalDelta,
+    latest_observation: latest?.observation || null,
+    latest_observation_path: latest ? toProjectPath(context, latest.filePath) : null,
+  }, [
+    `Context optimization: ${telemetry.status}`,
+    `Provider: ${policy.provider.id}${telemetry.detection?.version ? ` ${telemetry.detection.version}` : ""}`,
+    `Mode: ${policy.mode}; fallback: ${policy.fallback}`,
+    telemetry.savings
+      ? `Estimated command-output tokens avoided: ${telemetry.savings.estimated_tokens_avoided} (${telemetry.savings.estimated_savings_percent.toFixed(1)}%).`
+      : "No RTK savings telemetry is available; native fallback remains explicit.",
+    ...(proposalDelta ? [
+      proposalDelta.delta?.status === "measured"
+        ? `Proposal delta since apply: ~${proposalDelta.delta.estimated_tokens_avoided} command-output tokens avoided.`
+        : `Proposal delta: ${proposalDelta.status}.`,
+    ] : []),
+    "Budget effect: advisory only; usage adjustment applied is always 0.",
+  ]);
+}
+
+async function captureOptimizationFromCommand(context, options) {
+  ensureInitialized(context);
+  const proposalId = normalizeId(requireOption(options, "proposal"));
+  const phase = getOptionString(options, "phase") || "manual";
+  if (phase !== "manual") {
+    fail("optimization capture accepts only --phase manual; apply, checkpoint, and complete are reserved for lifecycle hooks");
+  }
+  const proposal = readAssessmentProposal(context, proposalId);
+  const workflow = readAssessmentWorkflow(context, proposalId);
+  if (!["running", "verifying", "exception_pending"].includes(workflow.state)) {
+    fail(`Manual optimization capture requires an active assessment workflow; ${proposalId} is ${workflow.state}.`);
+  }
+  const application = readAssessmentApplication(context, proposalId);
+  const authorization = readAuthorization(context, application.authorization_ref);
+  const authorizationUse = existingAuthorizationUse(context, authorization.id, "context.optimization.observe", {
+    proposal_ref: { id: proposal.id, hash: proposal.proposal_hash },
+    subject_id: proposal.id,
+    artifact_types: [],
+  });
+  if (!authorizationUse) {
+    fail(`Manual optimization capture is outside the activated write set for proposal ${proposalId}.`);
+  }
+  const result = await captureContextOptimization(
+    context,
+    proposalId,
+    phase,
+    contextOptimizationRuntimeOptions(options, { manual: true }),
+  );
+  output(options, result, [
+    `Context optimization capture for ${proposalId}: ${result.status}.`,
+    result.path ? `Observation: ${result.path}` : "No observation was persisted.",
+    "Usage adjustment applied: 0.",
+  ]);
+}
+
+async function runOptimizedCommand(context, options) {
+  if (options.json) fail("optimization run streams child output and does not support --json");
+  const raw = requireOption(options, "command-json");
+  let command;
+  try {
+    command = JSON.parse(raw);
+  } catch (error) {
+    fail(`--command-json must be valid JSON: ${error.message}`);
+  }
+  let route;
+  try {
+    route = routeRtkCommand(command, { profile: getOptionString(options, "profile") || "auto", exact: options.exact === true });
+  } catch (error) {
+    fail(error.message);
+  }
+  let executable;
+  let argv;
+  let nativeFallback = null;
+  if (route.mode === "native") {
+    executable = route.execution_command[0];
+    argv = route.execution_command.slice(1);
+  } else {
+    const policy = readContextOptimizationPolicy(context);
+    if (!policy.enabled || policy.mode === "disabled") {
+      executable = route.execution_command[0];
+      argv = route.execution_command.slice(1);
+    } else {
+      const releaseDetectionGate = acquireOptimizationRunBudgetGate(context, options);
+      releaseDetectionGate();
+      const detection = await detectConfiguredRtk(context, contextOptimizationRuntimeOptions(options));
+      const providerUsable = detection.available && detection.supported;
+      if (!providerUsable && policy.fallback === "error") {
+        fail(`RTK is required for optimization run but unavailable: ${detection.reason || "unsupported"}`);
+      }
+      executable = providerUsable ? detection.executable : route.execution_command[0];
+      argv = providerUsable
+        ? [...policy.provider.command.arguments, ...route.rtk_arguments]
+        : route.execution_command.slice(1);
+      nativeFallback = providerUsable && policy.fallback === "native"
+        ? route.execution_command
+        : null;
+    }
+  }
+  await executeOptimizationRunWithBudgetGate(context, options, {
+    executable,
+    argv,
+    nativeFallback,
+  });
+}
+
+async function executeOptimizationRunWithBudgetGate(context, options, plan) {
+  const releaseBudgetGate = acquireOptimizationRunBudgetGate(context, options);
+  let released = false;
+  const releaseOnce = () => {
+    if (released) return;
+    released = true;
+    releaseBudgetGate();
+  };
+  let attemptedExecutable = plan.executable;
+  try {
+    let result = await spawnCommandWithoutShell(attemptedExecutable, plan.argv, context.root, {
+      onSpawn: releaseOnce,
+    });
+    if (!result.started && result.error?.code === "ENOENT" && plan.nativeFallback) {
+      attemptedExecutable = plan.nativeFallback[0];
+      result = await spawnCommandWithoutShell(attemptedExecutable, plan.nativeFallback.slice(1), context.root, {
+        onSpawn: releaseOnce,
+      });
+    }
+    finishSpawnedCommand(result, attemptedExecutable);
+  } finally {
+    releaseOnce();
+  }
+}
+
+function governedAssessmentWorkflows(context) {
+  const governedStates = new Set(["authorized", "running", "verifying", "exception_pending"]);
+  return fs.existsSync(assessmentWorkflowsRoot(context))
+    ? safeReadDir(assessmentWorkflowsRoot(context))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => readAssessmentWorkflow(context, name.slice(0, -5)))
+      .filter((workflow) => governedStates.has(workflow.state))
+    : [];
+}
+
+function acquireOptimizationRunBudgetGate(context, options) {
+  const initialWorkflows = governedAssessmentWorkflows(context);
+  const lockableProposalIds = initialWorkflows
+    .filter((workflow) => ["running", "verifying", "exception_pending"].includes(workflow.state))
+    .map((workflow) => workflow.proposal_id)
+    .sort((left, right) => left.localeCompare(right));
+  const releases = [];
+  const releaseAll = () => {
+    for (const release of releases.splice(0).reverse()) release();
+  };
+  try {
+    for (const proposalId of lockableProposalIds) {
+      releases.push(acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId)));
+    }
+    const lockedWorkflows = governedAssessmentWorkflows(context);
+    const lockedIds = new Set(lockableProposalIds);
+    const newlyLockable = lockedWorkflows.filter((workflow) => (
+      ["running", "verifying", "exception_pending"].includes(workflow.state) &&
+      !lockedIds.has(workflow.proposal_id)
+    ));
+    if (newlyLockable.length > 0) {
+      fail(`Governed assessment state changed while acquiring the optimization cost gate: ${newlyLockable.map((workflow) => workflow.proposal_id).join(", ")}. Retry the command.`);
+    }
+    enforceOptimizationRunBudgetGate(context, options, lockedWorkflows);
+    return releaseAll;
+  } catch (error) {
+    releaseAll();
+    throw error;
+  }
+}
+
+function enforceOptimizationRunBudgetGate(context, options, governedWorkflows = governedAssessmentWorkflows(context)) {
+  const requestedProposal = getOptionString(options, "proposal");
+  if (!requestedProposal && governedWorkflows.length > 0) {
+    fail(`optimization run requires --proposal while governed assessment execution is active: ${governedWorkflows.map((workflow) => workflow.proposal_id).join(", ")}`);
+  }
+  if (!requestedProposal) return;
+  const proposalId = normalizeId(requestedProposal);
+  const workflow = readAssessmentWorkflow(context, proposalId);
+  if (!["running", "verifying", "exception_pending"].includes(workflow.state)) {
+    fail(`optimization run requires an applied active proposal; ${proposalId} is ${workflow.state}`);
+  }
+  const workflowsById = new Map(governedWorkflows.map((candidate) => [candidate.proposal_id, candidate]));
+  workflowsById.set(proposalId, workflow);
+  const blockers = [];
+  for (const candidate of workflowsById.values()) {
+    if (candidate.state === "authorized") {
+      blockers.push({ proposal_id: candidate.proposal_id, status: "authorized_not_applied", completion_only: false });
+      continue;
+    }
+    const budget = effectiveAssessmentBudget(context, candidate.proposal_id);
+    const receipts = readAssessmentUsageReceipts(context, candidate.proposal_id);
+    const decision = evaluateAssessmentBudgetUsage(context, candidate.proposal_id, budget, receipts);
+    if (candidate.state === "exception_pending" || decision.allowed_to_start_next !== true) {
+      blockers.push({
+        proposal_id: candidate.proposal_id,
+        status: decision.status,
+        completion_only: decision.allowed_for_completion_only === true,
+      });
+    }
+  }
+  if (blockers.length === 1) {
+    const [blocker] = blockers;
+    fail(
+      blocker.completion_only
+        ? `Cost gate for ${blocker.proposal_id} is in completion_reserve; optimization run cannot start new work. Use assessment proposal complete for the completion-only path.`
+        : `Cost gate for ${blocker.proposal_id} blocks optimization run: ${blocker.status}. Resolve the budget checkpoint before starting another command.`,
+    );
+  }
+  if (blockers.length > 1) {
+    fail(`Cost gate blocks optimization run because governed workflows are not startable: ${blockers.map((blocker) => `${blocker.proposal_id}: ${blocker.status}`).join(", ")}. Resolve every checkpoint before starting another command.`);
+  }
+}
+
+function finishSpawnedCommand(result, executable) {
+  if (!result.started) {
+    fail(`Cannot start command '${executable}': ${result.error?.message || "unknown error"}`);
+  }
+  if (result.signal) {
+    process.exitCode = ({ SIGHUP: 129, SIGINT: 130, SIGQUIT: 131, SIGKILL: 137, SIGTERM: 143 })[result.signal] || 1;
+    return;
+  }
+  process.exitCode = result.exit_code;
+}
+
+function spawnCommandWithoutShell(executable, argv, cwd, options = {}) {
+  return new Promise((resolve) => {
+    let started = false;
+    const child = childProcess.spawn(executable, argv, {
+      cwd,
+      stdio: "inherit",
+      shell: false,
+      windowsHide: true,
+    });
+    child.once("spawn", () => {
+      started = true;
+      options.onSpawn?.();
+    });
+    child.once("error", (error) => resolve({ started: false, exit_code: null, signal: null, error }));
+    child.once("close", (exitCode, signal) => resolve({ started, exit_code: exitCode ?? 1, signal, error: null }));
+  });
 }
 
 function initializeProject(context, options) {
@@ -4005,6 +4672,14 @@ function prepareAssessmentProposal(context, options) {
     { action: "contract.approve", subject_id: contractId, path: path.posix.join(SDLC_DIR, "contracts", `${contractId}.json`), artifact_types: [artifactType] },
     { action: "task.start.confirm", subject_id: storyId, path: path.posix.join(SDLC_DIR, "stories", storyId, "task-start.json"), artifact_types: [artifactType] },
     { action: "output.link", subject_id: storyId, path: artifactPath, artifact_types: [artifactType] },
+    {
+      action: "context.optimization.observe",
+      subject_id: id,
+      path: path.posix.join(SDLC_DIR, readContextOptimizationPolicy(context).storage_root, id, "observations", "*.json"),
+      artifact_types: [],
+      conditional: "RTK provider operational",
+      budget_effect: "advisory-only; usage adjustment 0",
+    },
     { action: "assessment.proposal.complete", subject_id: id, path: toProjectPath(context, assessmentWorkflowPath(context, id)), artifact_types: [artifactType] },
   ];
   let proposal;
@@ -4844,7 +5519,7 @@ function assertProposalBaselineStillValid(context, proposal) {
   }
 }
 
-function applyAssessmentProposal(context, options) {
+async function applyAssessmentProposal(context, options) {
   ensureInitialized(context);
   ensureAssessmentDirectories(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -4853,6 +5528,17 @@ function applyAssessmentProposal(context, options) {
   const approval = readAssessmentApproval(context, id);
   const priorApplication = readAssessmentApplication(context, id, { missingOk: true });
   if (priorApplication?.status === "applied" && priorApplication.proposal_hash === proposal.proposal_hash) {
+    const existingApplyObservation = readContextOptimizationObservations(context, id)
+      .find((item) => item.observation.phase === "apply") || null;
+    const optimization = existingApplyObservation
+      ? {
+          status: "idempotent_replay",
+          persisted: true,
+          telemetry: null,
+          observation: existingApplyObservation.observation,
+          path: toProjectPath(context, existingApplyObservation.filePath),
+        }
+      : { status: "replay_skipped", persisted: false, telemetry: null, observation: null, path: null };
     let recoveredWorkflow = workflow;
     const repairLock = acquireFileLock(`${assessmentProposalPath(context, id)}.lock`);
     try {
@@ -4875,7 +5561,7 @@ function applyAssessmentProposal(context, options) {
     } finally {
       repairLock();
     }
-    output(options, { status: "running", idempotent: true, proposal_id: id, application: priorApplication, workflow: recoveredWorkflow }, [
+    output(options, { status: "running", idempotent: true, proposal_id: id, application: priorApplication, workflow: recoveredWorkflow, context_optimization: optimization }, [
       `Proposal ${id} was already applied at ${priorApplication.applied_at}.`,
       `Execution is ${recoveredWorkflow.state}; any interrupted workflow marker was repaired without replaying writes.`,
     ]);
@@ -4920,6 +5606,11 @@ function applyAssessmentProposal(context, options) {
       ...baseSettings,
       subject_id: id,
       artifact_types: [proposal.deliverable.artifact_type],
+    }));
+    useReceipts.push(recordOrReuseAuthorizationUse(context, authorization, "context.optimization.observe", {
+      ...baseSettings,
+      subject_id: id,
+      artifact_types: [],
     }));
     const requirementResult = applyProposalRequirement(context, proposal, attribution, authorization, baseSettings, useReceipts);
     const storyResult = applyProposalStory(context, proposal, attribution, authorization, baseSettings, useReceipts);
@@ -4994,6 +5685,7 @@ function applyAssessmentProposal(context, options) {
     }
     writeJsonFile(assessmentApplicationPath(context, id), application, { force: Boolean(priorApplication) });
     writeJsonFile(assessmentWorkflowPath(context, id), runningWorkflow, { force: true });
+    const optimization = await captureContextOptimization(context, id, "apply", contextOptimizationRuntimeOptions(options));
     appendTraceEvent(context, proposal.story_reservation.id, {
       type: "decision",
       summary: `Applied approved assessment proposal ${id}`,
@@ -5005,11 +5697,12 @@ function applyAssessmentProposal(context, options) {
       git: attribution.git,
       run: attribution.run,
     });
-    output(options, { status: "running", proposal_id: id, proposal_hash: proposal.proposal_hash, workflow: runningWorkflow, application }, [
+    output(options, { status: "running", proposal_id: id, proposal_hash: proposal.proposal_hash, workflow: runningWorkflow, application, context_optimization: optimization }, [
       `Applied assessment proposal ${id}; workflow is now running.`,
       `Materialized ${application.write_results.length} approved records without additional user checkpoints.`,
       `Budget: ${proposal.execution_budget.id} (${proposal.execution_budget.budget_hash}).`,
       `Authority assurance: ${authorityAssuranceLabel(application.authority_assurance)}.`,
+      `Context optimization: ${optimization.status}; budget usage adjustment 0.`,
     ]);
   } finally {
     releaseLock();
@@ -6109,6 +6802,7 @@ async function recordBudgetMeter(context, options) {
       recordBudgetUsageLocked(context, options, proposalId, latest, {
         meter: { adapter: adapter.id, baseline: lockedBaseline, current, replayed_receipt: latest.id },
       });
+      await captureContextOptimization(context, proposalId, "checkpoint", contextOptimizationRuntimeOptions(options));
       return;
     }
     let delta;
@@ -6168,6 +6862,7 @@ async function recordBudgetMeter(context, options) {
       meter: { adapter: adapter.id, baseline: lockedBaseline, current, delta },
       assurance: "advisory_observed",
     });
+    await captureContextOptimization(context, proposalId, "checkpoint", contextOptimizationRuntimeOptions(options));
   } finally {
     releaseLock();
   }
@@ -6262,16 +6957,17 @@ function completionReserveRisks(budget, decision) {
   const threshold = 100 - reserve;
   return Object.entries(decision.utilization_percent || {})
     .filter(([, percent]) => percent !== null && Number(percent) >= threshold)
-    .map(([metric, percent]) => ({ metric, utilization_percent: percent, reserve_percent: reserve }));
+    .map(([metric, percent]) => ({ metric, utilization_percent: Number(percent), reserve_percent: reserve }));
 }
 
-function recordBudgetUsage(context, options) {
+async function recordBudgetUsage(context, options) {
   ensureInitialized(context);
   const proposalId = normalizeId(requireOption(options, "proposal"));
   ensureDir(assessmentBudgetsRoot(context, proposalId));
   const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
   try {
     recordBudgetUsageLocked(context, options, proposalId);
+    await captureContextOptimization(context, proposalId, "checkpoint", contextOptimizationRuntimeOptions(options));
   } finally {
     releaseLock();
   }
@@ -6379,18 +7075,48 @@ function buildBudgetExceptionQuestion(proposalId, budget, decision, reserveRisks
   ].join("\n");
 }
 
-function showBudgetStatus(context, options) {
+async function showBudgetStatus(context, options) {
   ensureInitialized(context);
   const proposalId = normalizeId(requireOption(options, "proposal"));
   const budget = effectiveAssessmentBudget(context, proposalId);
   const receipts = readAssessmentUsageReceipts(context, proposalId);
   const decision = evaluateAssessmentBudgetUsage(context, proposalId, budget, receipts);
   const reserveRisks = completionReserveRisks(budget, decision);
-  output(options, { proposal_id: proposalId, budget, receipts, aggregate: decision, completion_reserve_risks: reserveRisks }, [
+  const policy = readContextOptimizationPolicy(context);
+  const telemetry = policy.telemetry.include_in_budget_status
+    ? await inspectContextOptimization(context, contextOptimizationRuntimeOptions(options))
+    : { provider: policy.provider.id, status: "not_requested", usage_credit_tokens: 0, savings: null };
+  const observations = readContextOptimizationObservations(context, proposalId);
+  const latest = observations.at(-1) || null;
+  const proposalDelta = buildProposalContextOptimizationDelta(observations);
+  const optimizationAdvisory = optimizationBudgetAdvisory(decision, telemetry, latest?.observation || null, {
+    trigger_statuses: policy.budget_trigger_statuses,
+  });
+  output(options, {
+    proposal_id: proposalId,
+    budget,
+    receipts,
+    aggregate: decision,
+    completion_reserve_risks: reserveRisks,
+    rtk_project_cumulative: telemetry,
+    proposal_optimization_delta: proposalDelta,
+    optimization_advisory: optimizationAdvisory,
+  }, [
     `Budget ${budget.id} for ${proposalId}: ${decision.status}`,
     `Receipts: ${receipts.length}`,
     ...Object.entries(decision.usage).map(([metric, value]) => `${metric}: used ${value}; remaining ${decision.remaining[metric] ?? "unbounded"}`),
+    telemetry.savings
+      ? `RTK project cumulative: ~${telemetry.savings.estimated_tokens_avoided} command-output tokens avoided (${telemetry.savings.estimated_savings_percent.toFixed(1)}%).`
+      : `RTK project cumulative: ${telemetry.status}.`,
+    proposalDelta.delta?.status === "measured"
+      ? `Proposal delta since apply: ~${proposalDelta.delta.estimated_tokens_avoided} command-output tokens avoided.`
+      : `Proposal delta: ${proposalDelta.status}.`,
+    `Optimization action: ${optimizationAdvisory.action}; usage adjustment applied: 0.`,
   ]);
+}
+
+function buildProposalContextOptimizationDelta(observations) {
+  return buildContextOptimizationLineageDelta(observations.map((item) => item.observation));
 }
 
 function budgetAmendmentApprovalSubject(proposal, amendment) {
@@ -7201,7 +7927,35 @@ function validateReleaseManifestIntegrity(context, manifest) {
     budgetRecord = budgetResult?.record || null;
   }
 
-  const executionResults = [];
+  let canonicalUsageReceipts = null;
+  if (proposalRecord) {
+    try {
+      const usageRoot = assessmentUsageRoot(context, proposalRecord.id);
+      const canonicalEntries = safeReadDir(usageRoot)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => {
+          const filePath = path.join(usageRoot, name);
+          return { filePath, record: readProjectJson(context, filePath) };
+        });
+      canonicalUsageReceipts = readAssessmentUsageReceipts(context, proposalRecord.id);
+      const canonicalReferences = canonicalEntries
+        .map(({ filePath, record }) => ({
+          id: record.id,
+          path: toProjectPath(context, filePath),
+          hash: record.receipt_hash,
+        }))
+        .sort((left, right) => stableJson(left).localeCompare(stableJson(right)));
+      const declaredReferences = (manifest.execution_usage_receipts || [])
+        .map((reference) => ({ id: reference.id, path: reference.path, hash: reference.hash }))
+        .sort((left, right) => stableJson(left).localeCompare(stableJson(right)));
+      if (stableJson(declaredReferences) !== stableJson(canonicalReferences)) {
+        errors.push("manifest execution usage receipt set does not exactly match the canonical proposal receipt set");
+      }
+    } catch (error) {
+      errors.push(`canonical execution usage receipts cannot be read: ${error.message}`);
+    }
+  }
+
   for (const reference of manifest.execution_usage_receipts || []) {
     const result = checkReference(reference, `execution usage receipt ${reference.id}`, {
       expectedRoot: proposalRecord ? assessmentUsageRoot(context, proposalRecord.id) : assessmentBudgetsRoot(context),
@@ -7218,9 +7972,38 @@ function validateReleaseManifestIntegrity(context, manifest) {
         return validateExecutionUsageReceipt(record, receiptBudget);
       },
     });
-    executionResults.push(result);
     if (result?.record && proposalRecord && result.record.execution_id !== proposalRecord.id) {
       errors.push(`execution usage receipt ${reference.id} is for ${result.record.execution_id}, expected ${proposalRecord.id}`);
+    }
+  }
+
+  const contextOptimizationResults = [];
+  for (const reference of manifest.context_optimization_observations || []) {
+    const result = checkReference(reference, `context optimization observation ${reference.id}`, {
+      expectedRoot: proposalRecord
+        ? contextOptimizationObservationsRoot(context, proposalRecord.id)
+        : path.join(context.sdlcRoot, readContextOptimizationPolicy(context).storage_root),
+      schema: "context-optimization-observation.schema.json",
+      integrity: validateContextOptimizationObservation,
+    });
+    contextOptimizationResults.push(result);
+    if (result?.record && proposalRecord && (
+      result.record.execution_id !== proposalRecord.id ||
+      result.record.proposal_hash !== proposalRecord.proposal_hash ||
+      result.record.budget_effect?.usage_adjustment_applied !== 0 ||
+      result.record.budget_effect?.gate_override !== false
+    )) {
+      errors.push(`context optimization observation ${reference.id} is not advisory-only evidence for proposal ${proposalRecord.id}`);
+    }
+  }
+  if (contextOptimizationResults.length > 0 && contextOptimizationResults.every((result) => result?.record)) {
+    const records = contextOptimizationResults.map((result) => result.record);
+    const lineage = validateContextOptimizationLineage(records);
+    errors.push(...lineage.errors.map((error) => `context optimization lineage: ${error}`));
+    const referencedOrder = (manifest.context_optimization_observations || []).map((reference) => reference.id);
+    const canonicalOrder = lineage.ordered.map((observation) => observation.id);
+    if (stableJson(referencedOrder) !== stableJson(canonicalOrder)) {
+      errors.push("context optimization observations are not in canonical chronological order");
     }
   }
 
@@ -7301,6 +8084,11 @@ function validateReleaseManifestIntegrity(context, manifest) {
             manifest.budget_decision?.budget_ref,
             ...(manifest.execution_usage_receipts || []),
           ].filter(Boolean) },
+          ...((manifest.context_optimization_observations || []).length > 0 ? [{
+            name: "context_optimization",
+            subject: manifest.context_optimization_observations,
+            evidence: manifest.context_optimization_observations,
+          }] : []),
           { name: "historical_authorization_at_use", subject: manifest.authorization_usage_receipts || [], evidence: manifest.authorization_usage_receipts || [] },
           { name: "source_revision", subject: manifest.source_revision, evidence: [] },
           { name: "rollback", subject: manifest.rollback, evidence: [] },
@@ -7389,14 +8177,18 @@ function validateReleaseManifestIntegrity(context, manifest) {
 
   if (proposalRecord && budgetRecord) {
     try {
-      const usageReceipts = executionResults.map((result) => result?.record).filter(Boolean);
+      if (!canonicalUsageReceipts) {
+        throw new Error("canonical proposal receipt set is unavailable");
+      }
+      const usageReceipts = canonicalUsageReceipts;
       const decision = evaluateAssessmentBudgetUsage(context, proposalRecord.id, budgetRecord, usageReceipts);
       const coverage = hardLimitMeteringCoverage(context, budgetRecord, usageReceipts, {
         execution_started_at: workflowExecutionStartedAt(workflowRecord),
         checkpoint_at: manifest.released_at,
       });
       const declared = manifest.budget_decision || {};
-      if (!["within_budget", "warning"].includes(decision.status)) {
+      const expectedReserveRisks = completionReserveRisks(budgetRecord, decision);
+      if (!["within_budget", "warning", "completion_reserve"].includes(decision.status)) {
         errors.push(`release budget is not completion-safe: ${decision.status}`);
       }
       if (!coverage.valid) {
@@ -7406,7 +8198,8 @@ function validateReleaseManifestIntegrity(context, manifest) {
         declared.status !== decision.status ||
         declared.receipt_count !== usageReceipts.length ||
         stableJson(declared.usage || {}) !== stableJson(decision.usage || {}) ||
-        stableJson(declared.remaining || {}) !== stableJson(decision.remaining || {})
+        stableJson(declared.remaining || {}) !== stableJson(decision.remaining || {}) ||
+        stableJson(declared.completion_reserve_risks || []) !== stableJson(expectedReserveRisks)
       ) {
         errors.push("manifest budget decision does not match independently aggregated usage receipts");
       }
@@ -7540,6 +8333,20 @@ function recoverAssessmentCompletionFromManifest(context, options, proposal, wor
   const actor = manifest.audit?.actor;
   let completedWorkflow = workflow;
   try {
+    if (completedWorkflow.state === "exception_pending") {
+      if (manifest.budget_decision?.status !== "completion_reserve") {
+        fail(`Release manifest ${manifest.id} cannot recover an unresolved exception without a completion_reserve decision.`);
+      }
+      completedWorkflow = transitionAssessmentWorkflow(completedWorkflow, "running", {
+        at: completionAt,
+        proposal_hash: proposal.proposal_hash,
+        authorization_ref: completedWorkflow.authorization_ref,
+        actor,
+        reason: "Completion reserve permits only the already-authorized verification and release path.",
+        evidence: [link.artifact_path, link.verification_receipt_ref.path],
+        idempotency_key: `completion-reserve:${artifact.sha256}`,
+      });
+    }
     if (completedWorkflow.state === "running") {
       completedWorkflow = transitionAssessmentWorkflow(completedWorkflow, "verifying", {
         at: completionAt,
@@ -7650,7 +8457,7 @@ function recoverAssessmentCompletionFromManifest(context, options, proposal, wor
   ]);
 }
 
-function completeAssessmentProposal(context, options) {
+async function completeAssessmentProposal(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   ensureDir(assessmentBudgetsRoot(context, id));
@@ -7658,14 +8465,14 @@ function completeAssessmentProposal(context, options) {
   let releaseBudgetLock = null;
   try {
     releaseBudgetLock = acquireFileLock(assessmentBudgetMutationLockPath(context, id));
-    completeAssessmentProposalLocked(context, options, id);
+    await completeAssessmentProposalLocked(context, options, id);
   } finally {
     releaseBudgetLock?.();
     releaseCompletionLock();
   }
 }
 
-function completeAssessmentProposalLocked(context, options, id) {
+async function completeAssessmentProposalLocked(context, options, id) {
   const proposal = readAssessmentProposal(context, id);
   let workflow = readAssessmentWorkflow(context, id);
   const application = readAssessmentApplication(context, id);
@@ -7696,7 +8503,7 @@ function completeAssessmentProposalLocked(context, options, id) {
   if (workflow.state === "completed") {
     workflow = rewindInterruptedCompletedWorkflow(workflow);
   }
-  if (!["running", "verifying"].includes(workflow.state)) {
+  if (!["running", "verifying", "exception_pending"].includes(workflow.state)) {
     fail(`Assessment ${id} cannot complete from state '${workflow.state}'. Resolve any exception or apply the authorized proposal first.`);
   }
 
@@ -7716,6 +8523,9 @@ function completeAssessmentProposalLocked(context, options, id) {
   const reserveRisks = completionReserveRisks(budget, budgetDecision);
   if (["soft_limit", "hard_limit", "metering_violation"].includes(budgetDecision.status)) {
     fail(buildBudgetExceptionQuestion(id, budget, budgetDecision, reserveRisks));
+  }
+  if (workflow.state === "exception_pending" && budgetDecision.status !== "completion_reserve") {
+    fail(`Assessment ${id} has an unresolved exception. Only a completion_reserve decision may enter the completion-only path.`);
   }
 
   const registry = readOutputRegistry(context);
@@ -7779,9 +8589,23 @@ function completeAssessmentProposalLocked(context, options, id) {
     subject_id: id,
     artifact_types: [proposal.deliverable.artifact_type],
   });
-  const completionAt = meteringCheckpointAt;
+  const contextOptimization = existingGateReceipt
+    ? { status: "recovery_reuse", persisted: false, telemetry: null, observation: null, path: null }
+    : await captureContextOptimization(context, id, "complete", contextOptimizationRuntimeOptions(options));
+  const completionAt = existingGateReceipt?.generated_at || now();
   const completionActor = existingGateReceipt?.actor || attribution.actor;
   const completionAudit = existingGateReceipt?.audit || { git: attribution.git, run: attribution.run };
+  if (workflow.state === "exception_pending") {
+    workflow = transitionAssessmentWorkflow(workflow, "running", {
+      at: completionAt,
+      proposal_hash: proposal.proposal_hash,
+      authorization_ref: authorization.id,
+      actor: completionActor,
+      reason: "Completion reserve permits only the already-authorized verification and release path.",
+      evidence: [link.artifact_path, link.verification_receipt_ref.path],
+      idempotency_key: `completion-reserve:${artifactSha256}`,
+    });
+  }
   if (workflow.state === "running") {
     workflow = transitionAssessmentWorkflow(workflow, "verifying", {
       at: completionAt,
@@ -7851,6 +8675,11 @@ function completeAssessmentProposalLocked(context, options, id) {
     path: toProjectPath(context, path.join(assessmentUsageRoot(context, id), `${normalizeId(receipt.id)}.json`)),
     hash: receipt.receipt_hash,
   }));
+  const contextOptimizationRefs = readContextOptimizationObservations(context, id).map(({ filePath, observation }) => ({
+    id: observation.id,
+    path: toProjectPath(context, filePath),
+    hash: observation.observation_hash,
+  }));
   const project = readProjectSafe(context);
   const sourceRevision = completionAudit.git.is_git_repo && completionAudit.git.head_sha
     ? { type: "git", value: completionAudit.git.head_sha, branch: completionAudit.git.branch, dirty: Boolean(completionAudit.git.is_dirty) }
@@ -7880,6 +8709,7 @@ function completeAssessmentProposalLocked(context, options, id) {
       ] },
       { name: "layered_output_verification", evidence: [verificationRef, { id: link.id, path: link.artifact_path, hash: artifactSha256 }] },
       { name: "execution_budget", evidence: [budgetRef, ...executionUsageRefs] },
+      ...(contextOptimizationRefs.length > 0 ? [{ name: "context_optimization", evidence: contextOptimizationRefs }] : []),
       { name: "historical_authorization_at_use", evidence: authorizationUseRefs },
       { name: "source_revision", subject: sourceRevision, evidence: [] },
       { name: "rollback", subject: rollback, evidence: [] },
@@ -7914,6 +8744,7 @@ function completeAssessmentProposalLocked(context, options, id) {
     }],
     authorization_usage_receipts: authorizationUseRefs,
     execution_usage_receipts: executionUsageRefs,
+    context_optimization_observations: contextOptimizationRefs,
     budget_decision: {
       budget_ref: budgetRef,
       status: budgetDecision.status,
@@ -7998,12 +8829,13 @@ function completeAssessmentProposalLocked(context, options, id) {
     git: completionAudit.git,
     run: completionAudit.run,
   });
-  output(options, { status: "completed", proposal_id: id, workflow: completedWorkflow, application, release_manifest: manifest, budget: budgetDecision }, [
+  output(options, { status: "completed", proposal_id: id, workflow: completedWorkflow, application, release_manifest: manifest, budget: budgetDecision, context_optimization: contextOptimization }, [
     `Completed assessment ${id}.`,
     `Canonical output: ${link.artifact_path}`,
     `Verification: container verified, content verified, render ${verificationDimensionStatus(verification, "render_verified")}.`,
     `Release manifest: ${toProjectPath(context, manifestFile)}`,
     `Authorization ${authorization.id} is closed; it cannot be reused for future work.`,
+    `Context optimization: ${contextOptimization?.status || "unavailable"}; budget usage adjustment 0.`,
   ]);
 }
 
@@ -15951,6 +16783,9 @@ function releaseManifestEvidenceEntries(context, manifest, manifestPath = null) 
   for (const reference of manifest.execution_usage_receipts || []) {
     addReference(reference, "execution-usage-receipt");
   }
+  for (const reference of manifest.context_optimization_observations || []) {
+    addReference(reference, "context-optimization-observation");
+  }
   addReference(manifest.budget_decision?.budget_ref, "execution-budget");
   for (const reference of manifest.gate_receipts || []) {
     addReference(reference, "release-gate-receipt");
@@ -16003,6 +16838,7 @@ function validateActiveManifestRecordSchemas(context, manifest) {
     ...[manifest.workflow].filter(Boolean).map((reference) => [reference, "assessment-workflow.schema.json", "assessment workflow"]),
     ...(manifest.authorization_usage_receipts || []).map((reference) => [reference, "authorization-usage-receipt.schema.json", "authorization usage receipt"]),
     ...(manifest.execution_usage_receipts || []).map((reference) => [reference, "execution-usage-receipt.schema.json", "execution usage receipt"]),
+    ...(manifest.context_optimization_observations || []).map((reference) => [reference, "context-optimization-observation.schema.json", "context optimization observation"]),
     ...(manifest.gate_receipts || []).map((reference) => [reference, "release-gate-receipt.schema.json", "release gate receipt"]),
     ...[manifest.budget_decision?.budget_ref].filter(Boolean).map((reference) => [reference, "execution-budget.schema.json", "execution budget"]),
     ...(manifest.artifacts || []).map((artifact) => [artifact.verification_receipt_ref, "verification-receipt.schema.json", "verification receipt"]),
@@ -17986,6 +18822,12 @@ function gateCheck(context, options) {
       const receiptFile = resolveProjectFilePath(context, reference.path, { mustExist: false });
       if (fs.existsSync(receiptFile)) {
         appendRecordSchemaIssues(report, readProjectJson(context, receiptFile), "execution-usage-receipt.schema.json", `execution usage receipt ${reference.id}`);
+      }
+    }
+    for (const reference of manifest.context_optimization_observations || []) {
+      const observationFile = resolveProjectFilePath(context, reference.path, { mustExist: false });
+      if (fs.existsSync(observationFile)) {
+        appendRecordSchemaIssues(report, readProjectJson(context, observationFile), "context-optimization-observation.schema.json", `context optimization observation ${reference.id}`);
       }
     }
     for (const reference of manifest.gate_receipts || []) {
@@ -20080,6 +20922,29 @@ function writeTextFile(filePath, content, options = {}) {
     }
     fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
   }
+  if (options.atomicCreate) {
+    const tempPath = path.join(
+      parentPath,
+      `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+    );
+    try {
+      writeFileToStableParent(tempPath, content, parentIdentity);
+      assertDirectoryIdentity(parentPath, parentIdentity);
+      try {
+        fs.linkSync(tempPath, filePath);
+      } catch (error) {
+        if (error?.code === "EEXIST") {
+          fail(`File already exists: ${filePath}. Use a new immutable record id.`);
+        }
+        throw error;
+      }
+    } finally {
+      if (directoryIdentityMatches(parentPath, parentIdentity)) {
+        fs.rmSync(tempPath, { force: true });
+      }
+    }
+    return true;
+  }
   if (options.force) {
     const tempPath = path.join(
       parentPath,
@@ -20651,6 +21516,11 @@ function printHelp() {
 Usage:
   agentic-sdlc observe [--root path] [--host 127.0.0.1] [--port 0] [--no-open] [--json]
   agentic-sdlc doctor [--root path] [--json]
+  agentic-sdlc optimization status [--root path] [--proposal ASSESS-001] [--json]
+  agentic-sdlc optimization capture --proposal ASSESS-001 [--phase manual] [--json]
+  agentic-sdlc optimization run --root path --command-json '["npm","test"]'
+      [--proposal ASSESS-001] [--profile auto|native|test|git|rg] [--exact]
+      [--trust-custom-rtk-command]
   agentic-sdlc init [--project-name name] [--project-id id] [--root path]
   agentic-sdlc onboard existing-project [--project-name name] [--document path]
       [--source path] [--question text] [--summary text]
@@ -20944,6 +21814,23 @@ Budget measurement options:
   --pricing-ref id       Immutable pricing schedule used for a cost value.
   --subagent id          Attribute usage while still aggregating it into the
                          proposal execution tree.
+
+Context optimization options:
+  --command-json json    Shell-free argv vector for optimization run, for
+                         example '["npm","test"]'. Only fixed test, read-only
+                         Git, and rg search vectors are accepted. Mutations,
+                         external preprocessors, paths disguised as executables,
+                         and unknown commands are rejected.
+  --profile profile      auto, native, test, git, or rg. The test profile accepts
+                         only fixed known-safe test commands.
+  --exact                Bypass RTK when unfiltered or complete output is needed.
+                         It does not widen the allowlist or enable external rg/Git helpers.
+  --trust-custom-rtk-command
+                         Execute the exact custom provider executable/arguments
+                         declared in project config, or a project-local PATH rtk,
+                         for this invocation. Otherwise only a canonical rtk
+                         resolved outside the project root is automatic.
+                         RTK savings are advisory and never reduce budget usage.
 
 Migration options:
   migration active is dry-run by default. It validates every immutable record

@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.7.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.8.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -38,6 +38,7 @@ The npm `files` allowlist defines the package surface. Project-specific `.sdlc/`
 - Node.js 18.18 or newer for `bin/agentic-sdlc.mjs`.
 - Python 3.8 or newer for the repository staging installer.
 - A source checkout outside the generated `~/plugins/agentic-sdlc-codex-plugin` destination.
+- Optional: RTK 0.43 or newer on `PATH` for the gateway's default automatic runtime route. The first candidate is canonicalized and must resolve outside the project root; project-local or configured custom providers require the explicit per-invocation trust switch described below.
 
 Use `python3`, `python`, or `py -3` according to the Python 3 launcher available on the machine.
 
@@ -52,12 +53,35 @@ codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
 
+RTK integration does not require changing the installation command. If RTK is
+already installed and you also want the installer to configure its guidance in
+the current user's **global Codex instructions**, use the explicit opt-in:
+
+```bash
+python3 scripts/install-personal-marketplace.py --with-rtk
+codex plugin add agentic-sdlc-codex-plugin@personal
+codex plugin list --json
+```
+
+The flag does not install or upgrade RTK. Because the instruction change is
+global, it can affect Codex behavior in projects that do not use Agentic SDLC;
+omitting `--with-rtk` leaves those global instructions unchanged. The plugin's
+project-local gateway and fail-open native fallback remain available according
+to `.sdlc/config.json`. `--rtk-executable /absolute/path/to/rtk` only tells the
+installer which binary to use while configuring and verifying global guidance;
+it does not rewrite the project gateway command. For automatic runtime routing,
+put RTK on `PATH`. The gateway resolves and canonicalizes the first candidate
+before detection and executes that exact absolute path. A PATH candidate or
+symlink target inside the project root is inert by default. Alternatively,
+configure the absolute executable in the project provider command and pass
+`--trust-custom-rtk-command` on each CLI invocation that may execute it.
+
 A successful list result contains an installed, enabled entry with:
 
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "installed": true,
   "enabled": true
 }
@@ -75,6 +99,10 @@ The script:
 4. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
 5. preserves unrelated marketplace entries.
 
+With `--with-rtk`, it additionally configures RTK's global Codex instruction
+profile for the current user. This is the only opt-in global change; it still
+does not install RTK or modify target-project evidence.
+
 The script honors `HOME`. It refuses to traverse or replace a symlink, Windows junction/reparse point, Git checkout, source checkout, or directory with unmanaged top-level content and leaves that destination untouched for inspection.
 
 Treat the generated tree under `~/plugins` as installation output. Do not clone into it, symlink it to the source, or update it with Git.
@@ -88,6 +116,14 @@ cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
+```
+
+If the installation previously used global RTK guidance, repeat the opt-in so
+the installed RTK binary refreshes its global Codex instructions:
+
+```bash
+python3 scripts/install-personal-marketplace.py --with-rtk
+codex plugin add agentic-sdlc-codex-plugin@personal
 ```
 
 Re-adding is supported and refreshes the installed cache. The installer replaces the complete managed staging tree, so files removed from the package do not remain stale. Start a new Codex task afterward.
@@ -109,6 +145,14 @@ This command does not delete:
 - target-project `.sdlc/` knowledge;
 - `~/plugins/agentic-sdlc-codex-plugin`;
 - the catalog entry in `~/.agents/plugins/marketplace.json`.
+
+It also leaves RTK's independent global Codex instructions in place. Remove
+those only if they are no longer wanted by any project:
+
+```bash
+rtk init -g --codex --uninstall
+rtk init -g --codex --show
+```
 
 That retained catalog entry allows a later reinstall. For permanent machine cleanup, first run the supported remove command, then delete only the generated plugin directory and remove only the matching plugin object from the personal marketplace JSON with a JSON-aware editor. Preserve unrelated entries and do not remove the shared `personal` marketplace source.
 
@@ -136,8 +180,8 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.7.0` | Rerun staging, add again, then open a new task |
-| `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all three skills, agent cards, Observatory launcher/UI, preset, and optional project KB checks as passed | Repair the failed item, restage, and open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.8.0` | Rerun staging, add again, then open a new task |
+| `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all three skills, agent cards, Observatory launcher/UI, preset, optional RTK provider, and project KB checks as passed or not applicable | Repair a required failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
 | Package dry run | Contains manifest, all three skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
 
@@ -187,6 +231,7 @@ The installed skill must launch the plugin-local CLI, open or return a token-bea
 
 - The plugin is reusable code and method; target-project state remains in that project's `.sdlc/` directory.
 - Cache and indexes are derived and are never accepted as canonical evidence.
-- The installer changes only the current user's plugin staging and personal marketplace files.
+- Without `--with-rtk`, the installer changes only the current user's plugin staging and personal marketplace files.
+- Global Codex instructions change only when `--with-rtk` is explicitly passed; the flag never installs or upgrades RTK.
 - The plugin has no runtime npm dependencies.
 - External tools needed for a requested artifact format are selected and disclosed in the assessment proposal; missing tools require a decision before installation.

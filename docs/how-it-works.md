@@ -1,4 +1,4 @@
-# How Agentic SDLC 0.7.0 Works
+# How Agentic SDLC 0.8.0 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
@@ -35,7 +35,7 @@ The installed command is `agentic-sdlc`. From a source checkout, the equivalent 
 node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
 ```
 
-All examples below use commands exposed by the `Agentic SDLC 0.7.0` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.8.0` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project
@@ -55,6 +55,7 @@ Default locations are shown below. Their roots are configurable, but the same se
 | Materialized plan | `.sdlc/requirements/`, `.sdlc/stories/`, `.sdlc/contracts/`, `.sdlc/output-contracts/` | The requirement, story, contract, template, task start, and output link created from the proposal |
 | Authority | `.sdlc/authorizations/`, `.sdlc/authorization-uses/` | Exact grants and historical validity-at-use receipts |
 | Limits and usage | `.sdlc/budgets/<proposal>/` | Effective budget, amendments, metering snapshots, and usage receipts |
+| Context optimization | `.sdlc/context-optimization/<proposal>/observations/` | Hash-bound RTK lifecycle observations; advisory evidence with zero budget credit |
 | Verification | `.sdlc/receipts/generation/`, `.sdlc/receipts/verification/` | Generator identity, artifact hash, semantic checks, and render evidence |
 | Release | `.sdlc/releases/gates/`, `.sdlc/releases/manifests/`, `.sdlc/archive/` | Gate decision, released lineage, rollback information, and logical history classification |
 | Delivered artifact | The approved project path, for example `docs/technical-assessment.md` | Canonical only after it is linked, hash-bound, and verified |
@@ -301,6 +302,36 @@ agentic-sdlc budget status --proposal ASSESS-001
 
 Capture the CodeBurn baseline after checkpoint 2 approval and before `apply`. See [Limits and Metering](limits-and-metering.md) for exact-versus-advisory rules and cost attribution.
 
+RTK is a separate context-optimization gateway, not another usage meter. Inspect
+its provider and project-cumulative counters, route a supported noisy command,
+or capture a manual diagnostic with:
+
+```bash
+agentic-sdlc optimization status --proposal ASSESS-001 --json
+agentic-sdlc optimization run --proposal ASSESS-001 --command-json '["npm","test"]'
+agentic-sdlc optimization capture --proposal ASSESS-001 --phase manual --json
+```
+
+The gateway passes an argument vector without a shell. Supported fixed test,
+execution-safe read-only Git, and `rg` profiles use RTK when its configured
+version is operational; `--exact` preserves the same allowlisted argv while
+bypassing filtering, and the default fallback runs that same safe command when
+RTK is unavailable. With active assessment work, `--proposal` is required and
+the cost gate is evaluated before either route starts. Apply,
+budget-checkpoint, and completion hooks automatically
+capture configured lifecycle observations. Operators use `phase=manual` only
+for diagnostics; lifecycle phase labels belong to those automatic hooks.
+
+RTK gain counters are cumulative for the project root and can include concurrent
+activity. The hash-linked observation delta estimates the change since the
+previous proposal observation; it is not provider token usage or billing truth.
+Both are reported so the project total is never confused with proposal-local
+evidence. Every observation fixes `usage_adjustment_applied` at `0` and
+`gate_override` at `false`: usage receipts alone determine `budget_decision`,
+and warning, soft-limit, completion-reserve, hard-limit, and metering-violation
+policy remains sovereign. See [Token Efficiency](token-efficiency.md) for the
+full gateway and evidence model.
+
 ### Output verification is layered
 
 Codex creates the approved artifact, and the CLI links it to the approved story, requirement, template, and proposal authorization. The link stores the artifact fingerprint and a separate verification receipt.
@@ -335,7 +366,10 @@ agentic-sdlc gate check \
   --json
 ```
 
-Completion admits the release only when all seven gate checks pass:
+Completion admits the release only when all seven mandatory gate checks pass.
+When RTK lifecycle observations exist, it adds an eighth
+`context_optimization` evidence check; this validates their hashes, lineage,
+proposal binding, and zero-credit fields without changing the budget decision.
 
 | Gate check | What it proves |
 | --- | --- |
@@ -343,6 +377,7 @@ Completion admits the release only when all seven gate checks pass:
 | `active_scope_lineage` | Requirement, story, contract, workflow, and approved materialization agree |
 | `layered_output_verification` | The linked artifact hash and required verification dimensions pass |
 | `execution_budget` | Effective budget, amendments, usage, reserve, accuracy, and final coverage are valid |
+| `context_optimization` (optional) | Referenced RTK observations are intact, proposal-bound, advisory-only, and grant no budget or gate override |
 | `historical_authorization_at_use` | Every required action–subject use has an accepted, historically valid receipt |
 | `source_revision` | The release is bound to an exact Git revision or project snapshot |
 | `rollback` | Rollback instructions and target agree with that source revision |
@@ -454,7 +489,7 @@ Logical active-release migration is deliberately different from `archive closed 
 6. Every mutation records whether that permission was valid at the time of use.
 7. Usage from the main agent and all subagents is aggregated under one budget.
 8. The artifact is linked and verified in separate structural, semantic, and render dimensions.
-9. Seven release checks bind the proposal, materialized records, usage, authorization, artifact, source revision, and rollback into one manifest.
+9. Seven mandatory release checks bind the proposal, materialized records, usage, authorization, artifact, source revision, and rollback into one manifest; an optional context-optimization check validates referenced RTK evidence without affecting the budget gate.
 10. Replays repair only exact missing state; ambiguity, stale evidence, or wider authority fails closed.
 
 For conversational examples, continue with [Agent Interactions](agent-interactions.md). For the full component model, use [Architecture](architecture.md). For time, steps, tokens, costs, CodeBurn, hard limits, and amendments, use [Limits and Metering](limits-and-metering.md).

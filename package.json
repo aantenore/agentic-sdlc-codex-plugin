@@ -1,6 +1,6 @@
 {
   "name": "agentic-sdlc-codex-plugin",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
   "type": "module",
   "bin": {
@@ -22,7 +22,7 @@
     "ui/"
   ],
   "scripts": {
-    "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
+    "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/context-optimization.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
     "doctor": "node bin/agentic-sdlc.mjs doctor",
     "smoke": "node bin/agentic-sdlc.mjs --help",
     "test": "node --test"

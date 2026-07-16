@@ -360,6 +360,75 @@ This is a syntactically valid example; replace the illustrative public key with 
 
 The complete exact-metering policy is hashed into the approved budget. Changing adapters, metrics, keys, or freshness after approval invalidates the binding and requires a new proposal; it cannot be smuggled through a budget amendment.
 
+## RTK optimization and the cost gate
+
+The optimization gateway is deliberately integrated with budget status, but it
+does not participate in budget arithmetic. The boundary is:
+
+```text
+usage receipts -> sovereign budget decision -> RTK execution advisory
+```
+
+Inspect the configured RTK 0.43+ provider, route a supported command, and create
+an operator-initiated diagnostic observation with:
+
+```bash
+node bin/agentic-sdlc.mjs optimization status \
+  --root /path/to/project \
+  --proposal ASSESS-001 \
+  --json
+
+node bin/agentic-sdlc.mjs optimization run \
+  --root /path/to/project \
+  --proposal ASSESS-001 \
+  --command-json '["npm","test"]'
+
+node bin/agentic-sdlc.mjs optimization capture \
+  --root /path/to/project \
+  --proposal ASSESS-001 \
+  --phase manual \
+  --json
+```
+
+The gateway is shell-free. Supported fixed test, execution-safe read-only Git,
+and `rg` commands use RTK when the provider is operational; `--exact` forces
+native output without widening the allowlist. With the default `fallback:
+native`, a missing or unsupported provider does not block that same safe native
+command. An active assessment requires `--proposal`, and its cost gate runs
+before the child process. Operators capture only `phase=manual`; the automatic lifecycle hooks
+own the `apply`, `checkpoint`, and `complete` observations.
+
+RTK reports cumulative counters for the project root. Concurrent agents or
+sessions in the same checkout can contribute to that total. Each hash-linked
+observation reports an interval delta from its predecessor, while status
+correlation compares the proposal's apply baseline with its latest observation.
+Neither estimate is provider usage or billing truth. `optimization status
+--proposal ... --json` exposes both project and proposal scopes rather than
+presenting project totals as proposal-owned usage.
+
+The interaction with the gate is intentionally one-way:
+
+| Budget decision | Optimization advisory | What remains authoritative |
+| --- | --- | --- |
+| `within_budget` | Use RTK for supported noisy commands | Continue according to the approved proposal |
+| `warning` | Prefer RTK more aggressively | Notify and continue; recorded usage is unchanged |
+| `soft_limit` | Stop at the required checkpoint | The workflow enters `exception_pending` |
+| `completion_reserve` | Block `optimization run`; permit only the already-authorized completion path | The reserve cannot fund new work; `assessment proposal complete` may resume from `exception_pending` only to verify and release |
+| `hard_limit` | `stop_per_budget_gate` | Stop regardless of claimed savings |
+| `metering_violation` | `stop_per_budget_gate` | Stop until trusted evidence or a new approved proposal resolves the policy |
+
+Every RTK observation and advisory has `usage_adjustment_applied: 0` and
+`gate_override: false`. The evaluator aggregates only usage receipts; RTK
+cannot subtract estimated savings, raise a limit, satisfy exact metering, or
+change `budget_decision`. Valid RTK observations may be referenced by the
+release manifest and an optional context-optimization evidence check, but the
+mandatory `execution_budget` check remains separate and sovereign.
+
+This is different from CodeBurn. RTK estimates output avoided and influences
+how an allowed command should run; CodeBurn estimates tokens, calls, and cost
+from local logs and writes incremental usage receipts. Neither source can
+satisfy a hard metric without trusted exact metering.
+
 ## CodeBurn advisory metering
 
 CodeBurn is useful for local visibility into tokens, calls, and estimated cost. It reads local session logs, so it is **not** a provider-signed source and never becomes `exact` in this plugin.
@@ -562,6 +631,15 @@ Use `active_time_seconds` hard `3600` and `steps` hard `60`, both `exact`, plus 
 
 Use estimated soft thresholds such as `tokens: 200000` and `cost: 5.00 USD`, capture a CodeBurn baseline before execution, and record deltas during the run. This gives useful checkpoints but not hard enforcement.
 
+### Reduce command context without weakening the gate
+
+Keep `context_optimization_policy.mode` set to `automatic` with native fallback,
+run supported noisy commands through `optimization run --proposal <id>`, and let apply,
+checkpoint, and completion capture the proposal observation lineage. Review the
+RTK advisory beside `budget status`, but never deduct its estimated savings from
+token or cost receipts. Use `optimization capture --phase manual` only when a
+diagnostic snapshot is needed.
+
 ### Financially enforced cost ceiling
 
 Put the hard cost metric behind a trusted pre-call gateway or runtime adapter that can prevent new calls and sign cumulative exact usage. Reconcile its result with provider Costs data and ultimately the invoice. CodeBurn alone is not sufficient for this policy.
@@ -579,6 +657,7 @@ Before approving a proposal, verify that it answers all of these questions:
 - Which metrics are exact, estimated, or unavailable?
 - For every hard metric, which trusted adapter, Ed25519 key, cumulative coverage, and enforcement point make it real?
 - What happens at `exception_pending`: amendment, partial delivery, or stop?
+- Is RTK telemetry clearly zero-credit and subordinate to the budget decision?
 - Is cost an estimate, provider-reported Costs data, or final invoice truth?
 
 If any answer is unclear, revise the proposal before approval. Approval binds the proposal hash; a material revision creates a different hash and needs a new decision.

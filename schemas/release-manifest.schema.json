@@ -91,6 +91,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/hashed_ref" }
     },
+    "context_optimization_observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
     "budget_decision": { "$ref": "#/$defs/budget_decision" },
     "gate_receipts": {
       "type": "array",

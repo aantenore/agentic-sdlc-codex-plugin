@@ -64,6 +64,9 @@
     "budget_policy": {
       "$ref": "#/$defs/budget_policy"
     },
+    "context_optimization_policy": {
+      "$ref": "#/$defs/context_optimization_policy"
+    },
     "approval_policy": {
       "$ref": "#/$defs/approval_policy"
     },
@@ -106,6 +109,59 @@
     }
   },
   "$defs": {
+    "context_optimization_policy": {
+      "type": "object",
+      "required": ["enabled", "mode", "fallback", "storage_root", "observation_schema", "provider", "telemetry", "budget_trigger_statuses"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "enum": ["automatic", "manual", "disabled"] },
+        "fallback": { "enum": ["native", "error"] },
+        "storage_root": { "type": "string", "minLength": 1 },
+        "observation_schema": { "const": "schemas/context-optimization-observation.schema.json" },
+        "provider": {
+          "type": "object",
+          "required": ["id", "minimum_version", "command"],
+          "properties": {
+            "id": { "const": "rtk" },
+            "minimum_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+            "command": {
+              "type": "object",
+              "required": ["executable", "arguments"],
+              "properties": {
+                "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                "arguments": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "telemetry": {
+          "type": "object",
+          "required": ["enabled", "include_in_budget_status", "auto_capture"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "include_in_budget_status": { "type": "boolean" },
+            "auto_capture": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["apply", "checkpoint", "complete"] }
+            }
+          },
+          "additionalProperties": false
+        },
+        "budget_trigger_statuses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["warning", "soft_limit", "completion_reserve"] }
+        }
+      },
+      "additionalProperties": false
+    },
     "assessment_policy": {
       "type": "object",
       "required": [

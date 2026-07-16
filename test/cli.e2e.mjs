@@ -126,6 +126,71 @@ function createFakeCodeBurn(project, report) {
   };
 }
 
+function createFakeRtk(project, summary = {}) {
+  const toolRoot = path.join(project, "fake-rtk");
+  fs.mkdirSync(toolRoot, { recursive: true });
+  const reportPath = path.join(toolRoot, "gain.json");
+  const invocationPath = path.join(toolRoot, "invocations.jsonl");
+  const runnerPath = path.join(toolRoot, "runner.mjs");
+  writeJson(reportPath, {
+    summary: {
+      total_commands: 8,
+      total_input: 4_000,
+      total_output: 1_000,
+      total_saved: 2_900,
+      avg_savings_pct: 72.5,
+      total_time_ms: 80,
+      avg_time_ms: 10,
+      ...summary,
+    },
+  });
+  fs.writeFileSync(runnerPath, [
+    "import fs from 'node:fs';",
+    `const reportPath = ${JSON.stringify(reportPath)};`,
+    `const invocationPath = ${JSON.stringify(invocationPath)};`,
+    "const args = process.argv.slice(2);",
+    "if (args.length === 1 && args[0] === '--version') process.stdout.write('rtk 0.43.0\\n');",
+    "else if (args.join(' ') === 'gain --project --format json') process.stdout.write(fs.readFileSync(reportPath, 'utf8'));",
+    "else { fs.appendFileSync(invocationPath, `${JSON.stringify(args)}\\n`); process.stdout.write(`fake-rtk:${JSON.stringify(args)}\\n`); }",
+  ].join("\n"));
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.context_optimization_policy.provider.command = {
+    executable: process.execPath,
+    arguments: [runnerPath],
+  };
+  writeJson(configPath, config);
+  return { invocationPath, reportPath, runnerPath };
+}
+
+function createPathRtk(toolRoot, invocationPath) {
+  fs.mkdirSync(toolRoot, { recursive: true });
+  const runnerPath = path.join(toolRoot, "rtk-runtime.mjs");
+  const gainReport = JSON.stringify({
+    summary: {
+      total_commands: 2,
+      total_input: 1_000,
+      total_output: 300,
+      total_saved: 700,
+      avg_savings_pct: 70,
+      total_time_ms: 20,
+      avg_time_ms: 10,
+    },
+  });
+  fs.writeFileSync(runnerPath, [
+    "#!/usr/bin/env node",
+    "import fs from 'node:fs';",
+    `const invocationPath = ${JSON.stringify(invocationPath)};`,
+    "const args = process.argv.slice(2);",
+    "fs.appendFileSync(invocationPath, `${JSON.stringify({ entry: process.argv[1], args })}\\n`);",
+    "if (args.length === 1 && args[0] === '--version') process.stdout.write('rtk 0.43.0\\n');",
+    `else if (args.join(' ') === 'gain --project --format json') process.stdout.write(${JSON.stringify(gainReport)});`,
+    "else process.stdout.write(`path-rtk:${JSON.stringify(args)}\\n`);",
+  ].join("\n"));
+  fs.chmodSync(runnerPath, 0o755);
+  return runnerPath;
+}
+
 function initProject(project, extra = []) {
   mustRun(["init", "--root", project, "--project-name", "E2E", "--force", ...extra]);
 }
@@ -638,6 +703,283 @@ test("--version is not shadowed by help and boolean --json does not consume quer
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.query, "workflow");
   assert.ok(payload.results.length > 0);
+});
+
+test("RTK optimization gateway validates telemetry, routes safe commands, and bypasses exact output", () => {
+  const project = tmpProject("rtk-gateway");
+  initProject(project);
+  const fakeRtk = createFakeRtk(project);
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+
+  const untrustedStatus = JSON.parse(mustRun([
+    "optimization", "status", "--root", project, "--json",
+  ]).stdout);
+  assert.equal(untrustedStatus.status, "custom_provider_untrusted");
+  assert.equal(untrustedStatus.rtk_project_cumulative.detection.reason, "custom_provider_command_requires_explicit_trust");
+  assert.equal(fs.existsSync(fakeRtk.invocationPath), false);
+
+  const status = JSON.parse(mustRun([
+    "optimization", "status", "--root", project, "--trust-custom-rtk-command", "--json",
+  ]).stdout);
+  assert.equal(status.status, "operational");
+  assert.equal(status.rtk_project_cumulative.detection.version, "0.43.0");
+  assert.equal(status.rtk_project_cumulative.scope, "project_cumulative");
+  assert.equal(status.rtk_project_cumulative.usage_credit_tokens, 0);
+  assert.equal(status.rtk_project_cumulative.savings.estimated_tokens_avoided, 2_900);
+  assert.match(status.rtk_project_cumulative.source.report_hash, /^[a-f0-9]{64}$/u);
+
+  const optimized = mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--trust-custom-rtk-command",
+  ]);
+  assert.match(optimized.stdout, /fake-rtk:\["git","status","--short"\]/u);
+  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+
+  const native = mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--exact",
+  ]);
+  assert.match(native.stdout, /\.sdlc|fake-rtk/u);
+  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+
+  mustFail([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify([process.execPath, "-e", "process.stdout.write('unsafe')"]),
+    "--exact",
+  ], /bare command name|unsupported optimization command/u);
+  mustFail([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "diff", "--output=unsafe.patch"]),
+  ], /gateway accepts only/u);
+
+  mustFail([
+    "optimization", "capture", "--root", project,
+    "--proposal", "ASSESS-NOT-USED", "--phase", "complete",
+  ], /reserved for lifecycle hooks/u);
+
+  const untrustedDoctor = JSON.parse(mustRun(["doctor", "--root", project, "--json"]).stdout);
+  assert.equal(untrustedDoctor.status, "passed");
+  assert.equal(untrustedDoctor.checks.find((check) => check.id === "rtk-optimization-provider").status, "not_applicable");
+  const doctor = JSON.parse(mustRun([
+    "doctor", "--root", project, "--trust-custom-rtk-command", "--json",
+  ]).stdout);
+  assert.equal(doctor.status, "passed");
+  assert.equal(doctor.checks.find((check) => check.id === "rtk-optimization-provider").status, "passed");
+});
+
+test("standard RTK PATH lookup rejects project-local shadows and spawns the canonical host path", {
+  skip: process.platform === "win32" ? "POSIX executable symlink regression" : false,
+}, () => {
+  const project = tmpProject("rtk-path-trust");
+  initProject(project);
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+
+  const projectMarker = path.join(project, "project-rtk-invocations.jsonl");
+  const projectRtk = createPathRtk(path.join(project, ".project-tools"), projectMarker);
+  const shadowBin = tmpProject("rtk-shadow-bin");
+  fs.symlinkSync(projectRtk, path.join(shadowBin, "rtk"), "file");
+  const shadowEnv = { PATH: [shadowBin, process.env.PATH].filter(Boolean).join(path.delimiter) };
+
+  const shadowed = JSON.parse(mustRun([
+    "optimization", "status", "--root", project, "--json",
+  ], { env: shadowEnv }).stdout);
+  assert.equal(shadowed.status, "custom_provider_untrusted");
+  assert.equal(
+    shadowed.rtk_project_cumulative.detection.reason,
+    "project_local_standard_provider_requires_explicit_trust",
+  );
+  assert.equal(shadowed.rtk_project_cumulative.detection.executable, fs.realpathSync(projectRtk));
+  assert.equal(fs.existsSync(projectMarker), false);
+
+  const hostTools = tmpProject("rtk-host-tools");
+  const hostMarker = path.join(hostTools, "host-rtk-invocations.jsonl");
+  const hostRtk = createPathRtk(hostTools, hostMarker);
+  const hostBin = tmpProject("rtk-host-bin");
+  fs.symlinkSync(hostRtk, path.join(hostBin, "rtk"), "file");
+  const hostEnv = { PATH: [hostBin, process.env.PATH].filter(Boolean).join(path.delimiter) };
+  const canonicalHostRtk = fs.realpathSync(hostRtk);
+
+  const hostStatus = JSON.parse(mustRun([
+    "optimization", "status", "--root", project, "--json",
+  ], { env: hostEnv }).stdout);
+  assert.equal(hostStatus.status, "operational");
+  assert.equal(hostStatus.rtk_project_cumulative.detection.executable, canonicalHostRtk);
+
+  const optimized = mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+  ], { env: hostEnv });
+  assert.match(optimized.stdout, /path-rtk:\["git","status","--short"\]/u);
+  const invocations = readJsonLines(hostMarker);
+  assert.ok(invocations.length >= 3);
+  assert.ok(invocations.every((entry) => entry.entry === canonicalHostRtk));
+  assert.deepEqual(invocations.at(-1).args, ["git", "status", "--short"]);
+});
+
+test("native and exact optimization routes keep external rg and Git helpers disabled", {
+  skip: process.platform === "win32" ? "POSIX executable helper regression" : false,
+}, () => {
+  const project = tmpProject("rtk-native-helper-boundary");
+  initProject(project);
+
+  const rgMarker = path.join(project, "rg-pre-invoked");
+  const rgPreprocessor = path.join(project, "rg-pre.mjs");
+  fs.writeFileSync(rgPreprocessor, [
+    "#!/usr/bin/env node",
+    "import fs from 'node:fs';",
+    `fs.appendFileSync(${JSON.stringify(rgMarker)}, 'invoked\\n');`,
+    "const source = process.argv[2];",
+    "if (source) process.stdout.write(fs.readFileSync(source, 'utf8'));",
+  ].join("\n"));
+  fs.chmodSync(rgPreprocessor, 0o755);
+  const rgConfig = path.join(project, "ripgrep.conf");
+  fs.writeFileSync(rgConfig, `--pre=${rgPreprocessor}\n`);
+  fs.writeFileSync(path.join(project, "rg-input.txt"), "needle\n");
+  const rgEnv = { ...process.env, RIPGREP_CONFIG_PATH: rgConfig };
+  const directRg = spawnSync("rg", ["needle", "--json", "rg-input.txt"], {
+    cwd: project,
+    encoding: "utf8",
+    env: rgEnv,
+  });
+  assert.equal(directRg.status, 0, directRg.stderr);
+  assert.equal(fs.existsSync(rgMarker), true, "fixture must prove RIPGREP_CONFIG_PATH can invoke --pre");
+  fs.rmSync(rgMarker);
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["rg", "needle", "--json", "rg-input.txt"]),
+  ], { env: { RIPGREP_CONFIG_PATH: rgConfig } });
+  assert.equal(fs.existsSync(rgMarker), false);
+
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+  for (const [key, value] of [["user.name", "E2E"], ["user.email", "e2e@example.test"]]) {
+    const configured = spawnSync("git", ["config", key, value], { cwd: project, encoding: "utf8" });
+    assert.equal(configured.status, 0, configured.stderr);
+  }
+  const gitMarker = path.join(project, "git-textconv-invoked");
+  const textconv = path.join(project, "git-textconv.mjs");
+  fs.writeFileSync(textconv, [
+    "#!/usr/bin/env node",
+    "import fs from 'node:fs';",
+    `fs.appendFileSync(${JSON.stringify(gitMarker)}, 'invoked\\n');`,
+    "process.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));",
+  ].join("\n"));
+  fs.chmodSync(textconv, 0o755);
+  fs.writeFileSync(path.join(project, ".gitattributes"), "*.probe diff=probe\n");
+  fs.writeFileSync(path.join(project, "sample.probe"), "before\n");
+  for (const args of [
+    ["config", "diff.probe.textconv", textconv],
+    ["add", ".gitattributes", "sample.probe"],
+    ["commit", "--quiet", "-m", "fixture"],
+  ]) {
+    const result = spawnSync("git", args, { cwd: project, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  fs.writeFileSync(path.join(project, "sample.probe"), "after\n");
+  const directGit = spawnSync("git", ["diff", "--", "sample.probe"], {
+    cwd: project,
+    encoding: "utf8",
+  });
+  assert.equal(directGit.status, 0, directGit.stderr);
+  assert.equal(fs.existsSync(gitMarker), true, "fixture must prove the configured textconv is active");
+  fs.rmSync(gitMarker);
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "diff", "--", "sample.probe"]),
+    "--exact",
+  ]);
+  assert.equal(fs.existsSync(gitMarker), false);
+});
+
+test("optimization run locks and evaluates every active governed assessment", async () => {
+  const project = tmpProject("rtk-budget-gate");
+  initProject(project);
+  const fakeRtk = createFakeRtk(project);
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+  fs.writeFileSync(path.join(project, "README.md"), "# Governed optimization gate\n");
+  mustRun([
+    "baseline", "propose", "--root", project, "--id", "BASELINE-RTK-GATE",
+    "--source", "README.md", "--summary", "Two active assessments share one project-level command gateway",
+  ]);
+  mustRun([
+    "baseline", "approve", "--root", project, "--id", "BASELINE-RTK-GATE",
+    ...humanApproval("The gateway test baseline is accurate"),
+  ]);
+
+  for (const suffix of ["A", "B"]) {
+    const proposalId = `ASSESS-RTK-GATE-${suffix}`;
+    const storyId = `ST-RTK-GATE-${suffix}`;
+    const requirementId = `REQ-RTK-GATE-${suffix}`;
+    const templateId = `technical-analysis-rtk-gate-${suffix.toLowerCase()}-v1`;
+    const artifact = `.sdlc/stories/${storyId}/outputs/technical-assessment.md`;
+    const budget = {
+      scope: { level: "proposal", proposal_id: proposalId, includes_subagents: true },
+      limits: {
+        tokens: { unit: "tokens", metering: "estimated", soft: 10 },
+      },
+    };
+    mustRun([
+      "assessment", "proposal", "prepare", "--root", project,
+      "--id", proposalId, "--baseline", "BASELINE-RTK-GATE",
+      "--story", storyId, "--requirement", requirementId,
+      "--template", templateId,
+      "--scope-title", `Assess optimization gate ${suffix}`,
+      "--scope-summary", `Verify that governed assessment ${suffix} cannot be used to bypass another active cost gate.`,
+      "--format", "Markdown", "--delivery", "artifact", "--artifact", artifact,
+      "--budget-json", JSON.stringify(budget),
+    ]);
+    mustRun([
+      "assessment", "proposal", "approve", "--root", project, "--id", proposalId,
+      ...humanApproval(`Approve governed optimization fixture ${suffix}`),
+    ]);
+    mustRun([
+      "assessment", "proposal", "apply", "--root", project, "--id", proposalId,
+      "--actor-type", "agent", "--trust-custom-rtk-command",
+    ]);
+  }
+
+  const mutationLock = path.join(project, ".sdlc", "budgets", "ASSESS-RTK-GATE-A", "mutation.lock");
+  writeJson(mutationLock, {
+    pid: process.pid,
+    host: os.hostname(),
+    nonce: "test-held-budget-lock",
+    created_at: new Date().toISOString(),
+  });
+  let lockContendedRun;
+  try {
+    lockContendedRun = runAsync([
+      "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
+      "--command-json", JSON.stringify(["git", "status", "--short"]),
+      "--trust-custom-rtk-command",
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(fs.existsSync(fakeRtk.invocationPath), false, "the child command started before all budget mutation locks were acquired");
+  } finally {
+    fs.rmSync(mutationLock, { force: true });
+  }
+  const lockContendedResult = await lockContendedRun;
+  assert.equal(lockContendedResult.status, 0, `${lockContendedResult.stdout}\n${lockContendedResult.stderr}`);
+  assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1);
+
+  const stopped = JSON.parse(mustRun([
+    "budget", "usage", "record", "--root", project,
+    "--proposal", "ASSESS-RTK-GATE-A", "--input-tokens", "10", "--json",
+  ]).stdout);
+  assert.equal(stopped.aggregate.status, "soft_limit");
+  assert.equal(stopped.workflow.state, "exception_pending");
+  mustFail([
+    "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--trust-custom-rtk-command",
+  ], /Cost gate for ASSESS-RTK-GATE-A blocks optimization run: soft_limit/u);
+  assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1, "a different proposal bypassed the active soft-limit gate");
 });
 
 test("story create persists acceptance criteria with human-readable alias", () => {
@@ -1736,6 +2078,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   initProject(project);
   const codeBurnReport = readJson(path.join(repoRoot, "test", "fixtures", "codeburn", "report-v0.9.15.json"));
   const fakeCodeBurn = createFakeCodeBurn(project, codeBurnReport);
+  const fakeRtk = createFakeRtk(project);
   fs.writeFileSync(
     path.join(project, "README.md"),
     "# Travel Operations\n\nA modular travel workflow with replaceable providers and contract-driven delivery.\n",
@@ -1781,7 +2124,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     ...humanApproval("The baseline sources and current-state summary are accurate"),
   ]);
   ensureTrustedMeteringFixture(project, {
-    metrics: ["active_time_seconds", "steps"],
+    metrics: ["active_time_seconds", "api_calls", "steps"],
   });
 
   const budgetInput = {
@@ -1789,6 +2132,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     completion_reserve_percent: 15,
     limits: {
       active_time_seconds: { unit: "seconds", metering: "exact", soft: 600, hard: 1200 },
+      api_calls: { unit: "calls", metering: "exact", hard: 100 },
       steps: { unit: "steps", metering: "exact", soft: 10, hard: 20 },
       tokens: { unit: "tokens", metering: "estimated", soft: 50000 },
     },
@@ -1836,6 +2180,9 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.match(prepared.assistant_message, /Tempo attivo:[^\n]*hard stop/);
   assert.match(prepared.assistant_message, /Token:[^\n]*(?:stima|advisory)/i);
   assert.match(prepared.assistant_message, /non configurato[^\n]*pricing\/metering/i);
+  const optimizationWrite = prepared.proposal.write_set.find((entry) => entry.action === "context.optimization.observe");
+  assert.match(optimizationWrite.path, /^\.sdlc\/context-optimization\/ASSESS-E2E\/observations\/\*\.json$/u);
+  assert.equal(optimizationWrite.budget_effect, "advisory-only; usage adjustment 0");
   const pendingWorkflow = readJson(path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json"));
 
   const approved = JSON.parse(mustRun([
@@ -1855,6 +2202,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.match(approved.authority_note, /cannot independently prove/i);
   assert.ok(approved.authorization.allowed_actions.includes("assessment.proposal.apply"));
   assert.ok(approved.authorization.allowed_actions.includes("assessment.proposal.complete"));
+  assert.ok(approved.authorization.allowed_actions.includes("context.optimization.observe"));
   assert.equal(approved.approval.authorization_snapshot.authorization_hash, approved.authorization.authorization_hash);
 
   // Simulate a process interruption after the approval seed was persisted but
@@ -1896,12 +2244,36 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     "ASSESS-E2E",
     "--actor-type",
     "agent",
+    "--trust-custom-rtk-command",
     "--json",
   ]).stdout);
   assert.equal(applied.status, "running");
   assert.equal(applied.application.proposal_hash, prepared.proposal.proposal_hash);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "requirements", "REQ-ASSESS-E2E.json")), true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-ASSESS-E2E", "task-start.json")), true);
+  assert.equal(applied.context_optimization.observation.phase, "apply");
+  assert.equal(applied.context_optimization.observation.budget_effect.usage_adjustment_applied, 0);
+
+  mustFail([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+  ], /requires --proposal.*ASSESS-E2E/u);
+  const governedOptimized = mustRun([
+    "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--trust-custom-rtk-command",
+  ]);
+  assert.match(governedOptimized.stdout, /fake-rtk/u);
+
+  const checkpointGain = readJson(fakeRtk.reportPath);
+  Object.assign(checkpointGain.summary, {
+    total_commands: 10,
+    total_input: 4_900,
+    total_output: 1_250,
+    total_saved: 3_500,
+    avg_savings_pct: 71.4,
+  });
+  writeJson(fakeRtk.reportPath, checkpointGain);
 
   codeBurnReport.generated = "2026-07-14T10:00:00.000Z";
   codeBurnReport.overview.tokens.input += 100;
@@ -1913,7 +2285,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   writeJson(fakeCodeBurn.reportPath, codeBurnReport);
   const metered = JSON.parse(mustRun([
     "budget", "meter", "record", "--root", project,
-    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
+    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--trust-custom-rtk-command", "--json",
   ]).stdout);
   assert.equal(metered.registration_status, "created");
   assert.equal(metered.receipt.source.assurance, "advisory_observed");
@@ -1921,7 +2293,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(metered.receipt.usage.tokens, 150);
   const meteredReplay = JSON.parse(mustRun([
     "budget", "meter", "record", "--root", project,
-    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--json",
+    "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--trust-custom-rtk-command", "--json",
   ]).stdout);
   assert.equal(meteredReplay.idempotent, true);
 
@@ -2114,6 +2486,24 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.match(exception.assistant_message, /- Partial:/);
   assert.match(exception.assistant_message, /- Stop:/);
   assert.match(exception.assistant_message, /will not silently raise/i);
+
+  const budgetStatusAtSoftLimit = JSON.parse(mustRun([
+    "budget", "status", "--root", project, "--proposal", "ASSESS-E2E", "--trust-custom-rtk-command", "--json",
+  ]).stdout);
+  assert.equal(budgetStatusAtSoftLimit.aggregate.status, "soft_limit");
+  assert.equal(budgetStatusAtSoftLimit.optimization_advisory.action, "checkpoint_required_stop");
+  assert.equal(budgetStatusAtSoftLimit.optimization_advisory.usage_adjustment_applied, 0);
+  assert.equal(budgetStatusAtSoftLimit.optimization_advisory.gate_override, false);
+  assert.equal(budgetStatusAtSoftLimit.rtk_project_cumulative.usage_credit_tokens, 0);
+  assert.equal(budgetStatusAtSoftLimit.proposal_optimization_delta.usage_adjustment_applied, 0);
+  assert.equal(budgetStatusAtSoftLimit.proposal_optimization_delta.status, "measured");
+  assert.equal(budgetStatusAtSoftLimit.proposal_optimization_delta.delta.estimated_tokens_avoided, 600);
+
+  mustFail([
+    "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--trust-custom-rtk-command",
+  ], /Cost gate.*blocks optimization run: soft_limit/u);
 
   mustFail([
     "budget",
@@ -2451,8 +2841,8 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   const finalMeteringFixture = writeTrustedUsageReceipt(project, {
     proposalId: "ASSESS-E2E",
     id: "USAGE-ASSESS-E2E-FINAL",
-    usage: { active_time_seconds: 120, steps: 10 },
-    metering: { active_time_seconds: "exact", steps: "exact" },
+    usage: { active_time_seconds: 120, api_calls: 90, steps: 10 },
+    metering: { active_time_seconds: "exact", api_calls: "exact", steps: "exact" },
   });
   const finalMetering = JSON.parse(mustRun([
     "budget",
@@ -2467,7 +2857,23 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     "--json",
   ]).stdout);
   assert.equal(finalMetering.aggregate.usage.active_time_seconds, 120);
+  assert.equal(finalMetering.aggregate.usage.api_calls, 90);
   assert.equal(finalMetering.aggregate.usage.steps, 10);
+  assert.equal(finalMetering.aggregate.status, "completion_reserve");
+
+  const budgetStatusAtCompletionReserve = JSON.parse(mustRun([
+    "budget", "status", "--root", project, "--proposal", "ASSESS-E2E", "--trust-custom-rtk-command", "--json",
+  ]).stdout);
+  assert.equal(budgetStatusAtCompletionReserve.aggregate.status, "completion_reserve");
+  assert.equal(budgetStatusAtCompletionReserve.aggregate.allowed_for_completion_only, true);
+  assert.equal(budgetStatusAtCompletionReserve.optimization_advisory.action, "completion_only");
+  assert.equal(budgetStatusAtCompletionReserve.optimization_advisory.usage_adjustment_applied, 0);
+  assert.equal(budgetStatusAtCompletionReserve.optimization_advisory.gate_override, false);
+  mustFail([
+    "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--trust-custom-rtk-command",
+  ], /completion_reserve.*cannot start new work/u);
 
   writeArtifact(
     project,
@@ -2508,6 +2914,20 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(linked.link.verification_receipt.content_verified.status, "verified");
   assert.equal(linked.link.verification_receipt.render_verified.status, "not-required");
 
+  const completionGain = readJson(fakeRtk.reportPath);
+  Object.assign(completionGain.summary, {
+    total_commands: 13,
+    total_input: 6_000,
+    total_output: 1_500,
+    total_saved: 4_300,
+    avg_savings_pct: 71.7,
+  });
+  writeJson(fakeRtk.reportPath, completionGain);
+  const completionReserveWorkflowBeforeRelease = readJson(
+    path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json"),
+  );
+  assert.equal(completionReserveWorkflowBeforeRelease.state, "exception_pending");
+
   const completed = JSON.parse(mustRun([
     "assessment",
     "proposal",
@@ -2518,13 +2938,40 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     "ASSESS-E2E",
     "--actor-type",
     "agent",
+    "--trust-custom-rtk-command",
     "--json",
   ]).stdout);
   assert.equal(completed.status, "completed");
   assert.equal(completed.workflow.state, "completed");
   assert.equal(completed.release_manifest.status, "released");
+  assert.equal(completed.release_manifest.budget_decision.status, "completion_reserve");
   assert.equal(completed.release_manifest.budget_decision.usage.tokens, 1600);
+  assert.equal(completed.release_manifest.budget_decision.usage.api_calls, 90);
+  assert.ok(completed.release_manifest.budget_decision.completion_reserve_risks.some(
+    (risk) => risk.metric === "api_calls",
+  ));
   assert.equal(completed.release_manifest.legacy_history_policy, "logically_archived_out_of_release_scope");
+  assert.deepEqual(
+    completed.release_manifest.context_optimization_observations.map((reference) => readJson(path.join(project, reference.path)).phase),
+    ["apply", "checkpoint", "complete"],
+  );
+  for (const reference of completed.release_manifest.context_optimization_observations || []) {
+    const observation = readJson(path.join(project, reference.path));
+    assert.equal(observation.assurance.classification, "advisory_estimated");
+    assert.equal(observation.budget_effect.usage_adjustment_applied, 0);
+    assert.equal(observation.budget_effect.gate_override, false);
+  }
+
+  const completionWorkflowPath = path.join(project, ".sdlc", "assessments", "workflows", "ASSESS-E2E.json");
+  writeJson(completionWorkflowPath, completionReserveWorkflowBeforeRelease);
+  const recoveredCompletion = JSON.parse(mustRun([
+    "assessment", "proposal", "complete", "--root", project, "--id", "ASSESS-E2E",
+    "--actor-type", "agent", "--trust-custom-rtk-command", "--json",
+  ]).stdout);
+  assert.equal(recoveredCompletion.idempotent, true);
+  assert.equal(recoveredCompletion.recovered, true);
+  assert.equal(recoveredCompletion.workflow.state, "completed");
+  assert.equal(recoveredCompletion.release_manifest.manifest_hash, completed.release_manifest.manifest_hash);
 
   mustFail([
     "budget",
@@ -2557,6 +3004,35 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(gated.status, "passed");
   assert.equal(gated.scope, "release-manifest");
   assert.equal(gated.release_manifest_id, completed.release_manifest.id);
+
+  const manifestPath = path.join(project, completed.application.release_manifest_ref.path);
+  const originalManifest = readJson(manifestPath);
+  const tamperedManifest = structuredClone(originalManifest);
+  tamperedManifest.budget_decision.completion_reserve_risks = [];
+  delete tamperedManifest.manifest_hash;
+  delete tamperedManifest.hash_algorithm;
+  tamperedManifest.manifest_hash = computeStableHash(tamperedManifest);
+  tamperedManifest.hash_algorithm = "sha256:stable-json:v1";
+  writeJson(manifestPath, tamperedManifest);
+  mustFail([
+    "gate", "check", "--root", project, "--scope", "release-manifest",
+    "--release-manifest", completed.release_manifest.id, "--strict", "--json",
+  ], /budget decision does not match independently aggregated usage receipts/);
+  writeJson(manifestPath, originalManifest);
+
+  assert.ok(originalManifest.execution_usage_receipts.length > 1);
+  const omittedReceiptManifest = structuredClone(originalManifest);
+  omittedReceiptManifest.execution_usage_receipts = omittedReceiptManifest.execution_usage_receipts.slice(1);
+  delete omittedReceiptManifest.manifest_hash;
+  delete omittedReceiptManifest.hash_algorithm;
+  omittedReceiptManifest.manifest_hash = computeStableHash(omittedReceiptManifest);
+  omittedReceiptManifest.hash_algorithm = "sha256:stable-json:v1";
+  writeJson(manifestPath, omittedReceiptManifest);
+  mustFail([
+    "gate", "check", "--root", project, "--scope", "release-manifest",
+    "--release-manifest", completed.release_manifest.id, "--strict", "--json",
+  ], /execution usage receipt set does not exactly match the canonical proposal receipt set/u);
+  writeJson(manifestPath, originalManifest);
 });
 
 test("active migration upgrades config and logically archives an older release without moving evidence", () => {
@@ -6073,6 +6549,91 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
   assert.equal(fs.readFileSync(path.join(destination, "unmanaged.txt"), "utf8"), "do not delete\n");
 });
 
+test("personal marketplace installer can validate and configure RTK globally", () => {
+  const home = tmpProject("personal-installer-rtk-home");
+  const codexHome = path.join(home, ".codex-test");
+  const fakeRoot = tmpProject("personal-installer-fake-rtk");
+  const fakeRtkRunner = path.join(
+    fakeRoot,
+    process.platform === "win32" ? "rtk-fixture.cjs" : "rtk",
+  );
+  const fakeRtk = process.platform === "win32"
+    ? path.join(fakeRoot, "rtk.cmd")
+    : fakeRtkRunner;
+  const invocationPath = path.join(fakeRoot, "invocations.jsonl");
+  fs.writeFileSync(fakeRtkRunner, [
+    `#!${process.execPath}`,
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    `const invocationPath = ${JSON.stringify(invocationPath)};`,
+    "const args = process.argv.slice(2);",
+    "fs.appendFileSync(invocationPath, `${JSON.stringify(args)}\\n`);",
+    "if (args.join(' ') === '--version') process.stdout.write('rtk 0.43.0\\n');",
+    "else if (args.join(' ') === 'gain --project --format json') process.stdout.write(JSON.stringify({summary:{total_commands:2,total_input:100,total_output:20,total_saved:75,avg_savings_pct:75}}));",
+    "else if (args.join(' ') === 'init -g --codex') { const root=process.env.CODEX_HOME; fs.mkdirSync(root,{recursive:true}); fs.writeFileSync(path.join(root,'RTK.md'),'rtk\\n'); fs.writeFileSync(path.join(root,'AGENTS.md'),'@RTK.md\\n'); }",
+    "else if (args.join(' ') === 'init -g --codex --show') { if (process.env.RTK_FAKE_SHOW_FAIL === '1') { process.stderr.write('show failed\\n'); process.exitCode = 3; } else process.stdout.write('[ok] Global RTK.md: configured\\n[ok] Global AGENTS.md: configured\\n'); }",
+    "else process.exitCode = 2;",
+  ].join("\n"));
+  if (process.platform === "win32") {
+    fs.writeFileSync(fakeRtk, [
+      "@echo off",
+      '"%RTK_FAKE_NODE_EXECUTABLE%" "%RTK_FAKE_RUNNER_PATH%" %*',
+      "exit /b %errorlevel%",
+    ].join("\r\n"));
+  } else {
+    fs.chmodSync(fakeRtk, 0o755);
+  }
+  const python = process.env.PYTHON || "python3";
+  const installer = path.join(repoRoot, "scripts", "install-personal-marketplace.py");
+  const installed = spawnSync(python, [installer, "--with-rtk", "--rtk-executable", fakeRtk], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: home,
+      CODEX_HOME: codexHome,
+      RTK_FAKE_NODE_EXECUTABLE: process.execPath,
+      RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
+    },
+    timeout: 30_000,
+  });
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`);
+  assert.match(installed.stdout, /Configured RTK 0\.43\.0 for global Codex use/u);
+  assert.equal(fs.readFileSync(path.join(codexHome, "AGENTS.md"), "utf8"), "@RTK.md\n");
+  assert.equal(fs.readFileSync(path.join(codexHome, "RTK.md"), "utf8"), "rtk\n");
+  assert.deepEqual(readJsonLines(invocationPath), [
+    ["--version"],
+    ["gain", "--project", "--format", "json"],
+    ["init", "-g", "--codex"],
+    ["init", "-g", "--codex", "--show"],
+  ]);
+  assert.equal(
+    readJson(path.join(home, "plugins", "agentic-sdlc-codex-plugin", ".codex-plugin", "plugin.json")).version,
+    "0.8.0",
+  );
+
+  const partialFailureHome = tmpProject("personal-installer-rtk-partial-home");
+  const partialCodexHome = path.join(partialFailureHome, ".codex-test");
+  const partialFailure = spawnSync(python, [installer, "--with-rtk", "--rtk-executable", fakeRtk], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: partialFailureHome,
+      CODEX_HOME: partialCodexHome,
+      RTK_FAKE_SHOW_FAIL: "1",
+      RTK_FAKE_NODE_EXECUTABLE: process.execPath,
+      RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
+    },
+    timeout: 30_000,
+  });
+  assert.notEqual(partialFailure.status, 0);
+  assert.match(partialFailure.stderr, /global RTK files may have been left in place/u);
+  assert.equal(fs.existsSync(path.join(partialCodexHome, "RTK.md")), true);
+  assert.equal(fs.existsSync(path.join(partialCodexHome, "AGENTS.md")), true);
+  assert.equal(fs.existsSync(path.join(partialFailureHome, "plugins", "agentic-sdlc-codex-plugin")), false);
+});
+
 test("manifests, trace compaction, and archive plans scale the KB without using cache as truth", () => {
   const project = tmpProject("kb-scale");
   initProject(project);
@@ -6171,6 +6732,14 @@ test("schemas and JSON templates parse with portable local references", () => {
     authorizationSchema.properties.hash_algorithm.enum,
     ["sha256:stable-json:v1", "sha256:stable-json:v2"],
   );
+  const contextOptimizationSchema = readJson(path.join(repoRoot, "schemas", "context-optimization-observation.schema.json"));
+  assert.equal(contextOptimizationSchema.$id, "context-optimization-observation.schema.json");
+  assert.equal(contextOptimizationSchema.properties.budget_effect.properties.usage_adjustment_applied.const, 0);
+  const releaseManifestSchema = readJson(path.join(repoRoot, "schemas", "release-manifest.schema.json"));
+  assert.equal(releaseManifestSchema.properties.context_optimization_observations.type, "array");
+  const configTemplate = readJson(path.join(repoRoot, "templates", "sdlc-config.json"));
+  assert.equal(configTemplate.context_optimization_policy.mode, "automatic");
+  assert.equal(configTemplate.context_optimization_policy.fallback, "native");
   const releaseWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.match(releaseWorkflow, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
   assert.match(releaseWorkflow, /node: \[18\.18\.0, 20, 24\]/);
@@ -6218,6 +6787,9 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   const files = payload[0].files.map((entry) => entry.path);
   assert.ok(files.includes(".codex-plugin/plugin.json"));
   assert.ok(files.includes("bin/agentic-sdlc.mjs"));
+  assert.ok(files.includes("lib/rtk-optimization-adapter.mjs"));
+  assert.ok(files.includes("lib/context-optimization.mjs"));
+  assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
   assert.ok(files.includes("lib/change-observatory/cli.mjs"));
   assert.ok(files.includes("ui/change-observatory/index.html"));
@@ -6249,6 +6821,9 @@ test("npm package installs as a complete reusable plugin", async (t) => {
     process.platform === "win32" ? "agentic-sdlc.cmd" : "agentic-sdlc",
   );
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "templates", "sdlc-config.json")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "rtk-optimization-adapter.mjs")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "context-optimization.mjs")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "schemas", "context-optimization-observation.schema.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "cli.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "ui", "change-observatory", "index.html")), true);

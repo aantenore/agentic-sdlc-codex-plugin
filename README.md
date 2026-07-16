@@ -1,6 +1,6 @@
 # Agentic SDLC Codex Plugin
 
-Agentic SDLC 0.7.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.8.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -9,7 +9,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Documentation home](docs/README.md) — choose the right guide without knowing the internal record names.
 - [How It Works](docs/how-it-works.md) — the complete two-checkpoint journey, state transitions, authorization, verification, and recovery.
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
-- [Token Efficiency](docs/token-efficiency.md) — compact derived JSON plus optional RTK command-output filtering.
+- [Token Efficiency](docs/token-efficiency.md) — compact derived JSON, the RTK command gateway, lifecycle observations, and budget-safe savings telemetry.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
 - [Change Observatory](docs/change-observatory.md) — launch the local visual lineage app and understand its evidence and security model.
@@ -25,6 +25,21 @@ python3 scripts/install-personal-marketplace.py
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
+
+If RTK 0.43 or newer is already installed and you want its guidance available to
+Codex globally, opt in while staging:
+
+```bash
+python3 scripts/install-personal-marketplace.py --with-rtk
+```
+
+`--with-rtk` configures the current user's global Codex instructions. It does
+not install or upgrade the RTK binary, and omitting the flag leaves global
+instructions unchanged. `--rtk-executable` selects a binary only for that
+bootstrap step; the automatic gateway still resolves `rtk` from `PATH` unless
+the project configures and explicitly trusts a custom provider command. See
+[Portable Installation](docs/portable-install.md) for the user-global scope,
+runtime trust boundary, and update behavior.
 
 Open the project you want to assess in a **new Codex task**, then ask naturally:
 
@@ -198,6 +213,46 @@ node bin/agentic-sdlc.mjs budget meter record \
 
 `--provider` selects the local session-log producer, `--project` narrows the CodeBurn aggregation, `--from/--to` fix an inclusive and reproducible date window, and `--baseline` identifies the immutable starting point. The same query is reused for every delta so filter drift, counter resets, currency changes, and tampering fail closed. The adapter command is replaceable as an executable plus prefix-argument vector, preserving `shell: false` for Windows npm installations and hermetic CI. Full setup and examples are in [Autonomy, Limits, and Metering](docs/limits-and-metering.md) and [CodeBurn Metering](docs/codeburn-metering.md).
 
+## RTK Context Optimization
+
+RTK is integrated through a shell-free gateway rather than as a budget meter.
+Inspect availability, run a supported noisy command, or capture an explicit
+manual diagnostic with:
+
+```bash
+node bin/agentic-sdlc.mjs optimization status --root /path/to/project --proposal ASSESSMENT-001 --json
+node bin/agentic-sdlc.mjs optimization run --root /path/to/project --proposal ASSESSMENT-001 --command-json '["npm","test"]'
+node bin/agentic-sdlc.mjs optimization capture --root /path/to/project --proposal ASSESSMENT-001 --phase manual --json
+```
+
+Use `optimization run --exact` when unfiltered, complete output is required.
+It bypasses RTK but never widens the allowlist or disables the anti-helper
+boundary: native `rg` runs with config loading disabled, while native Git
+diff/log/show runs with external diff and text-conversion drivers disabled. The
+gateway accepts only fixed test commands, execution-safe read-only Git commands,
+and `rg` searches without external preprocessors. Mutations and unknown commands are rejected. For an
+active assessment, `--proposal` is mandatory and the command starts only when
+that proposal's cost gate allows new work. The assessment
+lifecycle automatically captures comparable observations at apply, budget
+checkpoints, and completion, so manual capture is for diagnostics—not for
+manufacturing lifecycle evidence.
+
+RTK's project-cumulative counters may include concurrent activity in the same
+checkout. The proposal delta is therefore reported separately and remains an
+estimate of command output avoided, not provider usage or billing truth. RTK
+always contributes zero budget credit: `usage_adjustment_applied` is `0`, the
+budget evaluator continues to aggregate only usage receipts, and soft limits,
+completion reserve, hard limits, and metering violations remain sovereign.
+Validated observation references may appear in the completion manifest and its
+release-gate evidence without changing `budget_decision`.
+
+The standard `rtk` executable is resolved once from `PATH`, canonicalized, and
+executed by that absolute path. A first PATH candidate located in the project
+root (including a symlink whose real target is there), a custom provider
+executable, or prefix argv is not run by doctor, status, lifecycle hooks, or the
+gateway unless that exact invocation includes
+`--trust-custom-rtk-command` after review.
+
 ## Canonical Output Formats
 
 Requested formats are stored as canonical delivery metadata; a Markdown file renamed to another extension is rejected.
@@ -256,6 +311,9 @@ codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
 
+Pass `--with-rtk` only when you intentionally want the installer to refresh the
+current user's global Codex instructions for an already installed RTK binary.
+
 On systems where Python 3 is exposed as `python` or `py -3`, use that launcher for the same script. Start a new Codex task after installation so the app reloads plugin skills and agent cards.
 
 The installer stages the package allowlist into `~/plugins/agentic-sdlc-codex-plugin` and updates the plugin entry in `~/.agents/plugins/marketplace.json`. It refuses unsafe destinations instead of traversing or replacing a symlink, Windows junction/reparse point, Git checkout, source checkout, or unmanaged directory.
@@ -271,6 +329,12 @@ codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
 
+If global RTK guidance was previously enabled, retain the opt-in during update:
+
+```bash
+python3 scripts/install-personal-marketplace.py --with-rtk
+```
+
 Do not edit the generated tree under `~/plugins` directly. Start a new Codex task after the refresh.
 
 ## Uninstall
@@ -283,6 +347,14 @@ codex plugin list --json
 ```
 
 This intentionally leaves the source checkout, generated staging directory, and personal marketplace entry in place. For permanent local cleanup, remove only `~/plugins/agentic-sdlc-codex-plugin` and only the matching JSON entry from `~/.agents/plugins/marketplace.json`; preserve every unrelated plugin entry. Do not remove the shared `personal` marketplace source just to uninstall this plugin.
+
+Plugin removal also leaves RTK's independent global Codex instructions in
+place. If no other project should use them, remove and verify them explicitly:
+
+```bash
+rtk init -g --codex --uninstall
+rtk init -g --codex --show
+```
 
 ## Diagnose An Install
 
@@ -327,6 +399,9 @@ The CLI remains available for automation and advanced project workflows:
 node bin/agentic-sdlc.mjs --help
 node bin/agentic-sdlc.mjs observe --root /path/to/project --no-open --json
 node bin/agentic-sdlc.mjs doctor --root /path/to/project --json
+node bin/agentic-sdlc.mjs optimization status --root /path/to/project --proposal ASSESSMENT-001 --json
+node bin/agentic-sdlc.mjs optimization run --root /path/to/project --command-json '["npm","test"]'
+node bin/agentic-sdlc.mjs optimization capture --root /path/to/project --proposal ASSESSMENT-001 --phase manual --json
 node bin/agentic-sdlc.mjs status --root /path/to/project
 node bin/agentic-sdlc.mjs approval requests --root /path/to/project --json
 node bin/agentic-sdlc.mjs assessment proposal status --root /path/to/project --id ASSESSMENT-001 --json
@@ -341,6 +416,13 @@ node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-man
 Natural-language interpretation stays in Codex. The CLI accepts canonical structured intent and performs deterministic state, format, authorization, and evidence checks.
 
 CodeBurn 0.9.x is an optional, separately installed prerequisite for `budget meter`; the plugin never installs it. Capture the baseline after proposal approval and before `apply`. `record` reuses the exact persisted provider/project/date query and advances an incremental monotonic cursor. CodeBurn evidence is always `estimated`/`advisory_observed`, never signed or exact; a mapped hard metric is recorded but stops the workflow with `metering_violation`. For multi-day work, pass an explicit stable `--from/--to` window at `start`.
+
+RTK 0.43+ is also optional and separately installed. `optimization run` routes
+only allowlisted command profiles without a shell; `--exact` bypasses filtering
+without allowing arbitrary command vectors. Ripgrep preprocessors, Git external
+diff/textconv drivers, and Git signature-verification helpers remain disabled.
+Its savings telemetry is advisory, project-scoped, and always receives zero
+budget credit. See [Token Efficiency](docs/token-efficiency.md).
 
 `migration active` is deliberately dry-run first. It validates the immutable records referenced by one exact release manifest, upgrades only missing configuration defaults when `--apply` is present, and never rewrites an approved record. Evidence referenced only by older valid releases remains where it is and is listed in an `archive-record:v1`; this logical archive changes gate scope, not filesystem location. Use the separate `archive closed --apply` workflow only when old closed reports or trace compactions must physically move.
 

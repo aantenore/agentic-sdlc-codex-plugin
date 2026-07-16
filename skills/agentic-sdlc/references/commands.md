@@ -322,6 +322,54 @@ is required; it never changes canonical evidence. Search limits are bounded to
 
 `migration active` is dry-run by default. The release manifest defines the exact active scope; the command validates every referenced immutable record, upgrades only missing configuration defaults on `--apply`, and emits a logical `archive-record:v1` for evidence referenced only by older valid releases. It rewrites no approved record and moves no file.
 
+## Context Optimization Gateway
+
+RTK 0.43+ is an optional, separately installed command-output optimizer. Inspect
+the configured provider and current telemetry before relying on it:
+
+```bash
+node bin/agentic-sdlc.mjs optimization status --root <project> --proposal ASSESS-001 --json
+```
+
+Route a supported command as a shell-free argument vector. `auto` selects a
+native, test, Git, or `rg` profile; use `--exact` to bypass RTK when complete or
+unfiltered output is required. Bind the active proposal so its cost gate is
+checked before execution:
+
+```bash
+node bin/agentic-sdlc.mjs optimization run --root <project> --proposal ASSESS-001 --command-json '["npm","test"]'
+node bin/agentic-sdlc.mjs optimization run --root <project> --command-json '["git","diff","--binary"]' --exact
+```
+
+The default native fallback handles an unavailable or unsupported RTK provider
+without claiming savings. Unknown commands, mutations, unsafe Git output flags,
+external `rg` preprocessors, and executable paths are rejected rather than
+treated as fallback. `--exact` bypasses filtering but does not widen this
+allowlist or disable `rg --no-config` and Git external-driver suppression.
+Custom provider executable/prefix arguments and project-local PATH shadows
+require the invocation-local `--trust-custom-rtk-command` switch; a normal PATH
+provider is canonicalized and spawned by absolute path. In automatic mode, proposal apply,
+budget checkpoints, and completion create lifecycle observations. Use only the
+manual phase for operator diagnostics:
+
+```bash
+node bin/agentic-sdlc.mjs optimization capture --root <project> --proposal ASSESS-001 --phase manual --json
+```
+
+Do not manually label a capture as apply, checkpoint, or complete. RTK counters
+are project-cumulative and may contain concurrent checkout activity; the
+proposal observation delta covers only the interval since its prior observation
+and remains estimated. Both are context-savings telemetry, not provider usage
+or billing evidence.
+
+Every observation is advisory-only with `usage_adjustment_applied: 0` and
+`gate_override: false`. Budget usage comes exclusively from append-only usage
+receipts. Warning, soft-limit, completion-reserve, hard-limit, and
+metering-violation decisions remain sovereign, even when the budget status
+recommends more aggressive RTK use. Completion may reference validated
+observation lineage in the manifest and an optional gate check; it must never
+change the manifest's `budget_decision`.
+
 ## Optional CodeBurn metering
 
 CodeBurn 0.9.x must be installed separately; never install it automatically. Capture before execution and record incremental observations with the same persisted query:
