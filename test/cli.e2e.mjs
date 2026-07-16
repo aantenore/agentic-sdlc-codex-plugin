@@ -6634,7 +6634,7 @@ test("personal marketplace installer can validate and configure RTK globally", (
   ]);
   assert.equal(
     readJson(path.join(home, "plugins", "agentic-sdlc-codex-plugin", ".codex-plugin", "plugin.json")).version,
-    "0.8.0",
+    "0.8.1",
   );
 
   const partialFailureHome = tmpProject("personal-installer-rtk-partial-home");
@@ -6817,6 +6817,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
   assert.ok(files.includes("lib/change-observatory/cli.mjs"));
+  assert.ok(files.includes("lib/change-observatory/intentabi-adapter.mjs"));
   assert.ok(files.includes("ui/change-observatory/index.html"));
   assert.ok(files.includes("ui/change-observatory/app.js"));
   assert.ok(files.includes("skills/change-observatory/SKILL.md"));
@@ -6851,6 +6852,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "schemas", "context-optimization-observation.schema.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "cli.mjs")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "intentabi-adapter.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "ui", "change-observatory", "index.html")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "change-observatory", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "change-observatory", "agents", "openai.yaml")), true);
@@ -6872,6 +6874,51 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   );
   assert.equal(initialized.status, 0, `installed init failed\n${initialized.stdout}\n${initialized.stderr}`);
   fs.writeFileSync(path.join(observedProject, ".sdlc", "config.json"), "{ malformed on purpose\n");
+  const intentAbiEventId = "123e4567-e89b-42d3-a456-426614174010";
+  const intentAbiRelativePath = `.sdlc/observations/intentabi/${intentAbiEventId}.json`;
+  const intentAbiDigest = (character) => `hmac-sha256:evidence:${character.repeat(64)}`;
+  fs.mkdirSync(path.join(observedProject, ".sdlc", "stories", "ST-INTENTABI"), { recursive: true });
+  fs.mkdirSync(path.join(observedProject, ".sdlc", "observations", "intentabi"), { recursive: true });
+  writeJson(path.join(observedProject, ".sdlc", "stories", "ST-INTENTABI", "story.json"), {
+    schema_version: "0.1.0",
+    id: "ST-INTENTABI",
+    title: "Observe IntentABI evidence",
+    status: "draft",
+  });
+  writeJson(path.join(observedProject, intentAbiRelativePath), {
+    schema: "io.github.aantenore.intentabi/authenticated-codex-shadow-evidence/v1alpha1",
+    eventId: intentAbiEventId,
+    keyId: "installed-observatory-test",
+    evidence: {
+      schema: "io.github.aantenore.intentabi/codex-shadow-evidence/v1alpha1",
+      mode: "shadow",
+      submitted: "original",
+      inputKind: "text",
+      bindingDigest: intentAbiDigest("a"),
+      originalDigest: intentAbiDigest("b"),
+      optionsDigest: "unavailable:not-provided",
+      execution: { status: "succeeded", outputDigest: "unavailable:opaque-output" },
+      preparation: {
+        outcome: "candidate-observed",
+        reason: "CANDIDATE_ATTESTED",
+        candidateDigest: intentAbiDigest("c"),
+        selectedCodecDigest: intentAbiDigest("d"),
+        reasonSetDigest: intentAbiDigest("e"),
+        promotionBindingDigest: intentAbiDigest("f"),
+        proof: "present-unverified",
+      },
+    },
+    mac: intentAbiDigest("9"),
+  });
+  const intentAbiTracePath = path.join(observedProject, ".sdlc", "traces", "ST-INTENTABI.jsonl");
+  fs.mkdirSync(path.dirname(intentAbiTracePath), { recursive: true });
+  fs.writeFileSync(intentAbiTracePath, `${JSON.stringify({
+    id: "TR-INTENTABI-INSTALLED",
+    story_id: "ST-INTENTABI",
+    type: "handoff",
+    summary: "Linked IntentABI evidence.",
+    evidence: [intentAbiRelativePath],
+  })}\n`);
 
   const observeExecutable = process.platform === "win32" ? process.execPath : installedBinShim;
   const observatory = spawn(observeExecutable, [
@@ -6971,6 +7018,25 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.equal(model.schemaVersion, "change-observatory:view:v1");
   assert.equal(model.project.name, "Installed Observatory");
   assert.ok(model.diagnostics.some((diagnostic) => diagnostic.code === "invalid_json"));
+  assert.equal(model.semanticObservations.length, 1);
+  assert.equal(model.semanticObservations[0].id, intentAbiEventId);
+  assert.equal(model.semanticObservations[0].link.storyId, "ST-INTENTABI");
+  assert.equal(model.semanticObservations[0].macStatus, "present-not-verified");
+  assert.equal(model.summary.asked.some((item) => item.id === intentAbiEventId), false);
+  assert.equal(model.summary.changed.some((item) => item.id === intentAbiEventId), false);
+  assert.equal(model.summary.decided.some((item) => item.id === intentAbiEventId), false);
+  assert.equal(model.verification.some((item) => item.id === intentAbiEventId), false);
+
+  const intentAbiSourceUrl = new URL("/api/v1/source", ready.base_url);
+  intentAbiSourceUrl.searchParams.set("path", intentAbiRelativePath);
+  const intentAbiSourceResponse = await authenticatedFetch(intentAbiSourceUrl);
+  assert.equal(intentAbiSourceResponse.status, 200);
+  const intentAbiSource = await intentAbiSourceResponse.json();
+  assert.equal(intentAbiSource.contentProjection, "intentabi-observatory:v1");
+  assert.equal(intentAbiSource.data.eventId, intentAbiEventId);
+  assert.equal(JSON.stringify(intentAbiSource).includes("hmac-sha256"), false);
+  assert.equal(Object.hasOwn(intentAbiSource, "sha256"), false);
+  assert.equal(Object.hasOwn(intentAbiSource, "sizeBytes"), false);
 
   const rootResponse = await authenticatedFetch(new URL("/", ready.base_url));
   assert.equal(rootResponse.status, 200);

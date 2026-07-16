@@ -30,6 +30,7 @@ The sample records below use neutral placeholders. The structure is generic and 
     assumptions/
     risks/
     tests/
+    observations/
     traces/
     releases/
     manifests/
@@ -69,6 +70,7 @@ flowchart TB
   Source --> Stories["stories"]
   Source --> Decisions["decisions"]
   Source --> Tests["tests"]
+  Source --> Observations["external content-free observations"]
   Source --> Traces["traces"]
   Source --> Manifests["manifests"]
   Source --> Archive["archive plans"]
@@ -89,6 +91,7 @@ flowchart TB
   Stories --> Cache
   Decisions --> Cache
   Tests --> Cache
+  Observations --> Cache
   Traces --> Cache
   Manifests --> Cache
   Archive --> Cache
@@ -609,6 +612,25 @@ Examples:
 ```
 
 Tests should link to acceptance criteria and requirements.
+
+## `observations/`
+
+Canonical, non-authoritative observations produced by an external runtime. The
+first supported adapter reads strict content-free IntentABI Codex shadow
+envelopes:
+
+```text
+.sdlc/observations/intentabi/<event-id>.json
+```
+
+The lowercase UUID v4 filename must exactly match the envelope `eventId`;
+descriptive names, nested paths, and JSONL batches are intentionally rejected.
+
+The envelope does not contain an SDLC story or phase. Link it only by recording
+its exact path in a trace `evidence` array whose trace also has `story_id`.
+Change Observatory otherwise shows it as unlinked. Observation presence, proof
+presence, or a stored MAC does not establish semantic equivalence, cache
+admission, token savings, authorization, phase completion, or verification.
 
 ## `traces/`
 

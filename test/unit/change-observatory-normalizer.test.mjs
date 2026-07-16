@@ -11,6 +11,41 @@ import {
 } from "../../lib/change-observatory/index.mjs";
 
 const FIXED_TIME = "2026-07-16T09:00:00.000Z";
+const INTENTABI_EVENT_ID = "123e4567-e89b-42d3-a456-426614174000";
+const INTENTABI_PATH = `.sdlc/observations/intentabi/${INTENTABI_EVENT_ID}.json`;
+
+function intentAbiEnvelope(overrides = {}) {
+  const digest = (character) => `hmac-sha256:evidence:${character.repeat(64)}`;
+  return {
+    schema: "io.github.aantenore.intentabi/authenticated-codex-shadow-evidence/v1alpha1",
+    eventId: INTENTABI_EVENT_ID,
+    keyId: "intentabi-test",
+    evidence: {
+      schema: "io.github.aantenore.intentabi/codex-shadow-evidence/v1alpha1",
+      mode: "shadow",
+      submitted: "original",
+      inputKind: "text",
+      bindingDigest: digest("a"),
+      originalDigest: digest("b"),
+      optionsDigest: "unavailable:not-provided",
+      execution: {
+        status: "succeeded",
+        outputDigest: "unavailable:opaque-output",
+      },
+      preparation: {
+        outcome: "candidate-observed",
+        reason: "CANDIDATE_ATTESTED",
+        candidateDigest: digest("c"),
+        selectedCodecDigest: digest("d"),
+        reasonSetDigest: digest("e"),
+        promotionBindingDigest: digest("f"),
+        proof: "present-unverified",
+      },
+    },
+    mac: digest("9"),
+    ...overrides,
+  };
+}
 
 test("normalizes representative SDLC lineage with explicit provenance and narrative", async (t) => {
   const root = await createProject(t);
@@ -176,6 +211,237 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
       assert.ok(Array.isArray(item.sourceRefs));
     }
   }
+});
+
+test("projects content-free IntentABI evidence and links it only through an explicit story trace", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "intentabi-project",
+    project_name: "IntentABI Project",
+  });
+  await writeJson(root, ".sdlc/stories/ST-INTENT/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-INTENT",
+    title: "Observe intent evidence",
+    status: "draft",
+  });
+  await writeJson(root, INTENTABI_PATH, intentAbiEnvelope());
+  await writeJsonLines(root, ".sdlc/traces/ST-INTENT.jsonl", [{
+    id: "TR-INTENTABI-LINK",
+    story_id: "ST-INTENT",
+    type: "handoff",
+    summary: "Linked content-free intent evidence.",
+    evidence: [INTENTABI_PATH],
+  }]);
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+
+  assert.equal(model.schemaVersion, OBSERVATORY_VIEW_SCHEMA_VERSION);
+  assert.equal(model.semanticObservations.length, 1);
+  assert.deepEqual(model.semanticObservations[0], {
+    id: INTENTABI_EVENT_ID,
+    type: "intentabi-codex-shadow",
+    title: "IntentABI shadow observation",
+    summary: "Content-free IntentABI shadow evidence.",
+    status: "candidate-observed",
+    phase: null,
+    action: null,
+    intent: null,
+    timestamp: null,
+    provenance: "recorded",
+    sourceRefs: [
+      { path: INTENTABI_PATH },
+      { path: ".sdlc/traces/ST-INTENT.jsonl", line: 1, pointer: "/evidence/0" },
+    ],
+    rawHref: `/api/v1/source?path=${encodeURIComponent(INTENTABI_PATH)}`,
+    mode: "shadow",
+    submitted: "original",
+    outcome: "candidate-observed",
+    reason: "CANDIDATE_ATTESTED",
+    proof: "present-unverified",
+    macStatus: "present-not-verified",
+    link: {
+      status: "linked",
+      storyId: "ST-INTENT",
+      traceIds: ["TR-INTENTABI-LINK"],
+      sourceRefs: [
+        { path: ".sdlc/traces/ST-INTENT.jsonl", line: 1, pointer: "/evidence/0" },
+      ],
+    },
+  });
+  assert.equal(model.snapshots.counts.semanticObservations, 1);
+  assert.deepEqual(model.summary, { asked: [], changed: [], decided: [] });
+  assert.equal(model.contracts.length, 0);
+  assert.equal(model.changes.length, 0);
+  assert.equal(model.decisions.length, 0);
+  assert.equal(model.verification.length, 0);
+  assert.ok(model.iterations[0].phases.every((phase) => phase.status === "missing"));
+  assert.equal(
+    model.diagnostics.some((diagnostic) =>
+      diagnostic.code === "schema_version_missing" && diagnostic.sourceRefs[0]?.path === INTENTABI_PATH),
+    false,
+  );
+
+  const source = await readSourceRecord(root, INTENTABI_PATH);
+  assert.equal(source.contentProjection, "intentabi-observatory:v1");
+  assert.deepEqual(source.data, {
+    eventId: INTENTABI_EVENT_ID,
+    mode: "shadow",
+    submitted: "original",
+    outcome: "candidate-observed",
+    reason: "CANDIDATE_ATTESTED",
+    proof: "present-unverified",
+    macStatus: "present-not-verified",
+  });
+  assert.equal(JSON.stringify(source).includes("hmac-sha256"), false);
+  assert.equal(JSON.stringify(source).includes("keyId"), false);
+  assert.equal(Object.hasOwn(source, "sha256"), false);
+  assert.equal(Object.hasOwn(source, "sizeBytes"), false);
+});
+
+test("keeps incomplete IntentABI trace links explicit and bounds diagnostic references", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "intentabi-incomplete-links",
+    project_name: "IntentABI Incomplete Links",
+  });
+  await writeJson(root, INTENTABI_PATH, intentAbiEnvelope());
+  await writeJsonLines(root, ".sdlc/traces/incomplete.jsonl", Array.from({ length: 15 }, (_, index) => ({
+    ...(index % 2 === 0 ? { id: `TR-INCOMPLETE-${index}` } : { story_id: "ST-INCOMPLETE" }),
+    type: "handoff",
+    summary: "Incomplete explicit link.",
+    evidence: [INTENTABI_PATH],
+  })));
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+
+  assert.equal(model.semanticObservations.length, 1);
+  assert.equal(model.semanticObservations[0].link.status, "unlinked");
+  const diagnostic = model.diagnostics.find((item) => item.code === "intentabi_link_incomplete");
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.sourceRefs.length, 12);
+  assert.equal(diagnostic.sourceRefs.some((reference) => reference.pointer === "/evidence/0"), true);
+});
+
+test("bounds IntentABI trace-link indexing without inferring omitted links", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "intentabi-bounded-links",
+    project_name: "IntentABI Bounded Links",
+  });
+  await writeJson(root, INTENTABI_PATH, intentAbiEnvelope());
+  await writeJsonLines(root, ".sdlc/traces/bounded.jsonl", [{
+    id: "TR-BOUNDED",
+    story_id: "ST-BOUNDED",
+    type: "handoff",
+    summary: "The relevant reference is beyond the configured per-record limit.",
+    evidence: ["unrelated-one", "unrelated-two", INTENTABI_PATH],
+  }]);
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxCollectionItems: 2 },
+  });
+
+  assert.equal(model.semanticObservations.length, 1);
+  assert.equal(model.semanticObservations[0].link.status, "unlinked");
+  assert.equal(
+    model.diagnostics.some((item) => item.code === "intentabi_link_index_truncated"),
+    true,
+  );
+});
+
+test("keeps unlinked IntentABI evidence unlinked and omits non-contract content fail-closed", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "intentabi-boundary",
+    project_name: "IntentABI Boundary",
+  });
+  await writeJson(root, INTENTABI_PATH, intentAbiEnvelope());
+  await writeJsonLines(root, ".sdlc/traces/project.jsonl", [{
+    id: "TR-NO-STORY",
+    type: "handoff",
+    summary: "A path without story lineage is insufficient.",
+    evidence: [INTENTABI_PATH],
+  }]);
+  const unsafePath = ".sdlc/observations/intentabi/PROMPT_SECRET.json";
+  await writeJson(root, unsafePath, intentAbiEnvelope({
+    eventId: "123e4567-e89b-42d3-a456-426614174001",
+    prompt: "PROMPT_MUST_NOT_APPEAR",
+    candidate: "CANDIDATE_MUST_NOT_APPEAR",
+    output: "OUTPUT_MUST_NOT_APPEAR",
+  }));
+  const outsidePath = ".sdlc/PROMPT_OUTSIDE_NAMESPACE.json";
+  await writeJson(root, outsidePath, intentAbiEnvelope({
+    eventId: "123e4567-e89b-42d3-a456-426614174004",
+  }));
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+
+  assert.equal(model.semanticObservations.length, 1);
+  assert.deepEqual(model.semanticObservations[0].link, {
+    status: "unlinked",
+    storyId: null,
+    traceIds: [],
+    sourceRefs: [],
+  });
+  assert.equal(model.semanticObservations[0].phase, null);
+  assert.equal(model.semanticObservations[0].timestamp, null);
+  assert.equal(JSON.stringify(model).includes("MUST_NOT_APPEAR"), false);
+  assert.equal(JSON.stringify(model).includes("PROMPT_SECRET"), false);
+  assert.equal(JSON.stringify(model).includes("PROMPT_OUTSIDE_NAMESPACE"), false);
+  assert.equal(model.diagnostics.some((diagnostic) => diagnostic.code === "intentabi_envelope_malformed"), true);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "intentabi_observation_path_noncanonical"),
+    true,
+  );
+  const unsafeRecord = model.records.find((record) => record.path === unsafePath);
+  assert.equal(unsafeRecord, undefined);
+  assert.equal(model.records.every(Boolean), true);
+  assert.equal(model.snapshots.counts.records, model.records.length);
+
+  const unsafeSource = await readSourceRecord(root, unsafePath);
+  assert.equal(unsafeSource.provenance, "malformed");
+  assert.equal(unsafeSource.parseError, "invalid_intentabi_path");
+  assert.equal(unsafeSource.contentOmitted, true);
+  assert.equal(Object.hasOwn(unsafeSource, "data"), false);
+  assert.equal(Object.hasOwn(unsafeSource, "sha256"), false);
+  assert.equal(Object.hasOwn(unsafeSource, "sizeBytes"), false);
+  assert.equal(JSON.stringify(unsafeSource).includes("MUST_NOT_APPEAR"), false);
+  assert.equal(JSON.stringify(unsafeSource).includes("PROMPT_SECRET"), false);
+
+  const outsideSource = await readSourceRecord(root, outsidePath);
+  assert.equal(outsideSource.provenance, "malformed");
+  assert.equal(outsideSource.parseError, "invalid_intentabi_path");
+  assert.equal(outsideSource.contentOmitted, true);
+  assert.equal(JSON.stringify(outsideSource).includes("PROMPT_OUTSIDE_NAMESPACE"), false);
+
+  const unsafeJsonlPath = ".sdlc/observations/intentabi/events.jsonl";
+  const safeEntry = intentAbiEnvelope({
+    eventId: "123e4567-e89b-42d3-a456-426614174002",
+  });
+  const unsafeEntry = {
+    ...intentAbiEnvelope({ eventId: "123e4567-e89b-42d3-a456-426614174003" }),
+    prompt: "JSONL_PROMPT_MUST_NOT_APPEAR",
+  };
+  await writeJsonLines(root, unsafeJsonlPath, [safeEntry, unsafeEntry]);
+  const jsonlSource = await readSourceRecord(root, unsafeJsonlPath);
+  assert.equal(jsonlSource.provenance, "malformed");
+  assert.equal(jsonlSource.parseError, "invalid_intentabi_path");
+  assert.equal(jsonlSource.contentOmitted, true);
+  assert.equal(Object.hasOwn(jsonlSource, "entries"), false);
+  assert.equal(JSON.stringify(jsonlSource).includes("JSONL_PROMPT_MUST_NOT_APPEAR"), false);
+
+  const unsupportedPath = ".sdlc/observations/intentabi/raw.txt";
+  await writeText(root, unsupportedPath, "RAW_PROMPT_MUST_NOT_APPEAR");
+  const unsupportedSource = await readSourceRecord(root, unsupportedPath);
+  assert.equal(unsupportedSource.parseError, "invalid_intentabi_path");
+  assert.equal(unsupportedSource.contentOmitted, true);
+  assert.equal(JSON.stringify(unsupportedSource).includes("RAW_PROMPT_MUST_NOT_APPEAR"), false);
 });
 
 test("returns bounded missing-state diagnostics for empty and absent knowledge bases", async (t) => {

@@ -16,11 +16,14 @@ import {
   narrativeFor,
   normalizeViewModel,
   rawHrefForPath,
+  recordSelectionKey,
   safeRawHref,
 } from "../../ui/change-observatory/model.js";
 import { parsePreviewPort } from "../helpers/change-observatory-preview-server.mjs";
 
 const UI_ROOT = new URL("../../ui/change-observatory/", import.meta.url);
+const INTENTABI_EVENT_ID = "123e4567-e89b-42d3-a456-426614174000";
+const INTENTABI_PATH = `.sdlc/observations/intentabi/${INTENTABI_EVENT_ID}.json`;
 
 function viewModel(overrides = {}) {
   return {
@@ -82,6 +85,38 @@ function viewModel(overrides = {}) {
   };
 }
 
+function semanticObservation(overrides = {}) {
+  return {
+    id: INTENTABI_EVENT_ID,
+    type: "intentabi-codex-shadow",
+    title: "Equivalent cached request",
+    summary: "Saved 42 tokens",
+    status: "recorded",
+    provenance: "recorded",
+    sourceRefs: [{ path: INTENTABI_PATH }],
+    rawHref: `/api/v1/source?path=${encodeURIComponent(INTENTABI_PATH)}`,
+    mode: "shadow",
+    submitted: "original",
+    outcome: "candidate-observed",
+    reason: "CANDIDATE_ATTESTED",
+    proof: "present-unverified",
+    macStatus: "present-not-verified",
+    keyId: "forbidden-key-id",
+    inputKind: "forbidden-input-kind",
+    bindingDigest: "forbidden-binding-digest",
+    equivalence: true,
+    cacheHit: true,
+    tokenSavings: 42,
+    link: {
+      status: "linked",
+      storyId: "ST-FIXTURE",
+      traceIds: ["TRACE-FIXTURE"],
+      sourceRefs: [{ path: ".sdlc/traces/TRACE-FIXTURE.json", pointer: "/evidence/0" }],
+    },
+    ...overrides,
+  };
+}
+
 test("normalizes the versioned view model and makes absent phases explicit", () => {
   const model = normalizeViewModel(viewModel());
 
@@ -92,6 +127,136 @@ test("normalizes the versioned view model and makes absent phases explicit", () 
   assert.equal(model.iterations[0].phases[3].status, "inProgress");
   assert.equal(model.iterations[0].phases[5].status, "missing");
   assert.deepEqual(model.changes, []);
+  assert.deepEqual(model.semanticObservations, []);
+});
+
+test("projects valid IntentABI evidence onto the closed content-free UI contract", () => {
+  const model = normalizeViewModel(viewModel({
+    semanticObservations: [semanticObservation()],
+  }));
+
+  assert.equal(model.semanticObservations.length, 1);
+  const observation = model.semanticObservations[0];
+  assert.deepEqual(Object.keys(observation).sort(), [
+    "id",
+    "link",
+    "macStatus",
+    "mode",
+    "outcome",
+    "proof",
+    "provenance",
+    "rawHref",
+    "reason",
+    "sourceRefs",
+    "submitted",
+    "type",
+  ]);
+  assert.equal(observation.id, "123e4567-e89b-42d3-a456-426614174000");
+  assert.equal(observation.mode, "shadow");
+  assert.equal(observation.submitted, "original");
+  assert.equal(observation.outcome, "candidate-observed");
+  assert.equal(observation.reason, "CANDIDATE_ATTESTED");
+  assert.equal(observation.proof, "present-unverified");
+  assert.equal(observation.macStatus, "present-not-verified");
+  assert.equal(
+    observation.rawHref,
+    `/api/v1/source?path=${encodeURIComponent(INTENTABI_PATH)}`,
+  );
+  assert.deepEqual(observation.link, {
+    status: "linked",
+    storyId: "ST-FIXTURE",
+    traceIds: ["TRACE-FIXTURE"],
+    sourceRefs: [{ path: ".sdlc/traces/TRACE-FIXTURE.json", pointer: "/evidence/0" }],
+  });
+
+  const projected = JSON.stringify(observation);
+  for (const forbidden of [
+    "Equivalent cached request",
+    "Saved 42 tokens",
+    "forbidden-key-id",
+    "forbidden-input-kind",
+    "forbidden-binding-digest",
+    "equivalence",
+    "cacheHit",
+    "tokenSavings",
+  ]) {
+    assert.doesNotMatch(projected, new RegExp(forbidden));
+  }
+});
+
+test("rejects manipulated IntentABI IDs and downgrades incomplete trace links", () => {
+  const model = normalizeViewModel(viewModel({
+    semanticObservations: [
+      semanticObservation({ id: "123E4567-E89B-42D3-A456-426614174000" }),
+      semanticObservation({
+        id: "223e4567-e89b-42d3-a456-426614174001",
+        sourceRefs: [{
+          path: ".sdlc/observations/intentabi/223e4567-e89b-42d3-a456-426614174001.json",
+        }],
+        rawHref: "/api/v1/source?path=.sdlc%2Frequirements%2FREQ-FIXTURE.json",
+        link: {
+          status: "linked",
+          storyId: "ST-FIXTURE",
+          traceIds: ["TRACE-FIXTURE"],
+          sourceRefs: [
+            { path: ".sdlc/requirements/REQ-FIXTURE.json", pointer: "/evidence/0" },
+            { path: ".sdlc/traces/TRACE-FIXTURE.json", pointer: "/digest/0" },
+          ],
+        },
+      }),
+      semanticObservation({
+        id: "323e4567-e89b-42d3-a456-426614174002",
+        sourceRefs: [{ path: ".sdlc/traces/TRACE-FIXTURE.json" }],
+      }),
+      semanticObservation({
+        sourceRefs: [{ path: ".sdlc/observations/intentabi/PROMPT_SECRET.json" }],
+      }),
+    ],
+  }));
+
+  assert.equal(model.semanticObservations.length, 1);
+  assert.deepEqual(model.semanticObservations[0].link, {
+    status: "unlinked",
+    storyId: null,
+    traceIds: [],
+    sourceRefs: [],
+  });
+  assert.equal(
+    model.semanticObservations[0].rawHref,
+    "/api/v1/source?path=.sdlc%2Fobservations%2Fintentabi%2F223e4567-e89b-42d3-a456-426614174001.json",
+  );
+});
+
+test("selection keys keep identical display IDs isolated across record types", () => {
+  const sourceRefs = [{ path: INTENTABI_PATH }];
+  const intent = recordSelectionKey({
+    id: INTENTABI_EVENT_ID,
+    type: "intentabi-codex-shadow",
+    sourceRefs,
+  });
+  const contract = recordSelectionKey({
+    id: INTENTABI_EVENT_ID,
+    type: "contract",
+    sourceRefs,
+  });
+  const verification = recordSelectionKey({
+    id: INTENTABI_EVENT_ID,
+    type: "test",
+    sourceRefs,
+  });
+
+  assert.notEqual(intent, contract);
+  assert.notEqual(intent, verification);
+  assert.notEqual(contract, verification);
+  assert.equal(intent, recordSelectionKey({
+    id: INTENTABI_EVENT_ID,
+    type: "intentabi-codex-shadow",
+    sourceRefs,
+  }));
+  assert.notEqual(
+    recordSelectionKey({ id: "TRACE-DUP", type: "decision", sourceRefs: [{ path: ".sdlc/traces/ST.jsonl", line: 1 }] }),
+    recordSelectionKey({ id: "TRACE-DUP", type: "decision", sourceRefs: [{ path: ".sdlc/traces/ST.jsonl", line: 2 }] }),
+  );
 });
 
 test("rejects unversioned or unsupported API responses", () => {
@@ -298,12 +463,14 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(html, /class="skip-link"/);
   assert.match(html, /aria-label="Change Observatory"/);
   assert.match(html, /aria-live="polite"/);
+  assert.doesNotMatch(html, /role="listitem"[^>]*data-view|role="list"[^>]*nav-primary/);
   for (const label of [
     "Overview",
     "Timeline",
     "Contracts",
     "Decisions",
     "Changes",
+    "Intent evidence",
     "Verification",
     "What was asked?",
     "What changed?",
@@ -318,6 +485,8 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(components, /Plain-language explanation/);
   assert.match(components, /Alternatives rejected/);
   assert.match(components, /No plain-language explanation was recorded/);
+  assert.match(components, /MAC present · not verified/);
+  assert.doesNotMatch(components, /intent equivalence|cache hit|token savings/i);
   assert.match(app, /\/api\/v1\/observatory|ObservatoryApi/);
   assert.doesNotMatch(app, /fixture|demo|mock/i);
 });

@@ -8,6 +8,7 @@ import {
   rawHrefForPath,
   rawTargetFor,
   readable,
+  recordSelectionKey,
   sentenceCase,
 } from "./model.js";
 
@@ -290,7 +291,7 @@ function lineagePanel(model, state) {
       ]),
     );
     for (const phase of iteration.phases) {
-      const selectionId = phaseSelectionId(iteration.id, phase.phase);
+      const selectionId = recordSelectionKey(phaseSelectionItem(iteration, phase));
       const associatedSelection =
         state.selectedItem?.phase === phase.phase && iteration.currentPhase === phase.phase;
       row.append(
@@ -344,15 +345,16 @@ function lineagePanel(model, state) {
 }
 
 function recordRow(item, selectedId) {
+  const selectionId = recordSelectionKey(item);
   return node(
     "button",
     {
       className: "list-row",
       attrs: {
         type: "button",
-        "aria-pressed": String(selectedId === item.id),
+        "aria-pressed": String(selectedId === selectionId),
       },
-      dataset: { action: "select-record", selectId: item.id },
+      dataset: { action: "select-record", selectId: selectionId },
     },
     [
       node("span", { className: "record-main" }, [
@@ -449,6 +451,123 @@ function verificationPanel(model, state, options = {}) {
   return panel;
 }
 
+const INTENT_EVIDENCE_LABELS = Object.freeze({
+  shadow: "Shadow",
+  original: "Original",
+  "candidate-observed": "Candidate observed",
+  identity: "Identity",
+  bypass: "Bypass",
+  "preparer-fault": "Preparer fault",
+  "preparer-timeout": "Preparer timeout",
+  "invalid-preparer-result": "Invalid preparer result",
+  "present-unverified": "Present · unverified",
+  "not-observed": "Not observed",
+  "present-not-verified": "Present · not verified",
+});
+
+function intentEvidenceValue(label, value, { code = false } = {}) {
+  return node("div", { className: "intent-evidence-field" }, [
+    node("dt", { text: label }),
+    code
+      ? node("dd", {}, [node("code", { text: INTENT_EVIDENCE_LABELS[value] ?? value })])
+      : node("dd", { text: INTENT_EVIDENCE_LABELS[value] ?? value }),
+  ]);
+}
+
+function intentEvidenceDetails(item) {
+  return node("dl", { className: "intent-evidence-grid" }, [
+    intentEvidenceValue("Event ID", item.id, { code: true }),
+    intentEvidenceValue("Mode", item.mode),
+    intentEvidenceValue("Submitted", item.submitted),
+    intentEvidenceValue("Outcome", item.outcome),
+    intentEvidenceValue("Reason", item.reason, { code: true }),
+    intentEvidenceValue("Proof", item.proof),
+    intentEvidenceValue("MAC", item.macStatus),
+  ]);
+}
+
+function intentEvidenceLink(item) {
+  const linked = item.link.status === "linked";
+  const section = node("section", { className: "intent-evidence-link" }, [
+    node("h3", { text: "Project link" }),
+  ]);
+
+  if (!linked) {
+    section.append(node("p", { text: "Unlinked. No complete explicit story and trace link was recorded." }));
+    return section;
+  }
+
+  section.append(
+    node("p", {}, [
+      document.createTextNode("Story "),
+      node("code", { text: item.link.storyId }),
+    ]),
+  );
+  if (item.link.traceIds.length) {
+    section.append(
+      node("div", { className: "intent-trace-list", attrs: { "aria-label": "Linked traces" } },
+        item.link.traceIds.map((traceId) => node("code", { className: "intent-trace", text: traceId })),
+      ),
+    );
+  } else {
+    section.append(node("p", { className: "intent-evidence-muted", text: "No trace link was recorded." }));
+  }
+  return section;
+}
+
+function intentEvidenceCard(item, state) {
+  const selectionId = recordSelectionKey(item);
+  return node("article", { className: "intent-evidence-card" }, [
+    node("header", { className: "intent-evidence-card-header" }, [
+      node("div", {}, [
+        node("span", { className: "intent-evidence-kicker", text: "IntentABI · Codex shadow" }),
+        node("button", {
+          className: "intent-evidence-select",
+          text: item.id,
+          attrs: {
+            type: "button",
+            "aria-label": `Inspect IntentABI event ${item.id}`,
+            "aria-pressed": String(state.selectedId === selectionId),
+          },
+          dataset: { action: "select-record", selectId: selectionId },
+        }),
+      ]),
+      node("span", { className: "intent-evidence-readonly", text: "Read-only" }),
+    ]),
+    intentEvidenceDetails(item),
+    intentEvidenceLink(item),
+    node("p", {
+      className: "intent-evidence-note",
+      text: "Content-free evidence only. MAC present · not verified by Change Observatory.",
+    }),
+  ]);
+}
+
+function intentEvidencePanel(model, state) {
+  const panel = node("section", {
+    className: "section-panel",
+    attrs: { "aria-labelledby": "intent-evidence-heading" },
+  }, [
+    sectionHeading(
+      "Intent evidence",
+      "Content-free IntentABI shadow observations; integrity is shown without asserting verification",
+    ),
+  ]);
+  panel.querySelector("h2").id = "intent-evidence-heading";
+
+  if (!model.semanticObservations.length) {
+    panel.append(emptyInline("No IntentABI shadow observations were recorded."));
+    return panel;
+  }
+
+  panel.append(
+    node("div", { className: "intent-evidence-list" },
+      model.semanticObservations.map((item) => intentEvidenceCard(item, state)),
+    ),
+  );
+  return panel;
+}
+
 function overview(model, state) {
   return node("div", { className: "view-stack" }, [
     lineagePanel(model, state),
@@ -484,6 +603,9 @@ export function renderPrimary(container, model, state) {
       break;
     case "changes":
       content = changesPanel(model, state);
+      break;
+    case "intent-evidence":
+      content = intentEvidencePanel(model, state);
       break;
     case "verification":
       content = verificationPanel(model, state);
@@ -589,6 +711,24 @@ export function renderInspector(container, item) {
         icon("source"),
         node("p", {
           text: "Select a lineage state or evidence record to inspect its recorded inputs, outputs, rationale, alternatives, and sources.",
+        }),
+      ]),
+    );
+    return;
+  }
+
+  if (item.type === "intentabi-codex-shadow") {
+    container.replaceChildren(
+      node("header", { className: "inspector-header" }, [
+        node("h2", { text: "Intent evidence" }),
+        node("span", { text: `Event · ${item.id}` }),
+      ]),
+      node("section", { className: "inspector-section intent-evidence-inspector" }, [
+        intentEvidenceDetails(item),
+        intentEvidenceLink(item),
+        node("p", {
+          className: "intent-evidence-note",
+          text: "Content-free evidence only. MAC present · not verified by Change Observatory.",
         }),
       ]),
     );

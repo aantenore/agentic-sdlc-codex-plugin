@@ -31,3 +31,9 @@ Launch the plugin-local, read-only visual lineage application for the selected p
 ## Interpretation
 
 Explain only what canonical records support. Generated explanations are labeled and limited to recorded evidence; they are not private chain-of-thought. Call out `missing`, `malformed`, `inferred`, or blocked states instead of inventing history.
+
+Treat IntentABI observations as content-free, advisory shadow evidence. A story
+link exists only when a trace explicitly cites the observation path and records
+`story_id`. `MAC present / not verified` is not semantic equivalence, cache
+admission, token savings, transformed-input authorization, or an SDLC
+verification result.

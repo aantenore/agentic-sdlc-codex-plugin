@@ -38,9 +38,43 @@ agentic-sdlc observe \
 - decisions, approvals, rationale summaries, alternatives, and evidence;
 - contract evolution and implementation/validation/release state;
 - tests, gates, handoffs, sync events, and missing or malformed lineage;
+- content-free IntentABI Codex shadow observations, when explicitly linked to a story trace;
 - raw canonical JSON, JSONL, Markdown, and text evidence under `.sdlc/`.
 
 The interface uses `recorded`, `inferred`, `missing`, and `malformed` provenance explicitly. It never silently turns an absent record into a completed phase.
+
+## Intent Evidence
+
+The optional Intent evidence view reads the IntentABI Codex envelope schema
+`io.github.aantenore.intentabi/authenticated-codex-shadow-evidence/v1alpha1`
+from canonical files under `.sdlc/observations/intentabi/`. It is an additive
+read model: these observations never become requests, changes, decisions,
+contracts, phase completions, or verification results.
+
+Each observation must use the exact lowercase path
+`.sdlc/observations/intentabi/<event-id>.json`, where `<event-id>` is the same
+UUID v4 stored in the envelope. Nested paths, descriptive filenames, mismatched
+IDs, and JSONL batches are omitted so filenames cannot become a side channel.
+
+An observation is linked to a story only when a canonical trace lists the exact
+observation path in its top-level `evidence` array and records a non-empty
+`story_id`. Without both records it remains explicitly `unlinked`; timestamps,
+filenames, and nearby iterations are never used to infer lineage.
+
+The application displays only the event ID, shadow mode, submitted input choice,
+preparation outcome and reason, proof-presence state, and `MAC present / not
+verified`. It does not load IntentABI key material or derive the trusted binding,
+so it cannot verify the MAC. Candidate observation is not presented as semantic
+equivalence, a cache hit, authorization to reuse, token savings, or permission to
+submit transformed content. The original input remains the submitted input in
+this v1alpha1 contract.
+
+The parser accepts the exact upstream envelope shape and projects only those
+display fields. Unknown or additional fields, including raw prompt, candidate,
+or output content, make the entry malformed and cause its content to be omitted
+from both the normalized model and the source drawer. The source drawer returns
+the same safe projection rather than the full envelope and omits file-level
+hash and size metadata for this evidence class.
 
 The three overview answers use an injectable semantic-ranking policy rather than recency alone: implementation evidence ranks ahead of operational sync events for “What changed?”, while approvals, recorded rationale, and alternatives rank ahead of task-start bookkeeping for “Why was it decided?”. Equivalent diagnostics are grouped by fingerprint in both the server model and browser client; non-error diagnostics stay collapsed so lineage remains visible, while errors open automatically.
 

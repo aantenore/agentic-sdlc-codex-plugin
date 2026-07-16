@@ -9,7 +9,7 @@ import {
   renderProjectControls,
   renderSummary,
 } from "./components.js";
-import { rawTargetFor } from "./model.js";
+import { rawTargetFor, recordSelectionKey } from "./model.js";
 
 const VALID_VIEWS = new Set([
   "overview",
@@ -17,6 +17,7 @@ const VALID_VIEWS = new Set([
   "contracts",
   "decisions",
   "changes",
+  "intent-evidence",
   "verification",
 ]);
 
@@ -82,13 +83,17 @@ function indexRecords(model) {
     model.contracts,
     model.decisions,
     model.changes,
+    model.semanticObservations,
     model.verification,
   ];
-  collections.flat().forEach((item) => records.set(item.id, item));
+  collections.flat().forEach((item) => {
+    const key = recordSelectionKey(item);
+    if (key) records.set(key, item);
+  });
   for (const iteration of model.iterations) {
     for (const phase of iteration.phases) {
       const item = phaseSelectionItem(iteration, phase);
-      records.set(item.id, item);
+      records.set(recordSelectionKey(item), item);
     }
   }
   state.records = records;
@@ -144,7 +149,7 @@ async function loadModel({ preserveSelection = false } = {}) {
       state.selectedItem = state.records.get(state.selectedId);
     } else {
       state.selectedItem = preferredSelection(model);
-      state.selectedId = state.selectedItem?.id ?? null;
+      state.selectedId = state.selectedItem ? recordSelectionKey(state.selectedItem) : null;
     }
 
     renderProjectControls(model);
@@ -185,7 +190,11 @@ function selectRecord(id) {
 }
 
 function selectPhase(iterationId, phase) {
-  selectRecord(phaseSelectionId(iterationId, phase));
+  selectRecord(recordSelectionKey({
+    id: phaseSelectionId(iterationId, phase),
+    type: "phase-state",
+    sourceRefs: [],
+  }));
 }
 
 function setNavigationOpen(open) {

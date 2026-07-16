@@ -11,9 +11,41 @@ export const PHASES = Object.freeze([
 
 const PROVENANCE = new Set(["recorded", "inferred", "missing", "malformed"]);
 const PHASE_STATES = new Set(["complete", "inProgress", "blocked", "missing"]);
+const INTENTABI_OUTCOME_REASONS = new Map([
+  ["candidate-observed", new Set(["CANDIDATE_ATTESTED"])],
+  ["identity", new Set(["IDENTITY_ATTESTED"])],
+  ["bypass", new Set(["NON_TEXT_INPUT", "REQUEST_ID_INVALID", "INPUT_LIMIT_EXCEEDED"])],
+  ["preparer-fault", new Set(["PREPARER_FAULT"])],
+  ["preparer-timeout", new Set(["PREPARATION_TIMEOUT_UNCANCELLED"])],
+  ["invalid-preparer-result", new Set(["PREPARER_RESULT_INVALID"])],
+]);
+const INTENTABI_PROOFS = new Set(["present-unverified", "not-observed"]);
+const INTENTABI_EVENT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const INTENTABI_LINK_POINTER_PATTERN = /^\/evidence\/[0-9]+$/u;
+const INTENTABI_OBSERVATION_PATH_PREFIX = ".sdlc/observations/intentabi/";
+const INTENTABI_OBSERVATION_PATH_PATTERN =
+  /^\.sdlc\/observations\/intentabi\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/u;
 
 function objectOrEmpty(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+export function recordSelectionKey(value) {
+  const item = objectOrEmpty(value);
+  const type = readable(item.type, "");
+  const id = readable(item.id, "");
+  if (!type || !id) return "";
+  const primarySource = type === "phase-state"
+    ? {}
+    : objectOrEmpty(arrayOrEmpty(item.sourceRefs)[0]);
+  return JSON.stringify([
+    type,
+    id,
+    readable(primarySource.path, ""),
+    Number.isSafeInteger(primarySource.line) ? primarySource.line : null,
+    readable(primarySource.pointer, ""),
+  ]);
 }
 
 export function arrayOrEmpty(value) {
@@ -43,10 +75,12 @@ function normalizeSourceRef(value) {
   const source = objectOrEmpty(value);
   const path = readable(source.path, "");
   if (!path) return null;
-  return {
+  const normalized = {
     path,
     pointer: readable(source.pointer, "") || null,
   };
+  if (Number.isSafeInteger(source.line) && source.line > 0) normalized.line = source.line;
+  return normalized;
 }
 
 function normalizeNarrative(value) {
@@ -83,6 +117,81 @@ function normalizeNarrativeEntry(value) {
 
 function normalizeMappedEntry(value) {
   return normalizeNarrativeEntry(value);
+}
+
+export function normalizeSemanticObservation(value) {
+  const observation = objectOrEmpty(value);
+  const id = readable(observation.id, "");
+  const outcome = readable(observation.outcome, "");
+  const reason = readable(observation.reason, "");
+  const proof = readable(observation.proof, "");
+
+  if (
+    observation.type !== "intentabi-codex-shadow"
+    || !INTENTABI_EVENT_ID_PATTERN.test(id)
+    || observation.mode !== "shadow"
+    || observation.submitted !== "original"
+    || !INTENTABI_OUTCOME_REASONS.get(outcome)?.has(reason)
+    || !INTENTABI_PROOFS.has(proof)
+    || observation.macStatus !== "present-not-verified"
+  ) {
+    return null;
+  }
+
+  if (
+    (outcome === "candidate-observed" && proof !== "present-unverified")
+    || (["bypass", "preparer-fault", "preparer-timeout", "invalid-preparer-result"].includes(outcome)
+      && proof !== "not-observed")
+  ) {
+    return null;
+  }
+
+  const sourceRefs = arrayOrEmpty(observation.sourceRefs)
+    .map(normalizeSourceRef)
+    .filter((source) => source
+      && source.path.toLowerCase().startsWith(INTENTABI_OBSERVATION_PATH_PREFIX)
+      && isCanonicalEvidencePath(source.path));
+  const pathMatch = sourceRefs[0]?.path.match(INTENTABI_OBSERVATION_PATH_PATTERN);
+  if (sourceRefs.length !== 1 || pathMatch?.[1] !== id) return null;
+  const rawLink = objectOrEmpty(observation.link);
+  const storyId = readable(rawLink.storyId, "") || null;
+  const projectedTraceIds = [
+    ...new Set(arrayOrEmpty(rawLink.traceIds).map((traceId) => readable(traceId, "")).filter(Boolean)),
+  ];
+  const projectedLinkSourceRefs = arrayOrEmpty(rawLink.sourceRefs)
+    .map(normalizeSourceRef)
+    .filter((source) => source
+      && source.path.startsWith(".sdlc/traces/")
+      && isCanonicalEvidencePath(source.path)
+      && INTENTABI_LINK_POINTER_PATTERN.test(source.pointer ?? ""));
+  const linkStatus = rawLink.status === "linked"
+    && storyId
+    && projectedTraceIds.length > 0
+    && projectedLinkSourceRefs.length > 0
+    ? "linked"
+    : "unlinked";
+
+  // This is an intentionally closed projection. Never forward upstream titles,
+  // summaries, digests, identifiers, or optimization claims to the rendered UI.
+  return {
+    id,
+    type: "intentabi-codex-shadow",
+    provenance: normalizeProvenance(observation.provenance),
+    sourceRefs,
+    rawHref: rawHrefForPath(sourceRefs[0].path),
+    mode: "shadow",
+    submitted: "original",
+    outcome,
+    reason,
+    proof,
+    macStatus: "present-not-verified",
+    link: {
+      status: linkStatus,
+      storyId: linkStatus === "linked" ? storyId : null,
+      traceIds: linkStatus === "linked" ? projectedTraceIds : [],
+      sourceRefs: linkStatus === "linked" ? projectedLinkSourceRefs : [],
+    },
+  };
 }
 
 export function normalizeItem(value) {
@@ -237,6 +346,9 @@ export function normalizeViewModel(payload) {
     decisions: arrayOrEmpty(payload.decisions).map(normalizeItem),
     changes: arrayOrEmpty(payload.changes).map(normalizeItem),
     verification: arrayOrEmpty(payload.verification).map(normalizeItem),
+    semanticObservations: arrayOrEmpty(payload.semanticObservations)
+      .map(normalizeSemanticObservation)
+      .filter(Boolean),
     records: arrayOrEmpty(payload.records).map(normalizeRecord).filter((record) => record.path),
     diagnostics: normalizeDiagnostics(payload.diagnostics),
   };
