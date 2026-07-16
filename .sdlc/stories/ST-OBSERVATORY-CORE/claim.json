@@ -2,9 +2,9 @@
   "story_id": "ST-OBSERVATORY-CORE",
   "agent": "codex-core",
   "branch": "codex/ST-OBSERVATORY-CORE",
-  "status": "active",
-  "claimed_at": "2026-07-16T08:38:20.201Z",
-  "expires_at": "2026-07-17T08:38:20.201Z",
+  "status": "released",
+  "claimed_at": "2026-07-16T09:01:57.413Z",
+  "expires_at": "2026-07-17T09:01:57.413Z",
   "notes": null,
   "audit": {
     "claimed_by": {
@@ -17,8 +17,8 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-OBSERVATORY-CORE",
-      "head_sha": "9c94d79fa7b4e6dc419326bc9628dc17184ba287",
-      "is_dirty": false,
+      "head_sha": "d58ec30fd55bd30576f443a6d7fbea5043382093",
+      "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
         "email": "50747458+aantenore@users.noreply.github.com"
@@ -33,6 +33,15 @@
       "session_id": null,
       "tool": "agentic-sdlc-cli",
       "version": "0.6.0"
+    },
+    "released_by": {
+      "id": "codex-core",
+      "type": "agent",
+      "name": "Codex Core",
+      "email": null,
+      "source": "cli"
     }
-  }
+  },
+  "released_at": "2026-07-16T09:07:07.594Z",
+  "release_reason": "Core implementation evidence is linked and the strict story gate passed."
 }

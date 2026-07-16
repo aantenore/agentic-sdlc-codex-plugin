@@ -22,7 +22,8 @@ Excluded by contract and left to the integration/UI lanes: CLI dispatch, browser
 
 - Requirement: [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json)
 - Story: [ST-OBSERVATORY-CORE](../story.json)
-- Approved contract: [contract-ST-OBSERVATORY-CORE-implementation](../../../contracts/contract-ST-OBSERVATORY-CORE-implementation.json)
+- Original approved execution contract: [contract-ST-OBSERVATORY-CORE-implementation](../../../contracts/contract-ST-OBSERVATORY-CORE-implementation.json)
+- Freshness-safe completion contract: [contract-ST-OBSERVATORY-CORE-implementation-v2](../../../contracts/contract-ST-OBSERVATORY-CORE-implementation-v2.json). It preserves the same scope while excluding story and source files intentionally mutated by delivery.
 - Approved capability boundary: [CAP-REC-CHANGE-OBSERVATORY](../../../capability-discovery/recommendations/CAP-REC-CHANGE-OBSERVATORY.json)
 - Approved output format: [implementation-evidence-v1](../../../output-contracts/templates/implementation-evidence-v1.md)
 - Project architecture: `docs/architecture.md`
@@ -69,7 +70,7 @@ Trade-off: the normalizer favors explicit missing states and diagnostics over a 
 - Versioned source response: `change-observatory:source:v1`
 - Loopback server start API: `startObservatoryServer({ projectRoot, assetRoot?, host, port, limits?, clock? })`
 - Request-handler API: `createObservatoryRequestHandler(options)`
-- Test evidence: [test-evidence.json](test-evidence.json)
+- Test evidence: [ST-OBSERVATORY-CORE-test-evidence.json](../../../tests/ST-OBSERVATORY-CORE-test-evidence.json)
 - Implementation and security tests under `test/unit/`.
 
 ## Verification
@@ -79,7 +80,7 @@ Trade-off: the normalizer favors explicit missing states and diagnostics over a 
 | Stable versioned model with explicit provenance | `change-observatory-normalizer.test.mjs`: representative lineage and provenance assertions | Passed |
 | Read-only loopback endpoints without traversal or symlink escape | `change-observatory-server.test.mjs`: health/model/source, Host, methods, traversal, two symlink boundaries, cache rejection | Passed |
 | Empty, partial, legacy, malformed, and oversized KBs remain bounded and non-speculative | `change-observatory-normalizer.test.mjs`: missing, legacy, malformed, diagnostic cap, file/source limits | Passed |
-| Deterministic Node tests cover core and security invariants | [test-evidence.json](test-evidence.json): 8/8 targeted tests, `npm run check`, and `git diff --check` | Passed |
+| Deterministic Node tests cover core and security invariants | [ST-OBSERVATORY-CORE-test-evidence.json](../../../tests/ST-OBSERVATORY-CORE-test-evidence.json): 8/8 targeted tests, `npm run check`, and `git diff --check` | Passed |
 
 No package-wide pass is claimed by this worker lane; final package and installed-launcher verification belongs to the integration orchestrator.
 
@@ -87,18 +88,18 @@ No package-wide pass is claimed by this worker lane; final package and installed
 
 Codex-generated from the recorded requirement, approved contract, changed files, and passing test evidence: the plugin now has a local evidence engine that can tell the visual app what was requested, changed, decided, and verified without inventing missing history. It reads only bounded project SDLC records, labels uncertainty, and exposes them over a loopback-only, read-only interface protected against Host abuse and path escape.
 
-This paragraph is a generated explanation, not private chain-of-thought. Its sources are [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json), [the approved contract](../../../contracts/contract-ST-OBSERVATORY-CORE-implementation.json), and [test-evidence.json](test-evidence.json).
+This paragraph is a generated explanation, not private chain-of-thought. Its sources are [REQ-CHANGE-OBSERVATORY-001](../../../requirements/REQ-CHANGE-OBSERVATORY-001.json), [the approved contract](../../../contracts/contract-ST-OBSERVATORY-CORE-implementation-v2.json), and [ST-OBSERVATORY-CORE-test-evidence.json](../../../tests/ST-OBSERVATORY-CORE-test-evidence.json).
 
 ## Lineage
 
 - Requirement: `REQ-CHANGE-OBSERVATORY-001`
 - Story: `ST-OBSERVATORY-CORE`
-- Contract/version: `contract-ST-OBSERVATORY-CORE-implementation`, `schema_version: 0.1.0`
-- Approved contract content hash: `872b1f000d7276eaa711f9421792d9f46c95868f0424e42058ec8fc7d2420288`
+- Contract/version: `contract-ST-OBSERVATORY-CORE-implementation-v2`, `schema_version: 0.1.0`; the original execution approval is retained as superseded lineage.
+- Approved completion-contract content hash: `9baf4f5105f903fbf189ea3f2241110a301eed2996fb7c35447032bc3343587d`
 - Capability recommendation: `CAP-REC-CHANGE-OBSERVATORY`
 - Task start: [task-start.json](../task-start.json)
 - Claim: [claim.json](../claim.json), branch `codex/ST-OBSERVATORY-CORE`
-- Test evidence: [test-evidence.json](test-evidence.json)
+- Test evidence: [ST-OBSERVATORY-CORE-test-evidence.json](../../../tests/ST-OBSERVATORY-CORE-test-evidence.json)
 - Trace: `../../../traces/ST-OBSERVATORY-CORE.jsonl`
 - Commit: story-scoped Git commit on `codex/ST-OBSERVATORY-CORE`; the immutable SHA is delivered in the worker handoff.
 - Output registry link and step completion: intentionally delegated to the parent orchestrator after integration, per worker scope.

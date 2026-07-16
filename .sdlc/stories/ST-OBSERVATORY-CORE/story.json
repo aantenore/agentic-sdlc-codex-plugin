@@ -4,7 +4,7 @@
   "schema_version": "0.1.0",
   "status": "draft",
   "phase": "implementation",
-  "contract_id": "contract-ST-OBSERVATORY-CORE-implementation",
+  "contract_id": "contract-ST-OBSERVATORY-CORE-implementation-v2",
   "work_breakdown_id": null,
   "acceptance": [
     "Canonical KB records normalize into a stable versioned observatory view model with explicit recorded, inferred, missing, and malformed provenance.",
@@ -26,7 +26,7 @@
     "tests": []
   },
   "created_at": "2026-07-16T08:30:23.474Z",
-  "updated_at": "2026-07-16T08:34:05.193Z",
+  "updated_at": "2026-07-16T09:00:45.877Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -44,9 +44,9 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/change-observatory",
-      "head_sha": "e15856040e88661d7d97a924d1091d0a95cb55b1",
-      "is_dirty": true,
+      "branch": "codex/ST-OBSERVATORY-CORE",
+      "head_sha": "d58ec30fd55bd30576f443a6d7fbea5043382093",
+      "is_dirty": false,
       "user": {
         "name": "Antonio Antenore",
         "email": "50747458+aantenore@users.noreply.github.com"

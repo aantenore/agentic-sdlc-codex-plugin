@@ -1,13 +1,13 @@
 {
-  "id": "START-ST-OBSERVATORY-CORE-20260716083741975-b38c14",
+  "id": "START-ST-OBSERVATORY-CORE-20260716090157366-69b31c",
   "story_id": "ST-OBSERVATORY-CORE",
   "phase": "implementation",
   "route": "claim_and_implement",
-  "contract_id": "contract-ST-OBSERVATORY-CORE-implementation",
-  "contract_approval_hash": "872b1f000d7276eaa711f9421792d9f46c95868f0424e42058ec8fc7d2420288",
+  "contract_id": "contract-ST-OBSERVATORY-CORE-implementation-v2",
+  "contract_approval_hash": "9baf4f5105f903fbf189ea3f2241110a301eed2996fb7c35447032bc3343587d",
   "status": "confirmed",
-  "authorization_ref": "AUTH-CHANGE-OBSERVATORY-REFRESH",
-  "authorization_use_ref": ".sdlc/authorization-uses/AUTH-CHANGE-OBSERVATORY-REFRESH/AUSE-AUTH-CHANGE-OBSERVATORY-REFRESH-20260716083741973-3f037b.json",
+  "authorization_ref": "AUTH-OBSERVATORY-CORE-V2",
+  "authorization_use_ref": ".sdlc/authorization-uses/AUTH-OBSERVATORY-CORE-V2/AUSE-AUTH-OBSERVATORY-CORE-V2-20260716090157362-c675b1.json",
   "authority_assurance": "audit_only",
   "confirmed_by": {
     "id": "codex",
@@ -16,12 +16,12 @@
     "email": null,
     "source": "cli"
   },
-  "confirmed_at": "2026-07-16T08:37:41.975Z",
+  "confirmed_at": "2026-07-16T09:01:57.367Z",
   "audit": {
     "git": {
       "is_git_repo": true,
-      "branch": "codex/change-observatory",
-      "head_sha": "e15856040e88661d7d97a924d1091d0a95cb55b1",
+      "branch": "codex/ST-OBSERVATORY-CORE",
+      "head_sha": "d58ec30fd55bd30576f443a6d7fbea5043382093",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
