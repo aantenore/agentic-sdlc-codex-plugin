@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { ObservatoryApi, ObservatoryApiError } from "../../ui/change-observatory/api.js";
+import {
+  ObservatoryApi,
+  ObservatoryApiError,
+  accessTokenFromHash,
+} from "../../ui/change-observatory/api.js";
 import {
   PHASES,
   VIEW_MODEL_SCHEMA,
@@ -14,6 +18,7 @@ import {
   rawHrefForPath,
   safeRawHref,
 } from "../../ui/change-observatory/model.js";
+import { parsePreviewPort } from "../helpers/change-observatory-preview-server.mjs";
 
 const UI_ROOT = new URL("../../ui/change-observatory/", import.meta.url);
 
@@ -95,6 +100,40 @@ test("rejects unversioned or unsupported API responses", () => {
     () => normalizeViewModel({ schemaVersion: "change-observatory:view:v2" }),
     /expected change-observatory:view:v1/,
   );
+});
+
+test("visual QA preview helper is import-safe and validates its port", () => {
+  assert.equal(parsePreviewPort([]), 4173);
+  assert.equal(parsePreviewPort(["--port", "0"]), 0);
+  assert.throws(() => parsePreviewPort(["--port"]), /between 0 and 65535/);
+  assert.throws(() => parsePreviewPort(["--port", "NaN"]), /between 0 and 65535/);
+  assert.throws(() => parsePreviewPort(["--port", "65536"]), /between 0 and 65535/);
+});
+
+test("groups equivalent diagnostics defensively in the browser model", () => {
+  const model = normalizeViewModel(viewModel({
+    diagnostics: [
+      {
+        code: "schema_version_missing",
+        severity: "warning",
+        message: "Legacy record.",
+        provenance: "inferred",
+        sourceRefs: [{ path: ".sdlc/one.json" }],
+      },
+      {
+        code: "schema_version_missing",
+        severity: "warning",
+        message: "Legacy record.",
+        provenance: "inferred",
+        occurrences: 3,
+        sourceRefs: [{ path: ".sdlc/two.json" }],
+      },
+    ],
+  }));
+
+  assert.equal(model.diagnostics.length, 1);
+  assert.equal(model.diagnostics[0].occurrences, 4);
+  assert.equal(model.diagnostics[0].sourceRefs.length, 2);
 });
 
 test("maps recorded narrative without generating missing facts", () => {
@@ -182,7 +221,9 @@ test("raw evidence links stay within canonical .sdlc sources", () => {
 
 test("API client requests the versioned endpoint and normalizes its response", async () => {
   const calls = [];
+  const accessToken = "a".repeat(43);
   const api = new ObservatoryApi({
+    accessToken,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return new Response(JSON.stringify(viewModel()), {
@@ -198,6 +239,15 @@ test("API client requests the versioned endpoint and normalizes its response", a
   assert.equal(calls[0].options.cache, "no-store");
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.redirect, "error");
+  assert.equal(calls[0].options.headers.Authorization, `Bearer ${accessToken}`);
+});
+
+test("extracts only bounded base64url access tokens from the launch fragment", () => {
+  const token = "Abc_123-".repeat(5);
+  assert.equal(accessTokenFromHash(`#access_token=${token}`), token);
+  assert.equal(accessTokenFromHash("#overview"), null);
+  assert.equal(accessTokenFromHash("#access_token=short"), null);
+  assert.equal(accessTokenFromHash("#access_token=contains%20space"), null);
 });
 
 test("API client refuses unsafe raw targets before fetch", async () => {
@@ -265,9 +315,9 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.doesNotMatch(css, /gradient\s*\(/i);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(css, /max-width:\s*430px/);
-  assert.match(components, /Generated explanation/);
+  assert.match(components, /Plain-language explanation/);
   assert.match(components, /Alternatives rejected/);
-  assert.match(components, /No generated explanation was recorded/);
+  assert.match(components, /No plain-language explanation was recorded/);
   assert.match(app, /\/api\/v1\/observatory|ObservatoryApi/);
   assert.doesNotMatch(app, /fixture|demo|mock/i);
 });

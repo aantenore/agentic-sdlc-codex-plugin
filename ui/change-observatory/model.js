@@ -98,6 +98,7 @@ export function normalizeItem(value) {
     summary: readable(item.summary, "No recorded summary."),
     status: readable(item.status, "missing"),
     phase: readable(item.phase, "") || null,
+    action: readable(item.action, "") || null,
     timestamp: readable(item.timestamp, "") || null,
     provenance: normalizeProvenance(item.provenance),
     sourceRefs,
@@ -157,13 +158,45 @@ function normalizeDiagnostic(value) {
   const severity = ["info", "warning", "error"].includes(diagnostic.severity)
     ? diagnostic.severity
     : "warning";
+  const occurrences = Number.isSafeInteger(diagnostic.occurrences) && diagnostic.occurrences > 0
+    ? diagnostic.occurrences
+    : 1;
   return {
     code: readable(diagnostic.code, "OBSERVATORY_DIAGNOSTIC"),
     severity,
     message: readable(diagnostic.message, "The evidence API reported an unspecified diagnostic."),
+    occurrences,
     provenance: normalizeProvenance(diagnostic.provenance),
     sourceRefs: arrayOrEmpty(diagnostic.sourceRefs).map(normalizeSourceRef).filter(Boolean),
   };
+}
+
+function normalizeDiagnostics(values) {
+  const grouped = new Map();
+  for (const value of arrayOrEmpty(values)) {
+    const diagnostic = normalizeDiagnostic(value);
+    const fingerprint = JSON.stringify([
+      diagnostic.code,
+      diagnostic.severity,
+      diagnostic.message,
+      diagnostic.provenance,
+    ]);
+    const existing = grouped.get(fingerprint);
+    if (!existing) {
+      grouped.set(fingerprint, diagnostic);
+      continue;
+    }
+    existing.occurrences += diagnostic.occurrences;
+    const seen = new Set(existing.sourceRefs.map((ref) => `${ref.path}\u0000${ref.pointer ?? ""}`));
+    for (const ref of diagnostic.sourceRefs) {
+      const key = `${ref.path}\u0000${ref.pointer ?? ""}`;
+      if (!seen.has(key) && existing.sourceRefs.length < 12) {
+        existing.sourceRefs.push(ref);
+        seen.add(key);
+      }
+    }
+  }
+  return [...grouped.values()];
 }
 
 export function normalizeViewModel(payload) {
@@ -205,7 +238,7 @@ export function normalizeViewModel(payload) {
     changes: arrayOrEmpty(payload.changes).map(normalizeItem),
     verification: arrayOrEmpty(payload.verification).map(normalizeItem),
     records: arrayOrEmpty(payload.records).map(normalizeRecord).filter((record) => record.path),
-    diagnostics: arrayOrEmpty(payload.diagnostics).map(normalizeDiagnostic),
+    diagnostics: normalizeDiagnostics(payload.diagnostics),
   };
 }
 
@@ -225,7 +258,7 @@ export function filterIterations(iterations, filters = {}) {
 export function groupChangesByIntent(changes) {
   const groups = new Map();
   for (const change of arrayOrEmpty(changes)) {
-    const key = change.intent || change.phase || "Intent not recorded";
+    const key = change.intent || change.phase || change.action || change.type || "Intent not recorded";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(change);
   }

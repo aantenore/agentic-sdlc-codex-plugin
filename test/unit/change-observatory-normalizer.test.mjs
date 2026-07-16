@@ -75,13 +75,15 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
       evidence: ["test/unit/change-observatory-server.test.mjs"],
       narrative: {
         schema_version: "trace-narrative:v1",
-        input_summary: "Approved core contract.",
-        output_summary: "Versioned model and loopback API.",
-        rationale: "Keep the plugin dependency-free.",
-        generated_explanation: "The plugin can now explain recorded project changes locally.",
-        explanation_source: "codex-generated",
+        input_summaries: ["Approved core contract."],
+        output_summaries: ["Versioned model and loopback API."],
+        rationale_summary: "Keep the plugin dependency-free.",
+        explanation: {
+          text: "The plugin can now explain recorded project changes locally.",
+          kind: "codex-generated",
+          scope: "recorded-evidence-only",
+        },
         alternatives: ["Hosted dashboard"],
-        chain_of_thought_included: false,
       },
       created_at: "2026-07-16T08:50:00Z",
     },
@@ -92,6 +94,22 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
       outcome: "passed",
       summary: "Core tests passed.",
       created_at: "2026-07-16T08:55:00Z",
+    },
+    {
+      id: "TR-APPROVE",
+      story_id: "ST-1",
+      type: "gate",
+      action: "contract.approve",
+      summary: "Approved the dependency-free implementation boundary.",
+      created_at: "2026-07-16T08:39:00Z",
+    },
+    {
+      id: "TR-SYNC",
+      story_id: "ST-1",
+      type: "sync",
+      action: "story.release",
+      summary: "Story claim released.",
+      created_at: "2026-07-16T08:59:00Z",
     },
   ]);
 
@@ -111,10 +129,12 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
   assert.equal(model.summary.asked.some((item) => item.summary === "Implement the Observatory core."), true);
   assert.equal(model.contracts.length, 1);
   assert.equal(model.decisions.some((item) => item.id === "APR-1" && item.type === "approval"), true);
-  assert.equal(model.changes.length, 1);
+  assert.equal(model.changes.length, 2);
   assert.equal(model.verification.some((item) => item.id === "TR-TEST"), true);
+  assert.equal(model.summary.changed[0].id, "TR-IMPLEMENT");
+  assert.equal(model.summary.decided[0].id, "TR-APPROVE");
 
-  const implementation = model.changes[0];
+  const implementation = model.changes.find((item) => item.id === "TR-IMPLEMENT");
   assert.deepEqual(implementation.explanation, {
     text: "The plugin can now explain recorded project changes locally.",
     authoring: "codex-generated",
@@ -166,8 +186,11 @@ test("returns bounded missing-state diagnostics for empty and absent knowledge b
   assert.equal(missingModel.diagnostics[0].code, "knowledge_base_missing");
 
   const empty = await createProject(t);
+  await writeJson(empty, ".sdlc/CACHE/derived.json", { secret: "not canonical" });
+  await writeJson(empty, ".sdlc/InDeXeS/derived.json", { secret: "not canonical" });
   const emptyModel = await buildObservatoryViewModel(empty, { clock: () => FIXED_TIME });
   assert.equal(emptyModel.records.length, 0);
+  assert.equal(emptyModel.records.some((record) => /\/(?:cache|indexes)\//i.test(record.path)), false);
   assert.equal(emptyModel.diagnostics.some((diagnostic) => diagnostic.code === "project_record_missing"), true);
   assert.ok(emptyModel.diagnostics.every((diagnostic) => diagnostic.sourceRefs.every((ref) => !path.isAbsolute(ref.path))));
 });
@@ -214,12 +237,41 @@ test("redacts explicitly stored private reasoning from normalized and source vie
       rationale: "unsafe rationale",
       chain_of_thought_included: true,
     },
+  }, {
+    id: "TR-PRIVATE-VARIANTS",
+    type: "decision",
+    summary: "A second safe summary.",
+    inputs: ["TOP_LEVEL_INPUT_SECRET"],
+    outputs: ["TOP_LEVEL_OUTPUT_SECRET"],
+    evidence: ["TOP_LEVEL_EVIDENCE_SECRET"],
+    chainOfThought: "camel secret",
+    "private-reasoning": "kebab secret",
+    reasoningTrace: "trace secret",
+    narrative: {
+      explanation: { text: "MODEL_SECRET", kind: "codex-generated" },
+      rationaleSummary: "RATIONALE_SECRET",
+      input_summaries: ["INPUT_SECRET"],
+      output_summaries: ["OUTPUT_SECRET"],
+      alternatives: ["ALTERNATIVE_SECRET"],
+      evidence: ["EVIDENCE_SECRET"],
+      chainOfThoughtIncluded: true,
+    },
   }]);
 
   const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
   const decision = model.decisions.find((item) => item.id === "TR-PRIVATE");
   assert.equal(decision.explanation.text, "A safe recorded summary.");
-  assert.equal(model.diagnostics.some((diagnostic) => diagnostic.code === "private_reasoning_redacted"), true);
+  const privateDiagnostic = model.diagnostics.find(
+    (diagnostic) => diagnostic.code === "private_reasoning_redacted",
+  );
+  assert.equal(privateDiagnostic.occurrences, 2);
+  const variants = model.decisions.find((item) => item.id === "TR-PRIVATE-VARIANTS");
+  assert.equal(variants.explanation.text, "A second safe summary.");
+  assert.deepEqual(variants.inputs, []);
+  assert.deepEqual(variants.outputs, []);
+  assert.deepEqual(variants.alternatives, []);
+  assert.deepEqual(variants.evidence, []);
+  assert.equal(JSON.stringify(variants).includes("SECRET"), false);
 
   const source = await readSourceRecord(root, ".sdlc/traces/project.jsonl");
   assert.equal(source.entries[0].data.chain_of_thought, "[redacted]");
@@ -229,7 +281,38 @@ test("redacts explicitly stored private reasoning from normalized and source vie
     "/0/chain_of_thought",
     "/0/narrative/generated_explanation",
     "/0/narrative/rationale",
+    "/1/chainOfThought",
+    "/1/private-reasoning",
+    "/1/reasoningTrace",
+    "/1/narrative/explanation",
+    "/1/narrative/rationaleSummary",
+    "/1/narrative/input_summaries",
+    "/1/narrative/output_summaries",
+    "/1/narrative/alternatives",
+    "/1/narrative/evidence",
   ]);
+  assert.equal(source.entries[1].data.chainOfThought, "[redacted]");
+  assert.equal(source.entries[1].data["private-reasoning"], "[redacted]");
+  assert.equal(source.entries[1].data.narrative.explanation, "[redacted]");
+  assert.equal(JSON.stringify(source).includes("MODEL_SECRET"), false);
+});
+
+test("malformed structured sources fail closed without returning private bytes", async (t) => {
+  const root = await createProject(t);
+  await writeText(root, ".sdlc/private.json", '{"privateReasoning":"JSON_SECRET"');
+  await writeText(root, ".sdlc/private.jsonl", '{"chain-of-thought":"JSONL_SECRET"\n');
+
+  const malformedJson = await readSourceRecord(root, ".sdlc/private.json");
+  assert.equal(malformedJson.provenance, "malformed");
+  assert.equal(malformedJson.contentOmitted, true);
+  assert.equal(Object.hasOwn(malformedJson, "raw"), false);
+  assert.equal(JSON.stringify(malformedJson).includes("JSON_SECRET"), false);
+
+  const malformedJsonl = await readSourceRecord(root, ".sdlc/private.jsonl");
+  assert.equal(malformedJsonl.provenance, "malformed");
+  assert.equal(malformedJsonl.entries[0].contentOmitted, true);
+  assert.equal(Object.hasOwn(malformedJsonl.entries[0], "raw"), false);
+  assert.equal(JSON.stringify(malformedJsonl).includes("JSONL_SECRET"), false);
 });
 
 test("bounds oversized normalization and raw-source responses", async (t) => {

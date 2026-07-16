@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -48,6 +49,11 @@ test("serves health, view model, raw records, static assets, and HEAD over loopb
   assert.equal(head.statusCode, 200);
   assert.equal(head.body, "");
   assert.ok(Number(head.headers["content-length"]) > 0);
+
+  const denied = await request(running, "/api/v1/observatory", { authenticated: false });
+  assert.equal(denied.statusCode, 401);
+  assert.equal(denied.json.error.code, "access_denied");
+  assert.match(denied.headers["www-authenticate"], /^Bearer /);
 });
 
 test("rejects invalid Host, write methods, traversal, derived evidence, and symlink escape", async (t) => {
@@ -87,6 +93,16 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
   });
   assert.equal(wrongPort.statusCode, 400);
 
+  for (const invalid of [
+    `127.0.0.1:${running.address.port}?x`,
+    `127.0.0.1:${running.address.port}#x`,
+    `2130706433:${running.address.port}`,
+    `127.0.0.1:0${running.address.port}`,
+  ]) {
+    const response = await request(running, "/api/v1/health", { headers: { Host: invalid } });
+    assert.equal(response.statusCode, 400, invalid);
+  }
+
   const post = await request(running, "/api/v1/observatory", { method: "POST" });
   assert.equal(post.statusCode, 405);
   assert.equal(post.headers.allow, "GET, HEAD");
@@ -107,14 +123,14 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
     `/api/v1/source?path=${encodeURIComponent(".sdlc/external/secret.json")}`,
   );
   assert.equal(symlink.statusCode, 403);
-  assert.equal(symlink.json.error.code, "symlink_escape");
+  assert.equal(symlink.json.error.code, "symlink_forbidden");
 
   const inProjectSymlink = await request(
     running,
     `/api/v1/source?path=${encodeURIComponent(".sdlc/project-hidden/secret.json")}`,
   );
   assert.equal(inProjectSymlink.statusCode, 403);
-  assert.equal(inProjectSymlink.json.error.code, "symlink_escape");
+  assert.equal(inProjectSymlink.json.error.code, "symlink_forbidden");
 
   const derived = await request(
     running,
@@ -122,6 +138,90 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
   );
   assert.equal(derived.statusCode, 403);
   assert.equal(derived.json.error.code, "derived_source_forbidden");
+
+  const upperDerived = await request(
+    running,
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/CACHE/derived.json")}`,
+  );
+  assert.equal(upperDerived.statusCode, 403);
+  assert.equal(upperDerived.json.error.code, "derived_source_forbidden");
+
+  await fs.symlink(
+    path.join(fixture.projectRoot, ".sdlc", "cache"),
+    path.join(fixture.projectRoot, ".sdlc", "alias"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const alias = await request(
+    running,
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/alias/derived.json")}`,
+  );
+  assert.equal(alias.statusCode, 403);
+  assert.equal(alias.json.error.code, "symlink_forbidden");
+
+  for (const relative of [".sdlc/.env", ".sdlc/private.pem", ".sdlc/blob.bin"]) {
+    await fs.writeFile(path.join(fixture.projectRoot, ...relative.split("/")), "secret\0bytes");
+    const blocked = await request(
+      running,
+      `/api/v1/source?path=${encodeURIComponent(relative)}`,
+    );
+    assert.equal(blocked.statusCode, 403, relative);
+    assert.equal(blocked.json.error.code, "source_format_forbidden");
+  }
+});
+
+test("rejects a symlinked knowledge base and a swapped project root", async (t) => {
+  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix symlink semantics");
+
+  const symlinkFixture = await createServerFixture(t);
+  const hiddenKnowledgeBase = path.join(symlinkFixture.projectRoot, "hidden-sdlc");
+  await fs.rename(path.join(symlinkFixture.projectRoot, ".sdlc"), hiddenKnowledgeBase);
+  await fs.symlink(".", path.join(symlinkFixture.projectRoot, ".sdlc"), "dir");
+  await fs.writeFile(path.join(symlinkFixture.projectRoot, ".env"), "TOP_SECRET=true\n", "utf8");
+  const symlinked = await startObservatoryServer({
+    projectRoot: symlinkFixture.projectRoot,
+    assetRoot: symlinkFixture.assetRoot,
+  });
+  t.after(() => symlinked.close());
+  const escaped = await request(
+    symlinked,
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/.env")}`,
+  );
+  assert.equal(escaped.statusCode, 403);
+  assert.equal(escaped.json.error.code, "knowledge_base_symlink");
+
+  const swapFixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: swapFixture.projectRoot,
+    assetRoot: swapFixture.assetRoot,
+  });
+  t.after(() => running.close());
+  const original = `${swapFixture.projectRoot}-original`;
+  const replacement = `${swapFixture.projectRoot}-replacement`;
+  await fs.rename(swapFixture.projectRoot, original);
+  await fs.mkdir(path.join(replacement, ".sdlc"), { recursive: true });
+  await fs.writeFile(path.join(replacement, ".sdlc", "project.json"), '{"project_id":"attacker"}\n');
+  await fs.symlink(replacement, swapFixture.projectRoot, "dir");
+  const swapped = await request(running, "/api/v1/observatory");
+  assert.equal(swapped.statusCode, 409);
+  assert.equal(swapped.json.error.code, "project_boundary_changed");
+  assert.doesNotMatch(swapped.body, /attacker/);
+});
+
+test("GET, HEAD, and rejected writes do not mutate canonical project evidence", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+  const before = await snapshotTree(fixture.projectRoot);
+
+  await request(running, "/api/v1/observatory");
+  await request(running, `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`);
+  await request(running, "/", { method: "HEAD" });
+  await request(running, "/api/v1/observatory", { method: "POST" });
+
+  assert.deepEqual(await snapshotTree(fixture.projectRoot), before);
 });
 
 test("refuses non-loopback bind configuration", async (t) => {
@@ -153,10 +253,13 @@ async function createServerFixture(t) {
   return { projectRoot, assetRoot };
 }
 
-function request(running, requestPath, { method = "GET", headers = {} } = {}) {
+function request(running, requestPath, { method = "GET", headers = {}, authenticated = true } = {}) {
   return new Promise((resolve, reject) => {
     const requestHeaders = {
       Host: `${running.address.host}:${running.address.port}`,
+      ...(authenticated && running.accessToken
+        ? { Authorization: `Bearer ${running.accessToken}` }
+        : {}),
       ...headers,
     };
     const outgoing = http.request({
@@ -185,4 +288,26 @@ function request(running, requestPath, { method = "GET", headers = {} } = {}) {
     outgoing.on("error", reject);
     outgoing.end();
   });
+}
+
+async function snapshotTree(root) {
+  const files = [];
+  async function walk(directory, relative = "") {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      const child = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(child, childRelative);
+      } else if (entry.isFile()) {
+        const content = await fs.readFile(child);
+        files.push([childRelative, crypto.createHash("sha256").update(content).digest("hex")]);
+      } else if (entry.isSymbolicLink()) {
+        files.push([childRelative, `symlink:${await fs.readlink(child)}`]);
+      }
+    }
+  }
+  await walk(root);
+  return files;
 }

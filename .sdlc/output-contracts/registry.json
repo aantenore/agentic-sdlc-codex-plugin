@@ -428,6 +428,179 @@
           "version": "0.6.0"
         }
       }
+    },
+    {
+      "id": "OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9",
+      "story_id": "ST-OBSERVATORY-INTEGRATION",
+      "artifact_type": "implementation-evidence",
+      "artifact_path": ".sdlc/stories/ST-OBSERVATORY-INTEGRATION/outputs/implementation-evidence.md",
+      "template_id": "implementation-evidence-v1",
+      "mode": "delta",
+      "base_artifact": ".sdlc/stories/ST-OBSERVATORY-UI/outputs/implementation-evidence.md",
+      "requirements": [
+        "REQ-CHANGE-OBSERVATORY-001"
+      ],
+      "decision_id": null,
+      "rationale": "Install-ready plugin integration is the final delivery delta over the approved UI evidence, which already inherits the approved core evidence.",
+      "delivery_format": "markdown",
+      "delivery_extension": ".md",
+      "media_type": "text/markdown",
+      "generator": null,
+      "delivery_mode": "artifact-plus-chat-summary",
+      "verification_receipt": {
+        "achieved_level": "semantic",
+        "artifact": {
+          "format": "markdown",
+          "media_type": "text/markdown",
+          "path": ".sdlc/stories/ST-OBSERVATORY-INTEGRATION/outputs/implementation-evidence.md",
+          "sha256": "968a651866adb4cbe1ffcb22378e36e9957700a4793b46752514a33b4ece3251"
+        },
+        "artifact_present": true,
+        "container_verified": {
+          "checks": [
+            "non-empty file (14549 bytes)",
+            "extension .md",
+            "non-binary text content"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-16T10:31:04.188Z",
+          "verifier": "file-structure-v1"
+        },
+        "content_verified": {
+          "checks": [
+            "non-empty meaningful text content"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-16T10:31:04.188Z",
+          "verifier": "file-structure-v1"
+        },
+        "evidence": [
+          {
+            "kind": "render",
+            "path": ".sdlc/tests/ST-OBSERVATORY-INTEGRATION-desktop.png",
+            "sha256": "9f2d921ae3c31537c083f94955ddb64e37ff7f16cd7b5fc5f9de80f7a1be6b5a"
+          },
+          {
+            "kind": "render",
+            "path": ".sdlc/tests/ST-OBSERVATORY-INTEGRATION-mobile.png",
+            "sha256": "929c014c440ffef37d7699074b87977b386ad9f32a72a96a140f3535c8081ead"
+          }
+        ],
+        "existence_verified": {
+          "checks": [
+            "non-empty file (14549 bytes)"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-16T10:31:04.188Z",
+          "verifier": "file-existence-v1"
+        },
+        "extensions": {
+          "delivery_label": "Markdown document",
+          "delivery_mode": "artifact-plus-chat-summary",
+          "size_bytes": 14549
+        },
+        "failed_checks": [],
+        "generator_receipt": null,
+        "hash_algorithm": "sha256:stable-json:v1",
+        "id": "VERIFY-OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9-968a6518",
+        "independent_verified": {
+          "checks": [],
+          "evidence": [],
+          "reason": "Independent verification is outside the approved verification level.",
+          "status": "not-required",
+          "verified_at": null,
+          "verifier": null
+        },
+        "kind": "verification_receipt",
+        "limitations": [
+          "Rendered and independent verification were not required by this output contract."
+        ],
+        "missing_checks": [],
+        "passed": true,
+        "receipt_hash": "2407e2221b42cceeec412fce30e7801166156e11fb98276f0965bc6bc81aba7a",
+        "render_verified": {
+          "checks": [],
+          "evidence": [],
+          "reason": "Approved format does not require rendered verification.",
+          "status": "not-required",
+          "verified_at": null,
+          "verifier": "render-evidence-v1"
+        },
+        "required_dimensions": {
+          "container": true,
+          "content": true,
+          "existence": true,
+          "independent": false,
+          "render": false
+        },
+        "required_level": "semantic",
+        "schema_version": "verification-receipt:v1",
+        "status": "passed",
+        "subject_ref": {
+          "hash": "4863dec9eecb9fd0898c4a68d076cd53b50b1708d85803765ef07910dce3fe32",
+          "id": "OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9",
+          "kind": "output_link"
+        },
+        "verified_at": "2026-07-16T10:31:04.188Z",
+        "verifier": "file-structure-v1",
+        "version": 1
+      },
+      "verification_receipt_ref": {
+        "id": "VERIFY-OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9-968a6518",
+        "path": ".sdlc/receipts/verification/VERIFY-OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9-968a6518.json",
+        "hash": "2407e2221b42cceeec412fce30e7801166156e11fb98276f0965bc6bc81aba7a"
+      },
+      "source_paths": [
+        ".sdlc/stories/ST-OBSERVATORY-INTEGRATION/outputs/implementation-evidence.md",
+        ".sdlc/stories/ST-OBSERVATORY-UI/outputs/implementation-evidence.md",
+        ".sdlc/output-contracts/templates/implementation-evidence-v1.md",
+        ".sdlc/receipts/verification/VERIFY-OUT-ST-OBSERVATORY-INTEGRATION-implementation-evidence-44a91ff9-968a6518.json",
+        ".sdlc/tests/ST-OBSERVATORY-INTEGRATION-desktop.png",
+        ".sdlc/tests/ST-OBSERVATORY-INTEGRATION-mobile.png"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "968a651866adb4cbe1ffcb22378e36e9957700a4793b46752514a33b4ece3251",
+        "base_artifact_sha256": "487778e14be65ef0ff914d7cc8af1cfa7c31b97a9286d4118d95097fb02fbb84",
+        "template_sha256": "8160a88e838a023cd4b1de7d156526f4967a3984591bcde8da823909e64888f9",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-16T09:57:03.905Z",
+      "updated_at": "2026-07-16T10:31:04.315Z",
+      "audit": {
+        "linked_by": {
+          "id": "codex-integration",
+          "type": "agent",
+          "name": "Codex Integration",
+          "email": null,
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ST-OBSERVATORY-INTEGRATION",
+          "head_sha": "5c5b6a352a8766442c1f1eeeb036a939faa3e4fc",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "50747458+aantenore@users.noreply.github.com"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.7.0"
+        }
+      }
     }
   ],
   "decisions": [
@@ -515,7 +688,7 @@
     }
   ],
   "created_at": "2026-07-15T15:16:58.432Z",
-  "updated_at": "2026-07-16T09:12:30.901Z",
+  "updated_at": "2026-07-16T10:31:04.316Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -525,16 +698,16 @@
       "source": "default"
     },
     "updated_by": {
-      "id": "codex-ui",
+      "id": "codex-integration",
       "type": "agent",
-      "name": "Codex UI",
+      "name": "Codex Integration",
       "email": null,
       "source": "cli"
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-OBSERVATORY-UI",
-      "head_sha": "5c8370e56dfcdcd87e54e161800c8501a0d396a3",
+      "branch": "codex/ST-OBSERVATORY-INTEGRATION",
+      "head_sha": "5c5b6a352a8766442c1f1eeeb036a939faa3e4fc",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -549,7 +722,7 @@
       "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.6.0"
+      "version": "0.7.0"
     }
   }
 }

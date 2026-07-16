@@ -438,6 +438,47 @@ svg {
   padding: 10px 16px 0;
 }
 
+.diagnostics-disclosure {
+  border: 1px solid #ecd29f;
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+}
+
+.diagnostics-disclosure > summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  list-style: none;
+}
+
+.diagnostics-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.diagnostics-disclosure > summary svg {
+  width: 17px;
+  height: 17px;
+  color: var(--warning);
+}
+
+.diagnostics-disclosure > summary span {
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.diagnostics-list {
+  padding: 0 8px 8px;
+}
+
 .diagnostic {
   display: flex;
   align-items: flex-start;
@@ -448,6 +489,10 @@ svg {
   background: var(--surface);
   color: var(--ink-secondary);
   font-size: 11px;
+}
+
+.diagnostics-list .diagnostic {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
 }
 
 .diagnostic + .diagnostic {
@@ -469,6 +514,32 @@ svg {
   height: 17px;
   flex: 0 0 auto;
   color: var(--warning);
+}
+
+.diagnostic-copy {
+  min-width: 0;
+}
+
+.diagnostic-count {
+  display: inline-flex;
+  min-height: 19px;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.panel-note {
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted);
+  font-size: 9px;
 }
 
 .evidence-workspace {

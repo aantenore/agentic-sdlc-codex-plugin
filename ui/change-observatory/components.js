@@ -154,8 +154,23 @@ export function renderDiagnostics(container, diagnostics) {
     return;
   }
   container.hidden = false;
-  container.replaceChildren(
-    ...diagnostics.map((diagnostic) =>
+  const occurrenceTotal = diagnostics.reduce(
+    (total, diagnostic) => total + diagnostic.occurrences,
+    0,
+  );
+  const disclosure = node("details", {
+    className: "diagnostics-disclosure",
+    attrs: { open: diagnostics.some((diagnostic) => diagnostic.severity === "error") ? "" : null },
+  });
+  disclosure.append(
+    node("summary", {}, [
+      icon("alert"),
+      node("strong", { text: "Evidence diagnostics" }),
+      node("span", {
+        text: `${diagnostics.length} ${diagnostics.length === 1 ? "category" : "categories"} · ${occurrenceTotal} ${occurrenceTotal === 1 ? "record" : "records"}`,
+      }),
+    ]),
+    node("div", { className: "diagnostics-list" }, diagnostics.map((diagnostic) =>
       node(
         "div",
         {
@@ -165,14 +180,22 @@ export function renderDiagnostics(container, diagnostics) {
         },
         [
           icon("alert"),
-          node("div", {}, [
+          node("div", { className: "diagnostic-copy" }, [
             node("strong", { text: `${diagnostic.code}: ` }),
             document.createTextNode(diagnostic.message),
+            diagnostic.occurrences > 1
+              ? node("span", {
+                className: "diagnostic-count",
+                text: `${diagnostic.occurrences} records`,
+                attrs: { title: "Equivalent diagnostics grouped" },
+              })
+              : null,
           ]),
         ],
       ),
-    ),
+    )),
   );
+  container.replaceChildren(disclosure);
 }
 
 function phaseStateIcon(status) {
@@ -351,18 +374,26 @@ function recordsPanel(title, description, items, state, options = {}) {
     return panel;
   }
   const list = node("div", { className: "record-list", attrs: { role: "list" } });
-  items.forEach((item) => {
+  const visibleItems = options.limit ? items.slice(0, options.limit) : items;
+  visibleItems.forEach((item) => {
     const row = recordRow(item, state.selectedId);
     list.append(node("div", { attrs: { role: "listitem" } }, [row]));
   });
   panel.append(list);
+  if (visibleItems.length < items.length) {
+    panel.append(node("footer", {
+      className: "panel-note",
+      text: `Showing ${visibleItems.length} of ${items.length}. Open the dedicated view for the complete history.`,
+    }));
+  }
   return panel;
 }
 
-function changesPanel(model, state) {
-  const groups = groupChangesByIntent(model.changes);
+function changesPanel(model, state, options = {}) {
+  const visibleChanges = options.limit ? model.changes.slice(0, options.limit) : model.changes;
+  const groups = groupChangesByIntent(visibleChanges);
   const panel = node("section", { className: "section-panel" }, [
-    sectionHeading("Changed files by intent", "Recorded changes grouped without guessing missing intent"),
+    sectionHeading("Recorded changes", "Implementation and sync evidence grouped by recorded intent"),
   ]);
   if (!groups.length) {
     panel.append(emptyInline("No change records were found."));
@@ -379,10 +410,16 @@ function changesPanel(model, state) {
     group.items.forEach((item) => list.append(recordRow(item, state.selectedId)));
   }
   panel.append(list);
+  if (visibleChanges.length < model.changes.length) {
+    panel.append(node("footer", {
+      className: "panel-note",
+      text: `Showing ${visibleChanges.length} of ${model.changes.length}. Open Changes for the complete history.`,
+    }));
+  }
   return panel;
 }
 
-function verificationPanel(model, state) {
+function verificationPanel(model, state, options = {}) {
   const panel = node("section", { className: "section-panel" }, [
     sectionHeading("Verification evidence", "Tests, gates, and validation outcomes"),
   ]);
@@ -391,7 +428,10 @@ function verificationPanel(model, state) {
     return panel;
   }
   const list = node("div", { className: "record-list", attrs: { role: "list" } });
-  for (const item of model.verification) {
+  const visibleItems = options.limit
+    ? model.verification.slice(0, options.limit)
+    : model.verification;
+  for (const item of visibleItems) {
     list.append(
       node("div", { className: "verification-row", attrs: { role: "listitem" } }, [
         recordRow(item, state.selectedId),
@@ -400,6 +440,12 @@ function verificationPanel(model, state) {
     );
   }
   panel.append(list);
+  if (visibleItems.length < model.verification.length) {
+    panel.append(node("footer", {
+      className: "panel-note",
+      text: `Showing ${visibleItems.length} of ${model.verification.length}. Open Verification for the complete history.`,
+    }));
+  }
   return panel;
 }
 
@@ -407,9 +453,9 @@ function overview(model, state) {
   return node("div", { className: "view-stack" }, [
     lineagePanel(model, state),
     node("div", { className: "overview-grid" }, [
-      recordsPanel("Contract evolution", "Versions, approvals, and status", model.contracts, state),
-      changesPanel(model, state),
-      verificationPanel(model, state),
+      recordsPanel("Contract evolution", "Versions, approvals, and status", model.contracts, state, { limit: 6 }),
+      changesPanel(model, state, { limit: 6 }),
+      verificationPanel(model, state, { limit: 6 }),
     ]),
   ]);
 }
@@ -552,7 +598,7 @@ export function renderInspector(container, item) {
   const narrative = narrativeFor(item);
   const generatedTone = narrative.generatedExplanation ? "generated" : "missing";
   const generatedText =
-    narrative.generatedExplanation || "No generated explanation was recorded for this evidence item.";
+    narrative.generatedExplanation || "No plain-language explanation was recorded for this evidence item.";
   const rationale = narrative.rationale || "No rationale was recorded for this evidence item.";
 
   const sections = [
@@ -565,7 +611,7 @@ export function renderInspector(container, item) {
     inspectorEntriesSection("Inputs", narrative.inputs),
     inspectorEntriesSection("Outputs", narrative.outputs),
     inspectorTextSection(
-      "Generated explanation",
+      "Plain-language explanation",
       generatedText,
       generatedTone,
       narrative.generatedExplanation

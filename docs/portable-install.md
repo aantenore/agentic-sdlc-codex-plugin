@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.6.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.7.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -16,13 +16,15 @@ schemas/
 scripts/
 skills/agentic-sdlc/
 skills/agentic-sdlc-assessment/
+skills/change-observatory/
 templates/
+ui/change-observatory/
 LICENSE
 package.json
 README.md
 ```
 
-The assessment skill includes `agents/openai.yaml`, which makes `Project Assessment` visible and allows implicit invocation. The first product starter is:
+The assessment and Change Observatory skills each include `agents/openai.yaml`, making `Project Assessment` and `Change Observatory` visible and available for implicit invocation. The first product starter remains:
 
 ```text
 Contextualize this project and prepare an initial technical assessment.
@@ -55,7 +57,7 @@ A successful list result contains an installed, enabled entry with:
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "installed": true,
   "enabled": true
 }
@@ -134,10 +136,10 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.6.0` | Rerun staging, add again, then open a new task |
-| `npm run doctor` or CLI doctor | Reports runtime, version, entry point, both skills, agent card, preset, and optional project KB checks as passed | Repair the failed item, restage, and open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.7.0` | Rerun staging, add again, then open a new task |
+| `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all three skills, agent cards, Observatory launcher/UI, preset, and optional project KB checks as passed | Repair the failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
-| Package dry run | Contains manifest, both skills, agent card, CLI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
+| Package dry run | Contains manifest, all three skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
 
 If the staging script refuses the destination, inspect the printed path. Move or rename an unmanaged destination rather than forcing deletion; rerun the script only after the generated location is safe.
 
@@ -151,6 +153,7 @@ When the Codex plugin and skill validator scripts are available locally, run the
 uv run --with pyyaml python /path/to/plugin-creator/scripts/validate_plugin.py .
 uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
 uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc-assessment
+uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/change-observatory
 ```
 
 These are file validators, not Codex plugin subcommands. If `uv` is unavailable, use an isolated Python environment that already contains `PyYAML`; do not add it as a plugin runtime dependency.
@@ -171,6 +174,14 @@ The normal journey must expose no more than two decisions:
 The combined proposal must name an explicit assessment story such as `ST-INITIAL-ASSESSMENT`. After approval, that story must exist before its contract or output, the approval must be persisted with `authorization grant`, and agent-driven approvals plus `task start --confirm-start` must use `--authorization <id>`.
 
 The final delivery must include the real requested artifact, a concise chat summary, and a stored verification receipt. DOCX, XLSX, PDF, PPTX, and HTML links must also contain render or visual-check evidence.
+
+Also submit this prompt in the disposable project:
+
+```text
+Open the Change Observatory for this project.
+```
+
+The installed skill must launch the plugin-local CLI, open or return a token-bearing loopback URL, render the bundled UI without a build, and leave the project tree unchanged. See [Change Observatory](change-observatory.md).
 
 ## Portability Boundaries
 
