@@ -839,7 +839,32 @@ test("native and exact optimization routes keep external rg and Git helpers disa
   const rgConfig = path.join(project, "ripgrep.conf");
   fs.writeFileSync(rgConfig, `--pre=${rgPreprocessor}\n`);
   fs.writeFileSync(path.join(project, "rg-input.txt"), "needle\n");
-  const rgEnv = { ...process.env, RIPGREP_CONFIG_PATH: rgConfig };
+  const rgBin = path.join(project, "fake-rg-bin");
+  fs.mkdirSync(rgBin);
+  const fakeRg = path.join(rgBin, "rg");
+  fs.writeFileSync(fakeRg, [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    "const { spawnSync } = require('node:child_process');",
+    "const args = process.argv.slice(2);",
+    "if (!args.includes('--no-config') && process.env.RIPGREP_CONFIG_PATH) {",
+    "  const configured = fs.readFileSync(process.env.RIPGREP_CONFIG_PATH, 'utf8')",
+    "    .split(/\\r?\\n/u).find((line) => line.startsWith('--pre='));",
+    "  if (configured) {",
+    "    const result = spawnSync(configured.slice('--pre='.length), [args.at(-1)], { encoding: 'utf8' });",
+    "    process.stdout.write(result.stdout || '');",
+    "    process.stderr.write(result.stderr || '');",
+    "    process.exit(result.status ?? 1);",
+    "  }",
+    "}",
+    "process.stdout.write(JSON.stringify({ type: 'match' }));",
+  ].join("\n"));
+  fs.chmodSync(fakeRg, 0o755);
+  const rgEnv = {
+    ...process.env,
+    RIPGREP_CONFIG_PATH: rgConfig,
+    PATH: [rgBin, process.env.PATH].filter(Boolean).join(path.delimiter),
+  };
   const directRg = spawnSync("rg", ["needle", "--json", "rg-input.txt"], {
     cwd: project,
     encoding: "utf8",
@@ -852,7 +877,7 @@ test("native and exact optimization routes keep external rg and Git helpers disa
   mustRun([
     "optimization", "run", "--root", project,
     "--command-json", JSON.stringify(["rg", "needle", "--json", "rg-input.txt"]),
-  ], { env: { RIPGREP_CONFIG_PATH: rgConfig } });
+  ], { env: { RIPGREP_CONFIG_PATH: rgConfig, PATH: rgEnv.PATH } });
   assert.equal(fs.existsSync(rgMarker), false);
 
   const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
