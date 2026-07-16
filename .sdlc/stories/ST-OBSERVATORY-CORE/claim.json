@@ -1,0 +1,38 @@
+{
+  "story_id": "ST-OBSERVATORY-CORE",
+  "agent": "codex-core",
+  "branch": "codex/ST-OBSERVATORY-CORE",
+  "status": "active",
+  "claimed_at": "2026-07-16T08:38:20.201Z",
+  "expires_at": "2026-07-17T08:38:20.201Z",
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex-core",
+      "type": "agent",
+      "name": "Codex Core",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-OBSERVATORY-CORE",
+      "head_sha": "9c94d79fa7b4e6dc419326bc9628dc17184ba287",
+      "is_dirty": false,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "50747458+aantenore@users.noreply.github.com"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.6.0"
+    }
+  }
+}
