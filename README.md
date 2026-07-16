@@ -1,8 +1,8 @@
 # Agentic SDLC Codex Plugin
 
-Agentic SDLC 0.6.0 gives Codex a guided way to understand an existing software project and deliver a verified technical or functional assessment. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.7.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
-Project state stays in the target repository under `.sdlc/`. The plugin installation contains only reusable skills, templates, schemas, and the cross-platform Node.js CLI.
+Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
 ## Documentation Map
 
@@ -11,6 +11,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
+- [Change Observatory](docs/change-observatory.md) — launch the local visual lineage app and understand its evidence and security model.
 
 ## Quick Start
 
@@ -31,6 +32,32 @@ Contextualize this project and prepare an initial technical assessment.
 ```
 
 The dedicated `Project Assessment` skill is visible in Codex and is also selected implicitly from equivalent requests. Normal use is conversational: the low-level CLI commands are available for automation and recovery, but the user does not need to orchestrate them manually.
+
+To inspect an existing `.sdlc` history visually, ask in the same natural style:
+
+```text
+Open the Change Observatory and explain this project's recorded delivery lineage.
+```
+
+The installed `Change Observatory` skill resolves the plugin-local launcher directly, so a Codex plugin installation does not depend on a global shell command.
+
+## Change Observatory
+
+Change Observatory is a local, read-only application bundled in the plugin. It answers “What was asked?”, “What changed?”, and “Why was it decided?”, then lets technical and non-technical readers inspect iterations, contracts, decisions, changes, tests, gates, and raw canonical evidence.
+
+From an npm/git/tarball package installation that exposes the bin entry:
+
+```bash
+agentic-sdlc observe --root /path/to/project
+```
+
+For automation or a machine without a browser opener:
+
+```bash
+agentic-sdlc observe --root /path/to/project --port 0 --no-open --json
+```
+
+The server binds only to `127.0.0.1`, selects an ephemeral port by default, protects evidence APIs with a per-run token carried in the URL fragment, and makes no project writes. Plain-language explanations retain their `codex-generated`, `deterministic`, or `human-authored` label and contain only stored summaries, rationale, alternatives, inputs, outputs, and evidence—never private chain-of-thought. See [Change Observatory](docs/change-observatory.md) for the full model.
 
 ## How It Works
 
@@ -297,6 +324,7 @@ The CLI remains available for automation and advanced project workflows:
 
 ```bash
 node bin/agentic-sdlc.mjs --help
+node bin/agentic-sdlc.mjs observe --root /path/to/project --no-open --json
 node bin/agentic-sdlc.mjs doctor --root /path/to/project --json
 node bin/agentic-sdlc.mjs status --root /path/to/project
 node bin/agentic-sdlc.mjs approval requests --root /path/to/project --json
@@ -328,7 +356,9 @@ lib/                                         Pure proposal, authorization, budge
 skills/agentic-sdlc/                         Core project workflow skill
 skills/agentic-sdlc-assessment/              Guided assessment skill
 skills/agentic-sdlc-assessment/agents/       Assessment agent card
+skills/change-observatory/                    Installed visual-lineage launcher skill
 templates/                                   Reusable artifact templates
+ui/change-observatory/                        Bundled build-free lineage application
 ```
 
-More detail: [Assessment Interactions](docs/agent-interactions.md) and [Portable Codex Install](docs/portable-install.md).
+More detail: [Assessment Interactions](docs/agent-interactions.md), [Change Observatory](docs/change-observatory.md), and [Portable Codex Install](docs/portable-install.md).

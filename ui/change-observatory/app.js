@@ -1,4 +1,4 @@
-import { ObservatoryApi } from "./api.js";
+import { ObservatoryApi, accessTokenFromHash } from "./api.js";
 import {
   phaseSelectionId,
   phaseSelectionItem,
@@ -38,7 +38,17 @@ const elements = {
 
 const endpoint =
   document.querySelector('meta[name="change-observatory-api"]')?.getAttribute("content") || undefined;
-const api = new ObservatoryApi(endpoint ? { endpoint } : undefined);
+const fragmentToken = accessTokenFromHash(window.location.hash);
+if (fragmentToken) {
+  window.sessionStorage.setItem("change-observatory-access-token", fragmentToken);
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
+const accessToken = fragmentToken
+  || window.sessionStorage.getItem("change-observatory-access-token");
+const api = new ObservatoryApi({
+  ...(endpoint ? { endpoint } : {}),
+  accessToken,
+});
 
 const state = {
   model: null,

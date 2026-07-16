@@ -1,0 +1,6 @@
+interface:
+  display_name: "Change Observatory"
+  short_description: "Open visual SDLC project lineage"
+  default_prompt: "Use $change-observatory to open the visual SDLC lineage for this project."
+policy:
+  allow_implicit_invocation: true

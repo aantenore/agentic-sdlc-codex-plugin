@@ -9,7 +9,6 @@ const uiRoot = resolve(repositoryRoot, "ui/change-observatory");
 const fixturePath = resolve(repositoryRoot, "test/fixtures/change-observatory/view-model.json");
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 const knownSources = new Set(fixture.records.map((record) => record.path));
-const requestedPort = Number.parseInt(process.argv[process.argv.indexOf("--port") + 1] ?? "4173", 10);
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -39,7 +38,8 @@ function send(response, status, body, contentType) {
   response.end(body);
 }
 
-const server = createServer(async (request, response) => {
+export function createPreviewServer() {
+  return createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
   if (url.pathname === "/api/v1/observatory") {
     send(response, 200, JSON.stringify(fixture), "application/json; charset=utf-8");
@@ -81,9 +81,29 @@ const server = createServer(async (request, response) => {
   } catch {
     send(response, 404, "Not found", "text/plain; charset=utf-8");
   }
-});
+  });
+}
 
-server.listen(requestedPort, "127.0.0.1", () => {
-  const address = server.address();
-  process.stdout.write(`Change Observatory visual-QA fixture: http://127.0.0.1:${address.port}\n`);
-});
+export function parsePreviewPort(argv = []) {
+  const portIndex = argv.indexOf("--port");
+  const raw = portIndex === -1 ? "4173" : argv[portIndex + 1];
+  if (raw === undefined || !/^\d+$/.test(raw)) {
+    throw new TypeError("Preview port must be an integer between 0 and 65535");
+  }
+  const port = Number(raw);
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+    throw new TypeError("Preview port must be an integer between 0 and 65535");
+  }
+  return port;
+}
+
+const isMain = !process.env.NODE_TEST_CONTEXT
+  && process.argv[1]
+  && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  const server = createPreviewServer();
+  server.listen(parsePreviewPort(process.argv.slice(2)), "127.0.0.1", () => {
+    const address = server.address();
+    process.stdout.write(`Change Observatory visual-QA fixture: http://127.0.0.1:${address.port}\n`);
+  });
+}

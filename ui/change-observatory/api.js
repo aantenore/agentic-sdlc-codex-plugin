@@ -13,11 +13,12 @@ export class ObservatoryApiError extends Error {
 }
 
 export class ObservatoryApi {
-  constructor({ endpoint = DEFAULT_ENDPOINT, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ endpoint = DEFAULT_ENDPOINT, fetchImpl = globalThis.fetch, accessToken = null } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
     }
     this.endpoint = endpoint;
+    this.accessToken = normalizeAccessToken(accessToken);
     this.fetchImpl = (...args) => Reflect.apply(fetchImpl, globalThis, args);
   }
 
@@ -82,6 +83,10 @@ export class ObservatoryApi {
     try {
       response = await this.fetchImpl(url, {
         ...options,
+        headers: {
+          ...options.headers,
+          ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
+        },
         cache: "no-store",
         credentials: "same-origin",
         redirect: "error",
@@ -102,4 +107,16 @@ export class ObservatoryApi {
     }
     return response;
   }
+}
+
+export function accessTokenFromHash(hash) {
+  if (typeof hash !== "string" || !hash.startsWith("#")) return null;
+  const token = new URLSearchParams(hash.slice(1)).get("access_token");
+  return normalizeAccessToken(token);
+}
+
+function normalizeAccessToken(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(value)) return null;
+  return value;
 }

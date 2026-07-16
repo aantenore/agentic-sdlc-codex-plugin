@@ -2755,6 +2755,12 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   assert.equal(approved.approvals.at(-1).approval_source, "explicit-user");
   assert.equal(approved.approvals.at(-1).scope.applies_only_to_presented_subject, true);
   assert.equal(approved.approvals.at(-1).scope.does_not_approve_future_artifacts, true);
+  const approvedReport = fs.readFileSync(
+    path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL-current-state.md"),
+    "utf8",
+  );
+  assert.match(approvedReport, /^Status: approved$/m);
+  assert.doesNotMatch(approvedReport, /^Status: proposed$/m);
 
   fs.appendFileSync(path.join(project, "README.md"), "\nChanged after baseline.\n");
   const status = JSON.parse(mustRun(["baseline", "status", "--root", project, "--id", "BASELINE-INITIAL", "--json"]).stdout);
@@ -3250,6 +3256,8 @@ test("gate reports can be persisted", () => {
   const report = readJson(path.join(project, ".sdlc", "reports", "ST-001-gate-report.json"));
   assert.equal(report.status, "passed");
   assert.equal(report.story_id, "ST-001");
+  assert.equal(report.root, ".");
+  assert.equal(report.root_name, path.basename(project));
   mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--out", ".sdlc/reports/ST-001-gate-report.md"]);
   assert.match(fs.readFileSync(path.join(project, ".sdlc", "reports", "ST-001-gate-report.md"), "utf8"), /SDLC Gate Report/);
 });
@@ -3817,6 +3825,23 @@ test("technical analysis route suggests capability discovery when no profile exi
   });
   assert.ok(decision.blocking_reasons.includes("capability_profile_missing"));
   assert.ok(decision.next_commands.some((command) => command.includes("capability profile propose")));
+});
+
+test("route accepts artifact types declared only by the approved output registry", () => {
+  const project = tmpProject("route-custom-output-type");
+  initProject(project);
+  createApprovedTemplate(project, "novel-evidence");
+
+  const decision = routeDecision(project, {
+    requested_action: "functional_analysis",
+    proposed_phase: "analysis",
+    artifact_type: "novel-evidence",
+  });
+  assert.equal(decision.intent.artifact_type, "novel-evidence");
+  assert.equal(
+    decision.blocking_reasons.some((reason) => reason.includes("artifact_type")),
+    false,
+  );
 });
 
 test("technical analysis routing ignores approved profiles whose sources became stale", () => {
@@ -4807,10 +4832,11 @@ test("contract create auto-links story contract and requires explicit replacemen
     "contract-ST-LINK-analysis",
     "--context-summary",
     "Analysis contract",
-    "--qa",
-    "Who approves?|Owner",
+    "--question",
+    "Who approves?",
     "--output-ref",
     "technical-analysis:technical-analysis-v1:new",
+    "--allow-incomplete-contract",
     "--json",
   ]).stdout);
   assert.equal(created.story_link.status, "linked");
@@ -4857,6 +4883,131 @@ test("contract create auto-links story contract and requires explicit replacemen
   ]).stdout);
   assert.equal(replaced.story_link.status, "replaced");
   assert.equal(readJson(path.join(project, ".sdlc", "stories", "ST-LINK", "story.json")).contract_id, "contract-ST-LINK-analysis-v2");
+
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-LINK-analysis-v2",
+    ...humanApproval("Approved replacement contract v2"),
+  ]);
+
+  const replacedAgain = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-LINK",
+    "--id",
+    "contract-ST-LINK-analysis-v3",
+    "--context-summary",
+    "Final replacement analysis contract",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--replace-story-contract",
+    "--json",
+  ]).stdout);
+  assert.equal(replacedAgain.story_link.status, "replaced");
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-LINK-analysis-v3",
+    ...humanApproval("Approved replacement contract v3"),
+  ]);
+  const outputDir = path.join(project, ".sdlc", "stories", "ST-LINK", "outputs");
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(path.join(outputDir, "technical-analysis.md"), "# Technical analysis\n\nCanonical candidate output for the active contract.\n");
+
+  const requests = JSON.parse(
+    mustRun(["approval", "requests", "--root", project, "--story", "ST-LINK", "--json"]).stdout,
+  ).requests.filter((request) => ["contract_approval", "contract_clarification", "output_link_required"].includes(request.type));
+  assert.deepEqual(requests.map((request) => request.subject_id), ["contract-ST-LINK-analysis-v3"]);
+
+  const globalOutputRequests = JSON.parse(
+    mustRun(["approval", "requests", "--root", project, "--json"]).stdout,
+  ).requests.filter((request) => request.type === "output_link_required");
+  assert.deepEqual(globalOutputRequests.map((request) => request.subject_id), ["contract-ST-LINK-analysis-v3"]);
+
+  const globalContractRequests = JSON.parse(
+    mustRun(["approval", "requests", "--root", project, "--json"]).stdout,
+  ).requests.filter((request) => (
+    request.story_id === "ST-LINK"
+    && ["contract_approval", "contract_clarification"].includes(request.type)
+  ));
+  assert.deepEqual(globalContractRequests, []);
+});
+
+test("story context is rehashed after contract auto-link so task start stays fresh", () => {
+  const project = tmpProject("contract-story-context-fresh");
+  initProject(project);
+  story(project, "ST-CONTEXT", ["--phase", "implementation", "--status", "ready"]);
+  createApprovedTemplate(project, "functional-analysis");
+  const storyRelativePath = ".sdlc/stories/ST-CONTEXT/story.json";
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-CONTEXT",
+    "--id",
+    "contract-ST-CONTEXT-implementation",
+    "--context-file",
+    storyRelativePath,
+    "--context-summary",
+    "Use the canonical story as implementation context.",
+    "--qa",
+    "Who approves?|Owner",
+    "--output-ref",
+    "functional-analysis:functional-analysis-v1:new",
+  ]);
+
+  const contractPath = path.join(project, ".sdlc", "contracts", "contract-ST-CONTEXT-implementation.json");
+  const contract = readJson(contractPath);
+  const source = contract.contextualization.context_sources.find((item) => item.path === storyRelativePath);
+  assert.equal(source.sha256, sha256File(path.join(project, storyRelativePath)));
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-CONTEXT-implementation",
+    ...humanApproval("Approved fresh story-context contract"),
+  ]);
+
+  const started = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--json",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-CONTEXT" }],
+      proposed_phase: "implementation",
+      artifact_type: "functional-analysis",
+    }),
+    "--confirm-start",
+    "--actor-type",
+    "human",
+  ]).stdout);
+  assert.equal(started.execution_allowed, true);
+  assert.deepEqual(started.contract.freshness_gaps, []);
 });
 
 test("phase outputs and story step completion require approved story contracts", () => {
@@ -5800,6 +5951,10 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
   assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
   const destination = path.join(home, "plugins", "agentic-sdlc-codex-plugin");
   assert.equal(fs.existsSync(path.join(destination, ".codex-plugin", "plugin.json")), true);
+  assert.equal(fs.existsSync(path.join(destination, "lib", "change-observatory", "cli.mjs")), true);
+  assert.equal(fs.existsSync(path.join(destination, "ui", "change-observatory", "index.html")), true);
+  assert.equal(fs.existsSync(path.join(destination, "skills", "change-observatory", "SKILL.md")), true);
+  assert.equal(fs.existsSync(path.join(destination, "skills", "change-observatory", "agents", "openai.yaml")), true);
   for (const excluded of [".git", ".sdlc", "test", ".DS_Store"]) {
     assert.equal(fs.existsSync(path.join(destination, excluded)), false, `${excluded} leaked into staged plugin`);
   }
@@ -5988,7 +6143,7 @@ function collectJsonSchemaReferences(value, references = []) {
   return references;
 }
 
-test("npm package installs as a complete reusable plugin", () => {
+test("npm package installs as a complete reusable plugin", async (t) => {
   const invokeNpm = (args, cwd = repoRoot) => {
     const npmCommand = process.env.npm_execpath
       ? process.execPath
@@ -6011,6 +6166,11 @@ test("npm package installs as a complete reusable plugin", () => {
   assert.ok(files.includes(".codex-plugin/plugin.json"));
   assert.ok(files.includes("bin/agentic-sdlc.mjs"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
+  assert.ok(files.includes("lib/change-observatory/cli.mjs"));
+  assert.ok(files.includes("ui/change-observatory/index.html"));
+  assert.ok(files.includes("ui/change-observatory/app.js"));
+  assert.ok(files.includes("skills/change-observatory/SKILL.md"));
+  assert.ok(files.includes("skills/change-observatory/agents/openai.yaml"));
   assert.equal(files.some((file) => file === ".sdlc" || file.startsWith(".sdlc/")), false);
   assert.equal(files.some((file) => file === "test" || file.startsWith("test/")), false);
   assert.equal(files.some((file) => file.endsWith(".DS_Store")), false);
@@ -6028,13 +6188,166 @@ test("npm package installs as a complete reusable plugin", () => {
   ], packageRoot);
   assert.equal(installed.status, 0, `npm install failed\nSTDOUT:\n${installed.stdout}\nSTDERR:\n${installed.stderr}`);
   const installedPluginRoot = path.join(installRoot, "node_modules", "agentic-sdlc-codex-plugin");
+  const installedCli = path.join(installedPluginRoot, "bin", "agentic-sdlc.mjs");
+  const installedBinShim = path.join(
+    installRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "agentic-sdlc.cmd" : "agentic-sdlc",
+  );
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "templates", "sdlc-config.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "cli.mjs")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "ui", "change-observatory", "index.html")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "change-observatory", "SKILL.md")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "change-observatory", "agents", "openai.yaml")), true);
+  assert.equal(fs.existsSync(installedBinShim), true);
   const installedDoctor = spawnSync(
     process.execPath,
-    [path.join(installedPluginRoot, "bin", "agentic-sdlc.mjs"), "doctor", "--root", packageRoot, "--json"],
+    [installedCli, "doctor", "--root", packageRoot, "--json"],
     { cwd: packageRoot, encoding: "utf8", timeout: 30_000 },
   );
   assert.equal(installedDoctor.status, 0, `installed doctor failed\n${installedDoctor.stdout}\n${installedDoctor.stderr}`);
   assert.equal(JSON.parse(installedDoctor.stdout).status, "passed");
+
+  const observedProject = path.join(packageRoot, "observed-project");
+  fs.mkdirSync(observedProject);
+  const initialized = spawnSync(
+    process.execPath,
+    [installedCli, "init", "--root", observedProject, "--project-name", "Installed Observatory", "--force"],
+    { cwd: observedProject, encoding: "utf8", timeout: 30_000 },
+  );
+  assert.equal(initialized.status, 0, `installed init failed\n${initialized.stdout}\n${initialized.stderr}`);
+  fs.writeFileSync(path.join(observedProject, ".sdlc", "config.json"), "{ malformed on purpose\n");
+
+  const observeExecutable = process.platform === "win32" ? process.execPath : installedBinShim;
+  const observatory = spawn(observeExecutable, [
+    ...(process.platform === "win32" ? [installedCli] : []),
+    "observe",
+    "--root",
+    observedProject,
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "0",
+    "--no-open",
+    "--json",
+  ], {
+    cwd: observedProject,
+    env: { ...process.env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let observatoryStdout = "";
+  let observatoryStderr = "";
+  observatory.stdout.setEncoding("utf8");
+  observatory.stderr.setEncoding("utf8");
+  observatory.stdout.on("data", (chunk) => { observatoryStdout += chunk; });
+  observatory.stderr.on("data", (chunk) => { observatoryStderr += chunk; });
+  const closed = new Promise((resolve, reject) => {
+    observatory.once("error", reject);
+    observatory.once("close", (status, signal) => resolve({ status, signal }));
+  });
+  t.after(async () => {
+    if (observatory.exitCode === null && observatory.signalCode === null) {
+      observatory.kill("SIGKILL");
+    }
+    await closed.catch(() => {});
+  });
+
+  const ready = await new Promise((resolve, reject) => {
+    let buffered = "";
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`installed observatory did not become ready\n${observatoryStdout}\n${observatoryStderr}`));
+    }, 15_000);
+    const onData = (chunk) => {
+      buffered += chunk;
+      let newline;
+      while ((newline = buffered.indexOf("\n")) !== -1) {
+        const line = buffered.slice(0, newline).trim();
+        buffered = buffered.slice(newline + 1);
+        if (!line) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (event.event === "observatory.ready") {
+          cleanup();
+          resolve(event);
+          return;
+        }
+      }
+    };
+    const onClose = (status, signal) => {
+      cleanup();
+      reject(new Error(`installed observatory exited before ready (${status ?? signal})\n${observatoryStdout}\n${observatoryStderr}`));
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      observatory.stdout.off("data", onData);
+      observatory.off("close", onClose);
+    };
+    observatory.stdout.on("data", onData);
+    observatory.once("close", onClose);
+  });
+
+  assert.equal(ready.status, "ready");
+  assert.equal(ready.host, "127.0.0.1");
+  assert.equal(ready.browser_open_requested, false);
+  assert.equal(ready.authentication, "per-run-bearer-fragment");
+  const accessUrl = new URL(ready.url);
+  const accessToken = new URLSearchParams(accessUrl.hash.slice(1)).get("access_token");
+  assert.ok(accessToken);
+  assert.equal(accessUrl.origin, new URL(ready.base_url).origin);
+  const authenticatedFetch = (url) => fetch(url, {
+    headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  const healthResponse = await authenticatedFetch(ready.health_url);
+  assert.equal(healthResponse.status, 200);
+  const health = await healthResponse.json();
+  assert.equal(health.status, "ok");
+  assert.equal(health.modelSchemaVersion, "change-observatory:view:v1");
+
+  const modelResponse = await authenticatedFetch(ready.model_url);
+  assert.equal(modelResponse.status, 200);
+  const model = await modelResponse.json();
+  assert.equal(model.schemaVersion, "change-observatory:view:v1");
+  assert.equal(model.project.name, "Installed Observatory");
+  assert.ok(model.diagnostics.some((diagnostic) => diagnostic.code === "invalid_json"));
+
+  const rootResponse = await authenticatedFetch(new URL("/", ready.base_url));
+  assert.equal(rootResponse.status, 200);
+  assert.match(rootResponse.headers.get("content-type") || "", /^text\/html\b/);
+  assert.match(await rootResponse.text(), /<title>Change Observatory<\/title>/);
+
+  const assetResponse = await authenticatedFetch(new URL("/app.js", ready.base_url));
+  assert.equal(assetResponse.status, 200);
+  assert.match(assetResponse.headers.get("content-type") || "", /javascript/);
+  assert.match(await assetResponse.text(), /new ObservatoryApi/);
+
+  assert.equal(observatory.kill("SIGTERM"), true);
+  const stopped = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("installed observatory did not stop")), 10_000);
+    closed.then(
+      (result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+  if (process.platform === "win32") {
+    assert.ok(stopped.status === 0 || stopped.signal === "SIGTERM");
+  } else {
+    assert.equal(stopped.status, 0, observatoryStderr);
+    assert.equal(stopped.signal, null);
+    assert.match(observatoryStdout, /"event":"observatory\.stopped"/);
+  }
 });

@@ -57,6 +57,8 @@ import {
   validateMeteringDeltaIntegrity,
   validateMeteringSnapshotIntegrity,
 } from "../lib/codeburn-metering-adapter.mjs";
+import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
+import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -165,6 +167,7 @@ const BOOLEAN_OPTIONS = new Set([
   "force",
   "help",
   "json",
+  "no-open",
   "preserve-status",
   "release-claim",
   "replace-story-contract",
@@ -236,6 +239,7 @@ const KNOWN_OPTIONS = new Set([
   "format",
   "git-event",
   "handoff-id",
+  "host",
   "host-receipt-file",
   "id",
   "input",
@@ -268,6 +272,7 @@ const KNOWN_OPTIONS = new Set([
   "pr-url",
   "preset",
   "pricing-ref",
+  "port",
   "profile",
   "profile-file",
   "profile-json",
@@ -285,6 +290,7 @@ const KNOWN_OPTIONS = new Set([
   "rationale",
   "reason",
   "reasoning",
+  "rationale-summary",
   "receipt-file",
   "receipt-json",
   "recommendation-file",
@@ -322,6 +328,11 @@ const KNOWN_OPTIONS = new Set([
   "subagent",
   "strict-gate-unit",
   "summary",
+  "input-summary",
+  "output-summary",
+  "explanation",
+  "explanation-kind",
+  "alternative",
   "task-gate",
   "template",
   "template-dir",
@@ -357,6 +368,7 @@ const REPEATABLE_OPTIONS = new Set([
   "allow-use",
   "artifact",
   "assumption",
+  "alternative",
   "capability-binding-file",
   "capability-binding-json",
   "capability-recommendation",
@@ -369,12 +381,14 @@ const REPEATABLE_OPTIONS = new Set([
   "evidence",
   "execution-note",
   "input",
+  "input-summary",
   "item",
   "kb-write",
   "levels",
   "metric",
   "open-item",
   "output",
+  "output-summary",
   "output-ref",
   "qa",
   "question",
@@ -487,6 +501,21 @@ async function main() {
     }
 
     const [command, subcommand, ...rest] = parsed.positionals;
+    if (command === "observe") {
+      try {
+        await runObserveCommand({
+          projectRoot: path.resolve(String(parsed.options.root || process.cwd())),
+          host: parsed.options.host,
+          port: parsed.options.port,
+          openBrowser: parsed.options["no-open"] !== true,
+          json: parsed.options.json === true,
+        });
+      } catch (error) {
+        if (error instanceof TypeError) fail(error.message);
+        throw error;
+      }
+      return;
+    }
     const context = buildContext(parsed.options);
 
     if (command === "init") {
@@ -2302,7 +2331,9 @@ function normalizeRouteIntent(rawIntent, policy, context) {
     errors.push("artifact_type is required for this requested_action");
   }
 
-  const allowedArtifactTypes = new Set(collectOutputArtifactTypes(context, null));
+  const allowedArtifactTypes = new Set(
+    collectOutputArtifactTypes(context, readOutputRegistry(context, { missingOk: true })),
+  );
   if (artifactType && allowedArtifactTypes.size > 0 && !allowedArtifactTypes.has(artifactType)) {
     errors.push(`artifact_type '${artifactType}' is not configured`);
   }
@@ -3172,6 +3203,13 @@ function runDoctor(context, options) {
     ["assessment-skill", "skills/agentic-sdlc-assessment/SKILL.md"],
     ["assessment-agent-card", "skills/agentic-sdlc-assessment/agents/openai.yaml"],
     ["assessment-preset", "templates/technical-assessment.md"],
+    ["observatory-entry-point", "lib/change-observatory/index.mjs"],
+    ["observatory-launcher", "lib/change-observatory/cli.mjs"],
+    ["observatory-skill", "skills/change-observatory/SKILL.md"],
+    ["observatory-agent-card", "skills/change-observatory/agents/openai.yaml"],
+    ["observatory-ui", "ui/change-observatory/index.html"],
+    ["observatory-ui-app", "ui/change-observatory/app.js"],
+    ["observatory-ui-style", "ui/change-observatory/styles.css"],
   ]) {
     const filePath = path.join(PLUGIN_ROOT, relativePath);
     add(id, fs.existsSync(filePath) && fs.statSync(filePath).isFile() ? "passed" : "failed", relativePath);
@@ -3487,6 +3525,7 @@ function approveBaseline(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const baselinePath = baselinePathById(context, id);
+  const reportPath = path.join(baselineRoot(context), `${id}-current-state.md`);
   if (!fs.existsSync(baselinePath)) {
     fail(`Baseline ${id} does not exist`);
   }
@@ -3523,6 +3562,7 @@ function approveBaseline(context, options) {
       run: attribution.run,
     };
     writeJsonFile(baselinePath, baseline, { force: true });
+    writeTextFile(reportPath, renderBaselineReport(baseline), { force: true });
   } finally {
     releaseLock();
   }
@@ -3531,12 +3571,20 @@ function approveBaseline(context, options) {
     summary: approval.summary || `Approved project baseline ${id}`,
     action: "baseline.approve",
     actor: attribution.actor,
-    evidence: [toProjectPath(context, baselinePath), ...approval.evidence.map((item) => item.path)],
+    evidence: [
+      toProjectPath(context, baselinePath),
+      toProjectPath(context, reportPath),
+      ...approval.evidence.map((item) => item.path),
+    ],
     related: [id],
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: baseline.status, baseline_path: baselinePath, approval, baseline }, [`Approved baseline ${id}`]);
+  output(
+    options,
+    { status: baseline.status, baseline_path: baselinePath, report_path: reportPath, approval, baseline },
+    [`Approved baseline ${id}`],
+  );
 }
 
 function showBaselineStatus(context, options) {
@@ -9381,7 +9429,7 @@ function buildOutputTemplateApprovalRequest(context, template) {
 
 function collectContractApprovalRequests(context, storyId = null) {
   return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
-    .filter((contract) => !storyId || contract.story_id === storyId)
+    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, storyId))
     .filter((contract) => collectContractReadinessGaps(context, contract).length === 0)
     .filter((contract) => collectContractDependencyFreshnessGaps(context, contract).length === 0)
     .filter((contract) => contract.human_gate === true && (contract.status !== "approved" || !hasFreshApprovedContractApproval(contract)))
@@ -9416,7 +9464,7 @@ function collectContractApprovalRequests(context, storyId = null) {
 
 function collectContractClarificationRequests(context, storyId = null) {
   return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
-    .filter((contract) => !storyId || contract.story_id === storyId)
+    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, storyId))
     .map((contract) => ({
       contract,
       gaps: [
@@ -9461,7 +9509,10 @@ function collectOutputLinkActionRequests(context, storyId = null) {
   const links = registry?.links || [];
   const requests = [];
   for (const contract of collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))) {
-    if (storyId && contract.story_id !== storyId) {
+    if (
+      !contractMatchesStoryApprovalScope(context, contract, storyId) ||
+      !contractIsActiveStoryContract(context, contract)
+    ) {
       continue;
     }
     if (!isTaskContractApproved(context, contract) || collectContractReadinessGaps(context, contract).length > 0) {
@@ -9518,6 +9569,25 @@ function collectOutputLinkActionRequests(context, storyId = null) {
     }
   }
   return requests;
+}
+
+function contractMatchesStoryApprovalScope(context, contract, storyId = null) {
+  if (!storyId) {
+    return !contract.story_id || contractIsActiveStoryContract(context, contract);
+  }
+  if (contract.story_id !== storyId) {
+    return false;
+  }
+  const story = readStory(context, storyId);
+  return !story?.contract_id || contract.id === story.contract_id;
+}
+
+function contractIsActiveStoryContract(context, contract) {
+  if (!contract.story_id) {
+    return false;
+  }
+  const story = readStory(context, contract.story_id);
+  return Boolean(story?.contract_id && story.contract_id === contract.id);
 }
 
 function humanApprovalFields(fields = {}) {
@@ -10168,6 +10238,7 @@ function linkStoryToContractAfterCreate(context, storyLink, contract, contractPa
     run: contract.audit?.run || buildRunMetadata({}),
   };
   writeJsonFile(storyPath, story, { force: true });
+  refreshContractContextAfterStoryLink(context, contract, contractPath, storyPath);
   appendTraceEvent(context, storyLink.story_id, {
     type: "decision",
     summary: `Linked story ${storyLink.story_id} to contract ${contract.id}`,
@@ -10185,6 +10256,20 @@ function linkStoryToContractAfterCreate(context, storyLink, contract, contractPa
     contract_id: contract.id,
     story_path: storyPath,
   };
+}
+
+function refreshContractContextAfterStoryLink(context, contract, contractPath, storyPath) {
+  const storyProjectPath = toProjectPath(context, storyPath);
+  const sources = contract.contextualization?.context_sources;
+  if (!Array.isArray(sources) || !sources.some((source) => source.path === storyProjectPath)) {
+    return;
+  }
+  const refreshed = buildContextSources(context, [storyProjectPath])[0];
+  contract.contextualization.context_sources = sources.map((source) => (
+    source.path === storyProjectPath ? refreshed : source
+  ));
+  contract.updated_at = now();
+  writeJsonFile(contractPath, contract, { force: true });
 }
 
 function validateContractReadinessForCreate(context, contract, options = {}) {
@@ -13790,6 +13875,12 @@ function appendTrace(context, options) {
   const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
   const attribution = buildAttribution(context, options, `trace.${type}`);
   const gitEvent = options["git-event"] ? normalizeGitEvent(options["git-event"]) : null;
+  let narrative;
+  try {
+    narrative = buildTraceNarrative(options);
+  } catch (error) {
+    fail(error.message);
+  }
   const event = {
     id: `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
     story_id: storyId,
@@ -13801,6 +13892,7 @@ function appendTrace(context, options) {
     action: normalizeScalarOption(options.action, "action") || type,
     evidence: normalizeListOption(options.evidence).map(normalizeProjectPathInput),
     related: normalizeListOption(options.related),
+    ...(narrative ? { narrative } : {}),
     git: {
       ...attribution.git,
       event: gitEvent,
@@ -17754,6 +17846,7 @@ function appendTraceEvent(context, storyId, event) {
     action: event.action || event.type,
     evidence: event.evidence || [],
     related: event.related || [],
+    ...(event.narrative ? { narrative: event.narrative } : {}),
     git: event.git || buildGitMetadata(context.root),
     run: event.run || buildRunMetadata({}),
     created_at: event.created_at || now(),
@@ -17812,7 +17905,8 @@ function gateCheck(context, options) {
     story_id: storyId,
     release_manifest_id: null,
     checked_at: now(),
-    root: context.root,
+    root: ".",
+    root_name: path.basename(context.root),
     actor: attribution.actor,
     git: attribution.git,
     run: attribution.run,
@@ -20473,6 +20567,7 @@ function printHelp() {
   console.log(`Agentic SDLC ${VERSION}
 
 Usage:
+  agentic-sdlc observe [--root path] [--host 127.0.0.1] [--port 0] [--no-open] [--json]
   agentic-sdlc doctor [--root path] [--json]
   agentic-sdlc init [--project-name name] [--project-id id] [--root path]
   agentic-sdlc onboard existing-project [--project-name name] [--document path]
@@ -20568,6 +20663,9 @@ Usage:
       [--outcome passed|failed|blocked|skipped|ready]
       [--actor id] [--requested-by id] [--authorized-by id]
       [--request-summary text] [--git-event push|commit|merge|pull|rebase]
+      [--input-summary text] [--output-summary text] [--rationale-summary text]
+      [--explanation text --explanation-kind codex-generated|deterministic|human-authored]
+      [--alternative text]
   agentic-sdlc sync record --event push [--story ST-001] [--remote origin]
   agentic-sdlc output template propose --type artifact-type [--id id]
       [--from path | --body text | --preset technical-assessment] [--summary text]
@@ -20609,6 +20707,12 @@ Global options:
   --template-dir path    Template directory. Defaults to this plugin's templates.
   --json                 Print JSON output where supported.
   --force                Overwrite generated files where supported.
+
+Change Observatory options:
+  --host 127.0.0.1       Loopback bind address. Other interfaces are rejected.
+  --port n               Local port from 0 to 65535. Defaults to 0 (ephemeral).
+  --no-open              Do not invoke the operating-system browser opener.
+  --json                 Emit compact NDJSON ready/stopped lifecycle events.
 
 Attribution options:
   --actor id             Human, agent, or CI identity responsible for the action.
