@@ -9,6 +9,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Documentation home](docs/README.md) — choose the right guide without knowing the internal record names.
 - [How It Works](docs/how-it-works.md) — the complete two-checkpoint journey, state transitions, authorization, verification, and recovery.
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
+- [Token Efficiency](docs/token-efficiency.md) — compact derived JSON plus optional RTK command-output filtering.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
 - [Change Observatory](docs/change-observatory.md) — launch the local visual lineage app and understand its evidence and security model.

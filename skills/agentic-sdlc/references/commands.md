@@ -296,6 +296,7 @@ node bin/agentic-sdlc.mjs output link \
 ```bash
 node bin/agentic-sdlc.mjs cache rebuild --root <project>
 node bin/agentic-sdlc.mjs cache status --root <project>
+node bin/agentic-sdlc.mjs cache status --root <project> --json --full
 node bin/agentic-sdlc.mjs cache clear --root <project>
 node bin/agentic-sdlc.mjs manifest rebuild --root <project>
 node bin/agentic-sdlc.mjs trace compact --root <project> --story ST-001
@@ -304,10 +305,18 @@ node bin/agentic-sdlc.mjs migration active --root <project> --release-manifest R
 node bin/agentic-sdlc.mjs migration active --root <project> --release-manifest RELEASE-ASSESSMENT-001 --apply
 node bin/agentic-sdlc.mjs index rebuild --root <project>
 node bin/agentic-sdlc.mjs kb search --root <project> "business workflow"
+node bin/agentic-sdlc.mjs kb search --root <project> "business workflow" --json --full
 ```
 
 Cache and indexes are local derived artifacts. They can accelerate context retrieval and output resolution, but canonical requirements, approvals, decisions, tests, traces, and outputs must stay in source-of-truth `.sdlc/` folders.
 If a cached output resolution differs from canonical KB files, the CLI rejects it and asks for `cache rebuild`.
+
+JSON is compact by default at the retrieval boundary: `kb search --json` omits
+the duplicated full-text field, and `cache status --json` omits the complete
+derived cache. Both responses preserve paths and diagnostics and report an
+estimated token reduction. Add `--full` only when the omitted derived payload
+is required; it never changes canonical evidence. Search limits are bounded to
+1-100.
 
 `manifest rebuild` creates a compact, shared KB map under `.sdlc/manifests/`. `trace compact` creates non-destructive summaries under `.sdlc/traces/compactions/`; original JSONL traces remain canonical. `archive closed` writes an archive plan for old reports and compactions and moves files only with `--apply`.
 

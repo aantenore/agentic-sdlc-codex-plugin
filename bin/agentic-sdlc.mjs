@@ -165,6 +165,7 @@ const BOOLEAN_OPTIONS = new Set([
   "approve-install",
   "confirm-start",
   "force",
+  "full",
   "help",
   "json",
   "no-open",
@@ -14577,7 +14578,7 @@ function showCacheStatus(context, options) {
   const status = getCacheStatus(context);
   output(
     options,
-    status,
+    options.full ? status : buildCompactCacheStatus(status),
     [
       status.exists ? `Cache: ${status.valid ? "valid" : "stale"}` : "Cache: missing",
       `Path: ${status.cache_path}`,
@@ -14774,10 +14775,10 @@ function normalizeReportQuery(rawQuery, options = {}) {
   }
   const time = rawQuery.time && typeof rawQuery.time === "object" && !Array.isArray(rawQuery.time) ? rawQuery.time : {};
   const filters = rawQuery.filters && typeof rawQuery.filters === "object" && !Array.isArray(rawQuery.filters) ? rawQuery.filters : {};
-  const limit = Number(rawQuery.limit || options.limit || 50);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-    fail("Report query limit must be an integer between 1 and 500.");
-  }
+  const limit = boundedPositiveInteger(rawQuery.limit ?? options.limit, "limit", {
+    defaultValue: 50,
+    maximum: 500,
+  });
   const sort = String(rawQuery.sort || "created_at_desc");
   if (!["created_at_desc", "created_at_asc", "updated_at_desc", "updated_at_asc", "kind_asc"].includes(sort)) {
     fail("Report query sort must be created_at_desc, created_at_asc, updated_at_desc, updated_at_asc, or kind_asc.");
@@ -17873,7 +17874,10 @@ function searchKnowledgeBase(context, options, rest) {
   if (!query) {
     fail("Provide a query with 'kb search <query>' or --query.");
   }
-  const limit = Number(options.limit || 10);
+  const limit = boundedPositiveInteger(options.limit, "limit", {
+    defaultValue: 10,
+    maximum: 100,
+  });
   const indexStatus = getIndexStatus(context);
   const index = indexStatus.valid ? indexStatus.index : buildIndex(context);
   const terms = tokenize(query);
@@ -17883,9 +17887,29 @@ function searchKnowledgeBase(context, options, rest) {
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 
+  const jsonResults = options.full ? results : results.map(({ entry, score }) => ({
+    score,
+    entry: compactIndexEntry(entry, index.source_hashes?.[entry.path]),
+  }));
+  const omittedBytes = options.full
+    ? 0
+    : results.reduce((total, { entry }) => total + Buffer.byteLength(entry.search_text || "", "utf8"), 0);
   output(
     options,
-    { query, index_status: indexStatus.valid ? "valid" : "rebuilt_in_memory", results },
+    {
+      query,
+      index_status: indexStatus.valid ? "valid" : "rebuilt_in_memory",
+      limit,
+      results: jsonResults,
+      ...(options.full ? {} : {
+        context_optimization: buildContextOptimizationMetadata({
+          profile: "kb-search-compact:v1",
+          omittedFields: ["results[].entry.search_text"],
+          omittedBytes,
+          fullPayloadFlag: "--full",
+        }),
+      }),
+    },
     results.length
       ? results.map(({ entry, score }) => `${score.toFixed(2)} ${entry.path}: ${entry.snippet}`)
       : [`No KB results for '${query}'`],
@@ -18169,7 +18193,10 @@ function showOrchestrationStatus(context, options) {
 function showOrchestrationPlan(context, options) {
   ensureInitialized(context);
   const snapshot = buildOrchestrationSnapshot(context);
-  const limit = Number(options.limit || 20);
+  const limit = boundedPositiveInteger(options.limit, "limit", {
+    defaultValue: 20,
+    maximum: 100,
+  });
   const candidates = snapshot.stories
     .filter((story) => story.orchestration_state === "available")
     .slice(0, limit)
@@ -20559,6 +20586,61 @@ function output(options, jsonPayload, lines) {
   }
 }
 
+function compactIndexEntry(entry, sourceHash = null) {
+  return {
+    path: entry.path,
+    title: entry.title,
+    extension: entry.extension,
+    size_bytes: entry.size_bytes,
+    snippet: entry.snippet,
+    source_hash: sourceHash,
+  };
+}
+
+function buildCompactCacheStatus(status) {
+  const { cache, ...summary } = status;
+  const omittedBytes = cache ? Buffer.byteLength(JSON.stringify(cache), "utf8") : 0;
+  return {
+    ...summary,
+    cache_summary: cache ? {
+      entries: Array.isArray(cache.full_text_index) ? cache.full_text_index.length : 0,
+      source_paths: Array.isArray(cache.source_paths) ? cache.source_paths.length : 0,
+      stories: Object.keys(cache.story_requirement_graph || {}).length,
+      artifact_fingerprints: Object.keys(cache.artifact_fingerprints || {}).length,
+      output_resolutions: Object.keys(cache.output_resolutions || {}).length,
+    } : null,
+    context_optimization: buildContextOptimizationMetadata({
+      profile: "cache-status-compact:v1",
+      omittedFields: cache ? ["cache"] : [],
+      omittedBytes,
+      fullPayloadFlag: "--full",
+    }),
+  };
+}
+
+function buildContextOptimizationMetadata({ profile, omittedFields, omittedBytes, fullPayloadFlag }) {
+  return {
+    profile,
+    lossless_for_reported_fields: true,
+    omitted_fields: omittedFields,
+    omitted_bytes: omittedBytes,
+    estimated_tokens_avoided: Math.ceil(omittedBytes / 4),
+    full_payload_flag: fullPayloadFlag,
+  };
+}
+
+function boundedPositiveInteger(rawValue, label, options = {}) {
+  const defaultValue = options.defaultValue;
+  const maximum = options.maximum;
+  const value = rawValue === undefined || rawValue === null || rawValue === ""
+    ? defaultValue
+    : Number(rawValue);
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    fail(`--${label} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+}
+
 function fail(message) {
   throw new UserError(message);
 }
@@ -20683,7 +20765,7 @@ Usage:
   agentic-sdlc route decide --intent-json json [--text raw] [--json]
   agentic-sdlc route --intent-file path [--text raw] [--json]
   agentic-sdlc cache rebuild
-  agentic-sdlc cache status
+  agentic-sdlc cache status [--json] [--full]
   agentic-sdlc cache clear
   agentic-sdlc manifest rebuild
   agentic-sdlc trace compact [--story ST-001] [--before 90d] [--out path]
@@ -20699,13 +20781,14 @@ Usage:
       [--scope story|release-manifest|all] [--release-manifest id-or-path]
       [--strict] [--out path] [--json]
   agentic-sdlc index rebuild
-  agentic-sdlc kb search <query>
+  agentic-sdlc kb search <query> [--limit 1..100] [--json] [--full]
   agentic-sdlc status
 
 Global options:
   --root path            Target project root. Defaults to current directory.
   --template-dir path    Template directory. Defaults to this plugin's templates.
   --json                 Print JSON output where supported.
+  --full                 Include large derived payloads otherwise omitted from compact JSON.
   --force                Overwrite generated files where supported.
 
 Change Observatory options:

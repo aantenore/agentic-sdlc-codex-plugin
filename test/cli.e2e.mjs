@@ -3930,6 +3930,59 @@ test("cache rebuild includes capability discovery sources", () => {
   assert.equal(cacheFile.source_paths.some((sourcePath) => sourcePath.includes("capability-discovery/profiles/CAP-PROJECT.json")), true);
 });
 
+test("KB search and cache status compact derived JSON without hiding retrievable sources", () => {
+  const project = tmpProject("compact-derived-json");
+  initProject(project);
+  const sourcePath = path.join(project, ".sdlc", "decisions", "DEC-TOKEN-CONTEXT.json");
+  writeJson(sourcePath, {
+    id: "DEC-TOKEN-CONTEXT",
+    title: "Token context reduction",
+    summary: "needle-token-context ".repeat(2_000),
+  });
+  mustRun(["index", "rebuild", "--root", project]);
+
+  const compactSearchRun = mustRun([
+    "kb", "search", "needle-token-context", "--root", project, "--limit", "5", "--json",
+  ]);
+  const compactSearch = JSON.parse(compactSearchRun.stdout);
+  assert.equal(compactSearch.results.length, 1);
+  assert.equal(compactSearch.results[0].entry.path, ".sdlc/decisions/DEC-TOKEN-CONTEXT.json");
+  assert.match(compactSearch.results[0].entry.source_hash, /^[a-f0-9]{64}$/);
+  assert.equal(compactSearch.results[0].entry.search_text, undefined);
+  assert.equal(compactSearch.context_optimization.lossless_for_reported_fields, true);
+  assert.ok(compactSearch.context_optimization.omitted_bytes > 30_000);
+  assert.ok(compactSearch.context_optimization.estimated_tokens_avoided > 7_500);
+  assert.equal(compactSearch.context_optimization.full_payload_flag, "--full");
+
+  const fullSearchRun = mustRun([
+    "kb", "search", "needle-token-context", "--root", project, "--limit", "5", "--json", "--full",
+  ]);
+  const fullSearch = JSON.parse(fullSearchRun.stdout);
+  assert.match(fullSearch.results[0].entry.search_text, /needle-token-context/);
+  assert.ok(fullSearchRun.stdout.length > compactSearchRun.stdout.length * 10);
+
+  for (const invalidLimit of ["0", "1.5", "101", "Infinity"]) {
+    mustFail(
+      ["kb", "search", "needle-token-context", "--root", project, "--limit", invalidLimit, "--json"],
+      /--limit must be an integer between 1 and 100/,
+    );
+  }
+
+  mustRun(["cache", "rebuild", "--root", project]);
+  const compactStatusRun = mustRun(["cache", "status", "--root", project, "--json"]);
+  const compactStatus = JSON.parse(compactStatusRun.stdout);
+  assert.equal(compactStatus.valid, true);
+  assert.equal(compactStatus.cache, undefined);
+  assert.ok(compactStatus.cache_summary.entries > 0);
+  assert.ok(compactStatus.context_optimization.omitted_bytes > 30_000);
+  assert.ok(compactStatus.context_optimization.estimated_tokens_avoided > 7_500);
+
+  const fullStatusRun = mustRun(["cache", "status", "--root", project, "--json", "--full"]);
+  const fullStatus = JSON.parse(fullStatusRun.stdout);
+  assert.ok(Array.isArray(fullStatus.cache.full_text_index));
+  assert.ok(fullStatusRun.stdout.length > compactStatusRun.stdout.length * 10);
+});
+
 test("dependency graph blocks orchestration and strict gate until upstream is satisfied", () => {
   const project = tmpProject("dependencies-block");
   initProject(project);
