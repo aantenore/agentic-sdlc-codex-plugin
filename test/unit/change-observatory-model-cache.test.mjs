@@ -45,7 +45,10 @@ test("structured stat signatures preserve canonical revision bytes for ASCII and
     "ad048030affb2833a823d71ea862079464232cd1818d5b1733fd291c2db5bda8",
   );
 
-  const unicodeDirectory = path.join(fixture.projectRoot, ".sdlc", "data-東京-🚆");
+  // Keep this fixture inside the BMP. Node.js 18 on Windows can reject a
+  // non-BMP path while its temporary parent is being finalized, which tests
+  // the runner rather than the cache's UTF-8 canonicalization.
+  const unicodeDirectory = path.join(fixture.projectRoot, ".sdlc", "data-東京-鉄道");
   await fs.mkdir(unicodeDirectory);
   await fs.writeFile(
     path.join(unicodeDirectory, "record-β.json"),
@@ -56,7 +59,7 @@ test("structured stat signatures preserve canonical revision bytes for ASCII and
   const unicodeRevision = await computeCanonicalRevision(fixture.projectRoot);
   assert.equal(
     unicodeRevision,
-    "c128246375ffe5d88650e18ba79fa38fd2c008587c6e5e09820a46de57bba2ef",
+    "e627a95b2d1da928c7989e77e5e99ef12c96a5592d48438dac6025be239b8cc4",
   );
   assert.equal(await computeCanonicalRevision(fixture.projectRoot), unicodeRevision);
 });
@@ -276,6 +279,25 @@ test("metadata-only drift refreshes signatures without changing content revision
   assert.equal(await computeCanonicalRevision(fixture.projectRoot), initialRevision);
 
   assert.equal(await cache.get(), initial);
+  assert.equal(await cache.get(), initial);
+  assert.equal(builds, 1);
+});
+
+test("directory timestamp drift does not invalidate an unchanged entry snapshot", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const knowledgeBase = path.join(fixture.projectRoot, ".sdlc");
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  const initial = await cache.get();
+
+  await fs.utimes(knowledgeBase, new Date(), new Date(Date.now() + 60_000));
+
   assert.equal(await cache.get(), initial);
   assert.equal(builds, 1);
 });
