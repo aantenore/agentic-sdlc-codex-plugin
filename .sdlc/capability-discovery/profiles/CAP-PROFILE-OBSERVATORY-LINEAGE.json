@@ -41,33 +41,65 @@
     {
       "type": "context_file",
       "path": "lib/change-observatory/normalizer.mjs",
-      "sha256": "9aaa0da3f4dced97037315952718940fab9ea1e6d7fca6a44e10fac216d09111",
-      "size_bytes": 45056,
+      "sha256": "3c9b1f2e685f8b0435475351914733f2e38cc7bad4d46a1adf610819d82c915f",
+      "size_bytes": 74042,
       "excerpt": "import fs from node fs/promises ; import path from node path ; import CANONICAL_SOURCE_EXTENSIONS OBSERVATORY_VIEW_SCHEMA_VERSION SDLC_PHASES normalizeObservatoryLimits from ./constants.mjs ; import ObservatoryPathError isContainedPath resolveKnowledgeBaseBoundary resolveProjectBoundary from ./path-safety.mjs ; import INTENTABI_REDACTED_OBSERVATION_PATH isCanonicalIntentAbiObservationPath isIntentAbiCodexEnvelopeCandidate isIntentAbiObservationPath projectIntentAbiCodexEnvelope from ./intentabi-adapter.mjs ; import rankSummaryItems from ./summary-ranking.mjs ; const SUPPORTED_EXTENSIONS = new ",
       "trust": "untrusted_project_evidence"
     },
     {
       "type": "context_file",
+      "path": "lib/change-observatory/source-reader.mjs",
+      "sha256": "4fc060bcadeb898863ca050f5ec0fa36701dac1d5ba88f384f50e617abd9cbef",
+      "size_bytes": 10800,
+      "excerpt": "import crypto from node crypto ; import fs from node fs/promises ; import path from node path ; import CANONICAL_SOURCE_EXTENSIONS OBSERVATORY_SOURCE_SCHEMA_VERSION normalizeObservatoryLimits from ./constants.mjs ; import ObservatoryPathError normalizePortableRelativePath resolveExistingFileWithin resolveKnowledgeBaseBoundary from ./path-safety.mjs ; import INTENTABI_REDACTED_OBSERVATION_PATH isCanonicalIntentAbiObservationPath isIntentAbiCodexEnvelopeCandidate isIntentAbiObservationPath projectIntentAbiCodexEnvelope from ./intentabi-adapter.mjs ; const DERIVED_PREFIXES = .sdlc/cache .sdlc/ind",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "context_file",
       "path": "ui/change-observatory/model.js",
-      "sha256": "4fc3ebe87526589953e163e3f798a314c85f356ad77d70f02d112788a06d2ce5",
-      "size_bytes": 17172,
-      "excerpt": "export const VIEW_MODEL_SCHEMA = change-observatory view v1 ; export const PHASES = Object.freeze( discovery analysis design implementation validation release ); const PROVENANCE = new Set( recorded inferred missing malformed ); const PHASE_STATES = new Set( complete inProgress blocked missing ); const INTENTABI_OUTCOME_REASONS = new Map( candidate-observed new Set( CANDIDATE_ATTESTED ) identity new Set( IDENTITY_ATTESTED ) bypass new Set( NON_TEXT_INPUT REQUEST_ID_INVALID INPUT_LIMIT_EXCEEDED ) preparer-fault new Set( PREPARER_FAULT ) preparer-timeout new Set( PREPARATION_TIMEOUT_UNCANCELLED ",
+      "sha256": "e9d89f2228023ff814cd32a955044a5ce5f2e23a8f3b39dab312dde99999dc59",
+      "size_bytes": 29229,
+      "excerpt": "export const VIEW_MODEL_SCHEMA = change-observatory view v1 ; export const DOSSIER_SCHEMA = change-observatory iteration-dossier v1 ; export const DOSSIER_LANES = Object.freeze( Object.freeze( key asked label Asked ) Object.freeze( key decided label Decided ) Object.freeze( key contract label Contract ) Object.freeze( key done label Done ) Object.freeze( key verified label Verified ) ); export const PHASES = Object.freeze( discovery analysis design implementation validation release ); const PROVENANCE = new Set( recorded inferred missing malformed ); const PHASE_STATES = new Set( complete inPr",
       "trust": "untrusted_project_evidence"
     },
     {
       "type": "context_file",
       "path": "ui/change-observatory/components.js",
-      "sha256": "909c97caf8d78da0411e6e2fc0d7e509d6f37e552eee1aed1c44781236fe43af",
-      "size_bytes": 26178,
-      "excerpt": "import PHASES filterIterations firstSummaryItem formatTimestamp groupChangesByIntent narrativeFor rawHrefForPath rawTargetFor readable recordSelectionKey sentenceCase from ./model.js ; const SVG_NAMESPACE = http //www.w3.org/2000/svg ; function node(tag options = children = ) const element = document.createElement(tag); if (options.className) element.className = options.className; if (options.text !== undefined) element.textContent = options.text; for (const name value of Object.entries(options.attrs ?? )) if (value !== null && value !== undefined) element.setAttribute(name String(value)); for",
+      "sha256": "a1d7de1d8ea0aeca90bfb975259296e343c5141c34fe678c9fcd3ecb93f2a0da",
+      "size_bytes": 36680,
+      "excerpt": "import DOSSIER_LANES PHASES filterIterations firstSummaryItem formatTimestamp groupChangesByIntent narrativeFor rawHrefForPath rawTargetFor readable recordSelectionKey sentenceCase from ./model.js ; const SVG_NAMESPACE = http //www.w3.org/2000/svg ; function node(tag options = children = ) const element = document.createElement(tag); if (options.className) element.className = options.className; if (options.text !== undefined) element.textContent = options.text; for (const name value of Object.entries(options.attrs ?? )) if (value !== null && value !== undefined) element.setAttribute(name Strin",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "context_file",
+      "path": "ui/change-observatory/app.js",
+      "sha256": "71613b095b58e88dcfe9f3ee215d9ded68b14e18eb74d45e958a71ec52912d14",
+      "size_bytes": 11128,
+      "excerpt": "import ObservatoryApi accessTokenFromHash from ./api.js ; import phaseSelectionId phaseSelectionItem renderDiagnostics renderFatalError renderInspector renderPrimary renderProjectControls renderSummary from ./components.js ; import rawTargetFor recordSelectionKey from ./model.js ; const VALID_VIEWS = new Set( overview timeline contracts decisions changes intent-evidence verification ); const elements = app document.querySelector( #app ) navigation document.querySelector( #primary-navigation ) navToggle document.querySelector(' data-action= toggle-navigation ') summary document.querySelector( #",
       "trust": "untrusted_project_evidence"
     },
     {
       "type": "context_file",
       "path": "test/unit/change-observatory-normalizer.test.mjs",
-      "sha256": "a2a674a13c40f74ff79dd69069d88afc7b5f4e5fc27ccc99f98006a7865d79d8",
-      "size_bytes": 25581,
+      "sha256": "bee482abe96ee9eefbd62647fb5c1ea7b652823011f59ee7c36ddef05b45201f",
+      "size_bytes": 38732,
       "excerpt": "import assert from node assert/strict ; import fs from node fs/promises ; import os from node os ; import path from node path ; import test from node test ; import OBSERVATORY_VIEW_SCHEMA_VERSION buildObservatoryViewModel readSourceRecord from ../../lib/change-observatory/index.mjs ; const FIXED_TIME = 2026-07-16T09 00 00.000Z ; const INTENTABI_EVENT_ID = 123e4567-e89b-42d3-a456-426614174000 ; const INTENTABI_PATH = `.sdlc/observations/intentabi/$ INTENTABI_EVENT_ID .json`; function intentAbiEnvelope(overrides = ) const digest = (character) => `hmac-sha256 evidence $ character.repeat(64) `; re",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "context_file",
+      "path": "test/unit/change-observatory-ui.test.mjs",
+      "sha256": "5dd0c3bfd76b1e33071df3d4047e773da4ea4b5f2ffb4aa3d639d7f7e95a9830",
+      "size_bytes": 29382,
+      "excerpt": "import test from node test ; import assert from node assert/strict ; import readFile from node fs/promises ; import ObservatoryApi ObservatoryApiError accessTokenFromHash from ../../ui/change-observatory/api.js ; import DOSSIER_LANES DOSSIER_SCHEMA PHASES VIEW_MODEL_SCHEMA filterIterations groupChangesByIntent isCanonicalEvidencePath narrativeFor normalizeDossier normalizeViewModel rawHrefForPath recordSelectionKey safeRawHref from ../../ui/change-observatory/model.js ; import parsePreviewPort from ../helpers/change-observatory-preview-server.mjs ; const UI_ROOT = new URL( ../../ui/change-obse",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "context_file",
+      "path": "docs/change-observatory.md",
+      "sha256": "d383e1c664497674437ade12302c77d6b8e327f06f057fa8eb5bece64cc8cbf6",
+      "size_bytes": 8679,
+      "excerpt": "# Change Observatory Change Observatory is the visual local-first lineage reader bundled with Agentic SDLC. It turns canonical `.sdlc/` records into a presentation that a non-technical stakeholder can start with and a technical reviewer can drill through to raw evidence. ## Launch After Installation In Codex ask ```text Open the Change Observatory for this project. ``` The installed `Change Observatory` skill resolves its own plugin root and runs the plugin-local CLI. It does not assume that `agentic-sdlc` is globally available in `PATH`. An npm Git or tarball installation that exposes the pac",
       "trust": "untrusted_project_evidence"
     },
     {
@@ -84,26 +116,34 @@
   "confidence": 0.7,
   "source_paths": [
     ".sdlc/requirements/REQ-CHANGE-OBSERVATORY-001.json",
+    "docs/change-observatory.md",
     "lib/change-observatory/normalizer.mjs",
+    "lib/change-observatory/source-reader.mjs",
     "package.json",
     "test/unit/change-observatory-normalizer.test.mjs",
+    "test/unit/change-observatory-ui.test.mjs",
+    "ui/change-observatory/app.js",
     "ui/change-observatory/components.js",
     "ui/change-observatory/model.js"
   ],
   "source_hashes": {
     ".sdlc/requirements/REQ-CHANGE-OBSERVATORY-001.json": "9ec73e0068d07a3af918d6075accbb09502422f42f67b34b69bc1ecb1b6f3af5",
-    "lib/change-observatory/normalizer.mjs": "9aaa0da3f4dced97037315952718940fab9ea1e6d7fca6a44e10fac216d09111",
-    "package.json": "9af4b2bee3d9004bfa40427251472648588f7b03096439736cb00bcabb4ad764",
-    "test/unit/change-observatory-normalizer.test.mjs": "a2a674a13c40f74ff79dd69069d88afc7b5f4e5fc27ccc99f98006a7865d79d8",
-    "ui/change-observatory/components.js": "909c97caf8d78da0411e6e2fc0d7e509d6f37e552eee1aed1c44781236fe43af",
-    "ui/change-observatory/model.js": "4fc3ebe87526589953e163e3f798a314c85f356ad77d70f02d112788a06d2ce5"
+    "docs/change-observatory.md": "d383e1c664497674437ade12302c77d6b8e327f06f057fa8eb5bece64cc8cbf6",
+    "lib/change-observatory/normalizer.mjs": "3c9b1f2e685f8b0435475351914733f2e38cc7bad4d46a1adf610819d82c915f",
+    "lib/change-observatory/source-reader.mjs": "4fc060bcadeb898863ca050f5ec0fa36701dac1d5ba88f384f50e617abd9cbef",
+    "package.json": "c30a4e2a9e97c50176b89e5dfd52055e319fe4da7f244902e53d804c66baa016",
+    "test/unit/change-observatory-normalizer.test.mjs": "bee482abe96ee9eefbd62647fb5c1ea7b652823011f59ee7c36ddef05b45201f",
+    "test/unit/change-observatory-ui.test.mjs": "5dd0c3bfd76b1e33071df3d4047e773da4ea4b5f2ffb4aa3d639d7f7e95a9830",
+    "ui/change-observatory/app.js": "71613b095b58e88dcfe9f3ee215d9ded68b14e18eb74d45e958a71ec52912d14",
+    "ui/change-observatory/components.js": "a1d7de1d8ea0aeca90bfb975259296e343c5141c34fe678c9fcd3ecb93f2a0da",
+    "ui/change-observatory/model.js": "e9d89f2228023ff814cd32a955044a5ce5f2e23a8f3b39dab312dde99999dc59"
   },
   "approvals": [
     {
-      "id": "APR-20260717073059-427f38",
+      "id": "APR-20260717081134-fdce91",
       "profile_id": "CAP-PROFILE-OBSERVATORY-LINEAGE",
       "status": "approved",
-      "summary": "Approved under Antonio's delegated lineage-completion scope: local repository evidence, Node tests, and loopback browser QA only; no install, external access, deployment, secret, or destructive capability.",
+      "summary": "Approved under Antonio's exact final local-only authorization: final repository evidence, Node checks, and loopback browser QA only; no install, external, deployment, secret, production, or destructive capability.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "CAP-PROFILE-OBSERVATORY-LINEAGE",
@@ -114,13 +154,12 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-OBSERVATORY-LINEAGE-V1",
-        "approval_level": "Complete the installed Change Observatory causal lineage experience with one new local-only story: refresh current project context, approve the exact lineage dossier work brief and capability boundary, confirm task start, implement and validate; excludes installs, external services, deployment, secrets, destructive actions, production access, and unrelated work.",
+        "authorization_ref": "AUTH-OBSERVATORY-LINEAGE-FINAL-V1",
+        "approval_level": "Finalize only the local Agentic SDLC 0.10.0 proof-bound iteration dossier after code, documentation, adversarial tests, package checks, and loopback browser QA; refresh and approve exact current baseline, capability profile, capability recommendation, v2 implementation contract, task start, and implementation-evidence delivery; excludes installs, external access, deployment, secrets, production, destructive actions, and unrelated work.",
         "allowed_actions": [
           "task.start.confirm",
           "contract.approve",
           "baseline.approve",
-          "breakdown.approve",
           "capability.approve",
           "capability.profile.approve"
         ],
@@ -128,12 +167,12 @@
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-OBSERVATORY-LINEAGE-V1",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-OBSERVATORY-LINEAGE-V1/AUSE-AUTH-OBSERVATORY-LINEAGE-V1-20260717073059462-6ef14b.json",
+      "authorization_ref": "AUTH-OBSERVATORY-LINEAGE-FINAL-V1",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-OBSERVATORY-LINEAGE-FINAL-V1/AUSE-AUTH-OBSERVATORY-LINEAGE-FINAL-V1-20260717081134584-86d9a9.json",
       "authorization_action": "capability.profile.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "0c632871e53d351fdbbbad16047367747e47d88cdcc0c908d32b88b24d7582fc",
+      "approved_content_hash": "be5fda0a82c4acffc0247300b412809b1de38d5b34d0cff93d4e1ebb3494a2d7",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -145,7 +184,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-OBSERVATORY-LINEAGE",
-        "head_sha": "ff0c9d4e7b883fa3b07926904843e60dedc832d2",
+        "head_sha": "8525e94187af2af6912d3ee96ab71bbf81127088",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -160,13 +199,13 @@
         "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
         "session_id": null,
         "tool": "agentic-sdlc-cli",
-        "version": "0.9.0"
+        "version": "0.10.0"
       },
-      "created_at": "2026-07-17T07:30:59.464Z"
+      "created_at": "2026-07-17T08:11:34.586Z"
     }
   ],
-  "created_at": "2026-07-17T07:30:53.595Z",
-  "updated_at": "2026-07-17T07:30:59.464Z",
+  "created_at": "2026-07-17T08:11:29.498Z",
+  "updated_at": "2026-07-17T08:11:34.586Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -178,7 +217,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-OBSERVATORY-LINEAGE",
-      "head_sha": "ff0c9d4e7b883fa3b07926904843e60dedc832d2",
+      "head_sha": "8525e94187af2af6912d3ee96ab71bbf81127088",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -193,7 +232,7 @@
       "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.9.0"
+      "version": "0.10.0"
     },
     "approved_by": {
       "id": "codex",
