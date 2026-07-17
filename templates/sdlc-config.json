@@ -7,6 +7,7 @@
     "budgets",
     "context-optimization",
     "contracts",
+    "autonomy",
     "authorizations",
     "authorization-uses",
     "receipts",
@@ -472,6 +473,105 @@
     "require_proposal_binding_for_assessments": true,
     "require_validity_at_use_receipt": true
   },
+  "autonomy_policy": {
+    "enabled": true,
+    "mode": "enforce_new_only",
+    "principle": "Autonomy is negotiated per requirement as a ceiling and selected again for every pull request or local release. A downstream delivery, contract, capability, environment, or budget may narrow that level but never widen it.",
+    "storage_root": "autonomy",
+    "requirement_profile_schema": "schemas/requirement-execution-profile.schema.json",
+    "delivery_profile_schema": "schemas/delivery-execution-profile.schema.json",
+    "decision_schema": "schemas/autonomy-decision.schema.json",
+    "allowed_levels": [
+      "supervised",
+      "checkpointed",
+      "bounded-autonomous"
+    ],
+    "default_requirement_ceiling": "supervised",
+    "legacy_default": "supervised",
+    "fail_closed_on_unknown": true,
+    "require_explicit_delivery_selection": true,
+    "bounded_autonomous_requires_host_verified": true,
+    "delivery_kinds": [
+      "pull_request",
+      "local_release"
+    ],
+    "presets": {
+      "supervised": {
+        "automatic_phases": [],
+        "checkpoints": [
+          "contract.approve",
+          "task.start.confirm",
+          "story.claim",
+          "story.complete-step",
+          "output.link",
+          "sync.commit",
+          "sync.push",
+          "sync.pr",
+          "release.local",
+          "pull_request.merge",
+          "deploy.remote"
+        ]
+      },
+      "checkpointed": {
+        "automatic_phases": [
+          "analysis",
+          "design",
+          "implementation",
+          "validation"
+        ],
+        "checkpoints": [
+          "release.local",
+          "pull_request.merge",
+          "deploy.remote"
+        ]
+      },
+      "bounded-autonomous": {
+        "automatic_phases": [
+          "analysis",
+          "design",
+          "implementation",
+          "validation",
+          "release"
+        ],
+        "checkpoints": [
+          "pull_request.merge",
+          "deploy.remote"
+        ]
+      }
+    },
+    "exception_triggers": [
+      "requirement-change",
+      "scope-expansion",
+      "new-write-path",
+      "new-tool-or-capability",
+      "environment-change",
+      "budget-extension",
+      "secret-access",
+      "external-access",
+      "production-access",
+      "global-install",
+      "destructive-action",
+      "irreversible-migration",
+      "security-privacy-compliance-decision",
+      "gate-bypass",
+      "protected-branch-merge",
+      "remote-deploy",
+      "external-publication"
+    ],
+    "pull_request": {
+      "require_repository": true,
+      "require_base_branch": true,
+      "require_head_branch": true,
+      "never_reuse_for_another_delivery": true
+    },
+    "local_release": {
+      "require_target_root": true,
+      "require_smoke_test": true,
+      "require_rollback": true,
+      "writes_outside_workspace_require_checkpoint": true,
+      "machine_global_changes_require_checkpoint": true
+    }
+  },
   "release_evidence_policy": {
     "manifest_schema": "schemas/release-manifest.schema.json",
     "gate_receipt_schema": "schemas/release-gate-receipt.schema.json",
@@ -797,6 +897,7 @@
       "assessments",
       "budgets",
       "contracts",
+      "autonomy",
       "authorizations",
       "authorization-uses",
       "receipts",
