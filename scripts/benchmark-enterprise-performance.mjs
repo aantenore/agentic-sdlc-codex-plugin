@@ -715,6 +715,7 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
     });
     child.on("message", (message) => {
       try {
+        if (protocolState === "complete_received" || protocolState === "terminal") return;
         if (message?.type === OBSERVATORY_READY_MESSAGE) {
           if (protocolState !== "awaiting_ready") {
             throw new Error(`Observatory server worker sent ready while ${protocolState}`);
@@ -792,6 +793,11 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
             );
           }
           protocolState = "complete_received";
+          // A valid completion owns the protocol transition. The primary work
+          // deadline no longer applies; only the bounded process-exit deadline
+          // may classify a worker that stays alive after completion.
+          clearTimeout(timeout);
+          timeout = null;
           completionExitTimeout = setTimeout(() => {
             failAndStop(new Error(
               "Observatory server worker did not exit after snapshot completion",

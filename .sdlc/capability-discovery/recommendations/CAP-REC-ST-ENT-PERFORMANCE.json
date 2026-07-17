@@ -5,8 +5,8 @@
   "profile_id": "CAP-PROFILE-ST-ENT-PERFORMANCE",
   "profile_ref": {
     "path": ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-ENT-PERFORMANCE.json",
-    "approved_content_hash": "2f9cff072b21ec8ee9028018eb46fbcb02a4a88984866cba8ef5af331bc46f4e",
-    "current_content_hash": "2f9cff072b21ec8ee9028018eb46fbcb02a4a88984866cba8ef5af331bc46f4e"
+    "approved_content_hash": "699f150573c4d932809d3ec88f446061a2dd2411ae88045b8b99a833a92b6bfa",
+    "current_content_hash": "699f150573c4d932809d3ec88f446061a2dd2411ae88045b8b99a833a92b6bfa"
   },
   "recommendations": [
     {
@@ -129,10 +129,10 @@
   "source_hashes": {},
   "approvals": [
     {
-      "id": "APR-20260717161213-028f8d",
+      "id": "APR-20260717205950-a61a0b",
       "recommendation_id": "CAP-REC-ST-ENT-PERFORMANCE",
       "status": "approved",
-      "summary": "Use the existing local repository and Node test runner only; no new capability or installation.",
+      "summary": "Rebound the unchanged local repo, test, review, and knowledge-base tool set to the refreshed Performance evidence; no install or external permission was added.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "CAP-REC-ST-ENT-PERFORMANCE",
@@ -143,27 +143,25 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-        "approval_level": "Autonomous completion of approved requirement REQ-ENTERPRISE-CONTROL-PLANE-001-R2 through the eight reserved local delivery stories only.",
+        "authorization_ref": "AUTH-ENT-PERFORMANCE-FINALIZE-001",
+        "approval_level": "Refresh unchanged Performance references, approve the replacement work brief and exact profile for this same pull request, and reconfirm the already approved task start; no new scope, installation, external access, or release target.",
         "allowed_actions": [
-          "task.start.confirm",
-          "capability.approve",
           "autonomy.delivery.approve",
-          "capability.profile.approve",
-          "dependency.approve",
           "contract.approve",
-          "breakdown.approve"
+          "capability.profile.approve",
+          "capability.approve",
+          "task.start.confirm"
         ],
         "subject_scope": "capability-recommendation"
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENTERPRISE-PROGRAM-001/AUSE-AUTH-ENTERPRISE-PROGRAM-001-20260717161213967-993506.json",
+      "authorization_ref": "AUTH-ENT-PERFORMANCE-FINALIZE-001",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-PERFORMANCE-FINALIZE-001/AUSE-AUTH-ENT-PERFORMANCE-FINALIZE-001-20260717205950932-d446fe.json",
       "authorization_action": "capability.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "48c6d4f0cf01a1fc81aed2d14120c6dfeb64326c6ca3b5d6538e881f8ec51346",
+      "approved_content_hash": "dca5c917965e18be6f097d0da06cf6043defea8b78bc7328f627f69f8ca0a19c",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -175,7 +173,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PERFORMANCE",
-        "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+        "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -192,11 +190,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-17T16:12:13.969Z"
+      "created_at": "2026-07-17T20:59:50.934Z"
     }
   ],
-  "created_at": "2026-07-17T16:12:09.825Z",
-  "updated_at": "2026-07-17T16:12:13.969Z",
+  "created_at": "2026-07-17T20:59:50.654Z",
+  "updated_at": "2026-07-17T20:59:50.934Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -208,7 +206,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

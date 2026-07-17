@@ -117,6 +117,14 @@ flowchart LR
 
 During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
 
+## Command-Scoped Canonical Queries
+
+Each read-heavy command opens one bounded query session over the canonical `.sdlc` tree. The session builds its sorted file catalog lazily once, memoizes parsed JSON and JSONL by content hash, and reuses small deterministic indexes for story, requirement, output, dependency, and trace lookups. This removes repeated directory walks and all-pairs joins without changing command output, exit codes, or the source of truth.
+
+The session never treats configured derived directories such as `.sdlc/cache/` or `.sdlc/indexes/` as canonical input. Writers invalidate the affected session state; a later command can always rebuild it from source files. Paths still pass through the canonical store boundary, including traversal, outside-root, and symlink checks.
+
+The reproducible enterprise benchmark exercises 1,000 source files, 1,000 stories, 10,000 work records, 5,000 dependency edges, and 100,000 trace events. It enforces a single catalog build, complete deterministic counts, platform-specific query and warm-response latency budgets, and a bounded RSS budget on Unix and Windows.
+
 ## Existing Project Baseline
 
 Existing repositories do not have a reliable SDLC history. The plugin creates a baseline of the observable current state instead of inventing past decisions.
@@ -188,7 +196,9 @@ flowchart LR
 
 The evaluator computes the most restrictive result across host, project, requirement, delivery, contract, capability, environment, and budget. A downstream layer can only narrow authority. Multiple linked requirements use the lowest ceiling. Missing, unknown, stale, expired, revoked, or materially drifted inputs fail closed.
 
-The three levels are `supervised`, `checkpointed`, and `bounded-autonomous`. `audit_only` authority is capped at `checkpointed`, including for local targets. Effective `bounded-autonomous` requires an external host/CI Ed25519 receipt for the exact delivery-profile approval subject, `authority_policy.mode: host_verified`, its public key in `trusted_host_keys`, and that receipt at approval time. The CLI validates but cannot self-issue trusted authority. Previous delivery history may support a recommendation but is not an input that can increase authority.
+In user-facing language, the three choices mean: work together at every important step, let the agent proceed between agreed checkpoints, or let it complete the agreed PR independently. The choice is made separately for each PR or local release and never carries over automatically. The interface leads with what the agent may do, when it will stop, and where the choice applies; implementation codes appear only in technical details.
+
+Internally those levels are `supervised`, `checkpointed`, and `bounded-autonomous`. `audit_only` authority is capped at `checkpointed`, including for local targets. Effective `bounded-autonomous` requires an external host/CI Ed25519 receipt for the exact delivery-profile approval subject, `authority_policy.mode: host_verified`, its public key in `trusted_host_keys`, and that receipt at approval time. The CLI validates but cannot self-issue trusted authority. Previous delivery history may support a recommendation but is not an input that can increase authority.
 
 Delivery profiles are exact and terminal. One profile binds exactly one story and its one approved contract; an agreed aggregation story/contract is required when several changes must ship together. A pull-request profile binds repository, base branch, head branch, canonical actions, explicit write paths, material scope, and requirement profile hashes. A local-release profile binds a local target root, allowed writes/actions, shell-free JSON-argv smoke tests, and rollback while keeping external, production, and destructive access false. Neither profile may be reused for another delivery. Protected-branch merge and remote or production deployment are explicit exceptions.
 

@@ -6506,6 +6506,24 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     if (missing.length > 0) {
       fail(`git.commit --scope-path is not currently changed or untracked: ${missing.join(", ")}.`);
     }
+    const stagedPaths = [...new Set(String(
+      execGit(context.root, ["diff", "--cached", "--name-only", "--no-renames", "HEAD", "--"]) || "",
+    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+    if (stableJson(stagedPaths) !== stableJson(changedPaths)) {
+      fail("git.commit requires the staged file set to match the exact --scope-path set before authorization.");
+    }
+    const unstagedScopePaths = [...new Set(String(
+      execGit(context.root, ["diff", "--name-only", "--no-renames", "--", ...changedPaths]) || "",
+    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+    if (unstagedScopePaths.length > 0) {
+      fail(`git.commit scope has unstaged changes after staging: ${unstagedScopePaths.join(", ")}.`);
+    }
+    const unmergedScope = String(
+      execGit(context.root, ["ls-files", "--unmerged", "--", ...changedPaths]) || "",
+    ).trim();
+    if (unmergedScope) {
+      fail("git.commit scope contains unmerged index entries.");
+    }
   }
   const allowedPaths = profile.constraints?.allowed_write_paths || [];
   const outOfScope = changedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
@@ -6520,6 +6538,20 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     changed_paths: changedPaths,
     allowed_write_paths: allowedPaths,
   };
+  if (action === "git.commit") {
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    const indexTreeOid = String(execGit(context.root, ["write-tree"]) || "").trim();
+    if (!/^(?:sha1|sha256)$/u.test(objectFormat) || !/^[a-f0-9]{40,64}$/u.test(indexTreeOid)) {
+      fail("git.commit could not bind the staged index to a canonical Git tree.");
+    }
+    details.commit_snapshot = {
+      schema_version: "git-commit-index-snapshot:v1",
+      object_format: objectFormat,
+      source_head_sha: runtimeTarget.head_sha,
+      index_tree_oid: indexTreeOid,
+      staged_paths: changedPaths,
+    };
+  }
   if (action === "git.push") {
     const remote = getOptionString(options, "remote") || (runtimeTarget.matching_remotes.length === 1
       ? runtimeTarget.matching_remotes[0]
@@ -6589,6 +6621,26 @@ function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
   const authorizedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
   if (committedPaths.length === 0 || stableJson(committedPaths) !== stableJson(authorizedPaths)) {
     fail("git.commit completion file set differs from the exact authorized --scope-path set.");
+  }
+  const commitSnapshot = authorization.action_details?.commit_snapshot;
+  const requiresCommitSnapshot = Boolean(authorization.action_details?.checkpoint_policy?.policy_source_ref);
+  if (requiresCommitSnapshot && !commitSnapshot) {
+    fail("git.commit authorization is missing its required staged index snapshot.");
+  }
+  if (commitSnapshot) {
+    const committedTreeOid = String(
+      execGit(context.root, ["rev-parse", `${afterSha}^{tree}`]) || "",
+    ).trim();
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    if (
+      commitSnapshot.schema_version !== "git-commit-index-snapshot:v1"
+      || commitSnapshot.object_format !== objectFormat
+      || commitSnapshot.source_head_sha !== beforeSha
+      || stableJson(commitSnapshot.staged_paths) !== stableJson(authorizedPaths)
+      || commitSnapshot.index_tree_oid !== committedTreeOid
+    ) {
+      fail("git.commit commit tree differs from the exact staged index authorized at the checkpoint.");
+    }
   }
   const allowedPaths = authorization.action_details?.allowed_write_paths || [];
   const outOfScope = committedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
@@ -6810,19 +6862,20 @@ function observeGitHubMergePrecondition(profile, actionDetails) {
 }
 
 function remoteAuthorizationProjection(action, actionDetails) {
+  const { checkpoint_policy: _checkpointPolicy, ...operationDetails } = actionDetails || {};
   if (action === "git.push") {
     const {
       push_precondition: _pushPrecondition,
       base_precondition: _basePrecondition,
       ...projection
-    } = actionDetails || {};
+    } = operationDetails;
     return projection;
   }
   if (action === "pull_request.merge") {
-    const { merge_precondition: _precondition, ...projection } = actionDetails || {};
+    const { merge_precondition: _precondition, ...projection } = operationDetails;
     return projection;
   }
-  return actionDetails;
+  return operationDetails;
 }
 
 function normalizeSmokeTestCommand(value) {
@@ -6946,23 +6999,59 @@ function validateLocalReleaseFilesystemBoundary(target) {
   }
 }
 
-function localReleaseBoundaryRequiresCheckpoint(context, target) {
+function localReleaseGlobalRoots(platform = process.platform) {
+  return platform === "win32"
+    ? [process.env.ProgramFiles, process.env.ProgramData]
+        .filter(Boolean)
+        .map((item) => path.resolve(item))
+        .sort()
+    : ["/Applications", "/Library", "/usr", "/opt"].map((item) => path.resolve(item)).sort();
+}
+
+function localReleaseBoundarySource(context, target) {
   validateLocalReleaseFilesystemBoundary(target);
   const realWorkspace = fs.realpathSync.native(context.root);
   const realTarget = fs.realpathSync.native(path.resolve(target.root_path));
   const policy = context.config.autonomy_policy?.local_release || {};
-  if (policy.writes_outside_workspace_require_checkpoint !== false && !isInsidePath(realWorkspace, realTarget)) {
-    return true;
-  }
-  if (policy.machine_global_changes_require_checkpoint !== false) {
-    const globalRoots = process.platform === "win32"
-      ? [process.env.ProgramFiles, process.env.ProgramData].filter(Boolean).map((item) => path.resolve(item))
-      : ["/Applications", "/Library", "/usr", "/opt"].map((item) => path.resolve(item));
-    if (globalRoots.some((rootPath) => isInsidePath(rootPath, realTarget))) {
-      return true;
-    }
-  }
-  return false;
+  const globalRoots = localReleaseGlobalRoots();
+  return {
+    schema_version: "delivery-local-boundary-source:v1",
+    target_hash: hashApprovalSubject(target),
+    platform: process.platform,
+    workspace_real_path: realWorkspace,
+    target_real_path: realTarget,
+    global_roots: globalRoots,
+    target_outside_workspace: !isInsidePath(realWorkspace, realTarget),
+    target_machine_global: globalRoots.some((rootPath) => isInsidePath(rootPath, realTarget)),
+    writes_outside_workspace_require_checkpoint:
+      policy.writes_outside_workspace_require_checkpoint !== false,
+    machine_global_changes_require_checkpoint:
+      policy.machine_global_changes_require_checkpoint !== false,
+  };
+}
+
+function recordedPathInside(platform, parent, child) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const relative = pathApi.relative(pathApi.resolve(parent), pathApi.resolve(child));
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${pathApi.sep}`)
+    && !pathApi.isAbsolute(relative)
+  );
+}
+
+function localReleaseBoundaryCheckpointFromSource(source) {
+  return (
+    source.writes_outside_workspace_require_checkpoint === true
+    && source.target_outside_workspace === true
+  ) || (
+    source.machine_global_changes_require_checkpoint === true
+    && source.target_machine_global === true
+  );
+}
+
+function localReleaseBoundaryRequiresCheckpoint(context, target) {
+  return localReleaseBoundaryCheckpointFromSource(localReleaseBoundarySource(context, target));
 }
 
 function normalizeGitRepositoryIdentity(value) {
@@ -7771,21 +7860,336 @@ function deliveryTargetAllowedActions(profile) {
     : profile.local_release_target?.allowed_actions || [];
 }
 
+const DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS = Object.freeze(["deploy.remote", "pull_request.merge"]);
+
+function deliveryCheckpointPolicySourcesRoot(context) {
+  return path.join(context.sdlcRoot, "autonomy", "policy-sources");
+}
+
+function buildDeliveryCheckpointPolicySource(context) {
+  const effectiveConfig = structuredClone(context.config);
+  const effectiveConfigHash = hashApprovalSubject(effectiveConfig);
+  if (effectiveConfigHash !== context.configState.effective_config_hash) {
+    fail("Effective configuration changed while preparing the delivery checkpoint policy source.");
+  }
+  const sourceBase = {
+    kind: "delivery_checkpoint_policy_source",
+    schema_version: "delivery-checkpoint-policy-source:v1",
+    config: {
+      status: context.configState.status,
+      path: context.configState.config_path || `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      raw_hash: context.configState.raw_config_hash || null,
+      effective_hash: effectiveConfigHash,
+      defaults_profile: context.configState.defaults_profile
+        ? structuredClone(context.configState.defaults_profile)
+        : null,
+      inherited_paths: [...(context.configState.inherited_paths || [])],
+    },
+    effective_config: effectiveConfig,
+  };
+  const source = {
+    ...sourceBase,
+    source_hash: hashApprovalSubject(sourceBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  const sourcePath = path.join(deliveryCheckpointPolicySourcesRoot(context), `${source.source_hash}.json`);
+  return {
+    source,
+    sourcePath,
+    ref: {
+      path: toProjectPath(context, sourcePath),
+      hash: source.source_hash,
+      effective_config_hash: effectiveConfigHash,
+    },
+  };
+}
+
+function validateDeliveryCheckpointPolicySource(context, source, expectedRef = null) {
+  const errors = [];
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return { valid: false, errors: ["checkpoint policy source is not an object"] };
+  }
+  if (source.kind !== "delivery_checkpoint_policy_source") {
+    errors.push("checkpoint policy source kind is invalid");
+  }
+  if (source.schema_version !== "delivery-checkpoint-policy-source:v1") {
+    errors.push("checkpoint policy source schema version is unsupported");
+  }
+  if (source.hash_algorithm !== "sha256:stable-json:v1") {
+    errors.push("checkpoint policy source hash algorithm is invalid");
+  }
+  const { source_hash: storedHash, hash_algorithm: _hashAlgorithm, ...sourceBase } = source;
+  const expectedSourceHash = hashApprovalSubject(sourceBase);
+  if (storedHash !== expectedSourceHash) {
+    errors.push("checkpoint policy source hash is invalid");
+  }
+  const effectiveConfigHash = source.effective_config
+    && typeof source.effective_config === "object"
+    && !Array.isArray(source.effective_config)
+    ? hashApprovalSubject(source.effective_config)
+    : null;
+  if (!effectiveConfigHash || source.config?.effective_hash !== effectiveConfigHash) {
+    errors.push("checkpoint policy source does not reproduce its effective config hash");
+  }
+  if (
+    !source.config
+    || typeof source.config !== "object"
+    || Array.isArray(source.config)
+    || typeof source.config.path !== "string"
+    || source.config.path.length === 0
+    || !Array.isArray(source.config.inherited_paths)
+    || stableJson(source.config.inherited_paths) !== stableJson([...new Set(source.config.inherited_paths)].sort())
+  ) {
+    errors.push("checkpoint policy source config identity is invalid");
+  }
+  const defaultsProfile = source.config?.defaults_profile;
+  if (defaultsProfile !== null && (
+    !defaultsProfile
+    || typeof defaultsProfile !== "object"
+    || Array.isArray(defaultsProfile)
+    || typeof defaultsProfile.id !== "string"
+    || defaultsProfile.id.length === 0
+    || !/^[a-f0-9]{64}$/u.test(defaultsProfile.sha256 || "")
+  )) {
+    errors.push("checkpoint policy source defaults profile is invalid");
+  }
+  if (expectedRef && (
+    expectedRef.hash !== storedHash
+    || expectedRef.effective_config_hash !== effectiveConfigHash
+  )) {
+    errors.push("checkpoint policy source reference is stale");
+  }
+  return { valid: errors.length === 0, errors, effectiveConfigHash };
+}
+
+function persistDeliveryCheckpointPolicySource(context, preparedSource) {
+  fs.mkdirSync(deliveryCheckpointPolicySourcesRoot(context), { recursive: true });
+  const releaseLock = acquireFileLock(`${preparedSource.sourcePath}.lock`);
+  try {
+    if (fs.existsSync(preparedSource.sourcePath)) {
+      const existing = readProjectJson(context, preparedSource.sourcePath);
+      const validation = validateDeliveryCheckpointPolicySource(context, existing, preparedSource.ref);
+      if (!validation.valid || stableJson(existing) !== stableJson(preparedSource.source)) {
+        fail(`Delivery checkpoint policy source ${preparedSource.ref.path} is stale or tampered.`);
+      }
+      return preparedSource.ref;
+    }
+    writeJsonFile(preparedSource.sourcePath, preparedSource.source, { atomicCreate: true });
+    return preparedSource.ref;
+  } finally {
+    releaseLock();
+  }
+}
+
+function readDeliveryCheckpointPolicySource(context, sourceRef) {
+  if (!sourceRef?.path || !sourceRef?.hash || !sourceRef?.effective_config_hash) {
+    throw new Error("checkpoint policy source reference is incomplete");
+  }
+  const sourcePath = resolveProjectFilePath(context, sourceRef.path, { mustExist: true, fileOnly: true });
+  const sourcesRoot = path.resolve(deliveryCheckpointPolicySourcesRoot(context));
+  const relative = path.relative(sourcesRoot, sourcePath);
+  if (
+    !relative
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+    || path.dirname(relative) !== "."
+    || path.basename(relative, ".json") !== sourceRef.hash
+  ) {
+    throw new Error("checkpoint policy source reference escapes its content-addressed store");
+  }
+  const source = readProjectJson(context, sourcePath);
+  const validation = validateDeliveryCheckpointPolicySource(context, source, sourceRef);
+  if (!validation.valid) {
+    throw new Error(validation.errors.join("; "));
+  }
+  return source;
+}
+
 function deliveryActionCheckpointRequired(context, profile, effectiveLevel, action) {
-  const preset = context.config.autonomy_policy?.presets?.[effectiveLevel] || {};
-  const checkpoints = new Set([
-    ...normalizeListValue(preset.checkpoints, []),
-    ...(profile.checkpoints || []),
-  ]);
+  const presetCheckpoints = [...new Set(normalizeListValue(
+    context.config.autonomy_policy?.presets?.[effectiveLevel]?.checkpoints,
+    [],
+  ))].sort();
+  const profileCheckpoints = [...new Set(profile.checkpoints || [])].sort();
+  const checkpoints = new Set([...presetCheckpoints, ...profileCheckpoints]);
+  const boundaryActions = [...DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS];
+  const localBoundarySource = profile.delivery_kind === "local_release"
+    ? localReleaseBoundarySource(context, profile.local_release_target)
+    : null;
   const localBoundaryCheckpoint = profile.delivery_kind === "local_release"
-    && localReleaseBoundaryRequiresCheckpoint(context, profile.local_release_target);
+    && localReleaseBoundaryCheckpointFromSource(localBoundarySource);
   return {
     required: effectiveLevel === "supervised"
       || checkpoints.has(action)
-      || ["pull_request.merge", "deploy.remote"].includes(action)
+      || boundaryActions.includes(action)
       || localBoundaryCheckpoint,
     checkpoints: [...checkpoints].sort(),
+    preset_checkpoints: presetCheckpoints,
+    profile_checkpoints: profileCheckpoints,
+    boundary_actions: boundaryActions,
+    local_boundary_checkpoint: localBoundaryCheckpoint,
+    local_boundary_source: localBoundarySource,
   };
+}
+
+function deliveryActionCheckpointPolicySnapshot(
+  context,
+  profile,
+  effectiveLevel,
+  action,
+  actionPolicy,
+  policySourceRef = buildDeliveryCheckpointPolicySource(context).ref,
+) {
+  const snapshot = {
+    schema_version: "delivery-action-checkpoint-policy:v1",
+    action,
+    delivery_kind: profile.delivery_kind,
+    effective_level: effectiveLevel,
+    profile_ref: { id: profile.id, hash: profile.profile_hash },
+    preset_checkpoints: actionPolicy.preset_checkpoints,
+    policy_source_ref: policySourceRef,
+    profile_checkpoints: actionPolicy.profile_checkpoints,
+    boundary_actions: actionPolicy.boundary_actions,
+    local_boundary_checkpoint: actionPolicy.local_boundary_checkpoint,
+    local_boundary_source: actionPolicy.local_boundary_source,
+    local_boundary_source_hash: actionPolicy.local_boundary_source
+      ? hashApprovalSubject(actionPolicy.local_boundary_source)
+      : null,
+    required: actionPolicy.required,
+  };
+  return { ...snapshot, policy_hash: hashApprovalSubject(snapshot) };
+}
+
+function validateDeliveryActionCheckpointPolicySnapshot(context, snapshot, profile, effectiveLevel, action) {
+  const errors = [];
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return { valid: false, required: null, errors: ["checkpoint policy snapshot is missing"] };
+  }
+  const { policy_hash: policyHash, ...subject } = snapshot;
+  const sortedUnique = (values) => Array.isArray(values)
+    && values.every((value) => typeof value === "string" && value.length > 0)
+    && stableJson(values) === stableJson([...new Set(values)].sort());
+  if (snapshot.schema_version !== "delivery-action-checkpoint-policy:v1") {
+    errors.push("checkpoint policy snapshot has an unsupported schema version");
+  }
+  if (policyHash !== hashApprovalSubject(subject)) {
+    errors.push("checkpoint policy snapshot hash is invalid");
+  }
+  if (
+    snapshot.action !== action
+    || snapshot.delivery_kind !== profile.delivery_kind
+    || snapshot.effective_level !== effectiveLevel
+  ) {
+    errors.push("checkpoint policy snapshot is bound to a different action boundary");
+  }
+  if (snapshot.profile_ref?.id !== profile.id || snapshot.profile_ref?.hash !== profile.profile_hash) {
+    errors.push("checkpoint policy snapshot is bound to a different delivery profile");
+  }
+  if (
+    !sortedUnique(snapshot.preset_checkpoints)
+    || !sortedUnique(snapshot.profile_checkpoints)
+    || !sortedUnique(snapshot.boundary_actions)
+  ) {
+    errors.push("checkpoint policy snapshot contains a non-canonical action set");
+  }
+  const immutableProfileCheckpoints = [...new Set(profile.checkpoints || [])].sort();
+  if (stableJson(snapshot.profile_checkpoints) !== stableJson(immutableProfileCheckpoints)) {
+    errors.push("checkpoint policy snapshot disagrees with immutable profile checkpoints");
+  }
+  if (stableJson(snapshot.boundary_actions) !== stableJson(DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS)) {
+    errors.push("checkpoint policy snapshot disagrees with protected boundary actions");
+  }
+  let policySource = null;
+  try {
+    policySource = readDeliveryCheckpointPolicySource(context, snapshot.policy_source_ref);
+  } catch (error) {
+    errors.push(`checkpoint policy snapshot source is invalid: ${error.message}`);
+  }
+  const sourcePresetCheckpoints = policySource
+    ? [...new Set(normalizeListValue(
+        policySource.effective_config?.autonomy_policy?.presets?.[effectiveLevel]?.checkpoints,
+        [],
+      ))].sort()
+    : null;
+  if (sourcePresetCheckpoints && stableJson(sourcePresetCheckpoints) !== stableJson(snapshot.preset_checkpoints)) {
+    errors.push("checkpoint policy snapshot disagrees with its content-addressed preset source");
+  }
+  if (profile.delivery_kind === "local_release") {
+    const localSource = snapshot.local_boundary_source;
+    const recordedGlobalRoots = Array.isArray(localSource?.global_roots)
+      ? [...new Set(localSource.global_roots)].sort()
+      : null;
+    const expectedOutsideWorkspace = localSource
+      && typeof localSource.workspace_real_path === "string"
+      && typeof localSource.target_real_path === "string"
+      && typeof localSource.platform === "string"
+      ? !recordedPathInside(
+          localSource.platform,
+          localSource.workspace_real_path,
+          localSource.target_real_path,
+        )
+      : null;
+    const expectedMachineGlobal = recordedGlobalRoots && typeof localSource?.target_real_path === "string"
+      ? recordedGlobalRoots.some((rootPath) => recordedPathInside(
+          localSource.platform,
+          rootPath,
+          localSource.target_real_path,
+        ))
+      : null;
+    const sourceLocalPolicy = policySource?.effective_config?.autonomy_policy?.local_release || null;
+    if (
+      !localSource
+      || typeof localSource !== "object"
+      || Array.isArray(localSource)
+      || localSource.schema_version !== "delivery-local-boundary-source:v1"
+      || localSource.target_hash !== hashApprovalSubject(profile.local_release_target)
+      || !["aix", "darwin", "freebsd", "linux", "openbsd", "sunos", "win32"].includes(localSource.platform)
+      || typeof localSource.workspace_real_path !== "string"
+      || localSource.workspace_real_path.length === 0
+      || typeof localSource.target_real_path !== "string"
+      || localSource.target_real_path.length === 0
+      || !recordedGlobalRoots
+      || stableJson(localSource.global_roots) !== stableJson(recordedGlobalRoots)
+      || typeof localSource.target_outside_workspace !== "boolean"
+      || localSource.target_outside_workspace !== expectedOutsideWorkspace
+      || typeof localSource.target_machine_global !== "boolean"
+      || localSource.target_machine_global !== expectedMachineGlobal
+      || typeof localSource.writes_outside_workspace_require_checkpoint !== "boolean"
+      || typeof localSource.machine_global_changes_require_checkpoint !== "boolean"
+      || localSource.writes_outside_workspace_require_checkpoint
+        !== (sourceLocalPolicy?.writes_outside_workspace_require_checkpoint !== false)
+      || localSource.machine_global_changes_require_checkpoint
+        !== (sourceLocalPolicy?.machine_global_changes_require_checkpoint !== false)
+      || snapshot.local_boundary_source_hash !== hashApprovalSubject(localSource)
+    ) {
+      errors.push("checkpoint policy snapshot has an invalid local-boundary source binding");
+    } else if (
+      snapshot.local_boundary_checkpoint !== localReleaseBoundaryCheckpointFromSource(localSource)
+    ) {
+      errors.push("checkpoint policy snapshot local-boundary flag is not derived from its recorded source");
+    }
+  } else if (
+    snapshot.local_boundary_checkpoint !== false
+    || snapshot.local_boundary_source !== null
+    || snapshot.local_boundary_source_hash !== null
+  ) {
+    errors.push("checkpoint policy snapshot unexpectedly records a local-boundary source");
+  }
+  if (typeof snapshot.local_boundary_checkpoint !== "boolean" || typeof snapshot.required !== "boolean") {
+    errors.push("checkpoint policy snapshot has invalid checkpoint flags");
+  }
+  const checkpoints = new Set([
+    ...(Array.isArray(snapshot.preset_checkpoints) ? snapshot.preset_checkpoints : []),
+    ...(Array.isArray(snapshot.profile_checkpoints) ? snapshot.profile_checkpoints : []),
+  ]);
+  const expectedRequired = effectiveLevel === "supervised"
+    || checkpoints.has(action)
+    || (Array.isArray(snapshot.boundary_actions) && snapshot.boundary_actions.includes(action))
+    || snapshot.local_boundary_checkpoint === true;
+  if (snapshot.required !== expectedRequired) {
+    errors.push("checkpoint policy snapshot does not reproduce its required flag");
+  }
+  return { valid: errors.length === 0, required: expectedRequired, errors };
 }
 
 function deliveryActionReceipts(context, profileId) {
@@ -7915,6 +8319,26 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     || authorization.checkpoint_required !== actionPolicy.required
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
+  }
+  const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
+  if (checkpointSnapshot) {
+    const snapshotValidation = validateDeliveryActionCheckpointPolicySnapshot(
+      context,
+      checkpointSnapshot,
+      profile,
+      decision.effective_level,
+      authorization.action,
+    );
+    const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+      context,
+      profile,
+      decision.effective_level,
+      authorization.action,
+      actionPolicy,
+    );
+    if (!snapshotValidation.valid || stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+      fail(`Delivery action authorization ${authorization.id} has a stale or invalid checkpoint policy snapshot.`);
+    }
   }
   if (!actionPolicy.required) return;
   if (authorization.approval?.status !== "approved") {
@@ -8138,6 +8562,7 @@ function evaluateDeliveryAction(context, options) {
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
       fail("Delivery action completion --outcome must be passed or failed.");
     }
+    const preparedPolicySource = completingAction ? null : buildDeliveryCheckpointPolicySource(context);
     let actionDetails = completingAction
       ? null
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
@@ -8155,6 +8580,19 @@ function evaluateDeliveryAction(context, options) {
     }
     if (!completingAction && action === "pull_request.merge") {
       actionDetails = { ...actionDetails, merge_precondition: observeGitHubMergePrecondition(profile, actionDetails) };
+    }
+    if (!completingAction) {
+      actionDetails = {
+        ...actionDetails,
+        checkpoint_policy: deliveryActionCheckpointPolicySnapshot(
+          context,
+          profile,
+          decision.effective_level,
+          action,
+          actionPolicy,
+          preparedPolicySource.ref,
+        ),
+      };
     }
     if (!completingAction && checkpointRequired && options["confirm-action"] !== true) {
       const guidance = actionCheckpointGuidance({
@@ -8343,6 +8781,9 @@ function evaluateDeliveryAction(context, options) {
       hash_algorithm: "sha256:stable-json:v1",
     };
     assertRecordSchema(receipt, "delivery-action-receipt.schema.json", `Delivery action receipt ${receipt.id}`);
+    if (!completingAction) {
+      persistDeliveryCheckpointPolicySource(context, preparedPolicySource);
+    }
     const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
     writeJsonFile(receiptPath, receipt, { atomicCreate: true });
     const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
@@ -25161,14 +25602,34 @@ function validateCompletedGitCommitReceipt(context, report, receipt, authorizati
     execGit(context.root, ["diff", "--name-only", "--no-renames", commit.before_sha, commit.after_sha]) || "",
   ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
   const expectedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
+  const commitSnapshot = authorization.action_details?.commit_snapshot;
+  const requiresCommitSnapshot = Boolean(authorization.action_details?.checkpoint_policy?.policy_source_ref);
+  let snapshotValid = true;
+  if (requiresCommitSnapshot && !commitSnapshot) {
+    snapshotValid = false;
+  } else if (commitSnapshot) {
+    const committedTreeOid = String(
+      execGit(context.root, ["rev-parse", `${commit.after_sha}^{tree}`]) || "",
+    ).trim();
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    snapshotValid = commitSnapshot.schema_version === "git-commit-index-snapshot:v1"
+      && commitSnapshot.object_format === objectFormat
+      && commitSnapshot.source_head_sha === commit.before_sha
+      && stableJson(commitSnapshot.staged_paths) === stableJson(expectedPaths)
+      && commitSnapshot.index_tree_oid === committedTreeOid;
+  } else {
+    const warning = `${label} uses a legacy git.commit authorization without a staged index snapshot`;
+    if (!report.warnings.includes(warning)) report.warnings.push(warning);
+  }
   if (
     commitAndParents.length !== 2
     || commitAndParents[0] !== commit.after_sha
     || commitAndParents[1] !== commit.before_sha
     || stableJson(commit.committed_paths) !== stableJson(expectedPaths)
     || stableJson(committedPaths) !== stableJson(expectedPaths)
+    || !snapshotValid
   ) {
-    report.errors.push(`${label} does not prove one exact non-merge commit for its authorized file set`);
+    report.errors.push(`${label} does not prove one exact non-merge commit with the authorized staged tree and file set`);
   }
 }
 
@@ -25234,6 +25695,8 @@ function validateCompletedRemoteActionReceipt(report, receipt, authorization, la
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  const historical = state.lifecycle_status === "terminal"
+    || effectiveDeliveryProfileStatus(context, profile).status === "revoked";
   let expectedEffectiveLevel = "supervised";
   try {
     const start = state.start_receipt;
@@ -25250,29 +25713,38 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     ) {
       report.errors.push(`${label} immutable start receipt has a stale or tampered autonomy decision`);
     } else {
-      const { decision: freshStartDecision } = evaluateDeliveryAutonomy(context, profile, {
-        id: startDecision.id,
-        phase: startDecision.phase || undefined,
-        evaluated_at: startDecision.evaluated_at,
-        allowHistorical: true,
-        deliveryStateOverride: {
-          delivery_id: profile.delivery_id,
-          status: "open",
-          active_run_count: 1,
-        },
-      });
-      if (stableJson(autonomyDecisionSemanticProjection(startDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshStartDecision))) {
-        report.errors.push(`${label} immutable start decision is not reproducible from its exact profile inputs`);
+      expectedEffectiveLevel = startDecision.effective_level;
+      if (!historical) {
+        const { decision: freshStartDecision } = evaluateDeliveryAutonomy(context, profile, {
+          id: startDecision.id,
+          phase: startDecision.phase || undefined,
+          evaluated_at: startDecision.evaluated_at,
+          allowHistorical: true,
+          deliveryStateOverride: {
+            delivery_id: profile.delivery_id,
+            status: "open",
+            active_run_count: 1,
+          },
+        });
+        if (stableJson(autonomyDecisionSemanticProjection(startDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshStartDecision))) {
+          report.errors.push(`${label} immutable start decision is not reproducible from its exact profile inputs`);
+        }
+        expectedEffectiveLevel = freshStartDecision.effective_level;
       }
-      expectedEffectiveLevel = freshStartDecision.effective_level;
     }
     const currentContract = readContractById(context, start.contract_ref.id, { missingOk: true });
     const currentStory = readStory(context, start.story_ref.id);
+    const profileContractRef = (profile.contract_refs || []).find((ref) => ref.id === start.contract_ref.id);
+    const profileStoryRef = (profile.story_refs || []).find((ref) => ref.id === start.story_ref.id);
     if (
       !currentContract
       || !currentStory
+      || !profileContractRef
+      || !profileStoryRef
+      || start.contract_ref.hash !== profileContractRef.hash
+      || start.story_ref.hash !== profileStoryRef.hash
       || start.contract_ref.hash !== hashApprovalSubject(currentContract)
-      || start.story_ref.hash !== hashApprovalSubject(currentStory)
+      || (!historical && start.story_ref.hash !== hashApprovalSubject(currentStory))
       || start.contract_approval_hash !== latestContractApproval(currentContract)?.approved_content_hash
       || start.delivery?.id !== profile.delivery_id
       || start.delivery?.kind !== profile.delivery_kind
@@ -25284,12 +25756,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     const taskReceiptPath = path.join(context.sdlcRoot, "stories", start.story_ref.id, "task-start.json");
     if (fs.existsSync(taskReceiptPath)) {
       const taskReceipt = readProjectJson(context, taskReceiptPath);
-      if (
+      const belongsToThisExecution = taskReceipt.delivery_start_receipt_ref?.id === start.id
+        || taskReceipt.delivery_profile_ref?.id === profile.id;
+      if ((!historical || belongsToThisExecution) && (
         taskReceipt.delivery_start_receipt_ref?.id !== start.id
         || taskReceipt.delivery_start_receipt_ref?.hash !== start.receipt_hash
         || taskReceipt.route !== start.route
         || taskReceipt.phase !== start.phase
-      ) {
+      )) {
         report.errors.push(`${label} immutable start receipt disagrees with its task-start receipt`);
       }
     }
@@ -25316,19 +25790,55 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
-    const actionPolicy = deliveryActionCheckpointRequired(
-      context,
-      profile,
-      expectedEffectiveLevel,
-      receipt.action,
-    );
+    const actionPolicy = historical
+      ? null
+      : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
     if (receipt.effective_level !== expectedEffectiveLevel) {
       report.errors.push(`${actionLabel} effective level differs from the immutable delivery start decision`);
     }
-    if (receipt.checkpoint_required !== actionPolicy.required) {
-      report.errors.push(`${actionLabel} checkpoint flag does not match the current exact profile policy`);
+    const checkpointSnapshot = receipt.action_details?.checkpoint_policy;
+    const snapshotValidation = checkpointSnapshot
+      ? validateDeliveryActionCheckpointPolicySnapshot(
+          context,
+          checkpointSnapshot,
+          profile,
+          expectedEffectiveLevel,
+          receipt.action,
+        )
+      : null;
+    if (snapshotValidation && !snapshotValidation.valid) {
+      report.errors.push(`${actionLabel} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
     }
-    if (actionPolicy.required && receipt.status === "authorized") {
+    let checkpointRequired = actionPolicy?.required ?? false;
+    if (historical && snapshotValidation?.valid) {
+      checkpointRequired = snapshotValidation.required;
+    } else if (historical) {
+      const immutableLegacyCheckpoint = expectedEffectiveLevel === "supervised"
+        || (profile.checkpoints || []).includes(receipt.action)
+        || DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS.includes(receipt.action)
+        || receipt.action === "release.local";
+      if (immutableLegacyCheckpoint && receipt.checkpoint_required !== true) {
+        report.errors.push(`${actionLabel} omits a checkpoint required by its immutable legacy boundary`);
+      }
+      checkpointRequired = receipt.checkpoint_required === true;
+      const legacyWarning = `${label} uses legacy action receipts without an event-time checkpoint policy snapshot; immutable boundaries and recorded approvals were verified`;
+      if (!report.warnings.includes(legacyWarning)) report.warnings.push(legacyWarning);
+    } else if (checkpointSnapshot && snapshotValidation?.valid) {
+      const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+        context,
+        profile,
+        expectedEffectiveLevel,
+        receipt.action,
+        actionPolicy,
+      );
+      if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+        report.errors.push(`${actionLabel} checkpoint policy snapshot is stale for the current exact policy source`);
+      }
+    }
+    if (receipt.checkpoint_required !== checkpointRequired) {
+      report.errors.push(`${actionLabel} checkpoint flag does not match its exact action policy`);
+    }
+    if (checkpointRequired && receipt.status === "authorized") {
       if (receipt.approval?.status !== "approved") {
         report.errors.push(`${actionLabel} is missing its required formal checkpoint approval`);
       }
@@ -25638,17 +26148,13 @@ function validateAutonomyRecords(context, report, storyId = null) {
       report.errors.push(`${label} references a missing or stale delivery profile`);
     } else {
       const executionState = currentDeliveryExecutionState(context, profile);
-      if (executionState.lifecycle_status !== "terminal") {
+      const revoked = effectiveDeliveryProfileStatus(context, profile).status === "revoked";
+      if (executionState.lifecycle_status !== "terminal" && !revoked) {
         try {
-          const revoked = effectiveDeliveryProfileStatus(context, profile).status === "revoked";
           const { decision: freshDecision } = evaluateDeliveryAutonomy(context, profile, {
             id: decision.id,
             phase: decision.phase || undefined,
             evaluated_at: decision.evaluated_at,
-            allowHistorical: revoked,
-            deliveryStateOverride: revoked
-              ? { delivery_id: profile.delivery_id, status: "open", active_run_count: 0 }
-              : undefined,
           });
           if (stableJson(autonomyDecisionSemanticProjection(decision)) !== stableJson(autonomyDecisionSemanticProjection(freshDecision))) {
             report.errors.push(`${label} does not match a fresh deterministic evaluation of its bound profile`);
@@ -26127,41 +26633,71 @@ function validateProtectedAutonomyTrace(context, report, event, label) {
     "release.local": "release.local",
   }[event.action];
   if (!mappedAction) return;
-  const story = readStory(context, event.story_id);
-  const contract = story?.contract_id
-    ? readContractById(context, story.contract_id, { missingOk: true })
-    : null;
-  const profileId = contract?.delivery_execution_profile_id;
-  if (!profileId) return;
-  let receipts;
-  try {
-    receipts = deliveryActionReceipts(context, profileId).filter((receipt) => receipt.action === mappedAction);
-  } catch (error) {
-    report.errors.push(`${label} cannot validate protected action receipts: ${error.message}`);
-    return;
-  }
   const requiredStatus = event.action === mappedAction && event.outcome === "ready"
     ? "authorized"
     : "completed";
   const evidence = new Set(Array.isArray(event.evidence) ? event.evidence : []);
-  const matching = receipts.filter((receipt) => {
-    const receiptPath = toProjectPath(
-      context,
-      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
-    );
-    if (receipt.status !== requiredStatus || !evidence.has(receiptPath)) return false;
-    if (event.action === "sync.commit" && event.git?.after_sha) {
-      return receipt.action_details?.commit?.after_sha === event.git.after_sha;
+  const related = new Set(Array.isArray(event.related) ? event.related : []);
+  const actionsRoot = path.resolve(autonomyActionsRoot(context));
+  const matching = [];
+  for (const evidencePath of evidence) {
+    try {
+      const resolved = resolveProjectFilePath(context, evidencePath, { mustExist: true, fileOnly: true });
+      const relative = path.relative(actionsRoot, resolved);
+      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || path.dirname(relative) !== ".") {
+        continue;
+      }
+      const receipt = readDeliveryLifecycleReceipt(
+        context,
+        resolved,
+        "delivery-action-receipt.schema.json",
+      );
+      const profile = readDeliveryAutonomyProfile(context, receipt.profile_ref?.id || "missing", { missingOk: true });
+      const executionState = profile ? currentDeliveryExecutionState(context, profile) : null;
+      const start = executionState?.start_receipt;
+      const startStoryRef = (profile?.story_refs || []).find((ref) => ref.id === start?.story_ref?.id);
+      if (
+        !profile
+        || !start
+        || receipt.profile_ref?.hash !== profile.profile_hash
+        || receipt.delivery?.id !== profile.delivery_id
+        || receipt.delivery?.kind !== profile.delivery_kind
+        || start.profile_ref?.id !== profile.id
+        || start.profile_ref?.hash !== profile.profile_hash
+        || start.delivery?.id !== profile.delivery_id
+        || start.delivery?.kind !== profile.delivery_kind
+        || start.story_ref?.id !== event.story_id
+        || !startStoryRef
+        || start.story_ref?.hash !== startStoryRef.hash
+        || !related.has(profile.id)
+        || !related.has(profile.delivery_id)
+        || receipt.action !== mappedAction
+        || receipt.status !== requiredStatus
+        || path.basename(resolved) !== `${normalizeId(receipt.id)}.json`
+      ) {
+        continue;
+      }
+      if (event.action === "sync.commit" && event.git?.after_sha
+        && receipt.action_details?.commit?.after_sha !== event.git.after_sha) {
+        continue;
+      }
+      if (event.action === "sync.push" && (
+        (event.git?.after_sha && receipt.action_details?.push?.source_sha !== event.git.after_sha)
+        || (event.git?.remote && receipt.action_details?.push?.remote !== event.git.remote)
+      )) {
+        continue;
+      }
+      if (event.action === "sync.merge" && event.git?.pr_url
+        && canonicalAbsoluteUrl(receipt.action_details?.merge?.pr_url) !== canonicalAbsoluteUrl(event.git.pr_url)) {
+        continue;
+      }
+      matching.push(receipt);
+    } catch (error) {
+      if (String(evidencePath).replace(/\\/gu, "/").startsWith(`${SDLC_DIR}/autonomy/actions/`)) {
+        report.errors.push(`${label} cannot validate protected action receipt ${evidencePath}: ${error.message}`);
+      }
     }
-    if (event.action === "sync.push") {
-      return (!event.git?.after_sha || receipt.action_details?.push?.source_sha === event.git.after_sha)
-        && (!event.git?.remote || receipt.action_details?.push?.remote === event.git.remote);
-    }
-    if (event.action === "sync.merge" && event.git?.pr_url) {
-      return canonicalAbsoluteUrl(receipt.action_details?.merge?.pr_url) === canonicalAbsoluteUrl(event.git.pr_url);
-    }
-    return true;
-  });
+  }
   if (matching.length !== 1) {
     report.errors.push(
       `${label} protected action ${event.action} requires one exact ${requiredStatus} ${mappedAction} receipt in trace evidence`,

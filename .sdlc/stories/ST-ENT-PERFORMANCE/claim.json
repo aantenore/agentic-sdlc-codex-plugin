@@ -2,7 +2,7 @@
   "story_id": "ST-ENT-PERFORMANCE",
   "agent": "codex",
   "branch": "codex/ST-ENT-PERFORMANCE",
-  "status": "active",
+  "status": "released",
   "claimed_at": "2026-07-17T16:18:15.625Z",
   "expires_at": "2026-07-18T16:18:15.625Z",
   "notes": null,
@@ -17,7 +17,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -33,6 +33,15 @@
       "session_id": null,
       "tool": "agentic-sdlc-cli",
       "version": "0.11.0"
+    },
+    "released_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
     }
-  }
+  },
+  "released_at": "2026-07-17T21:26:38.934Z",
+  "release_reason": "Completed implementation; story prepared for handoff"
 }

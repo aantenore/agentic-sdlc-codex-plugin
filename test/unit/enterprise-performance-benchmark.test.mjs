@@ -1036,6 +1036,17 @@ test("parent applies a secondary exit deadline after valid Observatory completio
       "completed worker waited for the primary timeout",
     );
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
+    const lateMessageWorker = path.join(temporary, "complete-then-late-message.mjs");
+    writeFakeObservatoryServerWorker(lateMessageWorker, { mode: "complete-then-late-message" });
+    const result = await runEnterprisePerformanceBenchmark({
+      parentDirectory: temporary,
+      scale: SMALL_SCALE,
+      warmIterations: 2,
+      observatoryWorkerScriptPath: lateMessageWorker,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.workloads.observatory.resources_closed, true);
+    assert.deepEqual(enterpriseFixtureEntries(temporary), []);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -1178,7 +1189,10 @@ test("parent treats a live Observatory worker IPC disconnect as immediately term
         scale: SMALL_SCALE,
         warmIterations: 2,
         observatoryWorkerScriptPath: fakeWorker,
-        observatoryWorkerTimeoutMs: 1_000,
+        // Keep the primary deadline well outside process startup jitter from
+        // the parallel full suite. The assertion below still proves that the
+        // disconnect, rather than the deadline, owns the terminal outcome.
+        observatoryWorkerTimeoutMs: 10_000,
       }),
       /disconnected before snapshot completion/u,
     );
@@ -1412,6 +1426,10 @@ function writeFakeObservatoryServerWorker(filePath, { mode, eventTimestampPath =
     `      },`,
     `    },`,
     `  }, () => {`,
+    `    if (mode === "complete-then-late-message") {`,
+    `      process.send({ type: "late-message-after-completion" }, () => process.disconnect());`,
+    `      return;`,
+    `    }`,
     `    process.disconnect();`,
     `    if (mode === "complete-and-stay") setInterval(() => {}, 1_000);`,
     `  });`,

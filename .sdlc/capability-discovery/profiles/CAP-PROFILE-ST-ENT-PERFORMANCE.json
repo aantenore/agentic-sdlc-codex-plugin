@@ -20,6 +20,7 @@
       "type": "automation",
       "source_path": "package.json",
       "scripts": [
+        "benchmark:enterprise",
         "check",
         "doctor",
         "smoke",
@@ -36,18 +37,18 @@
   "evidence": [
     {
       "type": "context_file",
-      "path": ".sdlc/requirements/REQ-ENTERPRISE-CONTROL-PLANE-001-R2.json",
-      "sha256": "cdb30a46e343aa740a17bad7490dd0d6ede32529f0f22df1c995040154dc35df",
-      "size_bytes": 9756,
-      "excerpt": "acceptance_criteria Effective configuration is versioned hash-locked explainable and migrated only through a reviewed plan hash; plugin upgrades cannot silently activate authority autonomy gate or budget defaults. A versioned workflow-definition and event-sourced workflow-instance engine supports software-project change-request technical-assessment and generic-governed-process presets without replacing the existing six SDLC execution phases. Requirement ceilings and a separate non-reusable delivery profile preserve an explicit autonomy choice for every pull request or local release with fail-c",
-      "trust": "untrusted_project_evidence"
-    },
-    {
-      "type": "context_file",
       "path": ".sdlc/baseline/BASELINE-ENTERPRISE-PLATFORM-001.json",
       "sha256": "f8cb18d9e433901444ffca4c2e9eeac0af3f95cd6064fcded8e19af02af85dd5",
       "size_bytes": 77437,
       "excerpt": "id BASELINE-ENTERPRISE-PLATFORM-001 schema_version 0.1.0 sdlc_version 0.11.0 kind existing-project status approved summary Agentic SDLC 0.11.0 current-state baseline for enterprise hardening across performance observability usability useful workflow features portability and first-class management of projects change requests and project-creation processes. repository_snapshot root_name TravelOps git is_git_repo true branch main head_sha 927dc93e97ea0c8aadc913b3a729edab44afaa10 is_dirty true user name Antonio Antenore email ant_ant95@hotmail.it remotes origin detected_stack name package-json typ",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "context_file",
+      "path": ".sdlc/requirements/REQ-ENTERPRISE-CONTROL-PLANE-001-R2.json",
+      "sha256": "cdb30a46e343aa740a17bad7490dd0d6ede32529f0f22df1c995040154dc35df",
+      "size_bytes": 9756,
+      "excerpt": "acceptance_criteria Effective configuration is versioned hash-locked explainable and migrated only through a reviewed plan hash; plugin upgrades cannot silently activate authority autonomy gate or budget defaults. A versioned workflow-definition and event-sourced workflow-instance engine supports software-project change-request technical-assessment and generic-governed-process presets without replacing the existing six SDLC execution phases. Requirement ceilings and a separate non-reusable delivery profile preserve an explicit autonomy choice for every pull request or local release with fail-c",
       "trust": "untrusted_project_evidence"
     },
     {
@@ -61,9 +62,9 @@
     {
       "type": "context_file",
       "path": "package.json",
-      "sha256": "c80577249961fc7c0e01056d65eeb25b2feffe1552f3f1c479b437067bbbc272",
-      "size_bytes": 1828,
-      "excerpt": "name agentic-sdlc-codex-plugin version 0.11.0 description Codex plugin for contract-driven delivery verified assessments and visual project lineage. type module bin agentic-sdlc ./bin/agentic-sdlc.mjs engines node >=18.18 files .codex-plugin/ assets/ bin/ docs/ lib/ schemas/ scripts/ skills/ templates/ ui/ scripts check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib",
+      "sha256": "e91ac90831b951ea02e2a44f719b0ff3e7bfeba624e1a3bdad269714597a8f69",
+      "size_bytes": 2171,
+      "excerpt": "name agentic-sdlc-codex-plugin version 0.11.0 description Codex plugin for contract-driven delivery verified assessments and visual project lineage. type module bin agentic-sdlc ./bin/agentic-sdlc.mjs engines node >=18.18 files .codex-plugin/ assets/ bin/ docs/ lib/ schemas/ scripts/ skills/ templates/ ui/ scripts benchmark enterprise node scripts/benchmark-enterprise-performance.mjs --enforce check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --c",
       "trust": "untrusted_project_evidence"
     },
     {
@@ -88,14 +89,14 @@
     ".sdlc/baseline/BASELINE-ENTERPRISE-PLATFORM-001.json": "f8cb18d9e433901444ffca4c2e9eeac0af3f95cd6064fcded8e19af02af85dd5",
     ".sdlc/requirements/REQ-ENTERPRISE-CONTROL-PLANE-001-R2.json": "cdb30a46e343aa740a17bad7490dd0d6ede32529f0f22df1c995040154dc35df",
     ".sdlc/stories/ST-ENT-FOUNDATION/outputs/implementation-evidence.md": "7ba325000faf6e55508ccd0421431b91d5c80708f362ebc0c865c57466383a92",
-    "package.json": "c80577249961fc7c0e01056d65eeb25b2feffe1552f3f1c479b437067bbbc272"
+    "package.json": "e91ac90831b951ea02e2a44f719b0ff3e7bfeba624e1a3bdad269714597a8f69"
   },
   "approvals": [
     {
-      "id": "APR-20260717161200-a21317",
+      "id": "APR-20260717205943-dfeb2c",
       "profile_id": "CAP-PROFILE-ST-ENT-PERFORMANCE",
       "status": "approved",
-      "summary": "Use only the local repository, existing Agentic SDLC process, Node tests, and deterministic benchmarks for this performance PR; no installs, external services, secrets, production access, or destructive actions.",
+      "summary": "Refreshed only the hashes and detected package scripts for the same approved Performance evidence and boundaries; no permission or scope changed.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "CAP-PROFILE-ST-ENT-PERFORMANCE",
@@ -106,27 +107,25 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-        "approval_level": "Autonomous completion of approved requirement REQ-ENTERPRISE-CONTROL-PLANE-001-R2 through the eight reserved local delivery stories only.",
+        "authorization_ref": "AUTH-ENT-PERFORMANCE-FINALIZE-001",
+        "approval_level": "Refresh unchanged Performance references, approve the replacement work brief and exact profile for this same pull request, and reconfirm the already approved task start; no new scope, installation, external access, or release target.",
         "allowed_actions": [
-          "task.start.confirm",
-          "capability.approve",
           "autonomy.delivery.approve",
-          "capability.profile.approve",
-          "dependency.approve",
           "contract.approve",
-          "breakdown.approve"
+          "capability.profile.approve",
+          "capability.approve",
+          "task.start.confirm"
         ],
         "subject_scope": "capability-profile"
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENTERPRISE-PROGRAM-001/AUSE-AUTH-ENTERPRISE-PROGRAM-001-20260717161200273-2ac76e.json",
+      "authorization_ref": "AUTH-ENT-PERFORMANCE-FINALIZE-001",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-PERFORMANCE-FINALIZE-001/AUSE-AUTH-ENT-PERFORMANCE-FINALIZE-001-20260717205943440-bd5621.json",
       "authorization_action": "capability.profile.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "2f9cff072b21ec8ee9028018eb46fbcb02a4a88984866cba8ef5af331bc46f4e",
+      "approved_content_hash": "699f150573c4d932809d3ec88f446061a2dd2411ae88045b8b99a833a92b6bfa",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -138,7 +137,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PERFORMANCE",
-        "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+        "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -155,11 +154,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-17T16:12:00.275Z"
+      "created_at": "2026-07-17T20:59:43.441Z"
     }
   ],
-  "created_at": "2026-07-17T16:11:53.440Z",
-  "updated_at": "2026-07-17T16:12:00.275Z",
+  "created_at": "2026-07-17T20:59:43.187Z",
+  "updated_at": "2026-07-17T20:59:43.441Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -171,7 +170,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
