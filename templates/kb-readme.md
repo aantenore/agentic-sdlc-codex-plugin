@@ -14,6 +14,15 @@ It is intentionally stored in the project repository so people and agents can co
 - Do not treat permission to implement or push as formal artifact approval.
 - Record formal approvals with `--approval-source explicit-user|ci|automation|bootstrap` plus summary or evidence.
 - Use `--approval-source automation` only when a human/CI has explicitly delegated a matching approval level or autonomy scope; keep that scope in the summary/evidence.
+- Use `requirement:v2` plus an approved requirement execution profile to record the maximum autonomy allowed for each requirement revision.
+- Ask for an explicit `supervised`, `checkpointed`, or `bounded-autonomous` selection for every pull request and every local release; never reuse one delivery profile for another. One profile binds exactly one story and its one approved contract.
+- For delivery work, reserve the planned profile ID in the requirement-bound story contract, approve that contract, then create the matching profile that binds its immutable hash. The ID is not a profile hash or approval; never introduce a circular back-reference.
+- Compute effective autonomy from the most restrictive host, project, requirement, delivery, contract, capability, environment, and budget boundary.
+- Treat `audit_only` as capped at `checkpointed`, including locally. Effective `bounded-autonomous` requires an external trusted host/CI Ed25519 receipt under `host_verified` policy; the CLI cannot self-issue trusted authority.
+- Start a phase automatically only when it is present in the effective level's configured `automatic_phases`; `supervised` always confirms.
+- Govern delivery actions as authorize → exact host/tool execution → complete with immutable evidence. A `host_verified` checkpoint requires an external Ed25519 receipt for the exact canonical action subject; `audit_only` records unverified explicit approval. Passing merge/local-release completion writes the success close receipt automatically.
+- For local releases, record the target root, allowed canonical actions and writes, shell-free JSON-argv smoke tests, and rollback. Treat protected-branch merge and remote or production deployment as explicit exceptions.
+- Preserve durable host/CI/provider evidence for remote push and merge; live remote pre/post observations are hash-bound but are not provider-signed offline attestations.
 - Run `agentic-sdlc orchestrate status` before starting work in another chat.
 - Run `agentic-sdlc sync record --event push` after pushing a branch.
 - Release story claims and phase locks when work is done or handed off.
@@ -36,6 +45,7 @@ It is intentionally stored in the project repository so people and agents can co
 
 ```text
 contracts/      Phase contracts and story-specific contracts
+autonomy/       Requirement ceilings, per-delivery profiles, decisions, execution/action receipts
 baseline/       Existing-project current-state baselines and approval records
 authorizations/ Explicit action-scoped grants for delegated automation approvals
 output-contracts/ Approved output templates, artifact links, and structure decisions

@@ -12,7 +12,7 @@ Contextualize this project and prepare an initial technical assessment.
 
 Equivalent requests in any language select the same journey, including “Contestualizza il progetto e prepara un assessment tecnico”, “Assess the architecture and risks”, and requests for Word, Excel, PDF, PowerPoint, HTML, JSON, CSV, or Markdown delivery.
 
-Preserve any root, format, destination, exclusions, evidence sources, autonomy boundary, or budget already provided. Do not ask for the same choice twice.
+Preserve any root, format, destination, exclusions, evidence sources, autonomy boundary, or budget already provided. Do not ask twice for the same unchanged, hash-bound choice. A new pull request or local release is a new delivery unit and must always receive its own explicit autonomy selection.
 
 ## Exactly Two Normal Checkpoints
 
@@ -21,9 +21,9 @@ The normal local assessment always has these two logical checkpoints:
 1. project context;
 2. immutable combined proposal and complete execution tranche.
 
-There is no separate normal decision for requirement, story, capabilities, template, contract, start, verification, or budget. A fresh approved context may make checkpoint 1 short, but it remains correctable when the user requested contextualization.
+There is no separate normal decision for requirement, story, capabilities, template, contract, start, verification, or budget when all are visible inside the immutable bundle. If the assessment will create one pull request or local release, that delivery's autonomy selection is included in checkpoint 2. A fresh approved context may make checkpoint 1 short, but it remains correctable when the user requested contextualization.
 
-An additional decision is exceptional and allowed only for an install, external access, secret, production access, destructive action, out-of-scope write, material proposal change, or unapproved budget extension.
+An additional decision is required for a different delivery unit, material requirement or delivery drift, protected-branch merge, remote deployment, install, external access, secret, production access, destructive action, out-of-scope write, material proposal change, or unapproved budget extension.
 
 ```mermaid
 stateDiagram-v2
@@ -93,6 +93,7 @@ After checkpoint 1, run `assessment proposal prepare`. It creates:
 The proposal binds `baseline_ref.approved_content_hash` and hashes the complete approval payload with `proposal_hash`. It includes:
 
 - scope ID/title/summary and real requirement ID;
+- exact `requirement:v2` revision and requirement execution profile ceiling;
 - story reservation and acceptance criteria;
 - artifact type, preset, sections, canonical delivery, generator, verifier, and destination;
 - capabilities, permissions, targets, and evidence plan;
@@ -100,18 +101,20 @@ The proposal binds `baseline_ref.approved_content_hash` and hashes the complete 
 - exact `write_set[]` actions, subject IDs/hashes, paths, and artifact types;
 - execution budget and stop policy;
 - security boundaries, approval boundary, and idempotent application plan.
+- when delivery is in scope, one exact pull-request or local-release profile and its requested/effective autonomy level.
 
 The system may not fill in material content after approval. Changing any bound field creates a new proposal hash and requires checkpoint 2 again.
 
 ## Checkpoint 2 — Combined Proposal And Complete Tranche
 
-Use five primary blocks:
+Use six primary blocks when a delivery unit is in scope; omit block 5 only for an assessment that produces no pull request or local release:
 
 1. **Outcome, scope, evidence** — supported decision, audience, inclusions/exclusions, depth, requirement/story, reuse mode, sources, and checks.
 2. **Deliverable, verification** — sections, format, extension, media type, path, delivery mode, generator, verifier, and required verification dimensions.
 3. **Tools, security, writes** — installed capabilities, permissions, targets, full write-set, and excluded risky operations.
 4. **Budget and stop policy** — the complete execution tranche.
-5. **Start and boundary** — internal records/actions, task start, final delivery, exception triggers, and exclusions.
+5. **Delivery autonomy** — requirement ceiling, one named PR or local-release profile, selected/effective level, target, actions, paths, checkpoints, non-reuse, and merge/deploy exclusions.
+6. **Start and boundary** — internal records/actions, task start, final delivery, exception triggers, and exclusions.
 
 Put proposal/baseline hashes, requirement/story/template/contract IDs, subject hashes, authorization actions, artifact types, and idempotency key in a compact technical appendix. It may be collapsible, but not hidden from the decision.
 
@@ -134,8 +137,8 @@ Label every metric `exact`, `estimated`, or `unavailable`. Estimated or unavaila
 
 - **What is being asked:** approve the exact proposal ID/hash and complete tranche, or request a change.
 - **Why:** one decision can replace fragmented approvals only when every authorized subject, write, tool, verification step, and budget limit is fixed and visible.
-- **Authorizes:** only the displayed requirement/story, exact subject hashes and write-set, proposal-bound automation uses, task start, analysis, artifact, layered verification, KB linking, budget policy, and final summary.
-- **Does not authorize:** installs; undisplayed external/production access; secrets; destructive actions; different subjects, paths, or artifacts; material changes; or unbounded budget extensions.
+- **Authorizes:** only the displayed requirement/story, exact subject hashes and write-set, proposal-bound automation uses, task start, analysis, artifact, layered verification, KB linking, budget policy, final summary, and—when present—the selected level for that one delivery profile.
+- **Does not authorize:** another PR or local release; protected-branch merge; remote deployment; installs; undisplayed external/production access; secrets; destructive actions; different subjects, paths, or artifacts; material changes; or unbounded budget extensions.
 - **Question:** “Do you approve proposal `<id>` at hash `<hash>`, including this budget and stop policy, or what should I change?”
 - **Italian examples:** “Approvo la proposta `<id>` con questo budget”; “Modifica: massimo 45 minuti, nessuna fonte esterna, DOCX.”
 - **English examples:** “I approve proposal `<id>` with this budget”; “Change it: 45 minutes maximum, no external sources, DOCX.”
@@ -158,7 +161,7 @@ budget status
 assessment proposal complete
 ```
 
-Supporting commands are `requirement create|status` and, for an approved exceptional change, `budget amend`.
+Supporting commands are `requirement propose|approve|revise|supersede|status` and, for an approved exceptional change, `budget amend`. `requirement create` remains only a compatibility alias for proposal creation; it must not bypass approval.
 
 - `assessment proposal approve` validates the unchanged proposal hash, records the host approval, and creates a proposal-bound content authorization.
 - `assessment proposal apply` applies the displayed write-set idempotently. A partial failure is resumed through workflow state, not a new normal checkpoint.
@@ -167,25 +170,43 @@ Supporting commands are `requirement create|status` and, for an approved excepti
 
 ## Requirement And Story Lineage
 
-The assessment uses one real requirement such as `REQ-INITIAL-ASSESSMENT` and one story such as `ST-INITIAL-ASSESSMENT`. Every example and record must use those same IDs consistently:
+The assessment uses one real `requirement:v2` such as `REQ-INITIAL-ASSESSMENT`, one approved requirement execution profile, and one story such as `ST-INITIAL-ASSESSMENT`. If it produces a pull request or local release, it also uses one delivery execution profile. Every example and record must use those same IDs consistently:
 
 ```text
 Requirement: REQ-INITIAL-ASSESSMENT
+Requirement execution profile: AUT-REQ-INITIAL-ASSESSMENT
 Story: ST-INITIAL-ASSESSMENT
 Profile: CAP-PROFILE-ST-INITIAL-ASSESSMENT
 Recommendation: CAP-REC-ST-INITIAL-ASSESSMENT
 Template: technical-analysis-v1
 Contract: contract-ST-INITIAL-ASSESSMENT-analysis
+Delivery execution profile: AUT-DELIVERY-ASSESSMENT-001
 Authorization: AUTH-ST-INITIAL-ASSESSMENT
 ```
 
-Use `requirement create|status`. Reuse only when identity and scope match. Never write a fake `REQ-001` merely to satisfy output linking.
+Use `requirement propose|approve|revise|supersede|status`. Reuse only when identity, revision, content hash, and material scope match. Never write a fake `REQ-001` merely to satisfy output linking. A material revision supersedes the prior requirement and invalidates delivery profiles bound to its old hash.
+
+## Delivery Autonomy Choice
+
+The requirement execution profile supplies only an autonomy ceiling. It does not authorize execution. Before each delivery begins, show one explicit choice among `supervised`, `checkpointed`, and `bounded-autonomous` for exactly one delivery kind:
+
+- `pull_request`: show repository, base branch, head branch, canonical actions, explicit write paths, the one story/approved-contract pair, exclusions, and whether merge is requested;
+- `local_release`: show the local root, canonical allowed actions and write paths, shell-free JSON-argv smoke tests, the one story/approved-contract pair, required rollback, and explicit denial of external, production, and destructive access.
+
+Explain the recommended level using requirement clarity, testability, reversibility, environment, data/security impact, known tools, write paths, and budget. Prior successful runs may inform that recommendation but never grant the level. The effective result is the most restrictive of host, project, requirement, delivery, contract, capability, environment, and budget.
+
+The choice applies to one delivery ID and content hash, exactly one story/approved-contract pair, cannot be reused for another PR or local release, permits at most one concurrent run, and closes when terminal. `audit_only` authority is capped at `checkpointed`, including for local release. Effective `bounded-autonomous` requires an external host/CI Ed25519 receipt for the exact profile-approval subject, `authority_policy.mode: host_verified`, a matching trusted public key, and `--host-receipt-file` on approval. Merge to `main` or another protected branch and every remote or production deployment remain explicit exceptions.
+
+For delivery work, reserve the planned profile ID in the requirement-bound story contract and approve the contract first. Then create the matching profile and bind it to the immutable requirement, story, and contract hashes. The reserved ID is not a profile hash or approval. Task start supplies the profile and rejects drift; do not rewrite the approved contract to create a circular reference.
+
+After start, explain the action lifecycle as **authorize → execute the exact recorded operation → complete with evidence**. The authorization receipt does not run Git or call a provider. At a `host_verified` checkpoint, require an external Ed25519 receipt for action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject; `audit_only` records explicit approval without claiming verified authority. Passing `release.local` completion runs the exact approved smoke argv in a supported read-only/no-network sandbox; passing release or merge completion writes the terminal receipt automatically. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for its post-state. These observations are not provider-signed offline attestations, so also preserve durable host/CI/provider evidence.
 
 ## Proposal-Bound Authorization
 
-New assessments use `content-authorization:v2`, not a free-text grant alone. It contains:
+New assessments use `content-authorization:v2`, not a free-text grant alone. Requirement and delivery profiles constrain what may be derived but are not executable credentials. The authorization contains:
 
 - exact proposal ID/hash;
+- exact delivery ID, kind, profile hash, and material target when delivery is in scope;
 - canonical `allowed_uses` bindings for each exact action + subject-content hash pair, plus derived action/subject indexes;
 - bounded use policy and terminal closure rule;
 - host or CI authority assurance;
@@ -254,7 +275,7 @@ Say “verified” only when all proposal-required dimensions pass. Otherwise qu
 
 ## Release And Archive
 
-Completion produces lineage from baseline and proposal through requirement/story, authorization uses, artifact generation, layered verification, and execution usage. A `release-manifest:v1` inventories those hashes, while `release-gate-receipt:v1` records the deterministic checks that admitted that exact manifest. An `archive-record:v1` is a logical, hash-bound declaration that identified legacy artifacts remain historical but are outside that release scope; it does not move files. The historical `archive closed` command instead emits a distinct `archive_plan` governed by `archive-plan.schema.json`; applying that plan verifies source hashes under a lock and rolls back incomplete moves.
+Completion produces lineage from baseline and proposal through requirement revision/profile, delivery profile, story/contract, authorization uses, artifact generation, layered verification, and execution usage. A pull-request completion does not imply protected-branch merge. A local release additionally requires evidence for its exact local target, smoke tests, and rollback procedure, and does not imply remote deployment. A `release-manifest:v1` inventories those hashes, while `release-gate-receipt:v1` records the deterministic checks that admitted that exact manifest. An `archive-record:v1` is a logical, hash-bound declaration that identified legacy artifacts remain historical but are outside that release scope; it does not move files. The historical `archive closed` command instead emits a distinct `archive_plan` governed by `archive-plan.schema.json`; applying that plan verifies source hashes under a lock and rolls back incomplete moves.
 
 For an existing KB, run an active-only migration as a dry run first:
 

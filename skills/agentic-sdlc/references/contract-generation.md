@@ -5,10 +5,13 @@ The contract-building behavior must be domain-agnostic. Do not hardcode a produc
 ## Context Gathering Order
 
 1. Read `.sdlc/project.json`.
-2. Search the project KB for relevant requirements, stories, decisions, assumptions, risks, tests, traces, and output contracts.
-3. Inspect user-provided files or repository files that the user names.
-4. Ask the user concise questions only for missing critical inputs, output format decisions, or approval boundaries.
-5. Generate or update the contract only after the critical answers are known, with the gathered context recorded in `contextualization`.
+2. Resolve the exact `requirement:v2` revision and its approved requirement execution profile. A legacy requirement is treated conservatively as `supervised`.
+3. Search the project KB for relevant stories, decisions, assumptions, risks, tests, traces, capabilities, budgets, and output contracts.
+4. Inspect user-provided files or repository files that the user names.
+5. Ask the user concise questions only for missing critical inputs, output format decisions, delivery autonomy, or approval boundaries.
+6. When a pull request or local release is in scope, create or locate the story, reserve a new delivery profile ID, create the final contract with that ID, and obtain normal contract approval. The ID is not a profile hash or approval.
+7. Create and approve the matching delivery execution profile against the immutable requirement-profile, story, and approved-contract hashes. Never copy a profile from another delivery and never rewrite the contract to point back to the profile.
+8. Only after both approvals, start the task with that delivery profile and record its receipt.
 
 ## Model And Reasoning Policy
 
@@ -39,11 +42,23 @@ Ask only questions that change the contract. Good questions include:
 - Which integrations, APIs, or external systems are in scope?
 - Which constraints or non-functional requirements are non-negotiable?
 - What counts as evidence that this phase is done?
-- What can the agent do autonomously, and what requires approval?
+- What is the requirement's approved autonomy ceiling?
+- Is this delivery one named `pull_request` or one named `local_release`, and which level does the user select for it?
+- For a PR, which repository/base/head/actions are in scope, and is protected-branch merge excluded?
+- For a local release, what exact target, canonical writes/actions, shell-free JSON-argv smoke tests, and rollback are required?
+- Which contract actions must narrow the selected delivery level or remain checkpoints?
 - Should this contract inherit the main Codex thread model/reasoning, or use a specific model or reasoning level?
 - Should any required output use an existing approved template, a delta from a base artifact, or a user-approved new structure?
 
 Avoid generic brainstorming questions when the KB already contains enough evidence.
+
+## Autonomy Recommendation And Binding
+
+The agent may recommend `supervised`, `checkpointed`, or `bounded-autonomous` from requirement clarity, unresolved questions, deterministic acceptance tests, reversibility, known tools and write paths, environment, data/security impact, external dependencies, and budget. Give deterministic reason codes and explain the recommendation in plain language. Do not use an opaque trust score, and never treat the number of previous successful runs as authority.
+
+The user selects the level for each delivery. The effective result is the most restrictive of host, project, requirement, delivery, contract, capability, environment, and budget. A contract can narrow its phase but cannot expand any upstream boundary. Multiple requirements use the lowest ceiling.
+
+`bounded-autonomous` requires `host_verified` authority or trusted CI; `audit_only` is capped at `checkpointed`. Any material requirement or delivery drift, new PR, new path/tool/environment, budget extension, secret/external/production access, destructive action, protected-branch merge, or remote deployment stops for a new explicit decision.
 
 ## CLI Pattern
 
@@ -53,7 +68,7 @@ Use `--context-file` for authoritative files and `--qa` for answered questions. 
 node <plugin-root>/bin/agentic-sdlc.mjs contract create \
   --root <target-project> \
   --phase analysis \
-  --context-file .sdlc/requirements/REQ-001.md \
+  --context-file .sdlc/requirements/REQ-001.json \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
   --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
@@ -69,6 +84,10 @@ Every generated contract should answer:
 
 - Which project is this for?
 - Which phase or story does it govern?
+- Which immutable requirement revision and requirement execution profile set its ceiling?
+- For delivery work, which stable delivery profile ID, kind, and target boundary does it reserve for the later per-delivery selection?
+- What contract autonomy cap applies before that selection, and how may it narrow the requirement ceiling?
+- Which checkpoints and exception actions remain?
 - Which sources informed it?
 - Which questions were answered?
 - Which questions remain open?

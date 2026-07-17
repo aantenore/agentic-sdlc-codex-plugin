@@ -44,6 +44,238 @@ Approval commands require a formal source. `--actor-type human` alone is not eno
 
 Use `--approval-source explicit-user` when the user explicitly approves the specific artifact and include `--summary` or `--approval-evidence`. A short "ok" or "yes" applies only to the artifact or decision that was shown immediately before it; do not reuse it for newly created templates, capability profiles, recommendations, contracts, or task start confirmations. Use `--approval-source ci` for approved CI actors. Use `--approval-source bootstrap` only for provisional migration records; bootstrap approvals do not satisfy strict gates by default.
 
+## Agree A Requirement And Its Autonomy Ceiling
+
+New governed requirements use `requirement:v2`. Proposal creation records the requirement and prepares its requirement execution profile; approval binds the immutable revision and its maximum autonomy level.
+
+```bash
+node bin/agentic-sdlc.mjs requirement propose \
+  --root <project> \
+  --id REQ-001 \
+  --title "Bounded outcome" \
+  --summary "Agreed outcome and material scope" \
+  --acceptance "Observable acceptance evidence exists" \
+  --autonomy-ceiling checkpointed
+
+node bin/agentic-sdlc.mjs requirement approve \
+  --root <project> \
+  --id REQ-001 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve requirement REQ-001 and its checkpointed ceiling"
+
+node bin/agentic-sdlc.mjs autonomy requirement status --root <project> --id REQ-001
+```
+
+Use immutable revision and supersession commands for material changes:
+
+```bash
+node bin/agentic-sdlc.mjs requirement revise \
+  --root <project> \
+  --id REQ-001 \
+  --new-id REQ-001-R2 \
+  --autonomy-ceiling supervised
+
+node bin/agentic-sdlc.mjs requirement approve \
+  --root <project> \
+  --id REQ-001-R2 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve revised requirement REQ-001-R2 and its supervised ceiling"
+
+node bin/agentic-sdlc.mjs requirement supersede \
+  --root <project> \
+  --id REQ-001 \
+  --new-id REQ-001-R2 \
+  --reason "Acceptance and integration boundary changed" \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Replace REQ-001 with approved revision REQ-001-R2"
+```
+
+`requirement create` is a compatibility alias for proposal creation, not direct approval. A material revision changes the requirement hash and invalidates downstream delivery profiles bound to the old revision. Legacy `requirement:v1` records remain readable with a conservative `supervised` ceiling.
+
+## Select Autonomy For Every Delivery
+
+Every pull request and every local release needs a new delivery profile ID and an explicit choice among `supervised`, `checkpointed`, and `bounded-autonomous`. Never reuse a profile or approval from another delivery. One profile binds exactly one story and that story's one approved contract. When several stories must ship together, first create an agreed aggregation story/contract; do not use the profile as an unrelated multi-story container.
+
+Create the story, reserve a new profile ID, and create the final contract with that ID. Obtain normal contract approval before proposing the profile. The contract stores only the planned `delivery_execution_profile_id`; the later profile binds the approved requirement-profile, story, and contract hashes.
+
+```bash
+node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement REQ-001" --requirement REQ-001
+node bin/agentic-sdlc.mjs contract create \
+  --root <project> \
+  --phase implementation \
+  --story ST-001 \
+  --id contract-ST-001-implementation \
+  --context-summary "Implement REQ-001 for PR-184" \
+  --qa "Which requirement applies?|REQ-001" \
+  --delivery-profile AUT-PR-184 \
+  --output-ref implementation-summary:implementation-summary-v1:new
+
+node bin/agentic-sdlc.mjs approval requests --root <project> --story ST-001
+
+# Run only after the user explicitly approves the displayed contract.
+node bin/agentic-sdlc.mjs contract approve \
+  --root <project> \
+  --id contract-ST-001-implementation \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve the implementation contract for PR-184"
+```
+
+Pull-request example:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery propose \
+  --root <project> \
+  --id AUT-PR-184 \
+  --delivery PR-184 \
+  --kind pull_request \
+  --story ST-001 \
+  --contract contract-ST-001-implementation \
+  --requirement REQ-001 \
+  --level checkpointed \
+  --repository owner/repository \
+  --base main \
+  --head feature/ST-001 \
+  --write-path src \
+  --allow-action repository.write \
+  --allow-action test.run \
+  --allow-action git.commit \
+  --allow-action git.push \
+  --allow-action pull_request.update \
+  --json
+```
+
+Local-release example:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery propose \
+  --root <project> \
+  --id AUT-LOCAL-REL-009 \
+  --delivery LOCAL-REL-009 \
+  --kind local_release \
+  --story ST-001 \
+  --contract contract-ST-001-release \
+  --requirement REQ-001 \
+  --level bounded-autonomous \
+  --target-root /absolute/project/.local-release \
+  --write-path /absolute/project/.local-release/app \
+  --allow-action build.local \
+  --allow-action test.run \
+  --allow-action release.local \
+  --smoke-test '["npm","run","smoke:local"]' \
+  --rollback "Restore the previous local package and restart the local process" \
+  --json
+```
+
+Approve, inspect, explain, or revoke the exact profile:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery approve \
+  --root <project> \
+  --id AUT-PR-184 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Select checkpointed autonomy for PR-184 only"
+
+# Effective bounded autonomy only: the external host/CI receipt must sign the
+# exact autonomy.delivery.approve subject for AUT-LOCAL-REL-009.
+node bin/agentic-sdlc.mjs autonomy delivery approve \
+  --root <project> \
+  --id AUT-LOCAL-REL-009 \
+  --actor-type ci \
+  --approval-source ci \
+  --host-receipt-file evidence/AUT-LOCAL-REL-009-host-approval.json \
+  --summary "CI approves this exact bounded local-release profile"
+
+node bin/agentic-sdlc.mjs autonomy delivery status --root <project> --id AUT-PR-184 --json
+node bin/agentic-sdlc.mjs autonomy delivery explain --root <project> --id AUT-PR-184
+node bin/agentic-sdlc.mjs autonomy delivery revoke \
+  --root <project> \
+  --id AUT-PR-184 \
+  --reason "PR-184 scope changed" \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Revoke autonomy for PR-184"
+```
+
+Before approving, review the complete proposed JSON: requirement ceiling, selected level, target identity, allowed actions, write paths, automatic phases, checkpoints, exception triggers, merge/deploy exclusions, expiry, and the non-reuse boundary. In `audit_only`, a requested `bounded-autonomous` profile evaluates only as `checkpointed`, including for local releases. Effective `bounded-autonomous` requires an external host/CI to sign the exact profile-approval subject with Ed25519, `authority_policy.mode: host_verified`, the public key in `authority_policy.trusted_host_keys`, and `--host-receipt-file <path.json>` on `autonomy delivery approve`. The CLI verifies that receipt; it cannot self-issue trusted authority.
+
+Before task start, verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Supply that profile to the evaluator. `supervised` always requires confirmation. For another effective level, task start is automatic only when the current phase is listed under `autonomy_policy.presets.<level>.automatic_phases`; otherwise rerun the displayed checkpoint with `--confirm-start` or a matching authorization. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic but keeps release actions checkpointed. Do not rewrite the contract:
+
+```bash
+node bin/agentic-sdlc.mjs task start \
+  --root <project> \
+  --story ST-001 \
+  --delivery-profile AUT-PR-184 \
+  --intent-json '<canonical-route-intent-json>' \
+  --json
+```
+
+The evaluator chooses the most restrictive host, project, requirement, delivery, contract, capability, environment, and budget boundary. A contract may narrow but never widen the result. Pull-request merge to `main` or another protected branch and remote or production deployment remain explicit exceptions. A local release must name its target, writes/actions, shell-free JSON-argv smoke tests, and rollback, and does not imply machine-global, external, production, or destructive access.
+
+## Authorize, Execute, And Complete Delivery Actions
+
+The action command creates a single-use authorization receipt; it does not perform the Git, provider, or local-write operation. Use canonical actions only:
+
+- PR: `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, `pull_request.merge`;
+- local release: `build.local`, `test.run`, `release.local`.
+
+Ask for the exact action first. A configured checkpoint returns `checkpoint_required` without authority. After showing that exact subject, rerun with `--confirm-action` and formal attribution. When `authority_policy.mode` is `host_verified`, also pass an external `--host-receipt-file`: its Ed25519 signature must bind action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject. In `audit_only`, the explicit approval is recorded but cannot be represented as host-verified authority. Then execute the exact recorded operation, collect evidence, and complete the same action:
+
+```bash
+# Authorize the exact one-commit transition and file set.
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-PR-184 \
+  --action git.commit \
+  --scope-path src/example.mjs \
+  --json
+
+# Execute exactly one non-merge commit, then report it.
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-PR-184 \
+  --action git.commit --outcome passed \
+  --evidence evidence/PR-184-commit.txt \
+  --json
+
+# Bind push authorization to one matching remote, source SHA, and destination ref.
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-PR-184 \
+  --action git.push --remote origin --json
+
+# Execute that push externally, capture durable host/provider evidence, then complete.
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-PR-184 \
+  --action git.push --outcome passed \
+  --evidence evidence/PR-184-push.json --json
+```
+
+For a merge checkpoint, include the exact `--pr-url` when authorizing `pull_request.merge`. For local release, authorize `release.local`, perform only the approved local writes, and repeat the exact smoke-test argv and rollback at completion:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-REL-009 \
+  --action release.local --confirm-action \
+  --actor-type human --approval-source explicit-user \
+  --summary "Release this exact local target" \
+  --host-receipt-file evidence/AUT-LOCAL-REL-009-release-action.json \
+  --json
+
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-REL-009 \
+  --action release.local --outcome passed \
+  --evidence .local-release/release-evidence.json \
+  --smoke-test '["npm","run","smoke:local"]' \
+  --rollback "Restore the previous local package and restart the local process" \
+  --json
+```
+
+Local completion runs the approved smoke argv without a shell in a supported read-only, no-network sandbox and records structured output hashes. Passing `release.local` and `pull_request.merge` completions automatically close the lifecycle as `released` or `merged`; do not also call manual close for those statuses. Use `autonomy delivery close` for formally approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other allowed non-success terminal outcomes.
+
+The CLI revalidates local Git identity, branches, SHA transitions, paths, action receipts, and evidence hashes. Push authorization observes the base SHA directly on the selected remote, requires one passing completed `git.commit` receipt for every commit from that SHA to the exact head, and rejects remotes with any fetch/push URL outside the approved repository. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for the expected later post-state. This observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence and do not claim signed proof when no attestation adapter is configured.
+
 ## Create Contract
 
 ```bash
@@ -61,7 +293,7 @@ Project-specific context can be attached while creating a contract:
 node bin/agentic-sdlc.mjs contract create \
   --root <project> \
   --phase analysis \
-  --context-file .sdlc/requirements/REQ-001.md \
+  --context-file .sdlc/requirements/REQ-001.json \
   --context-summary "Analyze the MVP around the approved business workflow." \
   --qa "Who approves this phase?|Product owner" \
   --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
@@ -111,7 +343,7 @@ node bin/agentic-sdlc.mjs contract create \
 ## Create And Claim Story
 
 ```bash
-node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement a business workflow"
+node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement a business workflow" --requirement REQ-001
 node bin/agentic-sdlc.mjs story claim --root <project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <codex-thread-id>
 node bin/agentic-sdlc.mjs story complete-step --root <project> --id ST-001 --step functional-analysis --type functional-analysis --summary "Functional review complete"
 node bin/agentic-sdlc.mjs story prepare-handoff --root <project> --id ST-001 --to-agent implementation-agent --release-claim --summary "Ready for implementation"
@@ -145,7 +377,7 @@ node bin/agentic-sdlc.mjs capability profile propose \
   --id CAP-PROFILE-ST-001 \
   --story ST-001 \
   --phase analysis \
-  --context-file .sdlc/requirements/REQ-001.md
+  --context-file .sdlc/requirements/REQ-001.json
 node bin/agentic-sdlc.mjs capability profile approve --root <project> --id CAP-PROFILE-ST-001 --actor-type human --approval-source explicit-user --summary "Approved capability profile"
 node bin/agentic-sdlc.mjs capability recommend \
   --root <project> \

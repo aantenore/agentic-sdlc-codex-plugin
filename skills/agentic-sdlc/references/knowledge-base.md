@@ -10,6 +10,7 @@ The project KB lives under `<target-project>/.sdlc/`. It is the durable source o
   README.md
   baseline/
   contracts/
+  autonomy/
   output-contracts/
   requirements/
   stories/
@@ -40,7 +41,8 @@ Manifests under `.sdlc/manifests/` are shared compact maps of canonical KB state
 - Contracts and phase rules.
 - Existing-project baselines, including inferred current state, imported documents, source hashes, open questions, and explicit baseline approvals.
 - Output contract registry, approved templates, story-artifact links, and structural output decisions.
-- Requirements and constraints.
+- Revisioned `requirement:v2` records, constraints, and supersession lineage.
+- Requirement execution profiles, per-delivery profiles, and effective autonomy decisions.
 - Story workspaces and claims.
 - Orchestration snapshots for parent chats.
 - Phase/shared-artifact locks.
@@ -79,6 +81,14 @@ node bin/agentic-sdlc.mjs baseline approve --id BASELINE-INITIAL --actor-type hu
 - Generated cache and indexes for a specific project.
 
 Those artifacts must stay in the project `.sdlc/` directory.
+
+## Autonomy Records
+
+Store requirement ceilings and delivery choices under `.sdlc/autonomy/`. A `requirement-execution-profile:v1` binds the ceiling to one immutable requirement revision. A `delivery-execution-profile:v1` binds the explicit choice to one `pull_request` or `local_release` and exactly one story/approved-contract pair; it is never reusable across deliveries. An `autonomy-decision:v1` records the most restrictive effective result and reason codes.
+
+For a pull request, retain repository, base/head branches, canonical actions, explicit write paths, story/contract refs, and merge boundary. For a local release, retain the target root, allowed writes/actions, shell-free JSON-argv smoke tests, and rollback. `audit_only` is capped at `checkpointed`, even for local targets; effective `bounded-autonomous` requires an external trusted host/CI Ed25519 receipt under `host_verified` policy. Protected-branch merge and remote/production deployment require separate explicit authority.
+
+Persist the immutable delivery start/close receipts and single-use action receipts. Actions follow authorize → host/tool execution → complete with evidence. Passing local release or merge completion creates the success close receipt automatically. Push/merge receipts include live remote pre/post observations, but those are not provider-signed offline attestations; retain durable host/CI/provider evidence too.
 
 ## Output Consistency
 
