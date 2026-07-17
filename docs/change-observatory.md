@@ -34,6 +34,8 @@ agentic-sdlc observe \
 ## What It Shows
 
 - the recorded request and requirement behind an iteration;
+- a proof-bound dossier for each story, ordered as Asked, Decided, Contract,
+  Done, and Verified;
 - what changed, grouped by recorded intent where available;
 - decisions, approvals, rationale summaries, alternatives, and evidence;
 - contract evolution and implementation/validation/release state;
@@ -42,6 +44,32 @@ agentic-sdlc observe \
 - raw canonical JSON, JSONL, Markdown, and text evidence under `.sdlc/`.
 
 The interface uses `recorded`, `inferred`, `missing`, and `malformed` provenance explicitly. It never silently turns an absent record into a completed phase.
+
+## Proof-Bound Iteration Dossiers
+
+The global lists remain useful for portfolio-level inspection, but they are not
+the causal lineage of one iteration. Each recorded story therefore has an
+additive dossier that groups its evidence into five lanes:
+
+1. **Asked** — the story, explicitly linked requirements, and recorded request;
+2. **Decided** — decisions, approvals, assumptions, risks, and their stored
+   rationale or alternatives;
+3. **Contract** — the exact story contract and any contract-bound approval;
+4. **Done** — implementation and sync evidence recorded for the story;
+5. **Verified** — tests, gates, completed steps, and release evidence.
+
+A lane membership is allowed only when canonical evidence records an explicit
+`story_id`, `requirement_id`, `related` identifier, contract identifier, or
+evidence path that resolves to the story. Time proximity, filename similarity,
+display titles, and free-text semantics are never lineage signals. The server
+computes the dossier once; the browser only validates and renders that bounded
+projection and does not attempt a second semantic join.
+
+An empty lane is shown as `missing`, not inferred from another story or from the
+Git history. Records that cannot be bound explicitly stay visible in the global
+views and diagnostics instead of being attached to the nearest iteration. This
+also means a repository can honestly show project-level operational evidence
+without pretending that an unrecorded historical story existed.
 
 ## Intent Evidence
 
@@ -96,7 +124,7 @@ agentic-sdlc trace append \
   --explanation-kind codex-generated
 ```
 
-The stored explanation scope is always `recorded-evidence-only`. Valid kinds are `codex-generated`, `deterministic`, and `human-authored`; the UI presents all three under the neutral “Plain-language explanation” label and preserves the authoring badge. Private chain-of-thought, internal reasoning traces, and equivalent fields are not part of the narrative contract; if legacy or malformed evidence declares them, the observatory fails closed and redacts the affected surface.
+The stored explanation scope is always `recorded-evidence-only`. Valid kinds are `codex-generated`, `deterministic`, and `human-authored`; the UI presents all three under the neutral “Plain-language explanation” label and preserves the authoring badge. A recorded `rationale_summary` remains a distinct “Recorded rationale” field rather than being collapsed into that generated explanation. Private chain-of-thought, internal reasoning traces, and equivalent fields are not part of the narrative contract; if legacy or malformed evidence declares them, the observatory fails closed and redacts the affected surface.
 
 ## Security And Privacy Boundary
 

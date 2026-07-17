@@ -327,7 +327,9 @@ flowchart LR
   Skill["Installed Change Observatory skill"] --> CLI["Plugin-local observe CLI"]
   CLI --> Server["Loopback server + per-run token"]
   Server --> Normalizer["Versioned evidence normalizer"]
+  Normalizer --> Dossiers["Explicit per-story causal dossiers"]
   Normalizer --> KB["Canonical .sdlc records"]
+  Dossiers --> KB
   Server --> Source["Constrained raw source reader"]
   Source --> KB
   UI["Bundled browser-native UI"] -->|"Bearer token, same origin"| Server
@@ -337,9 +339,9 @@ flowchart LR
 
 The server pins the device/inode identity of the project and asset roots for the session. `.sdlc` and every requested source component must be non-symlink canonical paths. Raw inspection is restricted to JSON, JSONL, Markdown, and text; cache/index paths, traversal, case-variant policy bypasses, unsupported formats, oversized files, and malformed structured bytes fail closed. Evidence APIs require the per-run bearer capability, while static assets and health remain non-sensitive.
 
-The normalizer emits `change-observatory:view:v1` and preserves `recorded`, `inferred`, `missing`, and `malformed` provenance. Overview selection is delegated to the configurable policy in `lib/change-observatory/summary-ranking.mjs`, preventing newer operational bookkeeping from displacing more meaningful implementation or approval evidence. Equivalent diagnostics are aggregated server-side and again in the browser model as a defensive boundary.
+The normalizer emits `change-observatory:view:v1` and preserves `recorded`, `inferred`, `missing`, and `malformed` provenance. Its additive iteration dossier projection joins Asked, Decided, Contract, Done, and Verified lanes only through explicit story, requirement, related-record, contract, and evidence-path bindings. It does not use timestamps, filenames, or free-text similarity; unbound records remain global evidence plus diagnostics. Overview selection is delegated to the configurable policy in `lib/change-observatory/summary-ranking.mjs`, preventing newer operational bookkeeping from displacing more meaningful implementation or approval evidence. Equivalent diagnostics are aggregated server-side and again in the browser model as a defensive boundary.
 
-Optional `trace-narrative:v1` records contain only shareable inputs, outputs, rationale summaries, alternatives, and labeled explanations with `recorded-evidence-only` scope. Sensitive reasoning keys and narratives explicitly marked as containing private reasoning are removed from both normalized and raw surfaces.
+Optional `trace-narrative:v1` records contain only shareable inputs, outputs, rationale summaries, alternatives, and labeled explanations with `recorded-evidence-only` scope. The rationale remains separate from the generated explanation in the API and UI. Sensitive reasoning keys and narratives explicitly marked as containing private reasoning are removed from both normalized and raw surfaces.
 
 ## Local Optimization Layer
 

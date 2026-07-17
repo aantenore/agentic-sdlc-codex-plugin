@@ -59,7 +59,7 @@ The installed `Change Observatory` skill resolves the plugin-local launcher dire
 
 ## Change Observatory
 
-Change Observatory is a local, read-only application bundled in the plugin. It answers “What was asked?”, “What changed?”, and “Why was it decided?”, then lets technical and non-technical readers inspect iterations, contracts, decisions, changes, tests, gates, and raw canonical evidence.
+Change Observatory is a local, read-only application bundled in the plugin. It answers “What was asked?”, “What changed?”, and “Why was it decided?”, then gives every recorded story a proof-bound Asked / Decided / Contract / Done / Verified dossier. Technical and non-technical readers can inspect the causal iteration, global contracts, decisions, changes, tests, gates, and raw canonical evidence without the app inventing missing history.
 
 From an npm/git/tarball package installation that exposes the bin entry:
 
