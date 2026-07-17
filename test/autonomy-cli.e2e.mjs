@@ -297,6 +297,14 @@ function createApprovedImplementationContract(project, { storyId, contractId, pr
 test("requirement ceiling and an exact PR profile govern task start without leaking autonomy to another PR", () => {
   const project = tmpProject("pull-request");
   initializeAutonomyProject(project);
+  const requirementStatus = mustRun([
+    "autonomy", "requirement", "status",
+    "--root", project,
+    "--id", "REQ-AUTONOMY",
+  ]);
+  assert.match(requirementStatus.stdout.split(/\r?\n/u)[0], /choose at most independent completion/i);
+  assert.match(requirementStatus.stdout, /does not authorize a pull request or local release by itself/u);
+  assert.match(requirementStatus.stdout, /Details:\n- Requirement: REQ-AUTONOMY/u);
   createApprovedImplementationContract(project, {
     storyId: "ST-PR-1",
     contractId: "CONTRACT-PR-1",
@@ -366,6 +374,29 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(activated.autonomy_decision.autonomous, false);
   assert.ok(activated.autonomy_decision.reason_codes.includes("delivery.authority.audit_only_caps_autonomy"));
 
+  const humanStatus = mustRun([
+    "autonomy", "delivery", "status",
+    "--root", project,
+    "--id", "AUT-PR-1",
+  ]);
+  assert.match(humanStatus.stdout.split(/\r?\n/u)[0], /active for one pull request/i);
+  assert.match(humanStatus.stdout, /Impact: .*independent work between agreed checkpoints/u);
+  assert.match(humanStatus.stdout, /Next: .*actions allowed by this delivery profile/u);
+  assert.match(humanStatus.stdout, /Requested technical level: bounded-autonomous/u);
+  assert.match(humanStatus.stdout, /Effective technical level: checkpointed/u);
+  assert.match(humanStatus.stdout, /Technical reason codes: .*delivery\.authority\.audit_only_caps_autonomy/u);
+
+  const humanExplainItalian = mustRun([
+    "autonomy", "delivery", "explain",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--locale", "it",
+  ]);
+  assert.match(humanExplainItalian.stdout.split(/\r?\n/u)[0], /attiva per una sola pull request/u);
+  assert.match(humanExplainItalian.stdout, /Impatto: .*checkpoint concordati/u);
+  assert.match(humanExplainItalian.stdout, /Prossimo passo:/u);
+  assert.match(humanExplainItalian.stdout, /Dettagli:/u);
+
   const intent = taskIntent("ST-PR-1");
   const mixedFetchRemoteStart = mustRunJson([
     "task", "start",
@@ -389,6 +420,32 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(profileMissing.execution_allowed, false);
   assert.equal(profileMissing.contract_action, "select_delivery_autonomy");
   assert.ok(profileMissing.blocking_reasons.includes("autonomy_selection_required"));
+  const profileMissingHuman = mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", intent,
+  ]);
+  assert.match(profileMissingHuman.stdout, /this pull request or local release still needs its own choice/u);
+  assert.match(profileMissingHuman.stdout, /choice is never inherited from an earlier delivery/u);
+  assert.match(profileMissingHuman.stdout, /step-by-step control \/ autonomy with checkpoints \/ full autonomy/u);
+  const profileMissingItalian = mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", intent,
+    "--locale", "it",
+  ]);
+  assert.match(profileMissingItalian.stdout.split(/\r?\n/u)[0], /Mi serve una decisione rapida/u);
+  assert.match(profileMissingItalian.stdout, /questa pull request .* propria scelta del livello di autonomia/u);
+  assert.match(profileMissingItalian.stdout, /Quale livello di autonomia vuoi usare/u);
+  assert.match(profileMissingItalian.stdout, /Dettagli tecnici:/u);
+  assert.ok(
+    profileMissingItalian.stdout.indexOf("autonomy_selection_required")
+      > profileMissingItalian.stdout.indexOf("Dettagli tecnici:"),
+  );
+  assert.doesNotMatch(
+    profileMissingItalian.stdout.slice(0, profileMissingItalian.stdout.indexOf("Dettagli tecnici:")),
+    /autonomy_selection_required/u,
+  );
 
   const automatic = mustRunJson([
     "task", "start",
@@ -489,6 +546,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   tamperedProfile.pull_request_target.allowed_actions.sort();
   tamperedProfile.profile_hash = computeDeliveryExecutionProfileHash(tamperedProfile);
   fs.writeFileSync(profilePath, `${JSON.stringify(tamperedProfile, null, 2)}\n`, "utf8");
+  const invalidHumanStatus = run([
+    "autonomy", "delivery", "status",
+    "--root", project,
+    "--id", "AUT-PR-1",
+  ]);
+  assert.notEqual(invalidHumanStatus.status, 0);
+  assert.match(invalidHumanStatus.stdout.split(/\r?\n/u)[0], /needs repair and cannot be used now/u);
+  assert.match(invalidHumanStatus.stdout, /Effective technical level: supervised/u);
+  assert.match(invalidHumanStatus.stdout, /Technical reason codes: autonomy_profile_evaluation_failed/u);
   const tamperedDecision = mustRunJson([
     "task", "start",
     "--root", project,

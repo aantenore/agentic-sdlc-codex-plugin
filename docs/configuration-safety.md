@@ -1,0 +1,74 @@
+# Configuration safety
+
+The plugin pins each initialized project's complete effective configuration. Updating the plugin can add new defaults, but it cannot silently change the rules already governing that project.
+
+## The short version
+
+Run:
+
+```bash
+agentic-sdlc config status --root /path/to/project
+```
+
+The first three lines tell you the result, its impact, and the next action. Technical hashes and internal labels follow only as supporting detail.
+
+| Message | Meaning | What to do |
+| --- | --- | --- |
+| Configuration is pinned and safe | The stored config matches its lock | Nothing |
+| Previous compatible behavior is preserved | This is an older project without a lock | Preview a migration |
+| Configuration changed after the lock | A person or tool changed project policy | Review and accept or restore the change |
+| The lock cannot be trusted | The lock is malformed or inconsistent | Restore a valid config and lock before governed writes |
+
+Commands that only inspect state remain available during recovery. Commands that change governed project records stop before writing when the config is drifted or invalid.
+
+## Review before applying
+
+The preview is read-only:
+
+```bash
+agentic-sdlc config migrate --root /path/to/project
+```
+
+It reports every JSON path that would be added, replaced, or removed and prints a deterministic plan hash. It does not change `config.json`, create a lock, or write a migration receipt.
+
+Apply only the plan you just reviewed:
+
+```bash
+agentic-sdlc config migrate \
+  --root /path/to/project \
+  --apply \
+  --plan-hash <displayed-sha256>
+```
+
+Before writing, the CLI recomputes the plan under a project lock. If the config, previous lock, or plan changed after review, the command stops and preserves the existing files. A successful apply atomically materializes the reviewed config, writes `config.lock.json`, and stores an immutable receipt under `.sdlc/migrations/config/`.
+
+Release-history migration is deliberately separate. It never upgrades configuration as a side effect; pin the project config first, then run the release migration.
+
+## Esempio in italiano
+
+```text
+La configurazione è stata modificata dopo l'ultimo blocco approvato.
+Impatto: il plugin non presume che la modifica sia intenzionale e sospende le scritture governate.
+Prossima azione: esegui l'anteprima, controlla le differenze e applica soltanto l'hash del piano mostrato.
+```
+
+L'anteprima non modifica file. Se qualcuno cambia nuovamente la configurazione prima dell'applicazione, il vecchio hash viene rifiutato e occorre revisionare un nuovo piano.
+
+## English example
+
+```text
+Configuration changed after the last approved lock.
+Impact: the plugin does not guess whether the change was intentional, so governed writes are paused.
+Next: preview the migration, review the diff, and apply only the displayed plan hash.
+```
+
+The preview changes no files. If the configuration changes again before apply, the old hash is rejected and a new plan must be reviewed.
+
+## Technical records
+
+- `.sdlc/config.json` is the fully materialized project policy.
+- `.sdlc/config.lock.json` binds the complete config hash, defaults profile, inherited paths, and creation time.
+- `.sdlc/migrations/config/*.json` records an applied plan, resulting lock, audit attribution, and immutable receipt hash.
+- `templates/config-compat/` contains frozen compatibility defaults used only for older projects that do not yet have a lock.
+
+The lock is hash-bound evidence, not a digital signature. A signed host approval is a different record with a verified trusted-key attestation; the CLI does not call an ordinary config lock “signed.”
