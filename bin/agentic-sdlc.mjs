@@ -6867,6 +6867,7 @@ function remoteAuthorizationProjection(action, actionDetails) {
     const {
       push_precondition: _pushPrecondition,
       base_precondition: _basePrecondition,
+      commit_coverage: _commitCoverage,
       ...projection
     } = operationDetails;
     return projection;
@@ -8192,18 +8193,417 @@ function validateDeliveryActionCheckpointPolicySnapshot(context, snapshot, profi
   return { valid: errors.length === 0, required: expectedRequired, errors };
 }
 
-function deliveryActionReceipts(context, profileId) {
+function allDeliveryActionReceipts(context) {
   return safeReadDir(autonomyActionsRoot(context))
     .filter((name) => name.endsWith(".json"))
     .map((name) => readDeliveryLifecycleReceipt(
       context,
       path.join(autonomyActionsRoot(context), name),
       "delivery-action-receipt.schema.json",
-    ))
+    ));
+}
+
+function deliveryActionReceipts(context, profileId) {
+  return allDeliveryActionReceipts(context)
     .filter((record) => record.profile_ref?.id === profileId);
 }
 
-function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions = null) {
+function pullRequestCommitLineage(profile) {
+  return {
+    schema_version: "pull-request-commit-lineage:v1",
+    delivery_kind: profile.delivery_kind,
+    repository: normalizeGitRepositoryIdentity(profile.pull_request_target?.repository),
+    base_branch: profile.pull_request_target?.base_branch || null,
+    head_branch: profile.pull_request_target?.head_branch || null,
+    story_ids: [...new Set((profile.story_refs || []).map((item) => item.id).filter(Boolean))].sort(),
+    requirement_profile_ids: [...new Set(
+      (profile.requirement_profile_refs || []).map((item) => item.id).filter(Boolean),
+    )].sort(),
+  };
+}
+
+function deliveryActionReceiptRef(context, receipt) {
+  return {
+    id: receipt.id,
+    path: toProjectPath(
+      context,
+      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+    ),
+    hash: receipt.receipt_hash,
+  };
+}
+
+function deliveryStartReceiptRef(context, profile, receipt) {
+  return {
+    id: receipt.id,
+    path: toProjectPath(context, deliveryStartReceiptPath(context, profile.id)),
+    hash: receipt.receipt_hash,
+  };
+}
+
+function validateCommitCoverageProfileRef(context, profile, profileRef, label) {
+  const expectedPath = toProjectPath(context, deliveryAutonomyPath(context, profile.id));
+  if (
+    profileRef?.id !== profile.id
+    || profileRef?.path !== expectedPath
+    || profileRef?.hash !== profile.profile_hash
+  ) {
+    return [`${label} profile reference is stale or non-canonical`];
+  }
+  return [];
+}
+
+function validateCommitMediationCandidate(
+  context,
+  currentProfile,
+  commitSha,
+  completion,
+  authorization,
+  candidateProfile,
+) {
+  const errors = [];
+  const label = `Commit ${commitSha}`;
+  if (stableJson(pullRequestCommitLineage(candidateProfile)) !== stableJson(pullRequestCommitLineage(currentProfile))) {
+    return { compatible: false, errors: [] };
+  }
+  if (candidateProfile.status !== "active") {
+    errors.push(`${label} mediation profile is not approved and active`);
+  }
+  try {
+    validateAutonomyApprovalRef(context, candidateProfile, `${label} mediation profile`);
+  } catch (error) {
+    errors.push(`${label} mediation profile approval is invalid: ${error.message}`);
+  }
+  let executionState = null;
+  try {
+    executionState = currentDeliveryExecutionState(context, candidateProfile);
+  } catch (error) {
+    errors.push(`${label} mediation execution state is invalid: ${error.message}`);
+  }
+  const startReceipt = executionState?.start_receipt || null;
+  const profileStoryRef = (candidateProfile.story_refs || []).find((ref) => ref.id === startReceipt?.story_ref?.id);
+  const profileContractRef = (candidateProfile.contract_refs || []).find((ref) => ref.id === startReceipt?.contract_ref?.id);
+  if (
+    !startReceipt
+    || !profileStoryRef
+    || !profileContractRef
+    || stableJson(startReceipt.story_ref) !== stableJson(profileStoryRef)
+    || stableJson(startReceipt.contract_ref) !== stableJson(profileContractRef)
+  ) {
+    errors.push(`${label} mediation profile has no matching immutable delivery start`);
+  } else {
+    try {
+      const decisionPath = resolveProjectFilePath(
+        context,
+        startReceipt.autonomy_decision_ref.path,
+        { mustExist: true, fileOnly: true },
+      );
+      const startDecision = readProjectJson(context, decisionPath);
+      const integrity = validateAutonomyDecisionIntegrity(startDecision);
+      if (
+        !integrity.valid
+        || startDecision.id !== startReceipt.autonomy_decision_ref.id
+        || startDecision.decision_hash !== startReceipt.autonomy_decision_ref.hash
+        || startDecision.delivery?.profile_id !== candidateProfile.id
+        || startDecision.delivery?.profile_hash !== candidateProfile.profile_hash
+        || startDecision.effective_level !== startReceipt.effective_level
+      ) {
+        errors.push(`${label} mediation delivery start decision is stale or invalid`);
+      }
+    } catch (error) {
+      errors.push(`${label} mediation delivery start decision is unavailable: ${error.message}`);
+    }
+  }
+  errors.push(...validateCommitCoverageProfileRef(context, candidateProfile, completion.profile_ref, label));
+  errors.push(...validateCommitCoverageProfileRef(context, candidateProfile, authorization?.profile_ref, label));
+  if (
+    !authorization
+    || authorization.action !== "git.commit"
+    || authorization.status !== "authorized"
+    || authorization.receipt_hash !== completion.authorization_receipt_ref?.hash
+    || authorization.id !== completion.authorization_receipt_ref?.id
+    || completion.action !== "git.commit"
+    || completion.status !== "completed"
+    || completion.outcome !== "passed"
+    || completion.delivery?.id !== candidateProfile.delivery_id
+    || authorization.delivery?.id !== candidateProfile.delivery_id
+    || completion.delivery?.kind !== candidateProfile.delivery_kind
+    || authorization.delivery?.kind !== candidateProfile.delivery_kind
+    || completion.effective_level !== authorization.effective_level
+    || completion.action_details?.commit?.after_sha !== commitSha
+  ) {
+    errors.push(`${label} receipt pair is not an exact passing git.commit mediation`);
+  }
+  const checkpointPolicy = authorization?.action_details?.checkpoint_policy || null;
+  if (checkpointPolicy) {
+    const checkpointValidation = validateDeliveryActionCheckpointPolicySnapshot(
+      context,
+      checkpointPolicy,
+      candidateProfile,
+      authorization.effective_level,
+      "git.commit",
+    );
+    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointValidation.required) {
+      errors.push(`${label} authorization has an invalid immutable checkpoint policy`);
+    }
+  }
+  if (authorization?.checkpoint_required === true) {
+    const approvalReport = { strict: true, errors: [], warnings: [], checked: [] };
+    validateFormalApprovalRecord(
+      context,
+      approvalReport,
+      authorization.approval,
+      `${label} authorization approval`,
+      authorization.approval?.approved_by,
+      { subject_id: candidateProfile.id },
+    );
+    const approvalSubject = {
+      profile_id: candidateProfile.id,
+      profile_hash: candidateProfile.profile_hash,
+      delivery_id: candidateProfile.delivery_id,
+      action: authorization.action,
+      runtime_target: authorization.runtime_target,
+      action_details: authorization.action_details,
+    };
+    if (
+      authorization.approval?.status !== "approved"
+      || authorization.approval?.approved_content_hash !== hashApprovalSubject(approvalSubject)
+    ) {
+      approvalReport.errors.push(`${label} authorization approval is missing or bound to a different action`);
+    }
+    try {
+      validateApprovalEvidenceIntegrity(context, authorization.approval, `${label} authorization approval`);
+      validateDeliveryActionHostAuthority(context, candidateProfile, authorization);
+    } catch (error) {
+      approvalReport.errors.push(`${label} authorization approval evidence is invalid: ${error.message}`);
+    }
+    errors.push(...approvalReport.errors);
+  }
+  const startAt = Date.parse(startReceipt?.started_at || "");
+  const authorizedAt = Date.parse(authorization?.authorized_at || "");
+  const completedAt = Date.parse(completion?.authorized_at || "");
+  const closedAt = executionState?.close_receipt
+    ? Date.parse(executionState.close_receipt.closed_at || "")
+    : Number.POSITIVE_INFINITY;
+  const effectiveProfileStatus = effectiveDeliveryProfileStatus(context, candidateProfile);
+  const revokedAt = effectiveProfileStatus.revocation
+    ? Date.parse(effectiveProfileStatus.revocation.created_at || "")
+    : Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(startAt)
+    || !Number.isFinite(authorizedAt)
+    || !Number.isFinite(completedAt)
+    || (executionState?.close_receipt && !Number.isFinite(closedAt))
+    || (effectiveProfileStatus.revocation && !Number.isFinite(revokedAt))
+    || authorizedAt < startAt
+    || completedAt < authorizedAt
+    || completedAt > closedAt
+    || completedAt > revokedAt
+  ) {
+    errors.push(`${label} mediation receipts fall outside the immutable delivery execution window`);
+  }
+  const target = candidateProfile.pull_request_target || {};
+  for (const receipt of [authorization, completion].filter(Boolean)) {
+    if (
+      normalizeGitRepositoryIdentity(receipt.action_details?.repository) !== normalizeGitRepositoryIdentity(target.repository)
+      || receipt.action_details?.base_branch !== target.base_branch
+      || receipt.action_details?.head_branch !== target.head_branch
+    ) {
+      errors.push(`${label} receipt pair is bound to a different pull-request target`);
+      break;
+    }
+  }
+  if (authorization && errors.length === 0) {
+    const validation = { errors: [], warnings: [] };
+    validateCompletedGitCommitReceipt(context, validation, completion, authorization, label);
+    errors.push(...validation.errors);
+  }
+  return { compatible: true, errors, startReceipt };
+}
+
+function buildGitCommitCoverageProof(context, profile, runtimeTarget) {
+  const errors = [];
+  const baseSha = runtimeTarget?.base_sha;
+  const headSha = runtimeTarget?.head_sha;
+  if (!baseSha || !headSha) {
+    return { errors: ["Git commit coverage requires exact base and head SHAs."], proof: null };
+  }
+  if (execGit(context.root, ["merge-base", baseSha, headSha]) !== baseSha) {
+    return { errors: [`Git head ${headSha} is not descended from the approved base ${baseSha}.`], proof: null };
+  }
+  const rangeOutput = execGit(context.root, ["rev-list", "--reverse", "--topo-order", `${baseSha}..${headSha}`]);
+  const commitShas = String(rangeOutput || "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  const receipts = allDeliveryActionReceipts(context);
+  const receiptById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+  const profileCache = new Map();
+  const entries = [];
+  for (const commitSha of commitShas) {
+    const candidates = [];
+    const invalidCandidates = [];
+    for (const completion of receipts.filter((receipt) =>
+      receipt.action === "git.commit"
+      && receipt.status === "completed"
+      && receipt.outcome === "passed"
+      && receipt.action_details?.commit?.after_sha === commitSha)) {
+      const profileId = completion.profile_ref?.id;
+      if (!profileId) continue;
+      let candidateProfile = profileCache.get(profileId);
+      if (!candidateProfile) {
+        candidateProfile = readDeliveryAutonomyProfile(context, profileId);
+        profileCache.set(profileId, candidateProfile);
+      }
+      const authorization = receiptById.get(completion.authorization_receipt_ref?.id) || null;
+      const validation = validateCommitMediationCandidate(
+        context,
+        profile,
+        commitSha,
+        completion,
+        authorization,
+        candidateProfile,
+      );
+      if (!validation.compatible) continue;
+      if (validation.errors.length > 0) {
+        invalidCandidates.push(...validation.errors);
+        continue;
+      }
+      candidates.push({
+        completion,
+        authorization,
+        candidateProfile,
+        startReceipt: validation.startReceipt,
+      });
+    }
+    if (candidates.length !== 1) {
+      errors.push(
+        candidates.length === 0 && invalidCandidates.length > 0
+          ? `${labelForCommit(commitSha)} has invalid mediation: ${invalidCandidates.join("; ")}`
+          : `Commit ${commitSha} requires exactly one passing completed git.commit receipt from the same pull-request lineage before git.push.`,
+      );
+      continue;
+    }
+    const { completion, authorization, candidateProfile, startReceipt } = candidates[0];
+    entries.push({
+      commit_sha: commitSha,
+      profile_ref: {
+        id: candidateProfile.id,
+        path: toProjectPath(context, deliveryAutonomyPath(context, candidateProfile.id)),
+        hash: candidateProfile.profile_hash,
+      },
+      start_receipt_ref: deliveryStartReceiptRef(context, candidateProfile, startReceipt),
+      authorization_receipt_ref: deliveryActionReceiptRef(context, authorization),
+      completion_receipt_ref: deliveryActionReceiptRef(context, completion),
+    });
+  }
+  if (errors.length > 0) return { errors, proof: null };
+  const proofBase = {
+    schema_version: "git-commit-coverage:v1",
+    base_sha: baseSha,
+    head_sha: headSha,
+    lineage_hash: hashApprovalSubject(pullRequestCommitLineage(profile)),
+    entries,
+  };
+  return {
+    errors: [],
+    proof: { ...proofBase, coverage_hash: hashApprovalSubject(proofBase) },
+  };
+}
+
+function labelForCommit(commitSha) {
+  return `Commit ${commitSha}`;
+}
+
+function validateGitCommitCoverageProof(context, profile, runtimeTarget, proof) {
+  const errors = [];
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
+    return ["Git commit coverage proof is missing."];
+  }
+  const { coverage_hash: coverageHash, ...proofBase } = proof;
+  if (
+    proof.schema_version !== "git-commit-coverage:v1"
+    || coverageHash !== hashApprovalSubject(proofBase)
+    || proof.base_sha !== runtimeTarget?.base_sha
+    || proof.head_sha !== runtimeTarget?.head_sha
+    || proof.lineage_hash !== hashApprovalSubject(pullRequestCommitLineage(profile))
+    || !Array.isArray(proof.entries)
+  ) {
+    return ["Git commit coverage proof is stale or invalid."];
+  }
+  if (!proof.entries.every((entry) =>
+    entry
+    && typeof entry === "object"
+    && !Array.isArray(entry)
+    && /^[a-f0-9]{40,64}$/u.test(entry.commit_sha || "")
+    && typeof entry.profile_ref?.id === "string"
+    && typeof entry.start_receipt_ref?.id === "string"
+    && typeof entry.authorization_receipt_ref?.id === "string"
+    && typeof entry.completion_receipt_ref?.id === "string")) {
+    return ["Git commit coverage proof contains an invalid entry."];
+  }
+  if (execGit(context.root, ["merge-base", proof.base_sha, proof.head_sha]) !== proof.base_sha) {
+    return [`Git head ${proof.head_sha} is not descended from the approved base ${proof.base_sha}.`];
+  }
+  const expectedCommits = String(execGit(
+    context.root,
+    ["rev-list", "--reverse", "--topo-order", `${proof.base_sha}..${proof.head_sha}`],
+  ) || "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  if (stableJson(proof.entries.map((entry) => entry.commit_sha)) !== stableJson(expectedCommits)) {
+    errors.push("Git commit coverage proof does not cover the exact ordered commit range.");
+  }
+  const receipts = allDeliveryActionReceipts(context);
+  const receiptById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+  for (const entry of proof.entries) {
+    let candidateProfile;
+    try {
+      candidateProfile = readDeliveryAutonomyProfile(context, entry.profile_ref.id);
+    } catch (error) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage profile is unavailable: ${error.message}`);
+      continue;
+    }
+    const authorization = receiptById.get(entry.authorization_receipt_ref?.id) || null;
+    const completion = receiptById.get(entry.completion_receipt_ref?.id) || null;
+    errors.push(...validateCommitCoverageProfileRef(
+      context,
+      candidateProfile,
+      entry.profile_ref,
+      labelForCommit(entry.commit_sha),
+    ));
+    if (
+      !authorization
+      || !completion
+      || stableJson(deliveryActionReceiptRef(context, authorization)) !== stableJson(entry.authorization_receipt_ref)
+      || stableJson(deliveryActionReceiptRef(context, completion)) !== stableJson(entry.completion_receipt_ref)
+    ) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage references are missing or stale`);
+      continue;
+    }
+    const validation = validateCommitMediationCandidate(
+      context,
+      profile,
+      entry.commit_sha,
+      completion,
+      authorization,
+      candidateProfile,
+    );
+    if (
+      !validation.startReceipt
+      || stableJson(deliveryStartReceiptRef(context, candidateProfile, validation.startReceipt))
+        !== stableJson(entry.start_receipt_ref)
+    ) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage start receipt is missing or stale`);
+    }
+    if (!validation.compatible) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage comes from a different pull-request lineage`);
+    } else {
+      errors.push(...validation.errors);
+    }
+  }
+  return errors;
+}
+
+function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions = null, coverageProof = null) {
+  if (coverageProof) {
+    return validateGitCommitCoverageProof(context, profile, runtimeTarget, coverageProof);
+  }
   const errors = [];
   const baseSha = runtimeTarget?.base_sha;
   const headSha = runtimeTarget?.head_sha;
@@ -8254,10 +8654,11 @@ function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions
 }
 
 function assertGitCommitReceiptCoverage(context, profile, runtimeTarget) {
-  const errors = gitCommitReceiptCoverageErrors(context, profile, runtimeTarget);
+  const { errors, proof } = buildGitCommitCoverageProof(context, profile, runtimeTarget);
   if (errors.length > 0) {
     fail(`git.push cannot authorize unmediated commits: ${errors.join("; ")}`);
   }
+  return proof;
 }
 
 function buildActionEvidence(context, values) {
@@ -8338,6 +8739,27 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     );
     if (!snapshotValidation.valid || stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
       fail(`Delivery action authorization ${authorization.id} has a stale or invalid checkpoint policy snapshot.`);
+    }
+  }
+  if (authorization.action === "git.push") {
+    const coverageProof = authorization.action_details?.commit_coverage || null;
+    const requiresCoverageProof = Boolean(checkpointSnapshot?.policy_source_ref);
+    if (requiresCoverageProof && !coverageProof) {
+      fail(`Delivery action authorization ${authorization.id} is missing its required git-commit coverage proof.`);
+    }
+    if (coverageProof) {
+      const coverageErrors = validateGitCommitCoverageProof(
+        context,
+        profile,
+        {
+          ...authorization.runtime_target,
+          base_sha: authorization.action_details?.base_precondition?.observed_sha,
+        },
+        coverageProof,
+      );
+      if (coverageErrors.length > 0) {
+        fail(`Delivery action authorization ${authorization.id} has invalid git-commit coverage: ${coverageErrors.join("; ")}`);
+      }
     }
   }
   if (!actionPolicy.required) return;
@@ -8568,13 +8990,14 @@ function evaluateDeliveryAction(context, options) {
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
     if (!completingAction && action === "git.push") {
       const basePrecondition = observeGitRemoteBasePrecondition(context, profile, actionDetails);
-      assertGitCommitReceiptCoverage(context, profile, {
+      const commitCoverage = assertGitCommitReceiptCoverage(context, profile, {
         ...runtimeTarget,
         base_sha: basePrecondition.observed_sha,
       });
       actionDetails = {
         ...actionDetails,
         base_precondition: basePrecondition,
+        commit_coverage: commitCoverage,
         push_precondition: observeGitPushPrecondition(context, actionDetails),
       };
     }
@@ -25949,7 +26372,19 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       ...authorization.runtime_target,
       base_sha: basePrecondition?.observed_sha,
     };
-    const coverageErrors = gitCommitReceiptCoverageErrors(context, profile, coverageRuntime, actions);
+    const coverageProof = authorization.action_details?.commit_coverage || null;
+    const requiresCoverageProof = Boolean(
+      authorization.action_details?.checkpoint_policy?.policy_source_ref,
+    );
+    const coverageErrors = requiresCoverageProof && !coverageProof
+      ? ["Push authorization is missing its required immutable git-commit coverage proof."]
+      : gitCommitReceiptCoverageErrors(
+          context,
+          profile,
+          coverageRuntime,
+          actions,
+          coverageProof,
+        );
     if (
       basePrecondition?.provider !== "git-remote"
       || basePrecondition.remote !== authorization.action_details?.push?.remote

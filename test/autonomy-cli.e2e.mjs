@@ -196,6 +196,12 @@ function checkpointPolicySourceHash(record) {
   return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
 }
 
+function commitCoverageHash(record) {
+  const canonical = structuredClone(record);
+  delete canonical.coverage_hash;
+  return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
+}
+
 function initializeAutonomyProject(project) {
   mustRun(["init", "--root", project, "--project-name", "Autonomy E2E", "--force"]);
   mustGit(project, ["init"]);
@@ -702,6 +708,23 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.observed_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.base_ref, "refs/heads/main");
   assert.equal(pushAuthorization.action_receipt.action_details.push_precondition.observed_sha, beforeCommit);
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.schema_version, "git-commit-coverage:v1");
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.base_sha, beforeCommit);
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.head_sha, afterCommit);
+  assert.deepEqual(
+    pushAuthorization.action_receipt.action_details.commit_coverage.entries.map((entry) => ({
+      commit_sha: entry.commit_sha,
+      profile_id: entry.profile_ref.id,
+      authorization_id: entry.authorization_receipt_ref.id,
+      completion_id: entry.completion_receipt_ref.id,
+    })),
+    [{
+      commit_sha: afterCommit,
+      profile_id: "AUT-PR-1",
+      authorization_id: commitAuthorization.action_receipt.id,
+      completion_id: commitCompletion.action_receipt.id,
+    }],
+  );
   const lockedPolicySourceRef = pushAuthorization.action_receipt.action_details.checkpoint_policy.policy_source_ref;
   assert.equal(
     lockedPolicySourceRef.effective_config_hash,
@@ -810,6 +833,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--base", "main",
     "--head", "codex/pr-1",
     "--write-path", "src",
+    "--allow-action", "git.push",
   ]).delivery_profile;
   assert.equal(proposedSuccessorProfile.status, "proposed");
   assert.equal(proposedSuccessorProfile.delivery_id, "PR-2");
@@ -830,6 +854,22 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(successorStart.execution_allowed, true);
   assert.equal(successorStart.delivery_profile_id, "AUT-PR-2");
+
+  const successorPushAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    "--action", "git.push",
+    "--remote", "origin",
+  ], { env: pushBeforeEnv });
+  assert.equal(successorPushAuthorization.status, "authorized");
+  assert.deepEqual(
+    successorPushAuthorization.action_receipt.action_details.commit_coverage.entries.map((entry) => ({
+      commit_sha: entry.commit_sha,
+      profile_id: entry.profile_ref.id,
+    })),
+    [{ commit_sha: afterCommit, profile_id: "AUT-PR-1" }],
+  );
 
   const successorGate = run([
     "gate", "check",
@@ -852,6 +892,69 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     [],
     `A successor contract/profile must not invalidate terminal AUT-PR-1 evidence:\n${historicalFalsePositives.join("\n")}`,
   );
+  assert.deepEqual(
+    successorGateReport.errors.filter((error) =>
+      /AUT-PR-2 git\.push authorization .*incomplete commit mediation|git-commit coverage proof/iu.test(error)),
+    [],
+    successorGate.stdout,
+  );
+
+  const successorPushReceiptPath = path.join(project, successorPushAuthorization.action_receipt_path);
+  const originalSuccessorPushReceipt = fs.readFileSync(successorPushReceiptPath, "utf8");
+  const pushWithoutCoverage = JSON.parse(originalSuccessorPushReceipt);
+  delete pushWithoutCoverage.action_details.commit_coverage;
+  pushWithoutCoverage.receipt_hash = lifecycleReceiptHash(pushWithoutCoverage);
+  fs.writeFileSync(successorPushReceiptPath, `${JSON.stringify(pushWithoutCoverage, null, 2)}\n`, "utf8");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    "--action", "git.push",
+    "--outcome", "passed",
+    "--evidence", "src/change.txt",
+  ], /missing its required git-commit coverage proof/u, { env: fakeGitRemoteEnv(project, afterCommit) });
+  const missingCoverageGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(missingCoverageGate.error, undefined, missingCoverageGate.error?.message);
+  assert.equal(missingCoverageGate.signal, null, `gate check terminated by ${missingCoverageGate.signal}`);
+  assert.equal(missingCoverageGate.status, 1, missingCoverageGate.stdout);
+  assert.ok(
+    JSON.parse(missingCoverageGate.stdout).errors.some((error) =>
+      /missing its required immutable git-commit coverage proof/u.test(error)),
+    missingCoverageGate.stdout,
+  );
+  fs.writeFileSync(successorPushReceiptPath, originalSuccessorPushReceipt, "utf8");
+
+  const pushWithForgedStart = JSON.parse(originalSuccessorPushReceipt);
+  pushWithForgedStart.action_details.commit_coverage.entries[0].start_receipt_ref.hash = "0".repeat(64);
+  pushWithForgedStart.action_details.commit_coverage.coverage_hash = commitCoverageHash(
+    pushWithForgedStart.action_details.commit_coverage,
+  );
+  pushWithForgedStart.receipt_hash = lifecycleReceiptHash(pushWithForgedStart);
+  fs.writeFileSync(successorPushReceiptPath, `${JSON.stringify(pushWithForgedStart, null, 2)}\n`, "utf8");
+  const forgedStartGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(forgedStartGate.error, undefined, forgedStartGate.error?.message);
+  assert.equal(forgedStartGate.signal, null, `gate check terminated by ${forgedStartGate.signal}`);
+  assert.equal(forgedStartGate.status, 1, forgedStartGate.stdout);
+  assert.ok(
+    JSON.parse(forgedStartGate.stdout).errors.some((error) =>
+      /coverage start receipt is missing or stale/u.test(error)),
+    forgedStartGate.stdout,
+  );
+  fs.writeFileSync(successorPushReceiptPath, originalSuccessorPushReceipt, "utf8");
 
   const originalCheckpointPolicySource = fs.readFileSync(checkpointPolicySourcePath, "utf8");
   const forgedCheckpointPolicySource = JSON.parse(originalCheckpointPolicySource);

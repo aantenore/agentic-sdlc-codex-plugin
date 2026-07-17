@@ -13,6 +13,8 @@
 - 2026-07-17T22:53:11+02:00 actor=codex branch=codex/ST-ENT-PERFORMANCE: `npm run check`, 451/451 repository tests, Node.js 18/24 protocol suites, and enforcing full-scale benchmark passed.
 - 2026-07-17T23:25:44+02:00 actor=codex branch=codex/ST-ENT-PERFORMANCE: historical delivery validation was rebound to immutable event-time evidence; successor-contract and forged-receipt regressions passed on Node.js 24 and 18.20.8.
 - 2026-07-17T23:25:44+02:00 actor=codex branch=codex/ST-ENT-PERFORMANCE: a parallel-load timeout race was reproduced and fixed by separating the completed worker's exit deadline from its primary work deadline; `npm run check`, 451/451 repository tests, 40/40 Node.js 18 protocol tests, 5/5 Node.js 18 autonomy tests, and the enforcing benchmark passed.
+- 2026-07-17T22:47:54Z actor=codex head=5f33bacbd4cd0e474d8720a9ace4612785c129ee: push mediation now preserves exact, non-reusable profile semantics across revisions of the same pull request by binding the ordered commit range to approved start, decision, authorization, completion, and lineage evidence.
+- 2026-07-17T22:47:54Z actor=codex branch=codex/ST-ENT-PERFORMANCE: independent review reported no remaining P0/P1/P2; `npm run check`, 451/451 tests, Node.js 18 autonomy 5/5, protocol 40/40, and all enforced performance budgets passed.
 
 ## Handoff
 
