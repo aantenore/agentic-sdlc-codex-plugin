@@ -145,6 +145,12 @@ function humanApproval(summary) {
   ];
 }
 
+function hostSupportsLocalSmokeSandbox() {
+  if (process.platform === "darwin") return fs.existsSync("/usr/bin/sandbox-exec");
+  if (process.platform === "linux") return fs.existsSync("/usr/bin/bwrap");
+  return false;
+}
+
 function taskIntent(storyId) {
   return JSON.stringify({
     requested_action: "implement_story",
@@ -815,7 +821,7 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
   );
 });
 
-test("local release autonomy requires a strict child target, smoke test, and rollback", () => {
+test("local release autonomy requires a strict child target, smoke test, rollback, and supported sandbox", () => {
   const project = tmpProject("local-release");
   initializeAutonomyProject(project);
   createApprovedImplementationContract(project, {
@@ -931,7 +937,7 @@ test("local release autonomy requires a strict child target, smoke test, and rol
 
   const releaseEvidence = path.join(releaseOutput, "release-proof.txt");
   fs.writeFileSync(releaseEvidence, "local release evidence\n", "utf8");
-  const completed = mustRunJson([
+  const completionArgs = [
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-1",
@@ -940,7 +946,24 @@ test("local release autonomy requires a strict child target, smoke test, and rol
     "--evidence", "local-release/app/release-proof.txt",
     "--smoke-test", '["node","--version"]',
     "--rollback", "Restore the previous local build directory snapshot.",
-  ], { timeout: 90_000 });
+  ];
+  if (!hostSupportsLocalSmokeSandbox()) {
+    mustFail(
+      completionArgs,
+      /Local smoke-test execution requires a configured read-only, no-network sandbox on this host/u,
+      { timeout: 90_000 },
+    );
+    const unavailableStatus = mustRunJson([
+      "autonomy", "delivery", "status",
+      "--root", project,
+      "--id", "AUT-LOCAL-1",
+    ]);
+    assert.equal(unavailableStatus.delivery_profiles[0].lifecycle_status, "started");
+    assert.equal(unavailableStatus.delivery_profiles[0].delivery_status, "started");
+    return;
+  }
+
+  const completed = mustRunJson(completionArgs, { timeout: 90_000 });
   assert.equal(completed.status, "completed");
   assert.equal(completed.lifecycle_status, "terminal");
   assert.match(completed.close_receipt_path, /autonomy\/executions\/AUT-LOCAL-1\/close\.json$/u);
