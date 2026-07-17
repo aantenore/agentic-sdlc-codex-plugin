@@ -1,0 +1,236 @@
+{
+  "id": "CAP-REC-ST-ENT-PERFORMANCE",
+  "schema_version": "0.1.0",
+  "status": "approved",
+  "profile_id": "CAP-PROFILE-ST-ENT-PERFORMANCE",
+  "profile_ref": {
+    "path": ".sdlc/capability-discovery/profiles/CAP-PROFILE-ST-ENT-PERFORMANCE.json",
+    "approved_content_hash": "2f9cff072b21ec8ee9028018eb46fbcb02a4a88984866cba8ef5af331bc46f4e",
+    "current_content_hash": "2f9cff072b21ec8ee9028018eb46fbcb02a4a88984866cba8ef5af331bc46f4e"
+  },
+  "recommendations": [
+    {
+      "type": "skill",
+      "name": "agentic-sdlc",
+      "availability": "available",
+      "purpose": "Keep the performance work traceable and story-scoped.",
+      "rationale": "The project already uses contract-driven delivery.",
+      "risk": null,
+      "permissions": [
+        "read"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "repo",
+      "availability": "available",
+      "purpose": "Read and update only files named by this PR profile.",
+      "rationale": "The change is entirely local to this repository.",
+      "risk": null,
+      "permissions": [
+        "read",
+        "write"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    },
+    {
+      "type": "tool",
+      "name": "node-test",
+      "availability": "available",
+      "purpose": "Run Node tests and deterministic performance benchmarks.",
+      "rationale": "The project uses Node built-ins and node:test.",
+      "risk": null,
+      "permissions": [
+        "read",
+        "execute"
+      ],
+      "install_required": false,
+      "install_approved": false,
+      "approval_required": false
+    }
+  ],
+  "available_capabilities": {},
+  "policy_patch": {
+    "skills": {
+      "required": [
+        "agentic-sdlc"
+      ],
+      "allowed": [
+        "agentic-sdlc"
+      ],
+      "forbidden": []
+    },
+    "mcp": {
+      "required": [],
+      "allowed": [],
+      "forbidden": []
+    },
+    "tools": {
+      "required": [
+        "repo",
+        "node-test"
+      ],
+      "allowed": [
+        "repo",
+        "node-test"
+      ],
+      "forbidden": []
+    },
+    "approval_required_for": []
+  },
+  "bindings": [
+    {
+      "type": "tool",
+      "name": "repo",
+      "binding_id": "enterprise-performance-local-repo",
+      "target": {
+        "root": ".",
+        "scope": "project"
+      },
+      "permissions": [
+        "read",
+        "write"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": [
+        "Writes remain limited by the exact delivery profile."
+      ]
+    },
+    {
+      "type": "tool",
+      "name": "node-test",
+      "binding_id": "enterprise-performance-node-test",
+      "target": {
+        "command": "node --test",
+        "scope": "project"
+      },
+      "permissions": [
+        "execute"
+      ],
+      "requires_approval_for": [],
+      "environment": null,
+      "notes": [
+        "No install or external service is required."
+      ]
+    }
+  ],
+  "execution_policy_suggestions": {
+    "notes": []
+  },
+  "decision_matrix": [],
+  "open_questions": [],
+  "source_paths": [],
+  "source_hashes": {},
+  "approvals": [
+    {
+      "id": "APR-20260717161213-028f8d",
+      "recommendation_id": "CAP-REC-ST-ENT-PERFORMANCE",
+      "status": "approved",
+      "summary": "Use the existing local repository and Node test runner only; no new capability or installation.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "CAP-REC-ST-ENT-PERFORMANCE",
+        "subject_label": "capability recommendation CAP-REC-ST-ENT-PERFORMANCE",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
+        "approval_level": "Autonomous completion of approved requirement REQ-ENTERPRISE-CONTROL-PLANE-001-R2 through the eight reserved local delivery stories only.",
+        "allowed_actions": [
+          "task.start.confirm",
+          "capability.approve",
+          "autonomy.delivery.approve",
+          "capability.profile.approve",
+          "dependency.approve",
+          "contract.approve",
+          "breakdown.approve"
+        ],
+        "subject_scope": "capability-recommendation"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENTERPRISE-PROGRAM-001/AUSE-AUTH-ENTERPRISE-PROGRAM-001-20260717161213967-993506.json",
+      "authorization_action": "capability.approve",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "48c6d4f0cf01a1fc81aed2d14120c6dfeb64326c6ca3b5d6538e881f8ec51346",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-ENT-PERFORMANCE",
+        "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "ant_ant95@hotmail.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.11.0"
+      },
+      "created_at": "2026-07-17T16:12:13.969Z"
+    }
+  ],
+  "created_at": "2026-07-17T16:12:09.825Z",
+  "updated_at": "2026-07-17T16:12:13.969Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-PERFORMANCE",
+      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.11.0"
+    },
+    "approved_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}

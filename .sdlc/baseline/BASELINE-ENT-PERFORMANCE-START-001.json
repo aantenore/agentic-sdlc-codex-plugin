@@ -1,0 +1,547 @@
+{
+  "id": "BASELINE-ENT-PERFORMANCE-START-001",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.11.0",
+  "kind": "existing-project",
+  "status": "approved",
+  "summary": "Post-Foundation project context for the enterprise Performance story: stable effective configuration, command-scoped canonical reads, current CLI/Observatory paths, deterministic enterprise fixture, and all merged Foundation evidence.",
+  "repository_snapshot": {
+    "root_name": "TravelOps",
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-PERFORMANCE",
+      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "detected_stack": [
+      {
+        "name": "package-json",
+        "type": "node",
+        "source_path": "package.json"
+      },
+      {
+        "name": "npm-scripts",
+        "type": "automation",
+        "source_path": "package.json",
+        "scripts": [
+          "check",
+          "doctor",
+          "smoke",
+          "test"
+        ]
+      }
+    ],
+    "key_files": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+        "size_bytes": 523
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
+      },
+      {
+        "path": "package.json",
+        "sha256": "c80577249961fc7c0e01056d65eeb25b2feffe1552f3f1c479b437067bbbc272",
+        "size_bytes": 1828
+      },
+      {
+        "path": "README.md",
+        "sha256": "cf5b242d22a66e1cc246154c0ce93eb970d7b9e084a19a2a4d7b2a2b68e05295",
+        "size_bytes": 37472
+      }
+    ],
+    "package_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
+      "doctor": "node bin/agentic-sdlc.mjs doctor",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test"
+    },
+    "package_summary": {
+      "name": "agentic-sdlc-codex-plugin",
+      "description": "Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
+      "version": "0.11.0",
+      "private": false,
+      "runtime_dependencies": [],
+      "development_dependencies": []
+    },
+    "source_roots": [
+      "lib",
+      "bin"
+    ],
+    "test_roots": [
+      "test"
+    ],
+    "ci_files": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+        "size_bytes": 523
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
+      }
+    ]
+  },
+  "imported_documents": [
+    {
+      "type": "document",
+      "path": "README.md",
+      "sha256": "cf5b242d22a66e1cc246154c0ce93eb970d7b9e084a19a2a4d7b2a2b68e05295",
+      "size_bytes": 37472,
+      "title": "Agentic SDLC Codex Plugin",
+      "headings": [
+        "Agentic SDLC Codex Plugin",
+        "Documentation Map",
+        "Quick Start",
+        "Change Observatory",
+        "How It Works",
+        "What The Two Checkpoints Mean",
+        "Autonomy Is Negotiated Per Requirement And Selected Per Delivery",
+        "CodeBurn Versus Exact Metering",
+        "RTK Context Optimization",
+        "Canonical Output Formats",
+        "Generation And Layered Verification Receipts",
+        "Install"
+      ],
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC 0.11.0 gives Codex a guided way to understand an existing software project deliver verified work and explain its recorded lineage visually. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills templates schemas the cross-platform Node.js CLI and the build-free Change Observatory UI. ## Documentation Map - Documentation home (docs/README.md) — choose the right guide without knowing the internal record names. - How It Works (docs/how-it-works.md) — the complete two-checkpoint journey state transitions author",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "document",
+      "path": "docs/architecture.md",
+      "sha256": "0acc21b98f2458f04f4c6d2a07cd8132fc239363d8f2a35424bb9121622c5d39",
+      "size_bytes": 28959,
+      "title": "Architecture",
+      "headings": [
+        "Architecture",
+        "Core Design Choices",
+        "Existing Project Baseline",
+        "Assessment Control Plane",
+        "Autonomy Control Plane",
+        "Intent Routing Layer",
+        "Contract Model",
+        "Approval Governance",
+        "Capability Discovery Layer",
+        "Work Breakdown And Dependencies",
+        "Output Consistency Layer",
+        "Change Observatory Presentation Layer"
+      ],
+      "excerpt": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> autonomy -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessme",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "document",
+      "path": "docs/change-observatory.md",
+      "sha256": "8406f30ff08ebaa396b9efdbbb9fd380d854ac405e7c24a11067bf2be4172684",
+      "size_bytes": 9427,
+      "title": "Change Observatory",
+      "headings": [
+        "Change Observatory",
+        "Launch After Installation",
+        "What It Shows",
+        "Proof-Bound Iteration Dossiers",
+        "Intent Evidence",
+        "Explainability Without Private Reasoning",
+        "Security And Privacy Boundary",
+        "Troubleshooting"
+      ],
+      "excerpt": "# Change Observatory Change Observatory is the visual local-first lineage reader bundled with Agentic SDLC. It turns canonical `.sdlc/` records into a presentation that a non-technical stakeholder can start with and a technical reviewer can drill through to raw evidence. ## Launch After Installation In Codex ask ```text Open the Change Observatory for this project. ``` The installed `Change Observatory` skill resolves its own plugin root and runs the plugin-local CLI. It does not assume that `agentic-sdlc` is globally available in `PATH`. An npm Git or tarball installation that exposes the package bin can launch it directly ```bash agentic-sdlc observe --root /path/to/project ``` Automation can suppress browser opening and consume the first NDJSON event ```bash agentic-sdlc observe \\ --roo",
+      "trust": "untrusted_project_evidence"
+    }
+  ],
+  "inferred_context": {
+    "product_signal": "Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
+    "document_map": [
+      {
+        "path": "README.md",
+        "title": "Agentic SDLC Codex Plugin",
+        "headings": [
+          "Agentic SDLC Codex Plugin",
+          "Documentation Map",
+          "Quick Start",
+          "Change Observatory",
+          "How It Works",
+          "What The Two Checkpoints Mean",
+          "Autonomy Is Negotiated Per Requirement And Selected Per Delivery",
+          "CodeBurn Versus Exact Metering",
+          "RTK Context Optimization",
+          "Canonical Output Formats",
+          "Generation And Layered Verification Receipts",
+          "Install"
+        ],
+        "summary": "# Agentic SDLC Codex Plugin Agentic SDLC 0.11.0 gives Codex a guided way to understand an existing software project deliver verified work and explain its recorded lineage visually. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills templates schemas the cross-platform Node.js CLI and the build-free Change Observatory UI. ## Documentation Map - Documentation home (docs/README.md) — choose the right guide without knowing the internal record names. - How It Works (docs/how-it-works.md) — the complete two-checkpoint journey state transitions author"
+      },
+      {
+        "path": "docs/architecture.md",
+        "title": "Architecture",
+        "headings": [
+          "Architecture",
+          "Core Design Choices",
+          "Existing Project Baseline",
+          "Assessment Control Plane",
+          "Autonomy Control Plane",
+          "Intent Routing Layer",
+          "Contract Model",
+          "Approval Governance",
+          "Capability Discovery Layer",
+          "Work Breakdown And Dependencies",
+          "Output Consistency Layer",
+          "Change Observatory Presentation Layer"
+        ],
+        "summary": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> autonomy -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessme"
+      },
+      {
+        "path": "docs/change-observatory.md",
+        "title": "Change Observatory",
+        "headings": [
+          "Change Observatory",
+          "Launch After Installation",
+          "What It Shows",
+          "Proof-Bound Iteration Dossiers",
+          "Intent Evidence",
+          "Explainability Without Private Reasoning",
+          "Security And Privacy Boundary",
+          "Troubleshooting"
+        ],
+        "summary": "# Change Observatory Change Observatory is the visual local-first lineage reader bundled with Agentic SDLC. It turns canonical `.sdlc/` records into a presentation that a non-technical stakeholder can start with and a technical reviewer can drill through to raw evidence. ## Launch After Installation In Codex ask ```text Open the Change Observatory for this project. ``` The installed `Change Observatory` skill resolves its own plugin root and runs the plugin-local CLI. It does not assume that `agentic-sdlc` is globally available in `PATH`. An npm Git or tarball installation that exposes the package bin can launch it directly ```bash agentic-sdlc observe --root /path/to/project ``` Automation can suppress browser opening and consume the first NDJSON event ```bash agentic-sdlc observe \\ --roo"
+      }
+    ],
+    "architecture_signals": [
+      {
+        "path": "README.md",
+        "headings": [
+          "Agentic SDLC Codex Plugin",
+          "Documentation Map",
+          "Quick Start",
+          "Change Observatory",
+          "How It Works",
+          "What The Two Checkpoints Mean",
+          "Autonomy Is Negotiated Per Requirement And Selected Per Delivery",
+          "CodeBurn Versus Exact Metering",
+          "RTK Context Optimization",
+          "Canonical Output Formats",
+          "Generation And Layered Verification Receipts",
+          "Install"
+        ],
+        "summary": "# Agentic SDLC Codex Plugin Agentic SDLC 0.11.0 gives Codex a guided way to understand an existing software project deliver verified work and explain its recorded lineage visually. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills templates schemas the cross-platform Node.js CLI and the build-free Change Observatory UI. ## Documentation Map - Documentation home (docs/README.md) — choose the right guide without knowing the internal record names. - How It Works (docs/how-it-works.md) — the complete two-checkpoint journey state transitions author"
+      },
+      {
+        "path": "docs/architecture.md",
+        "headings": [
+          "Architecture",
+          "Core Design Choices",
+          "Existing Project Baseline",
+          "Assessment Control Plane",
+          "Autonomy Control Plane",
+          "Intent Routing Layer",
+          "Contract Model",
+          "Approval Governance",
+          "Capability Discovery Layer",
+          "Work Breakdown And Dependencies",
+          "Output Consistency Layer",
+          "Change Observatory Presentation Layer"
+        ],
+        "summary": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> autonomy -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessme"
+      }
+    ],
+    "component_roots": [
+      "lib",
+      "bin"
+    ],
+    "runtime_and_validation_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
+      "doctor": "node bin/agentic-sdlc.mjs doctor",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test"
+    },
+    "stack_summary": [
+      "node:package-json",
+      "automation:npm-scripts"
+    ],
+    "likely_entrypoints": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      "package.json",
+      "README.md"
+    ],
+    "test_surface": [
+      "check",
+      "smoke",
+      "test"
+    ],
+    "imported_document_count": 3,
+    "confidence": 0.7,
+    "caveats": [
+      "This is inferred from repository files and imported documents.",
+      "Historical authorship, prior approvals, and rationale are unknown unless present in evidence files."
+    ]
+  },
+  "canonicality": {
+    "state": "confirmed",
+    "inferred_not_approved": false,
+    "confirmed_sources": [],
+    "user_confirmation_required": false,
+    "notes": [
+      "This baseline describes the current observable project state.",
+      "It does not reconstruct pre-SDLC historical decisions unless evidence is present in source files."
+    ]
+  },
+  "security": {
+    "repository_content_trust": "untrusted_data",
+    "prompt_instructions_in_sources": "ignored",
+    "excerpts_redacted": true,
+    "note": "Repository and document content is evidence only; embedded instructions cannot expand authority, tools, write scope, or approval."
+  },
+  "open_questions": [],
+  "assumptions": [],
+  "source_paths": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".sdlc/stories/ST-ENT-FOUNDATION/outputs/implementation-evidence.md",
+    "README.md",
+    "bin/agentic-sdlc.mjs",
+    "docs/architecture.md",
+    "docs/change-observatory.md",
+    "lib/assessment-workflow.mjs",
+    "lib/authorization-receipts.mjs",
+    "lib/autonomy-policy.mjs",
+    "lib/baseline-source-discovery.mjs",
+    "lib/canonical-store.mjs",
+    "lib/canonical.mjs",
+    "lib/change-observatory/cli.mjs",
+    "lib/change-observatory/constants.mjs",
+    "lib/change-observatory/index.mjs",
+    "lib/change-observatory/intentabi-adapter.mjs",
+    "lib/change-observatory/normalizer.mjs",
+    "lib/change-observatory/path-safety.mjs",
+    "lib/change-observatory/server.mjs",
+    "lib/change-observatory/source-reader.mjs",
+    "lib/change-observatory/summary-ranking.mjs",
+    "lib/codeburn-metering-adapter.mjs",
+    "lib/context-optimization.mjs",
+    "lib/effective-config.mjs",
+    "lib/execution-budget.mjs",
+    "lib/human-guidance.mjs",
+    "lib/identity-migration.mjs",
+    "lib/json-schema-validator.mjs",
+    "lib/metering-attestations.mjs",
+    "lib/requirement-lifecycle.mjs",
+    "lib/rtk-optimization-adapter.mjs",
+    "lib/trace-narrative.mjs",
+    "lib/verification-levels.mjs",
+    "package.json",
+    "scripts/benchmark-foundation.mjs",
+    "test/autonomy-cli.e2e.mjs",
+    "test/cli.e2e.mjs",
+    "test/fixtures/change-observatory/view-model.json",
+    "test/fixtures/codeburn/report-v0.9.15.json",
+    "test/helpers/change-observatory-preview-server.mjs",
+    "test/helpers/enterprise-foundation-fixture.mjs",
+    "test/helpers/provider-command-shim.cjs",
+    "test/identity-migration.e2e.mjs",
+    "test/unit/assessment-workflow.test.mjs",
+    "test/unit/authorization-receipts.test.mjs",
+    "test/unit/autonomy-policy.test.mjs",
+    "test/unit/autonomy-schema.test.mjs",
+    "test/unit/baseline-source-discovery.test.mjs",
+    "test/unit/canonical-store.test.mjs",
+    "test/unit/canonical.test.mjs",
+    "test/unit/change-observatory-cli.test.mjs",
+    "test/unit/change-observatory-normalizer.test.mjs",
+    "test/unit/change-observatory-server.test.mjs",
+    "test/unit/change-observatory-ui.test.mjs",
+    "test/unit/codeburn-metering-adapter.test.mjs",
+    "test/unit/context-optimization.test.mjs",
+    "test/unit/effective-config.test.mjs",
+    "test/unit/enterprise-foundation-fixture.test.mjs",
+    "test/unit/execution-budget.test.mjs",
+    "test/unit/human-guidance.test.mjs",
+    "test/unit/identity-migration.test.mjs",
+    "test/unit/metering-attestations.test.mjs",
+    "test/unit/requirement-lifecycle.test.mjs",
+    "test/unit/rtk-optimization-adapter.test.mjs",
+    "test/unit/trace-narrative.test.mjs",
+    "test/unit/verification-levels.test.mjs"
+  ],
+  "source_hashes": {
+    ".github/workflows/ci.yml": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+    ".github/workflows/release.yml": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+    ".sdlc/stories/ST-ENT-FOUNDATION/outputs/implementation-evidence.md": "7ba325000faf6e55508ccd0421431b91d5c80708f362ebc0c865c57466383a92",
+    "README.md": "cf5b242d22a66e1cc246154c0ce93eb970d7b9e084a19a2a4d7b2a2b68e05295",
+    "bin/agentic-sdlc.mjs": "970a755f617602b7d5bd9f8b54abdcc91ae81161787935181afe446ddc9f4033",
+    "docs/architecture.md": "0acc21b98f2458f04f4c6d2a07cd8132fc239363d8f2a35424bb9121622c5d39",
+    "docs/change-observatory.md": "8406f30ff08ebaa396b9efdbbb9fd380d854ac405e7c24a11067bf2be4172684",
+    "lib/assessment-workflow.mjs": "f6906da69010172e7c47eb447b1e8599e9b3b67e043a96ba4fb4ae33f069f231",
+    "lib/authorization-receipts.mjs": "873b5baa592a349361c2cb6af51c854b3fb89119d7bfc56d8e0cb142f968b40f",
+    "lib/autonomy-policy.mjs": "2602204307c6dd6451797774b080058ceb001c10229bbbea097bc7942607e80f",
+    "lib/baseline-source-discovery.mjs": "c40990406f40912c0efdbb6c2db6540b80f6a0575ff485c4377cc6f03ff675a3",
+    "lib/canonical-store.mjs": "7345b020266e944cadf778afcd8a626dc9cb1fb6277dcd1383c2789293c97eb0",
+    "lib/canonical.mjs": "8316e1e6bbd85d0c2cf8c8d807d1ed0a50352fad1c409305aebba76fef81fc87",
+    "lib/change-observatory/cli.mjs": "7e5cfdbc96bb4933dad0827e9ee4bc82c69d3dd1da395c1cef333c89272003e0",
+    "lib/change-observatory/constants.mjs": "4d449b2b85c2eab0a516298c5212bee2bb976b6a191064385efc0d1992a07a00",
+    "lib/change-observatory/index.mjs": "321fed71675cc9f81a601263a9a34bb9988348c974e87fe49a0597da2a71f07e",
+    "lib/change-observatory/intentabi-adapter.mjs": "5595409952684d91280d95c6066860c4930e87900c6b9bd069297d353a7fd71d",
+    "lib/change-observatory/normalizer.mjs": "684d18f74b741c813bbd127706534cfbd46ba6d819cebfbc559751f576137402",
+    "lib/change-observatory/path-safety.mjs": "0dd25c4b600da46a6a331a79650e23e3106200a83d04ebe72312d974423a3a35",
+    "lib/change-observatory/server.mjs": "e46a574829b8d4c2f11e1ce5f8e1d464495b09001b56c90046cd57dc861d4178",
+    "lib/change-observatory/source-reader.mjs": "4fc060bcadeb898863ca050f5ec0fa36701dac1d5ba88f384f50e617abd9cbef",
+    "lib/change-observatory/summary-ranking.mjs": "fe5344bf8a65ce063e2c0771b9fe18fe4d4bf51a796df7446ff3b2df1d2eb9c5",
+    "lib/codeburn-metering-adapter.mjs": "17d109e7b03a98aa8eb0c32238ad31005970e88d57e6589b17f606ba055045bd",
+    "lib/context-optimization.mjs": "2c6fb80e33fe2537a605afb895ec7e91f1521e773ebfd8566c4b0b52418990ba",
+    "lib/effective-config.mjs": "34b97845bb94d07e8d973a6fc078b5dc775784aaedf8e320bdf0ba948d2432f3",
+    "lib/execution-budget.mjs": "79b9e0a2546d7f4763854733d47da08d97cc7a097b0993a35ec1858b6411e658",
+    "lib/human-guidance.mjs": "4fc7ade4c9549e9568173d2c4e434474e9850c7e2d97fc24f2c187375c84672e",
+    "lib/identity-migration.mjs": "cdf5378fdeedecd6fe543d569a3ee00b8c9b274cc5dd099be354c20196982922",
+    "lib/json-schema-validator.mjs": "19d30bb095b492f502a08695a00e551c6f6e2a95f48ae5eddd86bfc929280cdf",
+    "lib/metering-attestations.mjs": "ded0e3945359c67c14de08572227a153cb77eed1e5e18d1416ecc82156fd8b62",
+    "lib/requirement-lifecycle.mjs": "1ac4d7a5bcb51fb246e629d725ee69d22672f1bbac25ba343726eef553c44c68",
+    "lib/rtk-optimization-adapter.mjs": "8a0a4d35c3676bcc945a12ec4ac8ccbc863e1e86e3dc093f47ffd61668c59c62",
+    "lib/trace-narrative.mjs": "6b17c41781891fc32146f018dd707e78430a91488d0f6600691e3d17089eaa2d",
+    "lib/verification-levels.mjs": "19e84c12b5cf0244db17518edcdaceec23063215f76296626c6e4e6311712c24",
+    "package.json": "c80577249961fc7c0e01056d65eeb25b2feffe1552f3f1c479b437067bbbc272",
+    "scripts/benchmark-foundation.mjs": "9001593d5c353df1171629e9f070b6422067d9a395b2df2b422b3e29973597dc",
+    "test/autonomy-cli.e2e.mjs": "3b9b40212a0a2e86da86b562eace826259fee388c83db829108e5d730ebc02b5",
+    "test/cli.e2e.mjs": "8d0e5fdbafda37295bd7f2cd654e5223cda36edd75de82517b90471ac530c35a",
+    "test/fixtures/change-observatory/view-model.json": "112d49fbfe4ad9ea501d57d0f1c393715f261c411f759a0604c82b3c48380485",
+    "test/fixtures/codeburn/report-v0.9.15.json": "f0b6df15fffae48604bad2caf9889e9d38a8b594aeb3872c5c8db8fe431e58f5",
+    "test/helpers/change-observatory-preview-server.mjs": "e50573fcec71e403b48df67159bef78bf014c1efb8fec09646a2ccc70867cfa7",
+    "test/helpers/enterprise-foundation-fixture.mjs": "67186b239055d0c59a103cf385aa8f7a935cb6eb727ee0d5023f54c17a726e50",
+    "test/helpers/provider-command-shim.cjs": "245b5bfafefa2353bb095a778e21458e6c70b3b9ca9bbc1eb34729b35c7b57c1",
+    "test/identity-migration.e2e.mjs": "634c7c821ca33b9ade0f3bff907fc19703890ac3a69b0bd9b9a643d0a8572109",
+    "test/unit/assessment-workflow.test.mjs": "3fd12ef4325b6b364f3b81832f3ac990235cafe81fcc084302953e55e1db468a",
+    "test/unit/authorization-receipts.test.mjs": "e85ea003e794c05d2256ebcf78d75765d5850273c672e8545e8df4486597724d",
+    "test/unit/autonomy-policy.test.mjs": "533ba3544ad916aec7c56e7cca233119d48db78a6a58f5bc545cb9149c388733",
+    "test/unit/autonomy-schema.test.mjs": "d8209c42ec02372d10fe0b14588aa4a735bda08086b9d40790b5805b329319e7",
+    "test/unit/baseline-source-discovery.test.mjs": "9eb24acaae399db922a39c4f8d943a8ad353854ffb877dcf288580c496a02f60",
+    "test/unit/canonical-store.test.mjs": "96dd0941dca7f0c89b2ebe11f6db0361845e4094cc5decc9ccbc3eb2a5bb8f50",
+    "test/unit/canonical.test.mjs": "b7e06558445435779890f62ffd1303c77acb1a29db80e9767aa68d38e1ea3e45",
+    "test/unit/change-observatory-cli.test.mjs": "27d7233332cf5ab4747ff5106947474a97b8536b6444fe5de8b62d8ccf0b37f6",
+    "test/unit/change-observatory-normalizer.test.mjs": "80623404a40fccffa539028169a6a23e86304d21254e4bc5c3ef052ab419a9df",
+    "test/unit/change-observatory-server.test.mjs": "ae5a3ef740976bd2029746a3c3c97318ec0db56b6a3e13b679bc81c159f9a2f9",
+    "test/unit/change-observatory-ui.test.mjs": "5dd0c3bfd76b1e33071df3d4047e773da4ea4b5f2ffb4aa3d639d7f7e95a9830",
+    "test/unit/codeburn-metering-adapter.test.mjs": "b091e91d98ffc4f922993b9f6488062e5eea14504c9c95a467fff071c6c2fd9b",
+    "test/unit/context-optimization.test.mjs": "c002f6c85c9dfcb092d25554a37085090d46df73f5062258c9e1d317c8938ace",
+    "test/unit/effective-config.test.mjs": "344e221770f3a243751a144d3a0341de199ebb784a805b68606cb28f81c60d08",
+    "test/unit/enterprise-foundation-fixture.test.mjs": "8306ffd859216f21ef2c22570ed00de4802d35512243e72b9e4004d885e30ca1",
+    "test/unit/execution-budget.test.mjs": "b59e2b57e88036f8cf3493ecb596ef695a2463643dca488548d7119122c2fdcf",
+    "test/unit/human-guidance.test.mjs": "e3faf50b01d9d31db1568073c1273089a8c7c7b6d65f7a273687bc18bd3ef603",
+    "test/unit/identity-migration.test.mjs": "8389640de71e4368c647839abe7be55e8d7da657dc1ee7d09c1ac9784c72f394",
+    "test/unit/metering-attestations.test.mjs": "3a6a9ee58bc7097718882e60b0f7ae64d4d03d6e3c8e84fd33283912fbd89678",
+    "test/unit/requirement-lifecycle.test.mjs": "b77c1a5a0edc73785550422bce6015bdaaed08b97a89c2d951fc081c8ca64f40",
+    "test/unit/rtk-optimization-adapter.test.mjs": "8d6ae93ac4f9aa0fdabc36c6d245d08f5a304e94afe547a6c672dae3ae1a3b30",
+    "test/unit/trace-narrative.test.mjs": "c5b0ba5ba730af159249962ae96f239befced38fdad7c7a9b30a8ca60b72d73f",
+    "test/unit/verification-levels.test.mjs": "c9ceec5a656eecd3173cce81fa0e8e6f11563c95a604a8d9b69112fbe207cb26"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260717161516-5bcef9",
+      "baseline_id": "BASELINE-ENT-PERFORMANCE-START-001",
+      "status": "approved",
+      "summary": "Use the merged Foundation state, current local code, documented architecture, CLI/Observatory implementation, and deterministic benchmark as the exact starting context for ST-ENT-PERFORMANCE only.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "BASELINE-ENT-PERFORMANCE-START-001",
+        "subject_label": "baseline BASELINE-ENT-PERFORMANCE-START-001",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "authorization_ref": "AUTH-ENT-PERFORMANCE-CONTEXT-001",
+        "approval_level": "Approve exactly one fresh post-Foundation project-context snapshot for ST-ENT-PERFORMANCE; no later baseline, requirement, install, external access, production action, or destructive change is covered.",
+        "allowed_actions": [
+          "baseline.approve"
+        ],
+        "subject_scope": "project-baseline"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "authorization_ref": "AUTH-ENT-PERFORMANCE-CONTEXT-001",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-PERFORMANCE-CONTEXT-001/AUSE-AUTH-ENT-PERFORMANCE-CONTEXT-001-20260717161516121-9378ac.json",
+      "authorization_action": "baseline.approve",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "6dbcd6b2775e83afb4db5846f8cfeba0411a56d8e134e9016e85e96a0d922245",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex",
+        "type": "agent",
+        "name": "Codex",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-ENT-PERFORMANCE",
+        "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "ant_ant95@hotmail.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.11.0"
+      },
+      "created_at": "2026-07-17T16:15:16.122Z"
+    }
+  ],
+  "created_at": "2026-07-17T16:15:11.311Z",
+  "updated_at": "2026-07-17T16:15:16.122Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-PERFORMANCE",
+      "head_sha": "edce671080d70345284d2fa95041b2a360559a14",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.11.0"
+    },
+    "approved_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}
