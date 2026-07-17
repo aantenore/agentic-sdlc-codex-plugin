@@ -4,7 +4,7 @@
   "schema_version": "0.1.0",
   "status": "draft",
   "phase": "implementation",
-  "contract_id": "contract-ST-ENT-PERFORMANCE-implementation-v4",
+  "contract_id": "contract-ST-ENT-PERFORMANCE-implementation-v6",
   "work_breakdown_id": null,
   "acceptance": [
     "Orchestration, report query, cache, index, manifest, trace reads, and Observatory normalization avoid repeated full scans and quadratic joins.",
@@ -33,7 +33,7 @@
     "tests": []
   },
   "created_at": "2026-07-17T14:40:58.214Z",
-  "updated_at": "2026-07-17T21:04:30.112Z",
+  "updated_at": "2026-07-17T23:38:39.700Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -47,12 +47,12 @@
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "cli"
+      "source": "default"
     },
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "3c3d03c5eb4c88c1c455e47bd46508f0ad63e332",
+      "head_sha": "122ccc65d9588df5b4c1c7bfa45a330dfae643b9",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
