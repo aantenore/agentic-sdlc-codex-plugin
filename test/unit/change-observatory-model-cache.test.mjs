@@ -174,6 +174,7 @@ test("revision markers stop at maxFiles and maxTotalBytes", async (t) => {
 test("unreadable canonical entries use a stable marker and recover when readable", async (t) => {
   if (process.platform === "win32" || process.getuid?.() === 0) {
     t.skip("Portable permission denial is unavailable on this runtime");
+    return;
   }
 
   const fixture = await createCacheFixture(t);
@@ -752,7 +753,10 @@ test("failed builds are not cached", async (t) => {
 });
 
 test("a cached model is not served after the canonical knowledge-base boundary becomes a symlink", async (t) => {
-  if (process.platform === "win32") t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
+  if (process.platform === "win32") {
+    t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
+    return;
+  }
 
   const fixture = await createCacheFixture(t);
   const cache = createObservatoryModelCache({

@@ -830,7 +830,7 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
             "Observatory server worker disconnected before snapshot completion",
           ));
         }
-      }, 25);
+      }, CHILD_TERMINATION_TIMEOUT_MS);
     });
     child.once("close", (exitCode, signal) => {
       releaseWorker();
