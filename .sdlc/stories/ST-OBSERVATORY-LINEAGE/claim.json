@@ -1,0 +1,38 @@
+{
+  "story_id": "ST-OBSERVATORY-LINEAGE",
+  "agent": "codex-lineage",
+  "branch": "codex/ST-OBSERVATORY-LINEAGE",
+  "status": "active",
+  "claimed_at": "2026-07-17T07:32:54.439Z",
+  "expires_at": "2026-07-18T07:32:54.439Z",
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex-lineage",
+      "type": "agent",
+      "name": "Codex Lineage",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-OBSERVATORY-LINEAGE",
+      "head_sha": "ff0c9d4e7b883fa3b07926904843e60dedc832d2",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.9.0"
+    }
+  }
+}
