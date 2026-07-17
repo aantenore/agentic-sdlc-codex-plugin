@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   AUTONOMY_LEVELS,
@@ -367,6 +368,26 @@ test("local releases can be bounded autonomous only inside an exact reversible t
   assert.equal(decision.effective_level, "bounded-autonomous");
   assert.equal(decision.delivery.kind, "local_release");
   assertAgainstSchema(delivery, "delivery-execution-profile");
+
+  const windowsShortNameRoot = path.join(ROOT, "RUNNER~1", "travelops");
+  assert.doesNotThrow(() => deliveryProfile(requirement, {
+    id: "AUT-LOCAL-SHORT-NAME",
+    delivery_id: "LOCAL-RELEASE-SHORT-NAME",
+    delivery_kind: "local_release",
+    material_scope: deliveryMaterial({ release_target: path.join(windowsShortNameRoot, "dist") }),
+    pull_request_target: null,
+    local_release_target: {
+      environment: "local",
+      root_path: windowsShortNameRoot,
+      allowed_write_paths: [path.join(windowsShortNameRoot, "dist")],
+      allowed_actions: ["build.local", "release.local", "test.run"],
+      smoke_tests: ['["node","--version"]'],
+      rollback: { required: true, procedure: "Restore the previous local package artifact" },
+      external_access_allowed: false,
+      production_access_allowed: false,
+      destructive_actions_allowed: false,
+    },
+  }));
 
   assert.throws(
     () => deliveryProfile(requirement, {
