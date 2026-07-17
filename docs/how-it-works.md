@@ -1,4 +1,4 @@
-# How Agentic SDLC 0.10.0 Works
+# How Agentic SDLC 0.11.0 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
@@ -35,7 +35,7 @@ The installed command is `agentic-sdlc`. From a source checkout, the equivalent 
 node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
 ```
 
-All examples below use commands exposed by the `Agentic SDLC 0.10.0` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.11.0` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project
