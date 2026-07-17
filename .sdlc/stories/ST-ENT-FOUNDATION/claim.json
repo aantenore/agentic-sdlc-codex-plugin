@@ -1,0 +1,38 @@
+{
+  "story_id": "ST-ENT-FOUNDATION",
+  "agent": "codex",
+  "branch": "codex/ST-ENT-FOUNDATION",
+  "status": "active",
+  "claimed_at": "2026-07-17T14:47:37.750Z",
+  "expires_at": "2026-07-18T14:47:37.750Z",
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-FOUNDATION",
+      "head_sha": "927dc93e97ea0c8aadc913b3a729edab44afaa10",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.11.0"
+    }
+  }
+}
