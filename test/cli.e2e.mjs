@@ -732,6 +732,10 @@ test("--version is not shadowed by help and boolean --json does not consume quer
   assert.ok(payload.results.length > 0);
 });
 
+test("unsupported human guidance locales fail before command execution", () => {
+  mustFail(["--version", "--locale", "fr"], /Unsupported human guidance locale 'fr'.*en or it/u);
+});
+
 test("effective configuration is human-readable, reviewable, hash-bound, and fail-closed", () => {
   const project = tmpProject("effective-config-cli");
 
@@ -1151,7 +1155,24 @@ test("strict gate fails when a story has no contract", () => {
   const project = tmpProject("missing-contract");
   initProject(project);
   story(project, "ST-001");
-  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /has no contract_id/);
+  const failedGate = mustFail(
+    ["gate", "check", "--root", project, "--story", "ST-001", "--strict"],
+    /has no contract_id/,
+  );
+  const firstLine = failedGate.stdout.trim().split(/\r?\n/u).find(Boolean);
+  assert.match(firstLine, /checks found .*blocking issue/i);
+  assert.match(failedGate.stdout, /Impact: .*No protected action was performed/u);
+  assert.match(failedGate.stdout, /What needs fixing:\n- This work item does not have a valid approved work brief/u);
+  assert.match(failedGate.stdout, /Details:\n- Scope checked:/u);
+  assert.ok(failedGate.stdout.indexOf("has no contract_id") > failedGate.stdout.indexOf("Details:"));
+
+  const failedGateItalian = mustFail(
+    ["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--locale", "it"],
+    /has no contract_id/,
+  );
+  assert.match(failedGateItalian.stdout.split(/\r?\n/u)[0], /controlli hanno trovato .*blocco/i);
+  assert.match(failedGateItalian.stdout, /Cosa bisogna sistemare:\n- Questa attività non ha un incarico di lavoro valido e approvato/u);
+  assert.match(failedGateItalian.stdout, /Impatto:|Prossimo passo:|Dettagli:/u);
 });
 
 test("story id mismatch and invalid branch pattern fail strict gate", () => {
@@ -2689,7 +2710,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     "--reason",
     "Host-verified mode must bind approval to base, changes, and result",
     ...humanApproval("A CLI actor declaration is not a host receipt"),
-  ], /Provide --host-receipt-file/);
+  ], /signed approval is required|--host-receipt-file/i);
 
   const insufficientId = "BAMEND-ASSESS-E2E-INSUFFICIENT";
   const insufficientChanges = { limits: { steps: { hard: 25 } } };
@@ -3613,7 +3634,10 @@ test("strict gates reject missing historical baselines still referenced by contr
     "Newer unrelated context",
   ]);
   mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-NEWER", ...humanApproval("Approved newer baseline")]);
-  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  const passedGate = mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  const firstLine = passedGate.stdout.trim().split(/\r?\n/u).find(Boolean);
+  assert.match(firstLine, /checks completed without a blocking issue/i);
+  assert.match(passedGate.stdout, /did not change, release, deploy, or merge anything/u);
   fs.rmSync(path.join(project, ".sdlc", "baseline", "BASELINE-USED.json"));
   mustFail(
     ["gate", "check", "--root", project, "--story", "ST-001", "--strict"],

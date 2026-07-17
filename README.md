@@ -9,6 +9,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Documentation home](docs/README.md) — choose the right guide without knowing the internal record names.
 - [How It Works](docs/how-it-works.md) — the complete two-checkpoint journey, state transitions, authorization, verification, and recovery.
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
+- [Configuration Safety](docs/configuration-safety.md) — why project behavior is pinned, how to preview an upgrade, and how to recover from drift without hidden policy changes.
 - [Token Efficiency](docs/token-efficiency.md) — compact derived JSON, the RTK command gateway, lifecycle observations, and budget-safe savings telemetry.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
@@ -130,6 +131,23 @@ An additional decision is exceptional: it is required for a new installation, ex
 
 **Autonomy** answers “what may the agent do without asking again?” **Limits** answer “how much may it consume while doing it?” A `requirement:v2` links an approved requirement execution profile that sets an autonomy ceiling. Every delivery unit then makes a separate, explicit selection for exactly one `pull_request` or `local_release`.
 
+In plain terms:
+
+1. While agreeing a requirement, you decide only the maximum freedom that future work may request. This does not authorize a pull request.
+2. For every pull request or local release, the plugin asks for a separate autonomy choice. That choice applies only to that delivery and is never reused.
+3. The CLI then tells you what is actually possible now. If it says **autonomy with checkpoints**, the agent may work between the named checkpoints but must stop before actions such as push, merge, or release when those actions require approval.
+4. The default installation records who approved the work, but that record has no independently verifiable digital signature. For that reason, a request for full autonomy becomes autonomy with checkpoints. Full autonomy inside the agreed limits is available only when the system running the plugin verifies a signed approval for that exact delivery.
+
+The names below are the technical labels stored in JSON and used by automation:
+
+| What a person sees | Stored technical label | Meaning |
+| --- | --- | --- |
+| Supervised work | `supervised` | Ask before the governed phases and actions |
+| Autonomy with checkpoints | `checkpointed` | Work independently inside the agreed boundary, stopping at the listed checkpoints |
+| Full autonomy inside the agreed limits | `bounded-autonomous` | Continue inside one exact delivery boundary without routine prompts; never applies to another PR |
+| Approval recorded for audit | `audit_only` | Attribution is stored, but identity was not independently verified |
+| Signed approval verified | `host_verified` | A trusted host or CI signature matches this exact approval subject |
+
 The available levels are `supervised`, `checkpointed`, and `bounded-autonomous`. A downstream record may narrow the selected level but can never widen it:
 
 > effective autonomy = minimum of host, project, requirement, delivery, contract, capability, environment, and budget boundaries
@@ -150,7 +168,7 @@ flowchart LR
 For PR-184 choose bounded-autonomous. You may implement, test, commit, push, and update
 that PR on the displayed repository and branches. Do not merge the protected branch,
 deploy remotely, use secrets, or write outside the approved paths. This choice expires
-when PR-184 is terminal and does not apply to another PR.
+when PR-184 is merged, closed, or cancelled and does not apply to another PR.
 ```
 
 A local release is a first-class delivery unit. Its profile must name the local root, allowed actions and write paths, smoke tests, and a required rollback procedure. Local does not mean unrestricted: machine-global changes, writes outside the workspace, destructive actions, external access, remote deployment, and production access remain explicit exception boundaries.

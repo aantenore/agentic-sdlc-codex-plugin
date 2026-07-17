@@ -9,6 +9,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 - [Limits and metering](limits-and-metering.md) — how requirement ceilings and explicit pull-request or local-release choices constrain actions, files, capabilities, time, steps, tokens, calls, cost, and custom metrics.
 - [Change Observatory](change-observatory.md) — open and interpret the bundled visual request/change/decision lineage.
 - [Token efficiency](token-efficiency.md) — reduce derived JSON and shell-output context without changing canonical evidence.
+- [Configuration safety](configuration-safety.md) — keep project policy stable across plugin updates and apply only a reviewed migration plan.
 
 ## Find a page by goal
 
@@ -20,6 +21,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 | Measure local Codex usage with CodeBurn | [Limits and metering](limits-and-metering.md#codeburn-advisory-metering) | The complete `start` and `record` workflow, option meanings, and metric mappings |
 | Integrate the CodeBurn library adapter | [CodeBurn adapter reference](codeburn-metering.md) | Snapshot and delta contracts, integrity rules, and library APIs |
 | Reduce token-heavy tool output | [Token efficiency](token-efficiency.md) | Compact JSON defaults, RTK setup, bypass rules, and measurement |
+| Keep behavior stable across plugin updates | [Configuration safety](configuration-safety.md) | Config locks, safe previews, drift recovery, and exact plan application |
 | Understand the architecture and trust model | [Architecture](architecture.md) | Components, canonical records, validation, and release evidence |
 | Open visual project lineage | [Change Observatory](change-observatory.md) | Launch paths, explainability, raw evidence, and local security boundaries |
 | Understand `.sdlc/` storage | [Knowledge-base structure](kb-structure.md) | Which files are canonical, derived, append-only, or releasable |
