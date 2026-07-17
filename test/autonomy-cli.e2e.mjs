@@ -11,6 +11,7 @@ import { computeDeliveryExecutionProfileHash } from "../lib/autonomy-policy.mjs"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
+const providerCommandShim = path.join(repoRoot, "test", "helpers", "provider-command-shim.cjs");
 const tempProjects = new Set();
 
 function tmpProject(name) {
@@ -74,29 +75,47 @@ function mustGit(project, args) {
   return result.stdout.trim();
 }
 
+function resolveHostCommand(command) {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(locator, [command], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.error, undefined, `${locator} ${command} failed: ${result.error?.message}`);
+  assert.equal(result.status, 0, `${locator} ${command}\n${result.stdout}\n${result.stderr}`);
+  const resolved = result.stdout.split(/\r?\n/u).map((item) => item.trim()).find(Boolean);
+  assert.ok(resolved && fs.existsSync(resolved), `${command} must resolve to a host executable`);
+  return fs.realpathSync.native(resolved);
+}
+
+function createNativeProviderShim(fakeBin, command) {
+  const executable = path.join(fakeBin, process.platform === "win32" ? `${command}.exe` : command);
+  if (!fs.existsSync(executable)) {
+    const nodeExecutable = fs.realpathSync.native(process.execPath);
+    try {
+      fs.linkSync(nodeExecutable, executable);
+    } catch {
+      fs.copyFileSync(nodeExecutable, executable);
+    }
+    if (process.platform !== "win32") fs.chmodSync(executable, 0o755);
+  }
+  return executable;
+}
+
+function providerShimEnv(provider) {
+  const requireOption = /\s/u.test(providerCommandShim)
+    ? `--require=${JSON.stringify(providerCommandShim)}`
+    : `--require=${providerCommandShim}`;
+  return {
+    AUTONOMY_FAKE_PROVIDER: provider,
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, requireOption].filter(Boolean).join(" "),
+  };
+}
+
 function fakeGitRemoteEnv(project, remoteSha) {
   const fakeBin = path.join(project, "fake-git-bin");
-  const wrapper = path.join(fakeBin, "git");
   fs.mkdirSync(fakeBin, { recursive: true });
-  if (!fs.existsSync(wrapper)) {
-    fs.writeFileSync(wrapper, `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-const commandIndex = args.indexOf("ls-remote");
-if (commandIndex >= 0) {
-  const destinationRef = args.at(-1);
-  const sha = process.env.AUTONOMY_FAKE_REMOTE_SHA || "";
-  if (sha) process.stdout.write(sha + "\\t" + destinationRef + "\\n");
-  process.exit(0);
-}
-const result = spawnSync(process.env.AUTONOMY_REAL_GIT, args, { stdio: "inherit" });
-process.exit(result.status ?? 1);
-`, "utf8");
-    fs.chmodSync(wrapper, 0o755);
-  }
-  const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
-  assert.ok(realGit, "the test requires the host git executable");
+  const realGit = resolveHostCommand("git");
+  createNativeProviderShim(fakeBin, "git");
   return {
+    ...providerShimEnv("git"),
     PATH: [fakeBin, process.env.PATH].filter(Boolean).join(path.delimiter),
     AUTONOMY_REAL_GIT: realGit,
     AUTONOMY_FAKE_REMOTE_SHA: remoteSha,
@@ -105,26 +124,10 @@ process.exit(result.status ?? 1);
 
 function fakeGitHubEnv(project, values) {
   const fakeBin = path.join(project, "fake-gh-bin");
-  const wrapper = path.join(fakeBin, "gh");
   fs.mkdirSync(fakeBin, { recursive: true });
-  if (!fs.existsSync(wrapper)) {
-    fs.writeFileSync(wrapper, `#!/usr/bin/env node
-const state = process.env.AUTONOMY_FAKE_GH_STATE;
-const response = {
-  url: process.env.AUTONOMY_FAKE_GH_URL,
-  state,
-  isDraft: process.env.AUTONOMY_FAKE_GH_DRAFT === "true",
-  headRefOid: process.env.AUTONOMY_FAKE_GH_HEAD_SHA,
-  headRefName: process.env.AUTONOMY_FAKE_GH_HEAD,
-  baseRefName: process.env.AUTONOMY_FAKE_GH_BASE,
-  mergedAt: state === "MERGED" ? process.env.AUTONOMY_FAKE_GH_MERGED_AT : null,
-  mergeCommit: state === "MERGED" ? { oid: process.env.AUTONOMY_FAKE_GH_MERGE_SHA } : null,
-};
-process.stdout.write(JSON.stringify(response));
-`, "utf8");
-    fs.chmodSync(wrapper, 0o755);
-  }
+  createNativeProviderShim(fakeBin, "gh");
   return {
+    ...providerShimEnv("gh"),
     PATH: [fakeBin, process.env.PATH].filter(Boolean).join(path.delimiter),
     AUTONOMY_FAKE_GH_STATE: values.state,
     AUTONOMY_FAKE_GH_URL: values.url,
