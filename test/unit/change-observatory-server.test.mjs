@@ -6,7 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { startObservatoryServer } from "../../lib/change-observatory/index.mjs";
+import {
+  buildObservatoryViewModel,
+  startObservatoryServer,
+} from "../../lib/change-observatory/index.mjs";
 
 test("serves health, view model, raw records, static assets, and HEAD over loopback", async (t) => {
   const fixture = await createServerFixture(t);
@@ -31,6 +34,8 @@ test("serves health, view model, raw records, static assets, and HEAD over loopb
   assert.equal(model.statusCode, 200);
   assert.equal(model.json.project.id, "server-fixture");
   assert.equal(model.json.generatedAt, "2026-07-16T09:00:00.000Z");
+  assert.match(model.headers.etag, /^"sha256-[A-Za-z0-9_-]+"$/);
+  assert.equal(model.headers["cache-control"], "no-store");
 
   const source = await request(
     running,
@@ -195,6 +200,7 @@ test("rejects a symlinked knowledge base and a swapped project root", async (t) 
     assetRoot: swapFixture.assetRoot,
   });
   t.after(() => running.close());
+  assert.equal((await request(running, "/api/v1/observatory")).statusCode, 200);
   const original = `${swapFixture.projectRoot}-original`;
   const replacement = `${swapFixture.projectRoot}-replacement`;
   await fs.rename(swapFixture.projectRoot, original);
@@ -205,6 +211,135 @@ test("rejects a symlinked knowledge base and a swapped project root", async (t) 
   assert.equal(swapped.statusCode, 409);
   assert.equal(swapped.json.error.code, "project_boundary_changed");
   assert.doesNotMatch(swapped.body, /attacker/);
+});
+
+test("serves revision-aware ETags and honors conditional GET and HEAD requests", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  const first = await request(running, "/api/v1/observatory");
+  assert.equal(first.statusCode, 200);
+  assert.match(first.headers.etag, /^"sha256-[A-Za-z0-9_-]+"$/);
+
+  const unchanged = await request(running, "/api/v1/observatory", {
+    headers: { "If-None-Match": first.headers.etag },
+  });
+  assert.equal(unchanged.statusCode, 304);
+  assert.equal(unchanged.body, "");
+  assert.equal(unchanged.headers.etag, first.headers.etag);
+  assert.equal(unchanged.headers["content-type"], undefined);
+
+  const weakListMatch = await request(running, "/api/v1/observatory", {
+    method: "HEAD",
+    headers: { "If-None-Match": `"stale", W/${first.headers.etag}` },
+  });
+  assert.equal(weakListMatch.statusCode, 304);
+  assert.equal(weakListMatch.body, "");
+
+  const stale = await request(running, "/api/v1/observatory", {
+    headers: { "If-None-Match": '"sha256-stale"' },
+  });
+  assert.equal(stale.statusCode, 200);
+  assert.equal(stale.headers.etag, first.headers.etag);
+
+  const denied = await request(running, "/api/v1/observatory", {
+    authenticated: false,
+    headers: { "If-None-Match": first.headers.etag },
+  });
+  assert.equal(denied.statusCode, 401);
+  assert.equal(denied.headers.etag, undefined);
+});
+
+test("shares concurrent model builds and invalidates only for canonical evidence", async (t) => {
+  const fixture = await createServerFixture(t);
+  let releaseBuild;
+  const buildGate = new Promise((resolve) => {
+    releaseBuild = resolve;
+  });
+  let builds = 0;
+  let observedCollectionLimit = null;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    async buildViewModel(...args) {
+      builds += 1;
+      observedCollectionLimit = args[1].limits.maxCollectionItems;
+      if (builds === 1) await buildGate;
+      return buildObservatoryViewModel(...args);
+    },
+  });
+  t.after(() => running.close());
+
+  const pending = Array.from({ length: 16 }, () => request(running, "/api/v1/observatory"));
+  await waitFor(() => builds === 1);
+  releaseBuild();
+  const concurrent = await Promise.all(pending);
+  assert.ok(concurrent.every((response) => response.statusCode === 200));
+  assert.ok(concurrent.every((response) => response.headers.etag === concurrent[0].headers.etag));
+  assert.equal(builds, 1);
+  assert.equal(observedCollectionLimit, 1_000);
+
+  await fs.mkdir(path.join(fixture.projectRoot, ".sdlc", "cache"), { recursive: true });
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "cache", "derived.json"), "{}\n");
+  const derivedOnly = await request(running, "/api/v1/observatory");
+  assert.equal(derivedOnly.headers.etag, concurrent[0].headers.etag);
+  assert.equal(builds, 1);
+
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "project.json"), `${JSON.stringify({
+    schema_version: "0.1.0",
+    project_id: "server-fixture",
+    project_name: "Server Fixture Updated",
+  })}\n`, "utf8");
+  const canonicalChange = await request(running, "/api/v1/observatory", {
+    headers: { "If-None-Match": concurrent[0].headers.etag },
+  });
+  assert.equal(canonicalChange.statusCode, 200);
+  assert.equal(canonicalChange.json.project.name, "Server Fixture Updated");
+  assert.notEqual(canonicalChange.headers.etag, concurrent[0].headers.etag);
+  assert.equal(builds, 2);
+});
+
+test("allows an explicit server collection limit to override the safe default", async (t) => {
+  const fixture = await createServerFixture(t);
+  let observedCollectionLimit = null;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    limits: { maxCollectionItems: 1_500 },
+    async buildViewModel(...args) {
+      observedCollectionLimit = args[1].limits.maxCollectionItems;
+      return buildObservatoryViewModel(...args);
+    },
+  });
+  t.after(() => running.close());
+
+  assert.equal((await request(running, "/api/v1/observatory")).statusCode, 200);
+  assert.equal(observedCollectionLimit, 1_500);
+});
+
+test("does not serve a warm model after the knowledge-base boundary becomes a symlink", async (t) => {
+  if (process.platform === "win32") t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
+
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+  assert.equal((await request(running, "/api/v1/observatory")).statusCode, 200);
+
+  const canonical = path.join(fixture.projectRoot, ".sdlc");
+  const hidden = path.join(fixture.projectRoot, "hidden-sdlc");
+  await fs.rename(canonical, hidden);
+  await fs.symlink("hidden-sdlc", canonical, "dir");
+
+  const blocked = await request(running, "/api/v1/observatory");
+  assert.equal(blocked.statusCode, 403);
+  assert.equal(blocked.json.error.code, "knowledge_base_symlink");
 });
 
 test("GET, HEAD, and rejected writes do not mutate canonical project evidence", async (t) => {
@@ -316,6 +451,14 @@ function request(running, requestPath, { method = "GET", headers = {}, authentic
     outgoing.on("error", reject);
     outgoing.end();
   });
+}
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("Timed out waiting for the model build");
 }
 
 async function snapshotTree(root) {
