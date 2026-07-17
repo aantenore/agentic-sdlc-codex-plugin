@@ -101,6 +101,7 @@ import {
 } from "../lib/identity-migration.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { computeStableHash } from "../lib/canonical.mjs";
+import { openCanonicalQuerySession } from "../lib/canonical-query-session.mjs";
 import {
   buildConfigMigrationApplyData,
   buildEffectiveConfigLock,
@@ -18565,9 +18566,11 @@ function dependencyEdgeKey(edge) {
   return [edge.from, edge.to, edge.type, edge.blocks].join("::");
 }
 
-function buildDependencyStatus(context, storyId = null) {
-  const graph = readDependencyGraph(context, { missingOk: true });
-  const edges = (graph.edges || []).filter((edge) => !storyId || edge.from === storyId || edge.to === storyId);
+function buildDependencyStatus(context, storyId = null, query = null) {
+  const graph = query?.graph || readDependencyGraph(context, { missingOk: true });
+  const edges = query?.edges_by_story && storyId
+    ? query.edges_by_story.get(storyId) || []
+    : (graph.edges || []).filter((edge) => !storyId || edge.from === storyId || edge.to === storyId);
   const blockers = [];
   const warnings = [];
   for (const edge of edges) {
@@ -18577,7 +18580,7 @@ function buildDependencyStatus(context, storyId = null) {
     }
     // Status and orchestration expose blockers for upcoming phases. Phase-aware
     // enforcement is applied by the story gate, which passes the current story.
-    const state = inspectDependencyEdge(context, edge);
+    const state = inspectDependencyEdge(context, edge, null, query);
     if (state.blocking && !state.satisfied) {
       blockers.push(state.message);
     } else if (!state.satisfied) {
@@ -18586,7 +18589,7 @@ function buildDependencyStatus(context, storyId = null) {
       warnings.push(state.message);
     }
   }
-  const cycles = findBlockingDependencyCycles(graph.edges || []);
+  const cycles = query?.cycles || findBlockingDependencyCycles(graph.edges || []);
   for (const cycle of cycles) {
     blockers.push(`blocking dependency cycle: ${cycle.join(" -> ")}`);
   }
@@ -18600,15 +18603,15 @@ function buildDependencyStatus(context, storyId = null) {
   };
 }
 
-function inspectDependencyEdge(context, edge, story = null) {
+function inspectDependencyEdge(context, edge, story = null, query = null) {
   const blocking = isHardDependencyEdge(edge) && shouldDependencyBlockStory(edge, story);
-  const satisfied = isDependencySatisfied(context, edge);
+  const satisfied = isDependencySatisfied(context, edge, query);
   const message = `${edge.from} depends on ${edge.to} (${edge.type}, ${edge.blocks}, requires ${edge.required_state})`;
   if (!satisfied) {
     return { blocking, satisfied, message };
   }
-  const stale = dependencyUpstreamArtifactChanged(context, edge);
-  if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since)) {
+  const stale = dependencyUpstreamArtifactChanged(context, edge, query);
+  if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since, query)) {
     return {
       blocking,
       satisfied: false,
@@ -18646,18 +18649,22 @@ function phaseRank(value) {
   return index >= 0 ? index : order.indexOf("design");
 }
 
-function isDependencySatisfied(context, edge) {
-  const upstream = readStory(context, edge.to);
+function isDependencySatisfied(context, edge, query = null) {
+  const upstream = query?.stories_by_id?.get(edge.to) || readStory(context, edge.to);
   if (!upstream) {
     return false;
   }
   const state = String(edge.required_state || "").toLowerCase();
   if (edge.type === "requires_contract" || state === "contract_approved") {
-    const contractState = inspectStoryContract(context, upstream);
+    let contractState = query?.contract_state_by_story?.get(upstream.id);
+    if (!contractState) {
+      contractState = inspectStoryContract(context, upstream);
+      query?.contract_state_by_story?.set(upstream.id, contractState);
+    }
     return contractState.exists && contractState.approved;
   }
   if (edge.type === "requires_artifact" || state === "artifact_linked") {
-    return storyHasOutputLink(context, edge.to);
+    return storyHasOutputLink(context, edge.to, query);
   }
   if (["exists", "none"].includes(state)) {
     return true;
@@ -18674,23 +18681,29 @@ function isDependencySatisfied(context, edge) {
   return upstream.status === state || upstream.phase === state;
 }
 
-function storyHasOutputLink(context, storyId) {
+function storyHasOutputLink(context, storyId, query = null) {
+  if (query?.registry_index) {
+    return (query.registry_index.links_by_story.get(storyId) || []).length > 0;
+  }
   const registry = readOutputRegistry(context, { missingOk: true });
   return (registry?.links || []).some((link) => link.story_id === storyId);
 }
 
-function dependencyUpstreamArtifactChanged(context, edge) {
+function dependencyUpstreamArtifactChanged(context, edge, query = null) {
   if (!["requires_artifact", "blocks"].includes(edge.type)) {
     return null;
   }
-  const registry = readOutputRegistry(context, { missingOk: true });
-  const links = (registry?.links || []).filter((link) => link.story_id === edge.to);
+  const registry = query?.registry || readOutputRegistry(context, { missingOk: true });
+  const links = query?.registry_index
+    ? query.registry_index.links_by_story.get(edge.to) || []
+    : (registry?.links || []).filter((link) => link.story_id === edge.to);
   for (const link of links) {
     if (!link.artifact_path || !link.fingerprints?.artifact_sha256) {
       continue;
     }
     const artifactPath = resolveProjectFilePath(context, link.artifact_path, { mustExist: false });
-    if (fs.existsSync(artifactPath) && hashFile(artifactPath) !== link.fingerprints.artifact_sha256) {
+    const currentHash = fs.existsSync(artifactPath) ? hashFile(artifactPath) : null;
+    if (currentHash && currentHash !== link.fingerprints.artifact_sha256) {
       return {
         artifact_path: link.artifact_path,
         since: link.updated_at || link.created_at || null,
@@ -18700,9 +18713,10 @@ function dependencyUpstreamArtifactChanged(context, edge) {
   return null;
 }
 
-function hasDependencyRevalidationTrace(context, storyId, edge, since) {
+function hasDependencyRevalidationTrace(context, storyId, edge, since, query = null) {
   const sinceTime = since ? Date.parse(since) : 0;
-  return readTraceEvents(context, storyId).some((event) => {
+  const events = query?.traces_by_story?.get(storyId) || readTraceEvents(context, storyId);
+  return events.some((event) => {
     const eventTime = Date.parse(String(event.created_at || ""));
     return (
       event.action === "dependency.revalidate" &&
@@ -18747,6 +18761,42 @@ function findBlockingDependencyCycles(edges) {
     visit(node);
   }
   return cycles;
+}
+
+function buildDependencyQuery(context, { stories = [], traceEvents = [], session = null } = {}) {
+  const graph = readDependencyGraph(context, { missingOk: true });
+  const edgesByStory = new Map();
+  for (const edge of graph.edges || []) {
+    for (const storyId of new Set([edge.from, edge.to])) {
+      if (!storyId) continue;
+      const edges = edgesByStory.get(storyId) || [];
+      edges.push(edge);
+      edgesByStory.set(storyId, edges);
+    }
+  }
+  const tracesByStory = new Map();
+  for (const event of traceEvents) {
+    if (!event.story_id) continue;
+    const events = tracesByStory.get(event.story_id) || [];
+    events.push(event);
+    tracesByStory.set(event.story_id, events);
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  return {
+    graph,
+    edges_by_story: edgesByStory,
+    cycles: findBlockingDependencyCycles(graph.edges || []),
+    stories_by_id: new Map(
+      stories
+        .filter((story) => story?.id && story.__folder_id === story.id)
+        .map((story) => [story.id, story]),
+    ),
+    traces_by_story: tracesByStory,
+    registry,
+    registry_index: createOutputRegistryQueryIndex(registry),
+    contract_state_by_story: new Map(),
+    session,
+  };
 }
 
 function claimStory(context, options) {
@@ -20074,7 +20124,8 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
 
 function buildReportQueryResult(context, rawQuery, options = {}) {
   const query = normalizeReportQuery(rawQuery, options);
-  const allRecords = collectReportQueryRecords(context);
+  const session = openProjectQuerySession(context);
+  const allRecords = collectReportQueryRecords(context, session);
   const filtered = allRecords
     .filter((record) => reportQuerySubjectMatches(record, query))
     .filter((record) => reportQueryTimeMatches(record, query))
@@ -20107,7 +20158,7 @@ function buildReportQueryResult(context, rawQuery, options = {}) {
     },
     results: filtered,
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     source_policy: "Query results cite canonical .sdlc files. Cache and indexes are never query evidence.",
   };
 }
@@ -20171,23 +20222,25 @@ function normalizeReportQueryFilters(filters) {
   };
 }
 
-function collectReportQueryRecords(context) {
+function collectReportQueryRecords(context, session = openProjectQuerySession(context)) {
   const registry = readOutputRegistry(context, { missingOk: true });
+  const registryIndex = createOutputRegistryQueryIndex(registry);
+  const stories = readAllStories(context, session);
   return [
-    ...collectTraceQueryRecords(context),
-    ...collectStoryQueryRecords(context, registry),
-    ...collectStoryStepQueryRecords(context),
+    ...collectTraceQueryRecords(context, session),
+    ...collectStoryQueryRecords(context, registry, registryIndex, stories),
+    ...collectStoryStepQueryRecords(context, stories, session),
     ...collectOutputQueryRecords(context, registry),
-    ...collectContractQueryRecords(context),
+    ...collectContractQueryRecords(context, session),
     ...collectHandoffQueryRecords(context),
-    ...collectWorkItemQueryRecords(context),
-    ...collectApprovalQueryRecords(context),
-    ...collectTestQueryRecords(context),
+    ...collectWorkItemQueryRecords(context, session),
+    ...collectApprovalQueryRecords(context, session),
+    ...collectTestQueryRecords(context, session),
   ];
 }
 
-function collectTraceQueryRecords(context) {
-  return readAllTraceEvents(context)
+function collectTraceQueryRecords(context, session = null) {
+  return readAllTraceEvents(context, { session })
     .filter((event) => event.type !== "invalid")
     .map((event) => ({
       kind: "activity",
@@ -20212,10 +20265,13 @@ function collectTraceQueryRecords(context) {
     }));
 }
 
-function collectStoryQueryRecords(context, registry = null) {
-  return readAllStories(context).map((story) => {
-    const storyOutputTypes = (registry?.links || [])
-      .filter((link) => link.story_id === story.id && link.artifact_type)
+function collectStoryQueryRecords(context, registry = null, registryIndex = null, stories = null) {
+  return (stories || readAllStories(context)).map((story) => {
+    const storyLinks = registryIndex
+      ? registryIndex.links_by_story.get(story.id) || []
+      : (registry?.links || []).filter((link) => link.story_id === story.id);
+    const storyOutputTypes = storyLinks
+      .filter((link) => link.artifact_type)
       .map((link) => link.artifact_type);
     return {
       kind: "stories",
@@ -20242,10 +20298,10 @@ function collectStoryQueryRecords(context, registry = null) {
   });
 }
 
-function collectStoryStepQueryRecords(context) {
+function collectStoryStepQueryRecords(context, stories = null, session = null) {
   const records = [];
-  for (const story of readAllStories(context)) {
-    for (const step of readStoryStepRecords(context, story.id)) {
+  for (const story of stories || readAllStories(context)) {
+    for (const step of readStoryStepRecords(context, story.id, session)) {
       records.push({
         kind: "story_steps",
         id: step.id || `${story.id}:${step.step}`,
@@ -20320,8 +20376,8 @@ function collectOutputQueryRecords(context, registry = null) {
   return [...templateRecords, ...linkRecords];
 }
 
-function collectContractQueryRecords(context) {
-  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+function collectContractQueryRecords(context, session = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"), session).map((contract) => ({
     kind: "contracts",
     id: contract.id || path.basename(contract.__path, ".json"),
     summary: `${contract.phase || "unknown"} contract ${contract.id || path.basename(contract.__path, ".json")}`,
@@ -20369,10 +20425,10 @@ function collectHandoffQueryRecords(context) {
   }));
 }
 
-function collectWorkItemQueryRecords(context) {
+function collectWorkItemQueryRecords(context, session = null) {
   const roots = [path.join(workItemsRoot(context), "epics"), path.join(workItemsRoot(context), "tasks")];
   return roots.flatMap((root) =>
-    collectJsonFiles(context, root).map((item) => ({
+    collectJsonFiles(context, root, session).map((item) => ({
       kind: "work_items",
       id: item.id || path.basename(item.__path, ".json"),
       summary: item.title || item.summary || item.id || path.basename(item.__path, ".json"),
@@ -20396,8 +20452,8 @@ function collectWorkItemQueryRecords(context) {
   );
 }
 
-function collectApprovalQueryRecords(context) {
-  return collectApprovalManifestEntries(context).map((approval) => ({
+function collectApprovalQueryRecords(context, session = null) {
+  return collectApprovalManifestEntries(context, session).map((approval) => ({
     kind: "approvals",
     id: approval.approval_id || `${approval.subject_id}:approval`,
     summary: `${approval.subject_id} approval ${approval.status || "unknown"}`,
@@ -20420,8 +20476,8 @@ function collectApprovalQueryRecords(context) {
   }));
 }
 
-function collectTestQueryRecords(context) {
-  return collectJsonFiles(context, path.join(context.sdlcRoot, "tests")).map((testRecord) => ({
+function collectTestQueryRecords(context, session = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "tests"), session).map((testRecord) => ({
     kind: "tests",
     id: testRecord.id || path.basename(testRecord.__path, ".json"),
     summary: testRecord.summary || testRecord.id || path.basename(testRecord.__path, ".json"),
@@ -20608,6 +20664,7 @@ function renderReportQueryMarkdown(report) {
 }
 
 function buildActivityReport(context, options = {}) {
+  const session = openProjectQuerySession(context);
   const view = normalizeActivityReportView(options.view || "business");
   const untilDate = parseDateBoundary(options.until || "now", "until", { defaultNow: true });
   const sinceDate = parseDateBoundary(options.since || "3d", "since", { relativeTo: untilDate });
@@ -20616,7 +20673,7 @@ function buildActivityReport(context, options = {}) {
   }
   const storyFilter = options.story ? normalizeId(options.story) : null;
   const actorFilter = getOptionString(options, "actor") || null;
-  const allEvents = readAllTraceEvents(context, { story: storyFilter });
+  const allEvents = readAllTraceEvents(context, { story: storyFilter, session });
   const filteredEvents = allEvents
     .filter((event) => event.type !== "invalid")
     .filter((event) => isEventInsideWindow(event, sinceDate, untilDate))
@@ -20642,7 +20699,7 @@ function buildActivityReport(context, options = {}) {
     items,
     parse_errors: allEvents.filter((event) => event.type === "invalid").map((event) => event.source),
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     source_policy: "Only canonical .sdlc trace files are summarized; cache and indexes are not cited as evidence.",
   };
 }
@@ -20658,6 +20715,24 @@ function normalizeActivityReportView(value) {
 function readAllTraceEvents(context, options = {}) {
   const tracesRoot = path.join(context.sdlcRoot, "traces");
   const storyFilter = options.story ? normalizeId(options.story) : null;
+  if (options.session) {
+    return options.session.traceEvents({ storyId: storyFilter, includeInvalid: true }).map((event) => {
+      if (event.type === "invalid") {
+        return {
+          type: "invalid",
+          summary: event.error?.message || "Invalid canonical trace event",
+          source: event.source,
+        };
+      }
+      const sourceFile = event.source?.path
+        ? path.basename(event.source.path.replaceAll("/", path.sep))
+        : null;
+      return {
+        ...event,
+        story_id: event.story_id || (sourceFile ? inferStoryIdFromTraceFile(sourceFile) : null),
+      };
+    });
+  }
   const files = walkFiles(tracesRoot)
     .filter((filePath) => filePath.endsWith(".jsonl"))
     .filter((filePath) => !storyFilter || path.basename(filePath) === `${storyFilter}.jsonl`);
@@ -20882,13 +20957,19 @@ function rebuildManifests(context, options) {
 
 function buildKnowledgeManifest(context, options = {}) {
   const generatedAt = now();
-  const sourceFiles = collectManifestSourceFiles(context);
+  const session = openProjectQuerySession(context);
+  const sourceFiles = collectManifestSourceFiles(context, session);
   const sourcePaths = sourceFiles.map((filePath) => toProjectPath(context, filePath)).sort();
-  const stories = readAllStories(context);
+  const stories = readAllStories(context, session);
   const registry = readOutputRegistry(context, { missingOk: true });
-  const traceEvents = readAllTraceEvents(context).filter((event) => event.type !== "invalid");
-  const approvals = collectApprovalManifestEntries(context);
-  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+  const registryIndex = createOutputRegistryQueryIndex(registry);
+  const traceEvents = readAllTraceEvents(context, { session }).filter((event) => event.type !== "invalid");
+  const lastTraceByStory = new Map();
+  for (const event of traceEvents) {
+    if (event.story_id) lastTraceByStory.set(event.story_id, event);
+  }
+  const approvals = collectApprovalManifestEntries(context, session);
+  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"), session).map((contract) => ({
     id: contract.id || path.basename(contract.__path, ".json"),
     phase: contract.phase || null,
     story_id: contract.story_id || null,
@@ -20920,13 +21001,12 @@ function buildKnowledgeManifest(context, options = {}) {
         contract_id: story.contract_id || null,
         requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
         active_claim: claim?.status === "active" ? { agent: claim.agent, branch: claim.branch, expires_at: claim.expires_at || null } : null,
-        completed_steps: readStoryStepRecords(context, story.id).map((record) => ({
+        completed_steps: readStoryStepRecords(context, story.id, session).map((record) => ({
           step: record.step,
           completed_at: record.completed_at,
           output_types: record.output_types || [],
         })),
-        output_links: (registry?.links || [])
-          .filter((link) => link.story_id === story.id)
+        output_links: (registryIndex.links_by_story.get(story.id) || [])
           .map((link) => ({
             id: link.id,
             artifact_type: link.artifact_type,
@@ -20934,7 +21014,7 @@ function buildKnowledgeManifest(context, options = {}) {
             mode: link.mode,
             template_id: link.template_id,
           })),
-        last_trace: readLastTraceEvent(context, story.id),
+        last_trace: lastTraceByStory.get(story.id) || null,
       };
     }),
     contracts,
@@ -20959,7 +21039,7 @@ function buildKnowledgeManifest(context, options = {}) {
     activity: summarizeActivityEvents(traceEvents),
     approvals,
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     audit: {
       generated_by: buildAttribution(context, options, "manifest.rebuild").actor,
       git: buildGitMetadata(context.root),
@@ -20968,14 +21048,21 @@ function buildKnowledgeManifest(context, options = {}) {
   };
 }
 
-function collectManifestSourceFiles(context) {
-  return collectKnowledgeSourceFiles(context).filter((filePath) => {
+function collectManifestSourceFiles(context, session = null) {
+  return collectKnowledgeSourceFiles(context, session).filter((filePath) => {
     const relative = path.relative(context.sdlcRoot, filePath);
     return !relative.startsWith(`manifests${path.sep}`);
   });
 }
 
-function collectJsonFiles(context, root) {
+function collectJsonFiles(context, root, session = null) {
+  if (session) {
+    return session.jsonRecords({ under: toProjectPath(context, root) }).map((record) => ({
+      ...record.value,
+      __path: path.join(context.root, ...record.path.split("/")),
+      __relative_path: record.path,
+    }));
+  }
   return walkFiles(root)
     .filter((filePath) => filePath.endsWith(".json"))
     .map((filePath) => {
@@ -20986,12 +21073,12 @@ function collectJsonFiles(context, root) {
     });
 }
 
-function collectApprovalManifestEntries(context) {
+function collectApprovalManifestEntries(context, session = null) {
   const entries = [];
-  for (const filePath of collectManifestSourceFiles(context).filter((candidate) => candidate.endsWith(".json"))) {
+  for (const filePath of collectManifestSourceFiles(context, session).filter((candidate) => candidate.endsWith(".json"))) {
     let data;
     try {
-      data = readProjectJson(context, filePath);
+      data = session ? session.readJson(toProjectPath(context, filePath)) : readProjectJson(context, filePath);
     } catch {
       continue;
     }
@@ -22002,26 +22089,33 @@ function buildOutputTemplateContent(context, options, artifactType, id) {
 }
 
 function buildOutputResolution(context, storyId, artifactType, options = {}) {
-  const story = readStory(context, storyId);
+  const story = options.story || readStory(context, storyId);
   if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
   const registry = options.registry || readOutputRegistry(context, { missingOk: true });
+  const registryIndex = options.registry_index || null;
   const storyRequirements = Array.isArray(story.links?.requirements) ? story.links.requirements : [];
   const requirements = options.requirements?.length > 0 ? options.requirements : storyRequirements;
-  const templates = registry ? registry.templates.filter((template) => template.type === artifactType) : [];
+  const templates = registryIndex
+    ? registryIndex.templates_by_type.get(artifactType) || []
+    : registry ? registry.templates.filter((template) => template.type === artifactType) : [];
   const approvedTemplates = templates.filter((template) => template.status === "approved");
-  const existingLinks = registry
-    ? registry.links.filter((link) => link.story_id === storyId && link.artifact_type === artifactType)
-    : [];
-  const relatedLinks = registry
-    ? registry.links.filter(
-        (link) =>
-          link.story_id !== storyId &&
-          link.artifact_type === artifactType &&
-          overlaps(link.requirements || [], requirements),
-      )
-    : [];
+  const existingLinks = registryIndex
+    ? registryIndex.links_by_story_and_type.get(outputRegistryPairKey(storyId, artifactType)) || []
+    : registry
+      ? registry.links.filter((link) => link.story_id === storyId && link.artifact_type === artifactType)
+      : [];
+  const relatedLinks = registryIndex
+    ? relatedOutputLinksFromIndex(registryIndex, storyId, artifactType, requirements)
+    : registry
+      ? registry.links.filter(
+          (link) =>
+            link.story_id !== storyId &&
+            link.artifact_type === artifactType &&
+            overlaps(link.requirements || [], requirements),
+        )
+      : [];
   const preferredRelated = relatedLinks[0] || null;
   const preferredTemplate = approvedTemplates.find((template) => template.id === preferredRelated?.template_id) || approvedTemplates[0] || null;
   const delivery = preferredTemplate ? effectiveOutputDelivery(preferredTemplate) : null;
@@ -22065,16 +22159,72 @@ function buildOutputResolution(context, storyId, artifactType, options = {}) {
   };
 }
 
+function createOutputRegistryQueryIndex(registry) {
+  const templatesByType = new Map();
+  const linksByStory = new Map();
+  const linksByStoryAndType = new Map();
+  const linksByRequirementAndType = new Map();
+  const linkOrder = new Map();
+
+  for (const template of registry?.templates || []) {
+    const templates = templatesByType.get(template.type) || [];
+    templates.push(template);
+    templatesByType.set(template.type, templates);
+  }
+  for (let index = 0; index < (registry?.links || []).length; index += 1) {
+    const link = registry.links[index];
+    linkOrder.set(link, index);
+    const linksForStory = linksByStory.get(link.story_id) || [];
+    linksForStory.push(link);
+    linksByStory.set(link.story_id, linksForStory);
+    const storyKey = outputRegistryPairKey(link.story_id, link.artifact_type);
+    const storyLinks = linksByStoryAndType.get(storyKey) || [];
+    storyLinks.push(link);
+    linksByStoryAndType.set(storyKey, storyLinks);
+    for (const requirement of new Set(link.requirements || [])) {
+      const requirementKey = outputRegistryPairKey(requirement, link.artifact_type);
+      const requirementLinks = linksByRequirementAndType.get(requirementKey) || [];
+      requirementLinks.push(link);
+      linksByRequirementAndType.set(requirementKey, requirementLinks);
+    }
+  }
+
+  return {
+    templates_by_type: templatesByType,
+    links_by_story: linksByStory,
+    links_by_story_and_type: linksByStoryAndType,
+    links_by_requirement_and_type: linksByRequirementAndType,
+    link_order: linkOrder,
+  };
+}
+
+function relatedOutputLinksFromIndex(index, storyId, artifactType, requirements) {
+  const related = new Set();
+  for (const requirement of new Set(requirements || [])) {
+    const key = outputRegistryPairKey(requirement, artifactType);
+    for (const link of index.links_by_requirement_and_type.get(key) || []) {
+      if (link.story_id !== storyId) related.add(link);
+    }
+  }
+  return [...related].sort((left, right) => index.link_order.get(left) - index.link_order.get(right));
+}
+
+function outputRegistryPairKey(left, right) {
+  return `${left ?? ""}\u0000${right ?? ""}`;
+}
+
 function buildCache(context) {
   const generatedAt = now();
-  const sourceFiles = collectKnowledgeSourceFiles(context);
-  const sourceHashes = {};
+  const session = openProjectQuerySession(context);
+  const sourceSnapshot = collectKnowledgeSourceSnapshot(context, session);
+  const sourceFiles = sourceSnapshot.source_paths
+    .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  const sourceHashes = { ...sourceSnapshot.source_hashes };
   const fullTextIndex = [];
   for (const filePath of sourceFiles) {
     const relativePath = toProjectPath(context, filePath);
-    const raw = fs.readFileSync(filePath, "utf8");
-    const sourceHash = hashBuffer(Buffer.from(raw, "utf8"));
-    sourceHashes[relativePath] = sourceHash;
+    const sourceHash = sourceHashes[relativePath];
+    const raw = session.readTextAtHash(relativePath, sourceHash);
     fullTextIndex.push({
       path: relativePath,
       title: inferTitle(filePath, raw),
@@ -22092,7 +22242,8 @@ function buildCache(context) {
   }
 
   const registry = readOutputRegistry(context, { missingOk: true });
-  const stories = readAllStories(context);
+  const stories = readAllStories(context, session);
+  const registryIndex = createOutputRegistryQueryIndex(registry);
   const templateResolution = buildTemplateResolution(registry);
   const storyRequirementGraph = buildStoryRequirementGraph(stories);
   const dependencyGraph = {
@@ -22106,6 +22257,8 @@ function buildCache(context) {
     for (const artifactType of artifactTypes) {
       outputResolutions[outputResolutionKey(story.id, artifactType)] = buildOutputResolution(context, story.id, artifactType, {
         registry,
+        registry_index: registryIndex,
+        story,
         cache_used: false,
       });
     }
@@ -22170,11 +22323,10 @@ function getCacheStatus(context) {
       cache: null,
     };
   }
-  const currentSourceFiles = collectKnowledgeSourceFiles(context);
-  const currentHashes = {};
-  for (const filePath of currentSourceFiles) {
-    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
-  }
+  const currentHashes = collectKnowledgeSourceSnapshot(
+    context,
+    openProjectQuerySession(context),
+  ).source_hashes;
   const cachedHashes = cache.source_hashes || {};
   const currentPaths = new Set(Object.keys(currentHashes));
   const cachedPaths = new Set(Object.keys(cachedHashes));
@@ -23123,7 +23275,15 @@ function outputResolutionKey(storyId, artifactType) {
   return `${storyId}::${artifactType}`;
 }
 
-function collectKnowledgeSourceFiles(context) {
+function openProjectQuerySession(context) {
+  return openCanonicalQuerySession({
+    root: context.root,
+    canonicalRoot: SDLC_DIR,
+    derivedDirectories: context.config.cache_policy?.derived_directories,
+  });
+}
+
+function knowledgeSourceRoots(context) {
   const sourceDirs = context.config.cache_policy?.source_of_truth_dirs || [
     "contracts",
     "requirements",
@@ -23145,6 +23305,22 @@ function collectKnowledgeSourceFiles(context) {
     "archive",
     "reports",
   ];
+  return ["project.json", ...sourceDirs];
+}
+
+function collectKnowledgeSourceSnapshot(context, session = openProjectQuerySession(context)) {
+  return session.sourceSnapshot({
+    under: knowledgeSourceRoots(context),
+    extensions: context.config.indexable_extensions,
+  });
+}
+
+function collectKnowledgeSourceFiles(context, session = null) {
+  if (session) {
+    return collectKnowledgeSourceSnapshot(context, session).source_paths
+      .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  }
+  const sourceDirs = knowledgeSourceRoots(context).filter((directory) => directory !== "project.json");
   const files = [];
   const rootFiles = [path.join(context.sdlcRoot, "project.json")].filter((filePath) => fs.existsSync(filePath));
   files.push(...rootFiles);
@@ -23170,7 +23346,12 @@ function shouldIndexFile(context, filePath) {
   return context.config.indexable_extensions.includes(extension);
 }
 
-function readAllStories(context) {
+function readAllStories(context, session = null) {
+  if (session) {
+    return session.stories()
+      .map(normalizeStoryRecord)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
   const storiesRoot = path.join(context.sdlcRoot, "stories");
   return safeReadDir(storiesRoot)
     .map((entry) => {
@@ -23209,22 +23390,57 @@ function buildStoryRequirementGraph(stories) {
 
 function buildStoryDependencyGraph(stories) {
   const nodes = stories.map((story) => story.id);
-  const edges = [];
-  for (let left = 0; left < stories.length; left += 1) {
-    for (let right = left + 1; right < stories.length; right += 1) {
-      const leftReqs = stories[left].links?.requirements || [];
-      const rightReqs = stories[right].links?.requirements || [];
-      const shared = leftReqs.filter((requirement) => rightReqs.includes(requirement));
-      if (shared.length > 0) {
-        edges.push({
-          from: stories[left].id,
-          to: stories[right].id,
-          reason: "shared_requirements",
-          requirements: shared,
-        });
+  const storyIndexesByRequirement = new Map();
+  for (let storyIndex = 0; storyIndex < stories.length; storyIndex += 1) {
+    const requirements = new Set(stories[storyIndex].links?.requirements || []);
+    for (const requirement of requirements) {
+      const indexes = storyIndexesByRequirement.get(requirement) || [];
+      indexes.push(storyIndex);
+      storyIndexesByRequirement.set(requirement, indexes);
+    }
+  }
+
+  // Build only pairs that actually share a requirement. The previous
+  // implementation compared every story with every other story even when the
+  // graph was sparse, which became the dominant cache-build cost at scale.
+  const sharedByPair = new Map();
+  for (const [requirement, indexes] of storyIndexesByRequirement) {
+    for (let leftOffset = 0; leftOffset < indexes.length; leftOffset += 1) {
+      for (let rightOffset = leftOffset + 1; rightOffset < indexes.length; rightOffset += 1) {
+        const left = indexes[leftOffset];
+        const right = indexes[rightOffset];
+        const key = `${left}\u0000${right}`;
+        const shared = sharedByPair.get(key) || new Set();
+        shared.add(requirement);
+        sharedByPair.set(key, shared);
       }
     }
   }
+
+  const edges = [...sharedByPair.entries()]
+    .map(([key, shared]) => {
+      const [left, right] = key.split("\u0000").map(Number);
+      const requirements = [];
+      const emitted = new Set();
+      for (const requirement of stories[left].links?.requirements || []) {
+        if (shared.has(requirement) && !emitted.has(requirement)) {
+          requirements.push(requirement);
+          emitted.add(requirement);
+        }
+      }
+      return {
+        left,
+        right,
+        edge: {
+          from: stories[left].id,
+          to: stories[right].id,
+          reason: "shared_requirements",
+          requirements,
+        },
+      };
+    })
+    .sort((first, second) => first.left - second.left || first.right - second.right)
+    .map(({ edge }) => edge);
   return { nodes, edges };
 }
 
@@ -23788,19 +24004,38 @@ function showOrchestrationPlan(context, options) {
 }
 
 function buildOrchestrationSnapshot(context) {
-  const storiesRoot = path.join(context.sdlcRoot, "stories");
-  const stories = safeReadDir(storiesRoot)
-    .map((entry) => {
-      const storyPath = path.join(storiesRoot, entry, "story.json");
-      if (!fs.existsSync(storyPath)) {
-        return null;
-      }
-      const story = readProjectJson(context, storyPath);
-      story.__folder_id = entry;
-      const claimPath = path.join(storiesRoot, entry, "claim.json");
-      const claim = fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
-      const lastTrace = readLastTraceEvent(context, entry);
-      const dependencyStatus = buildDependencyStatus(context, story.id || entry);
+  const session = openProjectQuerySession(context);
+  const storyRecords = session.listFiles({
+    under: "stories",
+    extensions: [".json"],
+    names: ["story.json"],
+  })
+    .filter((file) => file.canonical_path.split("/").length === 3)
+    .map((file) => {
+      const entry = file.canonical_path.split("/")[1];
+      return normalizeStoryRecord({ ...session.readJson(file.path), __folder_id: entry });
+    });
+  const claimByStory = new Map(
+    session.listFiles({ under: "stories", extensions: [".json"], names: ["claim.json"] })
+      .filter((file) => file.canonical_path.split("/").length === 3)
+      .map((file) => [file.canonical_path.split("/")[1], session.readJson(file.path)]),
+  );
+  const traceEvents = readAllTraceEvents(context, { session }).filter((event) => event.type !== "invalid");
+  const lastTraceByStory = new Map();
+  for (const event of traceEvents) {
+    if (event.story_id) lastTraceByStory.set(event.story_id, event);
+  }
+  const dependencyQuery = buildDependencyQuery(context, {
+    stories: storyRecords,
+    traceEvents,
+    session,
+  });
+  const stories = storyRecords
+    .map((story) => {
+      const entry = story.__folder_id;
+      const claim = claimByStory.get(entry) || null;
+      const lastTrace = lastTraceByStory.get(story.id || entry) || null;
+      const dependencyStatus = buildDependencyStatus(context, story.id || entry, dependencyQuery);
       const blockers = inferStoryBlockers(context, story, claim, dependencyStatus);
       return {
         id: story.id || entry,
@@ -23816,8 +24051,10 @@ function buildOrchestrationSnapshot(context) {
         blockers,
       };
     })
-    .filter(Boolean)
     .sort((a, b) => a.id.localeCompare(b.id));
+
+  const locks = readLocks(context);
+  const handoffs = readHandoffs(context);
 
   const summary = {
     total: stories.length,
@@ -23826,7 +24063,7 @@ function buildOrchestrationSnapshot(context) {
     blocked: stories.filter((story) => story.orchestration_state === "blocked").length,
     stale: stories.filter((story) => story.orchestration_state === "stale").length,
     terminal: stories.filter((story) => story.orchestration_state === "terminal").length,
-    active_locks: readActiveLocks(context).length,
+    active_locks: locks.filter((lock) => lock.status === "active" && !isExpired(lock.expires_at)).length,
   };
 
   return {
@@ -23834,8 +24071,8 @@ function buildOrchestrationSnapshot(context) {
     root: context.root,
     summary,
     stories,
-    locks: readLocks(context),
-    handoffs: readHandoffs(context),
+    locks,
+    handoffs,
   };
 }
 
@@ -23959,7 +24196,16 @@ function assertReleaseClaimPrecondition(context, storyId, options) {
   }
 }
 
-function readStoryStepRecords(context, storyId) {
+function readStoryStepRecords(context, storyId, session = null) {
+  if (session) {
+    return session.listFiles({
+      under: `stories/${storyId}/steps`,
+      extensions: [".json"],
+      recursive: false,
+    })
+      .map((file) => session.readJson(file.path))
+      .sort((a, b) => String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
+  }
   const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
   return safeReadDir(stepsRoot)
     .filter((name) => name.endsWith(".json"))
@@ -24057,9 +24303,17 @@ function collectStoryHandoffSourceFiles(context, storyId) {
   return Array.from(new Set(files)).sort((a, b) => a.localeCompare(b));
 }
 
-function buildSourceHashMap(context, relativePaths) {
+function buildSourceHashMap(context, relativePaths, session = null) {
   const result = {};
   for (const relativePath of relativePaths) {
+    if (session) {
+      try {
+        result[relativePath] = session.hash(relativePath);
+      } catch (error) {
+        if (error?.code !== "path_missing") throw error;
+      }
+      continue;
+    }
     const filePath = resolveProjectFilePath(context, relativePath, { mustExist: false });
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       result[relativePath] = hashFile(filePath);
@@ -26273,15 +26527,17 @@ function latestTraceEvent(events, type) {
 }
 
 function buildIndex(context) {
-  const sourceFiles = collectKnowledgeSourceFiles(context);
-  const sourceHashes = {};
+  const session = openProjectQuerySession(context);
+  const sourceSnapshot = collectKnowledgeSourceSnapshot(context, session);
+  const sourceFiles = sourceSnapshot.source_paths
+    .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  const sourceHashes = { ...sourceSnapshot.source_hashes };
   const entries = [];
   for (const filePath of sourceFiles) {
     const relativePath = toProjectPath(context, filePath);
     const extension = path.extname(filePath);
-    const raw = fs.readFileSync(filePath, "utf8");
+    const raw = session.readTextAtHash(relativePath, sourceHashes[relativePath]);
     const text = normalizeText(raw);
-    sourceHashes[relativePath] = hashBuffer(Buffer.from(raw, "utf8"));
     entries.push({
       path: relativePath,
       title: inferTitle(filePath, raw),
@@ -26312,10 +26568,10 @@ function getIndexStatus(context) {
   } catch {
     return { exists: true, valid: false, index_path: indexPath, index: null };
   }
-  const currentHashes = {};
-  for (const filePath of collectKnowledgeSourceFiles(context)) {
-    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
-  }
+  const currentHashes = collectKnowledgeSourceSnapshot(
+    context,
+    openProjectQuerySession(context),
+  ).source_hashes;
   const cachedHashes = index.source_hashes || {};
   const valid =
     index.schema_version === context.config.schema_version &&
