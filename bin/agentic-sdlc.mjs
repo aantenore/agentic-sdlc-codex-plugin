@@ -73,6 +73,25 @@ import {
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 import {
+  buildRequirementProposal,
+  buildRequirementRef,
+  buildRequirementRevision,
+  buildRequirementSupersession,
+  requirementContentHash,
+  validateRequirementIntegrity,
+} from "../lib/requirement-lifecycle.mjs";
+import {
+  AUTONOMY_LEVELS,
+  buildDeliveryExecutionProfile,
+  buildRequirementExecutionProfile,
+  mostRestrictiveAutonomyLevel,
+  evaluateAutonomyPolicy,
+  normalizeAutonomyLevel,
+  validateAutonomyDecisionIntegrity,
+  validateDeliveryExecutionProfileIntegrity,
+  validateRequirementExecutionProfileIntegrity,
+} from "../lib/autonomy-policy.mjs";
+import {
   IdentityMigrationError,
   applyIdentityMigration,
   planIdentityMigration,
@@ -185,11 +204,13 @@ const BOOLEAN_OPTIONS = new Set([
   "apply",
   "approve-install",
   "confirm-start",
+  "confirm-action",
   "force",
   "full",
   "exact",
   "help",
   "json",
+  "merge-allowed",
   "no-open",
   "preserve-status",
   "release-claim",
@@ -218,6 +239,7 @@ const KNOWN_OPTIONS = new Set([
   "authority-assurance",
   "artifact",
   "assumption",
+  "autonomy-ceiling",
   "authorized-by",
   "authorized-by-email",
   "authorized-by-name",
@@ -226,6 +248,7 @@ const KNOWN_OPTIONS = new Set([
   "available-capabilities-file",
   "available-capabilities-json",
   "base-artifact",
+  "base",
   "baseline",
   "before",
   "before-sha",
@@ -234,6 +257,8 @@ const KNOWN_OPTIONS = new Set([
   "breakdown",
   "budget-file",
   "budget-json",
+  "budget-ref",
+  "by",
   "capability",
   "capability-binding-file",
   "capability-binding-json",
@@ -254,6 +279,7 @@ const KNOWN_OPTIONS = new Set([
   "decision-id",
   "default-flow",
   "delivery-unit",
+  "delivery-profile",
   "document",
   "delivery",
   "edge",
@@ -261,6 +287,7 @@ const KNOWN_OPTIONS = new Set([
   "evidence",
   "execution-note",
   "expires-at",
+  "environment",
   "from",
   "from-email",
   "format",
@@ -277,6 +304,8 @@ const KNOWN_OPTIONS = new Set([
   "item",
   "kb-write",
   "kind",
+  "integration",
+  "level",
   "limit",
   "locale",
   "levels",
@@ -288,6 +317,9 @@ const KNOWN_OPTIONS = new Set([
   "mode",
   "model",
   "model-calls",
+  "new-id",
+  "nfr",
+  "non-goal",
   "next-step",
   "notes",
   "open-item",
@@ -310,6 +342,7 @@ const KNOWN_OPTIONS = new Set([
   "project-name",
   "project",
   "provider",
+  "repository",
   "proposal",
   "proposal-hash",
   "qa",
@@ -342,17 +375,20 @@ const KNOWN_OPTIONS = new Set([
   "requirement",
   "requirement-title",
   "release-manifest",
+  "release-target",
   "root",
   "run-id",
   "scope",
   "scope-id",
   "scope-summary",
+  "scope-path",
   "scope-title",
   "section",
   "session-id",
   "since",
   "source",
   "status",
+  "smoke-test",
   "step",
   "story",
   "steps",
@@ -367,12 +403,15 @@ const KNOWN_OPTIONS = new Set([
   "task-gate",
   "template",
   "template-dir",
+  "target-root",
+  "terminal-status",
   "text",
   "thread-id",
   "title",
   "to-agent",
   "tool",
   "tool-calls",
+  "head",
   "input-tokens",
   "output-tokens",
   "generator",
@@ -385,6 +424,8 @@ const KNOWN_OPTIONS = new Set([
   "trace-limit",
   "type",
   "until",
+  "rollback",
+  "write-path",
   "to",
   "to-email",
   "to-name",
@@ -415,10 +456,13 @@ const REPEATABLE_OPTIONS = new Set([
   "execution-note",
   "input",
   "input-summary",
+  "integration",
   "item",
   "kb-write",
   "levels",
   "metric",
+  "nfr",
+  "non-goal",
   "open-item",
   "output",
   "output-summary",
@@ -428,9 +472,11 @@ const REPEATABLE_OPTIONS = new Set([
   "related",
   "requirement",
   "section",
+  "scope-path",
   "source",
   "tool",
   "validation",
+  "write-path",
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const TERMINAL_STORY_STATUSES = new Set(["done"]);
@@ -445,6 +491,15 @@ const DEPENDENCY_TYPES = new Set(["blocks", "requires_artifact", "requires_contr
 const DEPENDENCY_BLOCK_SCOPES = new Set(["analysis", "design", "implementation", "validation", "release", "none"]);
 const CAPABILITY_RECOMMENDATION_AVAILABILITY = new Set(["available", "missing", "unknown", "install_required"]);
 const APPROVAL_SOURCES = new Set(["explicit-user", "ci", "automation", "bootstrap"]);
+const DELIVERY_TERMINAL_STATUSES = new Set([
+  "merged",
+  "closed",
+  "released",
+  "rolled_back",
+  "cancelled",
+  "superseded",
+  "revoked",
+]);
 const STORY_STEP_NAMES = new Set([
   "discovery",
   "functional-analysis",
@@ -646,12 +701,56 @@ async function main() {
       await showBudgetStatus(context, parsed.options);
       return;
     }
-    if (command === "requirement" && subcommand === "create") {
-      createRequirement(context, parsed.options);
+    if (command === "requirement" && ["create", "propose"].includes(subcommand)) {
+      proposeRequirement(context, parsed.options, { legacyAlias: subcommand === "create" });
+      return;
+    }
+    if (command === "requirement" && subcommand === "approve") {
+      approveRequirement(context, parsed.options);
+      return;
+    }
+    if (command === "requirement" && subcommand === "revise") {
+      reviseRequirement(context, parsed.options);
+      return;
+    }
+    if (command === "requirement" && subcommand === "supersede") {
+      supersedeRequirement(context, parsed.options);
       return;
     }
     if (command === "requirement" && subcommand === "status") {
       showRequirements(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") {
+      showRequirementAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "propose") {
+      proposeDeliveryAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "approve") {
+      approveDeliveryAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "revoke") {
+      revokeDeliveryAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "action") {
+      evaluateDeliveryAction(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "close") {
+      closeDeliveryAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "status") {
+      showDeliveryAutonomy(context, parsed.options);
+      return;
+    }
+    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "explain") {
+      explainDeliveryAutonomy(context, parsed.options);
       return;
     }
     if (command === "contract" && subcommand === "create") {
@@ -1077,6 +1176,7 @@ function validateSdlcConfig(config) {
   validateRoutingPolicy(config.routing_policy);
   validateWorkBreakdownPolicy(config.work_breakdown_policy);
   validateApprovalPolicy(config.approval_policy);
+  validateAutonomyPolicy(config.autonomy_policy);
   validateBranchPolicy(config.parallel_work);
   validateStoryLifecyclePolicy(config.story_lifecycle);
   validateClaimPolicy(config.claim_policy);
@@ -1259,48 +1359,121 @@ function validateApprovalPolicy(policy) {
   }
 }
 
+function validateAutonomyPolicy(policy) {
+  if (policy === undefined) {
+    return;
+  }
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    fail("autonomy_policy must be an object");
+  }
+  if (!["off", "observe", "enforce_new_only", "enforce_all"].includes(String(policy.mode || ""))) {
+    fail("autonomy_policy.mode must be off, observe, enforce_new_only, or enforce_all");
+  }
+  const levels = Array.isArray(policy.allowed_levels) ? policy.allowed_levels : [];
+  const requiredLevels = ["supervised", "checkpointed", "bounded-autonomous"];
+  if (requiredLevels.some((level) => !levels.includes(level))) {
+    fail(`autonomy_policy.allowed_levels must include ${requiredLevels.join(", ")}`);
+  }
+  const deliveryKinds = Array.isArray(policy.delivery_kinds) ? policy.delivery_kinds : [];
+  if (["pull_request", "local_release"].some((kind) => !deliveryKinds.includes(kind))) {
+    fail("autonomy_policy.delivery_kinds must include pull_request and local_release");
+  }
+  assertSafeSdlcRelativeDirectory(policy.storage_root || "autonomy", "autonomy_policy.storage_root");
+}
+
 function decideRoute(context, options) {
   const decision = buildRouteDecision(context, options);
   output(options, decision, formatRouteDecision(decision));
 }
 
 function startTask(context, options) {
+  const explicitProfileId = getOptionString(options, "delivery-profile");
+  const profilePath = explicitProfileId ? deliveryAutonomyPath(context, normalizeId(explicitProfileId)) : null;
+  const releaseLock = profilePath && fs.existsSync(context.sdlcRoot)
+    ? acquireFileLock(`${profilePath}.lock`)
+    : () => {};
+  try {
+    return startTaskLocked(context, options);
+  } finally {
+    releaseLock();
+  }
+}
+
+function startTaskLocked(context, options) {
   const decision = buildTaskStartDecision(context, options);
-  if (decision.execution_allowed && options["confirm-start"] && !decision.assessment_proposal_id) {
+  const autonomyAuthorizedStart = decision.autonomy_decision?.autonomous === true
+    || decision.autonomy?.task_start_automatic === true;
+  if (
+    decision.execution_allowed
+    && (options["confirm-start"] || autonomyAuthorizedStart)
+    && !decision.assessment_proposal_id
+  ) {
     const attribution = buildAttribution(context, options, "task.start.confirm");
     const taskContract = decision.contract_id
       ? readContractById(context, decision.contract_id, { missingOk: true })
       : null;
-    const authorization = attribution.actor.type === "human"
+    const authorization = attribution.actor.type === "human" || decision.autonomy?.task_start_automatic === true
       ? null
       : requireAutomationAuthorization(context, options, attribution.action, {
           label: `task start${decision.story_id ? ` for ${decision.story_id}` : ""}`,
           subject_id: decision.story_id || "PROJECT",
           artifact_types: contractArtifactTypes(taskContract || {}),
         });
+    decision.authorization_ref = authorization?.id || null;
+    decision.authorization_use_ref = authorization?.__use_receipt?.path || null;
+    decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
     const trace = appendTraceEvent(context, decision.story_id || null, {
       type: "decision",
-      summary: `Confirmed start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
+      summary: `${options["confirm-start"] ? "Confirmed" : "Profile-authorized"} start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
       action: "task.start.confirm",
       actor: attribution.actor,
       ...buildTraceAuthorityMetadata(context, options, attribution),
-      evidence: decision.contract?.path ? [decision.contract.path] : [],
-      related: [decision.story_id, decision.contract_id].filter(Boolean),
+      evidence: [decision.contract?.path, decision.delivery_profile_path, decision.autonomy_decision_path].filter(Boolean),
+      related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
       authorization_ref: authorization?.id || null,
       git: attribution.git,
       run: attribution.run,
     });
     decision.confirmation_trace_id = trace.id;
-    decision.authorization_ref = authorization?.id || null;
-    decision.authorization_use_ref = authorization?.__use_receipt?.path || null;
-    decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
   }
   output(options, decision, formatTaskStartDecision(decision));
 }
 
 function writeTaskStartReceipt(context, decision, attribution, authorization = null) {
+  let autonomyDecisionRef = null;
+  if (decision.autonomy_decision) {
+    const decisionPath = path.join(autonomyDecisionsRoot(context), `${normalizeId(decision.autonomy_decision.id)}.json`);
+    writeJsonFile(decisionPath, decision.autonomy_decision, { force: false });
+    decision.autonomy_decision_path = toProjectPath(context, decisionPath);
+    autonomyDecisionRef = {
+      id: decision.autonomy_decision.id,
+      path: decision.autonomy_decision_path,
+      hash: decision.autonomy_decision.decision_hash,
+    };
+  }
+  const deliveryProfile = decision.delivery_profile_id
+    ? readDeliveryAutonomyProfile(context, decision.delivery_profile_id, { missingOk: true })
+    : null;
+  const startBasis = decision.autonomy_decision?.autonomous === true
+    ? "bounded-autonomous-profile"
+    : decision.autonomy?.task_start_automatic === true
+      ? "checkpointed-profile"
+      : "explicit-confirmation";
+  const rawAuthorityAssurance = authorization?.authority_assurance || deliveryProfile?.authority_assurance || null;
+  const taskStartAuthorityAssurance = rawAuthorityAssurance
+    && typeof rawAuthorityAssurance === "object"
+    && !Array.isArray(rawAuthorityAssurance)
+      ? rawAuthorityAssurance
+      : {
+          mode: "audit_only",
+          source: rawAuthorityAssurance ? "legacy-authorization-string" : "declared_cli_attribution",
+          verified: false,
+          limitation: "Legacy string attribution is recorded but cannot independently prove authority.",
+        };
   const receipt = {
     id: `START-${decision.story_id || "PROJECT"}-${uniqueRecordSuffix()}`,
+    kind: "profile_task_start_receipt",
+    schema_version: "profile-task-start-receipt:v1",
     story_id: decision.story_id || null,
     phase: decision.phase || null,
     route: decision.route,
@@ -1308,23 +1481,90 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     contract_approval_hash: decision.contract_id
       ? latestContractApproval(readContractById(context, decision.contract_id, { missingOk: true }) || {})?.approved_content_hash || null
       : null,
+    delivery_profile_ref: deliveryProfile
+      ? {
+          id: deliveryProfile.id,
+          path: toProjectPath(context, deliveryAutonomyPath(context, deliveryProfile.id)),
+          hash: deliveryProfile.profile_hash,
+        }
+      : null,
+    autonomy_decision_ref: autonomyDecisionRef,
+    delivery_start_receipt_ref: null,
+    autonomy_level: decision.autonomy_decision?.effective_level || "supervised",
+    start_basis: startBasis,
     status: "confirmed",
     authorization_ref: authorization?.id || null,
     authorization_use_ref: authorization?.__use_receipt?.path || null,
-    authority_assurance: authorization?.authority_assurance || {
-      mode: "audit_only",
-      source: "declared_cli_attribution",
-      verified: false,
-      limitation: "The CLI records attribution but cannot independently prove who invoked the command.",
-    },
+    authority_assurance: taskStartAuthorityAssurance,
     confirmed_by: attribution.actor,
     confirmed_at: now(),
     audit: { git: attribution.git, run: attribution.run },
   };
+  let deliveryStartPath = null;
+  if (deliveryProfile && autonomyDecisionRef) {
+    const story = decision.story_id ? readStory(context, decision.story_id) : null;
+    const contract = decision.contract_id ? readContractById(context, decision.contract_id, { missingOk: true }) : null;
+    const startRecordBase = {
+      id: `AUT-START-${normalizeId(deliveryProfile.id)}`,
+      kind: "delivery_start_receipt",
+      schema_version: "delivery-start-receipt:v1",
+      profile_ref: {
+        id: deliveryProfile.id,
+        path: toProjectPath(context, deliveryAutonomyPath(context, deliveryProfile.id)),
+        hash: deliveryProfile.profile_hash,
+      },
+      delivery: { id: deliveryProfile.delivery_id, kind: deliveryProfile.delivery_kind },
+      story_ref: story
+        ? {
+            id: story.id,
+            path: toProjectPath(context, path.join(context.sdlcRoot, "stories", story.id, "story.json")),
+            hash: hashApprovalSubject(story),
+          }
+        : null,
+      contract_ref: contract
+        ? {
+            id: contract.id,
+            path: toProjectPath(context, path.join(context.sdlcRoot, "contracts", `${contract.id}.json`)),
+            hash: hashApprovalSubject(contract),
+          }
+        : null,
+      contract_approval_hash: receipt.contract_approval_hash,
+      phase: receipt.phase,
+      route: receipt.route,
+      autonomy_decision_ref: autonomyDecisionRef,
+      effective_level: receipt.autonomy_level,
+      start_basis: startBasis,
+      status: "started",
+      started_by: attribution.actor,
+      started_at: receipt.confirmed_at,
+      audit: receipt.audit,
+    };
+    const startRecord = {
+      ...startRecordBase,
+      receipt_hash: autonomyLifecycleReceiptHash(startRecordBase),
+      hash_algorithm: "sha256:stable-json:v1",
+    };
+    assertRecordSchema(startRecord, "delivery-start-receipt.schema.json", `Delivery start receipt ${deliveryProfile.id}`);
+    const startPath = deliveryStartReceiptPath(context, deliveryProfile.id);
+    writeJsonFile(startPath, startRecord, { atomicCreate: true });
+    deliveryStartPath = startPath;
+    receipt.delivery_start_receipt_ref = {
+      id: startRecord.id,
+      path: toProjectPath(context, startPath),
+      hash: startRecord.receipt_hash,
+    };
+    decision.delivery_start_receipt = toProjectPath(context, startPath);
+  }
   const receiptPath = decision.story_id
     ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
     : path.join(context.sdlcRoot, "reports", "project-task-start.json");
-  writeJsonFile(receiptPath, receipt, { force: true });
+  try {
+    assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id}`);
+    writeJsonFile(receiptPath, receipt, { force: true });
+  } catch (error) {
+    if (deliveryStartPath) fs.rmSync(deliveryStartPath, { force: true });
+    throw error;
+  }
   return toProjectPath(context, receiptPath);
 }
 
@@ -1358,6 +1598,12 @@ function buildTaskStartDecision(context, options) {
     deterministic_checks: [],
     next_commands: [],
     approval_requests: [],
+    delivery_profile_id: getOptionString(options, "delivery-profile")
+      ? normalizeId(getOptionString(options, "delivery-profile"))
+      : null,
+    delivery_profile_path: null,
+    autonomy_decision: null,
+    autonomy_decision_path: null,
     route_decision: routeDecision,
   };
   pushAllUnique(result.blocking_reasons, routeDecision.blocking_reasons);
@@ -1626,7 +1872,132 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
+  if (!applyDeliveryAutonomyToTaskStart(context, result, contractState.contract, options)) {
+    return dedupeTaskStartDecision(result);
+  }
+
   return finalizeTaskStartExecution(context, result, routeDecision, options);
+}
+
+function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
+  const policy = context.config.autonomy_policy || {};
+  if (policy.enabled === false || policy.mode === "off") {
+    result.autonomy = { mode: "off", effective_level: "supervised" };
+    return true;
+  }
+  const v2Bound = Array.isArray(contract.requirement_execution_profile_refs)
+    && contract.requirement_execution_profile_refs.length > 0;
+  if (!v2Bound) {
+    if (policy.mode === "enforce_all") {
+      result.status = "needs_user_input";
+      result.execution_allowed = false;
+      result.contract_action = "migrate_requirement_autonomy";
+      pushAllUnique(result.blocking_reasons, ["legacy_autonomy_migration_required"]);
+      pushAllUnique(result.questions, [
+        "This project enforces per-delivery autonomy for all work. Create and approve requirement:v2, then bind a new exact delivery profile.",
+      ]);
+      return false;
+    }
+    result.autonomy = {
+      mode: "legacy_fallback",
+      effective_level: policy.legacy_default || "supervised",
+      reason_codes: ["autonomy.legacy_supervised_fallback"],
+    };
+    return true;
+  }
+  const explicitProfileId = getOptionString(options, "delivery-profile")
+    ? normalizeId(getOptionString(options, "delivery-profile"))
+    : null;
+  if (policy.mode === "observe" && !explicitProfileId) {
+    result.autonomy = {
+      mode: "observe",
+      effective_level: "supervised",
+      reason_codes: ["autonomy.selection_missing_observed"],
+    };
+    return true;
+  }
+  if (!explicitProfileId && policy.require_explicit_delivery_selection !== false) {
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = "select_delivery_autonomy";
+    pushAllUnique(result.blocking_reasons, ["autonomy_selection_required"]);
+    pushAllUnique(result.questions, [
+      `Select the already reviewed autonomy profile for this exact pull request or local release. Contract ${contract.id} expects ${contract.delivery_execution_profile_id || "a new profile"}; the choice is never inferred from a previous delivery.`,
+    ]);
+    pushAllUnique(result.next_commands, [
+      `agentic-sdlc autonomy delivery status${contract.delivery_execution_profile_id ? ` --id ${contract.delivery_execution_profile_id}` : ""}`,
+    ]);
+    return false;
+  }
+  if (!explicitProfileId || explicitProfileId !== contract.delivery_execution_profile_id) {
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = "select_delivery_autonomy";
+    pushAllUnique(result.blocking_reasons, ["autonomy_profile_contract_mismatch"]);
+    pushAllUnique(result.questions, [
+      `Contract ${contract.id} is bound to delivery profile ${contract.delivery_execution_profile_id || "none"}, not ${explicitProfileId || "none"}.`,
+    ]);
+    return false;
+  }
+  try {
+    const profile = readDeliveryAutonomyProfile(context, explicitProfileId);
+    const actualStory = result.story_id ? readStory(context, result.story_id) : null;
+    const exactStoryRef = profile.story_refs.length === 1 ? profile.story_refs[0] : null;
+    const exactContractRef = profile.contract_refs.length === 1 ? profile.contract_refs[0] : null;
+    if (
+      !actualStory
+      || exactStoryRef?.id !== actualStory.id
+      || exactContractRef?.id !== contract.id
+    ) {
+      fail(`Delivery autonomy profile ${profile.id} is not bound to the exact current story and contract.`);
+    }
+    const { decision } = evaluateDeliveryAutonomy(context, profile, {
+      id: `AUT-DEC-${uniqueRecordSuffix()}`,
+      phase: result.phase || contract.phase,
+      validateRuntimeTarget: true,
+      forStart: true,
+    });
+    result.delivery_profile_id = profile.id;
+    result.delivery_profile_path = toProjectPath(context, deliveryAutonomyPath(context, profile.id));
+    result.autonomy_decision = decision;
+    result.autonomy = {
+      mode: policy.mode,
+      requested_level: decision.requested_level,
+      effective_level: decision.effective_level,
+      execution_status: decision.execution_status,
+      reason_codes: decision.reason_codes,
+    };
+    const invalidConstraints = decision.source_constraints.filter((constraint) => constraint.valid === false);
+    const invalidDecision = decision.blocked
+      || invalidConstraints.length > 0
+      || decision.material_drift.length > 0;
+    result.deterministic_checks.push({
+      check: "per_delivery_autonomy",
+      status: invalidDecision ? "failed" : "passed",
+      details: `${decision.requested_level} -> ${decision.effective_level} for ${profile.delivery_kind} ${profile.delivery_id}`,
+    });
+    if (invalidDecision) {
+      result.status = "needs_user_input";
+      result.execution_allowed = false;
+      result.contract_action = "repair_delivery_autonomy";
+      pushAllUnique(result.blocking_reasons, [
+        "autonomy_policy_blocked",
+        ...decision.reason_codes,
+        ...invalidConstraints.flatMap((constraint) => constraint.reason_codes),
+        ...decision.material_drift.map((item) => item.reason_code),
+      ]);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (!(error instanceof UserError)) throw error;
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = "repair_delivery_autonomy";
+    pushAllUnique(result.blocking_reasons, ["autonomy_profile_invalid"]);
+    pushAllUnique(result.questions, [error.message]);
+    return false;
+  }
 }
 
 function finalizeTaskStartExecution(context, result, routeDecision, options) {
@@ -1639,18 +2010,40 @@ function finalizeTaskStartExecution(context, result, routeDecision, options) {
       : collectApprovalRequests(context, { storyId: result.story_id || null });
     return dedupeTaskStartDecision(result);
   }
-  if (routeDecision.requires_confirmation && !options["confirm-start"]) {
+  const effectiveAutonomy = result.autonomy_decision?.effective_level || result.autonomy?.effective_level || "supervised";
+  const preset = context.config.autonomy_policy?.presets?.[effectiveAutonomy] || {};
+  const automaticPhases = normalizeListValue(preset.automatic_phases, []);
+  const checkpoints = normalizeListValue(preset.checkpoints, []);
+  const phaseIsAutomatic = effectiveAutonomy !== "supervised"
+    && Boolean(result.phase)
+    && automaticPhases.includes(result.phase);
+  const autonomyRequiresConfirmation = effectiveAutonomy === "supervised" || !phaseIsAutomatic;
+  const routeRequiresConfirmation = routeDecision.requires_confirmation && !phaseIsAutomatic;
+  result.autonomy = {
+    ...(result.autonomy || {}),
+    automatic_phases: automaticPhases,
+    checkpoints,
+    task_start_automatic: !autonomyRequiresConfirmation && !routeRequiresConfirmation,
+  };
+  result.requires_confirmation = autonomyRequiresConfirmation || routeRequiresConfirmation;
+  if ((autonomyRequiresConfirmation || routeRequiresConfirmation) && !options["confirm-start"]) {
     result.status = "needs_user_input";
     result.execution_allowed = false;
     result.contract_action = "confirm_start";
-    pushAllUnique(result.blocking_reasons, ["route_requires_confirmation"]);
+    pushAllUnique(result.blocking_reasons, [
+      ...(routeDecision.requires_confirmation ? ["route_requires_confirmation"] : []),
+      effectiveAutonomy === "checkpointed"
+        ? "autonomy_checkpoint_required"
+        : "autonomy_human_approval_required",
+    ]);
     pushAllUnique(result.questions, [
-      `Confirm task start for route ${routeDecision.route}${result.contract_id ? ` under contract ${result.contract_id}` : ""}.`,
+      `Confirm task start for route ${routeDecision.route}${result.contract_id ? ` under contract ${result.contract_id}` : ""}; effective autonomy is ${effectiveAutonomy}.`,
     ]);
     return dedupeTaskStartDecision(result);
   }
   result.status = "ready_to_execute";
   result.execution_allowed = true;
+  result.requires_confirmation = false;
   result.contract_action = "use_contract";
   return dedupeTaskStartDecision(result);
 }
@@ -2910,12 +3303,76 @@ function validateTaskStartReceipt(context, storyId, contract) {
   }
   const receipt = readProjectJson(context, receiptPath);
   const issues = [];
+  if (receipt.kind === "profile_task_start_receipt") {
+    try {
+      assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id || storyId}`);
+    } catch (error) {
+      issues.push(error.message);
+    }
+  }
+  let deliveryProfile = null;
   const latestApprovalHash = latestContractApproval(contract)?.approved_content_hash || null;
   if (receipt.status !== "confirmed") {
     issues.push(`task-start receipt status is '${receipt.status || "unknown"}'`);
   }
   if (receipt.contract_id !== contract.id || receipt.contract_approval_hash !== latestApprovalHash) {
     issues.push("task-start receipt does not match the current approved contract");
+  }
+  if (contract.delivery_execution_profile_id) {
+    const profile = readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id, { missingOk: true });
+    deliveryProfile = profile;
+    if (
+      !profile
+      || receipt.delivery_profile_ref?.id !== profile.id
+      || receipt.delivery_profile_ref?.hash !== profile.profile_hash
+    ) {
+      issues.push("task-start receipt does not match the current exact delivery autonomy profile");
+    } else {
+      try {
+        validateAutonomyApprovalRef(context, profile, `Delivery autonomy profile ${profile.id}`);
+      } catch (error) {
+        issues.push(`task-start receipt delivery autonomy is invalid: ${error.message}`);
+      }
+    }
+    const decisionRef = receipt.autonomy_decision_ref;
+    if (!decisionRef?.path || !decisionRef?.hash) {
+      issues.push("task-start receipt has no immutable autonomy decision reference");
+    } else {
+      try {
+        const decisionPath = resolveProjectFilePath(context, decisionRef.path, { mustExist: true, fileOnly: true });
+        const autonomyDecision = readProjectJson(context, decisionPath);
+        const integrity = validateAutonomyDecisionIntegrity(autonomyDecision);
+        if (
+          !integrity.valid
+          || autonomyDecision.id !== decisionRef.id
+          || autonomyDecision.decision_hash !== decisionRef.hash
+          || autonomyDecision.delivery?.profile_id !== profile?.id
+          || autonomyDecision.delivery?.profile_hash !== profile?.profile_hash
+        ) {
+          issues.push("task-start receipt autonomy decision is missing, stale, or tampered");
+        } else {
+          const executionState = currentDeliveryExecutionState(context, profile);
+          if (
+            receipt.delivery_start_receipt_ref?.id !== executionState.start_receipt?.id
+            || receipt.delivery_start_receipt_ref?.hash !== executionState.start_receipt?.receipt_hash
+          ) {
+            issues.push("task-start receipt does not match the immutable delivery start receipt");
+          }
+          if (executionState.lifecycle_status !== "terminal") {
+            const { decision: freshDecision } = evaluateDeliveryAutonomy(context, profile, {
+              id: autonomyDecision.id,
+              phase: autonomyDecision.phase || undefined,
+              evaluated_at: autonomyDecision.evaluated_at,
+            });
+            if (stableJson(autonomyDecisionSemanticProjection(autonomyDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshDecision))) {
+              issues.push("task-start receipt autonomy decision is not reproducible from the current exact delivery profile");
+            }
+          }
+        }
+      } catch (error) {
+        issues.push(`task-start receipt autonomy decision cannot be validated: ${error.message}`);
+      }
+    }
   }
   if (receipt.authorization_ref) {
     const authorization = readAuthorization(context, receipt.authorization_ref, { missingOk: true });
@@ -2953,7 +3410,13 @@ function validateTaskStartReceipt(context, storyId, contract) {
         artifact_types: contractArtifactTypes(contract),
       }).map((error) => `task-start receipt: ${error}`));
     }
-  } else if (receipt.confirmed_by?.type !== "human") {
+  } else if (
+    receipt.confirmed_by?.type !== "human"
+    && !(
+      deliveryProfile
+      && ["checkpointed-profile", "bounded-autonomous-profile"].includes(receipt.start_basis)
+    )
+  ) {
     issues.push("task-start receipt is neither directly human-confirmed nor backed by delegated authorization");
   }
   return issues;
@@ -4348,72 +4811,740 @@ function readRequirement(context, id, options = {}) {
   return readProjectJson(context, filePath);
 }
 
-function createRequirement(context, options) {
+function autonomyRoot(context) {
+  const configured = context.config.autonomy_policy?.storage_root || "autonomy";
+  assertSafeSdlcRelativeDirectory(configured, "autonomy_policy.storage_root");
+  return path.join(context.sdlcRoot, configured);
+}
+
+function requirementAutonomyRoot(context) {
+  return path.join(autonomyRoot(context), "requirements");
+}
+
+function deliveryAutonomyRoot(context) {
+  return path.join(autonomyRoot(context), "deliveries");
+}
+
+function autonomyApprovalsRoot(context) {
+  return path.join(autonomyRoot(context), "approvals");
+}
+
+function autonomyDecisionsRoot(context) {
+  return path.join(autonomyRoot(context), "decisions");
+}
+
+function autonomyRevocationsRoot(context) {
+  return path.join(autonomyRoot(context), "revocations");
+}
+
+function autonomyExecutionsRoot(context) {
+  return path.join(autonomyRoot(context), "executions");
+}
+
+function autonomyActionsRoot(context) {
+  return path.join(autonomyRoot(context), "actions");
+}
+
+function deliveryExecutionRoot(context, profileId) {
+  return path.join(autonomyExecutionsRoot(context), normalizeId(profileId));
+}
+
+function deliveryStartReceiptPath(context, profileId) {
+  return path.join(deliveryExecutionRoot(context, profileId), "start.json");
+}
+
+function deliveryCloseReceiptPath(context, profileId) {
+  return path.join(deliveryExecutionRoot(context, profileId), "close.json");
+}
+
+function requirementLifecycleRoot(context) {
+  return path.join(requirementsRoot(context), "lifecycle");
+}
+
+function requirementAutonomyPath(context, profileId) {
+  return path.join(requirementAutonomyRoot(context), `${normalizeId(profileId)}.json`);
+}
+
+function deliveryAutonomyPath(context, profileId) {
+  return path.join(deliveryAutonomyRoot(context), `${normalizeId(profileId)}.json`);
+}
+
+function readRequirementAutonomyProfile(context, profileId, options = {}) {
+  const filePath = requirementAutonomyPath(context, profileId);
+  if (!fs.existsSync(filePath)) {
+    if (options.missingOk) return null;
+    fail(`Requirement autonomy profile ${profileId} does not exist.`);
+  }
+  const profile = readProjectJson(context, filePath);
+  const integrity = validateRequirementExecutionProfileIntegrity(profile);
+  if (!integrity.valid) {
+    fail(`Requirement autonomy profile ${profileId} failed integrity validation: ${integrity.errors.join("; ")}`);
+  }
+  return profile;
+}
+
+function readDeliveryAutonomyProfile(context, profileId, options = {}) {
+  const filePath = deliveryAutonomyPath(context, profileId);
+  if (!fs.existsSync(filePath)) {
+    if (options.missingOk) return null;
+    fail(`Delivery autonomy profile ${profileId} does not exist.`);
+  }
+  const profile = readProjectJson(context, filePath);
+  const integrity = validateDeliveryExecutionProfileIntegrity(profile);
+  if (!integrity.valid) {
+    fail(`Delivery autonomy profile ${profileId} failed integrity validation: ${integrity.errors.join("; ")}`);
+  }
+  return profile;
+}
+
+function buildDomainRecord(label, factory) {
+  try {
+    return factory();
+  } catch (error) {
+    fail(`${label}: ${error.message}`);
+  }
+}
+
+function resolveRequirementSources(context, values) {
+  const sourcePaths = normalizeRawListOption(values).map((source) => {
+    const resolved = resolveProjectFilePath(context, source, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, resolved, "Requirement source");
+    return toProjectPath(context, resolved);
+  });
+  return {
+    source_paths: sourcePaths,
+    source_hashes: Object.fromEntries(sourcePaths.map((sourcePath) => {
+      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: true, fileOnly: true });
+      return [sourcePath, hashFile(resolved)];
+    })),
+  };
+}
+
+function validateRequirementSourceHashes(context, requirement, label, options = {}) {
+  const stale = [];
+  for (const sourcePath of requirement.source_paths || []) {
+    let actual = null;
+    try {
+      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
+      actual = fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? hashFile(resolved) : null;
+    } catch {
+      actual = null;
+    }
+    const expected = requirement.source_hashes?.[sourcePath] || null;
+    if (!actual || actual !== expected) {
+      stale.push({ path: sourcePath, expected, actual });
+    }
+  }
+  if (stale.length > 0 && options.failOnStale) {
+    fail(`${label} has stale source evidence: ${stale.map((item) => item.path).join(", ")}. Create a new immutable revision.`);
+  }
+  return stale;
+}
+
+function requirementMaterialScope(requirement, options = {}) {
+  const environments = normalizeListOption(options.environment).length > 0
+    ? normalizeListOption(options.environment)
+    : ["local"];
+  const capabilities = [...new Set([
+    ...normalizeListOption(options.capability),
+    ...normalizeListOption(options.tool),
+  ])];
+  return {
+    objective: requirement.summary,
+    scope: requirement.summary,
+    non_goals: requirement.non_goals,
+    acceptance_criteria: requirement.acceptance_criteria,
+    nfrs: requirement.non_functional_requirements,
+    integrations: requirement.integrations,
+    environment: environments.sort(),
+    write_paths: normalizeListOption(options["write-path"]).sort(),
+    capabilities: capabilities.sort(),
+    budget: null,
+    release_target: null,
+    requirement_constraints: requirement.constraints,
+  };
+}
+
+function buildRequirementProfileFor(context, requirement, options = {}, settings = {}) {
+  const ceiling = normalizeAutonomyLevel(
+    settings.ceiling || getOptionString(options, "autonomy-ceiling") || context.config.autonomy_policy?.default_requirement_ceiling || "supervised",
+  );
+  const profileId = normalizeId(settings.profileId || requirement.autonomy_profile_id);
+  const preset = context.config.autonomy_policy?.presets?.[ceiling] || {};
+  return buildDomainRecord(`Cannot build autonomy profile ${profileId}`, () => buildRequirementExecutionProfile({
+    id: profileId,
+    status: settings.status || "proposed",
+    requirement_ref: {
+      id: requirement.id,
+      version: requirement.revision,
+      path: toProjectPath(context, requirementPath(context, requirement.id)),
+      hash: requirementContentHash(requirement),
+    },
+    autonomy_ceiling: ceiling,
+    phase_levels: settings.phase_levels || {},
+    material_scope: settings.material_scope || requirementMaterialScope(requirement, options),
+    constraints: settings.constraints || {
+      allowed_tools: normalizeListOption(options.tool),
+      allowed_capabilities: normalizeListOption(options.capability),
+      allowed_environments: normalizeListOption(options.environment).length > 0
+        ? normalizeListOption(options.environment)
+        : ["local"],
+      allowed_write_paths: normalizeListOption(options["write-path"]),
+      forbidden_actions: context.config.autonomy_policy?.exception_triggers || [],
+      budget_ref: null,
+    },
+    checkpoints: settings.checkpoints || preset.checkpoints || [],
+    exception_actions: context.config.autonomy_policy?.exception_triggers || [],
+    authority_assurance: settings.authority_assurance || { mode: "audit_only" },
+    approval_ref: settings.approval_ref || null,
+    valid_from: settings.valid_from || requirement.created_at,
+    expires_at: settings.expires_at ?? getOptionString(options, "expires-at"),
+    created_at: settings.created_at || requirement.created_at,
+    updated_at: settings.updated_at || requirement.updated_at,
+    extensions: settings.extensions || {},
+  }));
+}
+
+function proposeRequirement(context, options, settings = {}) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const title = requireOption(options, "title");
   const summary = getOptionString(options, "summary") || getOptionString(options, "scope-summary");
   if (!summary) {
-    fail("Requirement creation needs --summary explaining the requested outcome and boundary.");
+    fail("Requirement proposal needs --summary explaining the requested outcome and boundary.");
   }
   const acceptanceCriteria = normalizeListOption(options.acceptance);
   if (acceptanceCriteria.length === 0) {
     fail([
-      "Requirement creation needs at least one --acceptance criterion.",
+      "Requirement proposal needs at least one --acceptance criterion.",
       "What I need: an observable statement that lets a reviewer decide whether the outcome is complete.",
       "Why: a title and summary describe intent but do not define testable success.",
-      "Example: --acceptance \"A strict release-manifest gate passes for the exact active story and artifact hashes.\"",
-      "Effect: the criterion becomes part of the canonical requirement and downstream story/contract validation.",
+      "Effect: the criterion and the selected autonomy ceiling become immutable inputs to downstream stories, contracts, and deliveries.",
     ].join("\n"));
   }
-  const status = String(options.status || "proposed");
-  const allowedStatuses = new Set(["proposed", "approved", "active", "satisfied", "rejected", "superseded"]);
-  if (!allowedStatuses.has(status)) {
-    fail(`Requirement status '${status}' is invalid. Use one of: ${Array.from(allowedStatuses).join(", ")}.`);
+  if (options.status && String(options.status) !== "proposed") {
+    fail("Requirement proposal is always created as 'proposed'. Use requirement approve for a separate content-bound decision.");
   }
   if (options.proposal && !getOptionString(options, "proposal-hash")) {
-    fail("A proposal-bound requirement requires both --proposal <id> and --proposal-hash <sha256>; an ID alone does not bind immutable content.");
+    fail("A proposal-bound requirement requires both --proposal <id> and --proposal-hash <sha256>.");
   }
-  const attribution = buildAttribution(context, options, "requirement.create");
-  const record = {
+  const ceiling = getOptionString(options, "autonomy-ceiling")
+    || (settings.legacyAlias ? "supervised" : null);
+  if (!ceiling) {
+    fail("Requirement proposal needs --autonomy-ceiling supervised|checkpointed|bounded-autonomous. This is a ceiling, not authority for future PRs.");
+  }
+  normalizeAutonomyLevel(ceiling);
+  const attribution = buildAttribution(context, options, settings.legacyAlias ? "requirement.create" : "requirement.propose");
+  const profileId = normalizeId(`AUT-${id}-R1`);
+  const sources = resolveRequirementSources(context, options.source);
+  const createdAt = now();
+  const requirement = buildDomainRecord(`Cannot propose requirement ${id}`, () => buildRequirementProposal({
     id,
-    kind: "requirement",
-    schema_version: "requirement:v1",
+    logical_id: id,
+    revision: 1,
     title,
     summary,
-    status,
     acceptance_criteria: acceptanceCriteria,
-    source_paths: normalizeRawListOption(options.source).map((source) => {
-      const resolved = resolveProjectFilePath(context, source, { mustExist: true, fileOnly: true });
-      assertNotDerivedArtifact(context, resolved, "Requirement source");
-      return toProjectPath(context, resolved);
-    }),
-    proposal_ref: options.proposal ? { id: normalizeId(String(options.proposal)), hash: getOptionString(options, "proposal-hash") } : null,
-    created_at: now(),
-    updated_at: now(),
+    non_goals: normalizeListOption(options["non-goal"]),
+    constraints: normalizeListOption(options.constraint),
+    non_functional_requirements: normalizeListOption(options.nfr),
+    integrations: normalizeListOption(options.integration),
+    ...sources,
+    proposal_ref: options.proposal
+      ? { id: normalizeId(String(options.proposal)), hash: getOptionString(options, "proposal-hash") }
+      : null,
+    previous_revision_ref: null,
+    autonomy_profile_id: profileId,
+    created_at: createdAt,
     audit: {
       created_by: attribution.actor,
       updated_by: attribution.actor,
       git: attribution.git,
       run: attribution.run,
     },
-  };
+  }));
+  const profile = buildRequirementProfileFor(context, requirement, options, { ceiling });
   const filePath = requirementPath(context, id);
-  assertRecordSchema(record, "requirement.schema.json", `Requirement ${id}`);
-  writeJsonFile(filePath, record, { force: Boolean(options.force) });
+  const profilePath = requirementAutonomyPath(context, profileId);
+  assertRecordSchema(requirement, "requirement.schema.json", `Requirement ${id}`);
+  assertRecordSchema(profile, "requirement-execution-profile.schema.json", `Requirement autonomy profile ${profileId}`);
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  try {
+    writeJsonFile(filePath, requirement, { force: false });
+    writeJsonFile(profilePath, profile, { force: false });
+  } finally {
+    releaseLock();
+  }
   appendTraceEvent(context, null, {
     type: "decision",
-    summary: `Created requirement ${id}: ${title}`,
-    action: "requirement.create",
+    summary: `Proposed requirement ${id} with autonomy ceiling ${ceiling}`,
+    action: settings.legacyAlias ? "requirement.create" : "requirement.propose",
     actor: attribution.actor,
-    evidence: [toProjectPath(context, filePath)],
-    related: [id, record.proposal_ref?.id].filter(Boolean),
+    evidence: [toProjectPath(context, filePath), toProjectPath(context, profilePath)],
+    related: [id, profileId, requirement.proposal_ref?.id].filter(Boolean),
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "created", requirement: record, requirement_path: toProjectPath(context, filePath) }, [
-    `Created requirement ${id}: ${title}`,
-    `Scope: ${summary}`,
+  output(options, {
+    status: "proposed",
+    deprecated_alias: Boolean(settings.legacyAlias),
+    requirement,
+    requirement_path: toProjectPath(context, filePath),
+    autonomy_profile: profile,
+    autonomy_profile_path: toProjectPath(context, profilePath),
+  }, [
+    `${settings.legacyAlias ? "Created (deprecated alias)" : "Proposed"} requirement ${id}: ${title}`,
+    `Requirement autonomy ceiling: ${ceiling}`,
+    "No pull request or local release is authorized yet; each delivery needs its own explicit profile.",
+  ]);
+}
+
+function autonomyApprovalSubject(context, profile, profilePath) {
+  return {
+    kind: profile.kind,
+    id: profile.id,
+    path: toProjectPath(context, profilePath),
+    hash: profile.profile_hash,
+  };
+}
+
+function loadAutonomyAuthorityAssurance(context, options, action, subject) {
+  const rawPath = getOptionString(options, "host-receipt-file");
+  const required = (context.config.authority_policy?.mode || "audit_only") === "host_verified";
+  if (!rawPath) {
+    if (required) {
+      fail(`${action} requires --host-receipt-file because authority_policy.mode is host_verified.`);
+    }
+    return { mode: "audit_only" };
+  }
+  const filePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+  assertNotDerivedArtifact(context, filePath, "Autonomy host approval receipt");
+  const receipt = readProjectJson(context, filePath);
+  assertRecordSchema(receipt, "host-approval-receipt.schema.json", `Host approval receipt ${toProjectPath(context, filePath)}`);
+  let decision;
+  try {
+    decision = validateHostApprovalReceiptAtUse(receipt, { action, subject, used_at: now() }, {
+      trusted_host_keys: context.config.authority_policy?.trusted_host_keys || [],
+    });
+  } catch (error) {
+    fail(`Host approval receipt ${toProjectPath(context, filePath)} is invalid: ${error.message}`);
+  }
+  if (!decision.valid) {
+    fail(`Host approval receipt ${toProjectPath(context, filePath)} is not valid for ${subject.id}: ${decision.errors.join("; ")}`);
+  }
+  return {
+    mode: "host_verified",
+    source: receipt.issued_by?.type === "ci" ? "ci_attestation" : "host_approval_receipt",
+    verified: true,
+    receipt_ref: { id: receipt.id, path: toProjectPath(context, filePath), hash: receipt.receipt_hash },
+  };
+}
+
+function writeAutonomyApproval(context, profile, options, attribution, settings = {}) {
+  const profilePath = settings.profilePath;
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: profile,
+    subject_id_field: "profile_id",
+    subject_id: profile.id,
+    status: "approved",
+    scope: settings.scope,
+    label: settings.label,
+  });
+  const envelope = {
+    id: `AUT-APR-${uniqueRecordSuffix()}`,
+    kind: "autonomy_profile_approval",
+    schema_version: "autonomy-profile-approval:v1",
+    subject: autonomyApprovalSubject(context, profile, profilePath),
+    subject_snapshot: profile,
+    authority_action: settings.authorityAction || attribution.action,
+    authority_subject: settings.authoritySubject || autonomyApprovalSubject(context, profile, profilePath),
+    approval,
+    created_at: now(),
+  };
+  const filePath = path.join(autonomyApprovalsRoot(context), `${normalizeId(envelope.id)}.json`);
+  writeJsonFile(filePath, envelope, { force: false });
+  return {
+    approval,
+    envelope,
+    ref: { id: envelope.id, path: toProjectPath(context, filePath), hash: hashFile(filePath) },
+  };
+}
+
+function approveRequirement(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const filePath = requirementPath(context, id);
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  try {
+    return approveRequirementLocked(context, options, id, filePath);
+  } finally {
+    releaseLock();
+  }
+}
+
+function approveRequirementLocked(context, options, id, filePath) {
+  const requirement = readRequirement(context, id);
+  if (requirement.schema_version !== "requirement:v2") {
+    fail(`Requirement ${id} is legacy requirement:v1; create an immutable requirement:v2 revision before approval.`);
+  }
+  if (requirement.status !== "proposed") {
+    fail(`Requirement ${id} is '${requirement.status}', expected proposed.`);
+  }
+  const integrity = validateRequirementIntegrity(requirement);
+  if (!integrity.valid) {
+    fail(`Requirement ${id} failed integrity validation: ${integrity.errors.join("; ")}`);
+  }
+  validateRequirementSourceHashes(context, requirement, `Requirement ${id}`, { failOnStale: true });
+  const profilePath = requirementAutonomyPath(context, requirement.autonomy_profile_id);
+  const proposedProfile = readRequirementAutonomyProfile(context, requirement.autonomy_profile_id);
+  if (proposedProfile.status !== "proposed") {
+    fail(`Requirement autonomy profile ${proposedProfile.id} is '${proposedProfile.status}', expected proposed.`);
+  }
+  if (proposedProfile.requirement_ref.hash !== requirementContentHash(requirement)) {
+    fail(`Requirement autonomy profile ${proposedProfile.id} is stale for requirement ${id}.`);
+  }
+  const attribution = buildAttribution(context, options, "requirement.approve");
+  requireFormalApprovalActor(context, options, attribution, "Approving a requirement and its autonomy ceiling");
+  const authorityAssurance = loadAutonomyAuthorityAssurance(
+    context,
+    options,
+    "requirement.approve",
+    {
+      kind: "requirement_autonomy_approval",
+      id,
+      requirement_hash: requirementContentHash(requirement),
+      profile_hash: proposedProfile.profile_hash,
+    },
+  );
+  const requirementApproval = buildApprovalRecord(context, options, attribution, {
+    subject: requirement,
+    subject_id_field: "requirement_id",
+    subject_id: id,
+    status: "approved",
+    scope: "requirement-and-autonomy-ceiling",
+    label: `requirement ${id}`,
+  });
+  const profileApproval = writeAutonomyApproval(context, proposedProfile, options, attribution, {
+    profilePath,
+    scope: "requirement-autonomy-ceiling",
+    label: `requirement autonomy profile ${proposedProfile.id}`,
+    authorityAction: "requirement.approve",
+    authoritySubject: {
+      kind: "requirement_autonomy_approval",
+      id,
+      requirement_hash: requirementContentHash(requirement),
+      profile_hash: proposedProfile.profile_hash,
+    },
+  });
+  const updatedAt = now();
+  const activeProfile = buildRequirementProfileFor(context, requirement, options, {
+    ceiling: proposedProfile.autonomy_ceiling,
+    status: "active",
+    phase_levels: proposedProfile.phase_levels,
+    material_scope: proposedProfile.material_scope,
+    constraints: proposedProfile.constraints,
+    checkpoints: proposedProfile.checkpoints,
+    authority_assurance: authorityAssurance,
+    approval_ref: profileApproval.ref,
+    valid_from: proposedProfile.valid_from,
+    expires_at: proposedProfile.expires_at,
+    created_at: proposedProfile.created_at,
+    updated_at: updatedAt,
+    extensions: {
+      ...proposedProfile.extensions,
+      approved_profile_hash: proposedProfile.profile_hash,
+    },
+  });
+  const approvedRequirement = {
+    ...requirement,
+    status: "approved",
+    approvals: [...(requirement.approvals || []), requirementApproval],
+    updated_at: updatedAt,
+    audit: {
+      ...(requirement.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  };
+  assertRecordSchema(activeProfile, "requirement-execution-profile.schema.json", `Requirement autonomy profile ${activeProfile.id}`);
+  assertRecordSchema(approvedRequirement, "requirement.schema.json", `Requirement ${id}`);
+  writeJsonFile(profilePath, activeProfile, { force: true });
+  writeJsonFile(filePath, approvedRequirement, { force: true });
+  appendTraceEvent(context, null, {
+    type: "gate",
+    summary: `Approved requirement ${id} and autonomy ceiling ${activeProfile.autonomy_ceiling}`,
+    action: "requirement.approve",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, filePath), toProjectPath(context, profilePath), profileApproval.ref.path],
+    related: [id, activeProfile.id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, {
+    status: "approved",
+    requirement: approvedRequirement,
+    autonomy_profile: activeProfile,
+    requirement_approval: requirementApproval,
+    autonomy_approval: profileApproval.envelope,
+  }, [
+    `Approved requirement ${id}`,
+    `Approved autonomy ceiling: ${activeProfile.autonomy_ceiling}`,
+    "Every pull request or local release still requires a separate explicit delivery selection.",
+  ]);
+}
+
+function reviseRequirement(context, options) {
+  ensureInitialized(context);
+  const currentId = normalizeId(requireOption(options, "id"));
+  const newId = normalizeId(requireOption(options, "new-id"));
+  if (currentId === newId) {
+    fail("A requirement revision needs a new immutable --new-id.");
+  }
+  const initialCurrent = readRequirement(context, currentId);
+  const lineageLock = path.join(
+    requirementLifecycleRoot(context),
+    `.logical-${shortHash(initialCurrent.logical_id || initialCurrent.id)}.lock`,
+  );
+  const releaseLock = acquireFileLock(lineageLock);
+  try {
+    return reviseRequirementLocked(context, options, currentId, newId);
+  } finally {
+    releaseLock();
+  }
+}
+
+function reviseRequirementLocked(context, options, currentId, newId) {
+  const current = readRequirement(context, currentId);
+  if (current.schema_version !== "requirement:v2") {
+    fail(`Requirement ${currentId} is legacy requirement:v1 and cannot use the immutable revision command.`);
+  }
+  if (effectiveRequirementStatus(context, current).status === "superseded") {
+    fail(`Requirement ${currentId} is superseded and cannot be revised again.`);
+  }
+  const existingChild = safeReadDir(requirementsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readProjectJson(context, path.join(requirementsRoot(context), name)))
+    .find((candidate) => candidate.previous_revision_ref?.id === currentId);
+  if (existingChild) {
+    fail(`Requirement ${currentId} already has immutable child revision ${existingChild.id}; revise the current lineage head instead.`);
+  }
+  const currentProfile = readRequirementAutonomyProfile(context, current.autonomy_profile_id);
+  const ceiling = getOptionString(options, "autonomy-ceiling") || currentProfile.autonomy_ceiling;
+  normalizeAutonomyLevel(ceiling);
+  const profileId = normalizeId(`AUT-${newId}-R${Number(current.revision) + 1}`);
+  const sourceValues = options.source === undefined ? current.source_paths : options.source;
+  const sources = resolveRequirementSources(context, sourceValues);
+  const attribution = buildAttribution(context, options, "requirement.revise");
+  const createdAt = now();
+  const revision = buildDomainRecord(`Cannot revise requirement ${currentId}`, () => buildRequirementRevision(current, {
+    id: newId,
+    previous_path: toProjectPath(context, requirementPath(context, currentId)),
+    title: options.title === undefined ? current.title : requireOption(options, "title"),
+    summary: options.summary === undefined && options["scope-summary"] === undefined
+      ? current.summary
+      : getOptionString(options, "summary", "scope-summary"),
+    acceptance_criteria: options.acceptance === undefined ? current.acceptance_criteria : normalizeListOption(options.acceptance),
+    non_goals: options["non-goal"] === undefined ? current.non_goals : normalizeListOption(options["non-goal"]),
+    constraints: options.constraint === undefined ? current.constraints : normalizeListOption(options.constraint),
+    non_functional_requirements: options.nfr === undefined ? current.non_functional_requirements : normalizeListOption(options.nfr),
+    integrations: options.integration === undefined ? current.integrations : normalizeListOption(options.integration),
+    ...sources,
+    proposal_ref: null,
+    autonomy_profile_id: profileId,
+    created_at: createdAt,
+    audit: {
+      created_by: attribution.actor,
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    },
+  }));
+  const profile = buildRequirementProfileFor(context, revision, options, { ceiling, profileId });
+  const filePath = requirementPath(context, newId);
+  const profilePath = requirementAutonomyPath(context, profileId);
+  assertRecordSchema(revision, "requirement.schema.json", `Requirement ${newId}`);
+  assertRecordSchema(profile, "requirement-execution-profile.schema.json", `Requirement autonomy profile ${profileId}`);
+  writeJsonFile(filePath, revision, { force: false });
+  writeJsonFile(profilePath, profile, { force: false });
+  appendTraceEvent(context, null, {
+    type: "decision",
+    summary: `Revised requirement ${currentId} as immutable revision ${newId}`,
+    action: "requirement.revise",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, filePath), toProjectPath(context, profilePath)],
+    related: [currentId, newId, profileId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "proposed", requirement: revision, autonomy_profile: profile }, [
+    `Proposed immutable revision ${newId} from ${currentId}`,
+    "Approve the new revision, then supersede the old revision explicitly.",
+  ]);
+}
+
+function requirementSupersessionEvents(context) {
+  return safeReadDir(requirementLifecycleRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readProjectJson(context, path.join(requirementLifecycleRoot(context), name)));
+}
+
+function effectiveRequirementStatus(context, requirement) {
+  const event = requirementSupersessionEvents(context)
+    .filter((item) =>
+      item.event === "superseded"
+      && item.requirement_ref?.id === requirement.id
+      && requirementSupersessionGovernanceErrors(context, item).length === 0)
+    .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)))
+    .at(-1);
+  return event ? { status: "superseded", event } : { status: requirement.status, event: null };
+}
+
+function requirementSupersessionGovernanceErrors(context, event) {
+  const report = { strict: true, errors: [], warnings: [] };
+  const approval = event?.approval;
+  if (!approval || approval.status !== "approved") {
+    return [`requirement lifecycle event ${event?.id || "unknown"} has no approved governance record`];
+  }
+  const subject = {
+    current: event.requirement_ref,
+    replacement: event.replacement_ref,
+    reason: event.reason,
+  };
+  if (approval.approved_content_hash !== hashApprovalSubject(subject)) {
+    report.errors.push(`requirement lifecycle event ${event.id || "unknown"} approval does not bind the exact supersession subject`);
+  }
+  if (!hasFormalApprovalAttribution(approval.approved_by, approval.approval_source)) {
+    report.errors.push(`requirement lifecycle event ${event.id || "unknown"} approval attribution is incomplete`);
+  }
+  validateFormalApprovalRecord(
+    context,
+    report,
+    approval,
+    `requirement lifecycle event ${event.id || "unknown"} approval`,
+    approval.approved_by,
+    { subject_id: event.requirement_ref?.id || null },
+  );
+  return report.errors;
+}
+
+function assertRequirementReadyForDownstream(
+  context,
+  requirement,
+  label = `Requirement ${requirement?.id || "unknown"}`,
+  options = {},
+) {
+  if (!requirement) fail(`${label} does not exist.`);
+  if (requirement.schema_version !== "requirement:v2") {
+    return { legacy: true, autonomy_level: "supervised", profile: null };
+  }
+  if (requirement.status !== "approved" || !isApprovedRecordFresh(requirement)) {
+    fail(`${label} must have a fresh formal approval before downstream story or delivery work.`);
+  }
+  if (effectiveRequirementStatus(context, requirement).status === "superseded") {
+    fail(`${label} is superseded; use its approved replacement revision.`);
+  }
+  if (options.allowPendingSupersession !== true) {
+    const approvedHeads = safeReadDir(requirementsRoot(context))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => readProjectJson(context, path.join(requirementsRoot(context), name)))
+      .filter((candidate) =>
+        candidate.schema_version === "requirement:v2"
+        && candidate.logical_id === requirement.logical_id
+        && candidate.status === "approved"
+        && effectiveRequirementStatus(context, candidate).status !== "superseded");
+    if (approvedHeads.length !== 1 || approvedHeads[0]?.id !== requirement.id) {
+      fail(`${label} is not the single approved head of logical requirement ${requirement.logical_id}; complete the explicit supersession first.`);
+    }
+  }
+  validateRequirementSourceHashes(context, requirement, label, { failOnStale: true });
+  const profile = readRequirementAutonomyProfile(context, requirement.autonomy_profile_id);
+  if (profile.status !== "active" || profile.requirement_ref.hash !== requirementContentHash(requirement)) {
+    fail(`${label} has no active, current requirement autonomy profile.`);
+  }
+  validateAutonomyApprovalRef(context, profile, label);
+  return { legacy: false, autonomy_level: profile.autonomy_ceiling, profile };
+}
+
+function supersedeRequirement(context, options) {
+  ensureInitialized(context);
+  const currentId = normalizeId(requireOption(options, "id"));
+  const replacementId = normalizeId(requireOption(options, "new-id"));
+  const reason = requireOption(options, "reason");
+  const initialCurrent = readRequirement(context, currentId);
+  const lineageLock = path.join(
+    requirementLifecycleRoot(context),
+    `.logical-${shortHash(initialCurrent.logical_id || initialCurrent.id)}.lock`,
+  );
+  const releaseLock = acquireFileLock(lineageLock);
+  try {
+    return supersedeRequirementLocked(context, options, currentId, replacementId, reason);
+  } finally {
+    releaseLock();
+  }
+}
+
+function supersedeRequirementLocked(context, options, currentId, replacementId, reason) {
+  const current = readRequirement(context, currentId);
+  const replacement = readRequirement(context, replacementId);
+  assertRequirementReadyForDownstream(context, current, `Requirement ${currentId}`, { allowPendingSupersession: true });
+  assertRequirementReadyForDownstream(context, replacement, `Replacement requirement ${replacementId}`, { allowPendingSupersession: true });
+  const expectedCurrentRef = buildRequirementRef(
+    current,
+    toProjectPath(context, requirementPath(context, currentId)),
+  );
+  if (
+    current.logical_id !== replacement.logical_id
+    || Number(replacement.revision) !== Number(current.revision) + 1
+    || replacement.previous_revision_ref?.id !== expectedCurrentRef.id
+    || replacement.previous_revision_ref?.revision !== expectedCurrentRef.revision
+    || replacement.previous_revision_ref?.content_hash !== expectedCurrentRef.content_hash
+  ) {
+    fail(`Replacement ${replacementId} must be the exact direct child revision of ${currentId}.`);
+  }
+  if (effectiveRequirementStatus(context, current).status === "superseded") {
+    fail(`Requirement ${currentId} is already superseded.`);
+  }
+  const attribution = buildAttribution(context, options, "requirement.supersede");
+  requireFormalApprovalActor(context, options, attribution, "Superseding a requirement revision");
+  const subject = {
+    current: buildRequirementRef(current, toProjectPath(context, requirementPath(context, currentId))),
+    replacement: buildRequirementRef(replacement, toProjectPath(context, requirementPath(context, replacementId))),
+    reason,
+  };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject,
+    subject_id_field: "requirement_id",
+    subject_id: currentId,
+    status: "approved",
+    scope: "requirement-supersession",
+    label: `supersession ${currentId} -> ${replacementId}`,
+  });
+  const event = buildDomainRecord(`Cannot supersede requirement ${currentId}`, () => buildRequirementSupersession({
+    id: `REQ-SUP-${uniqueRecordSuffix()}`,
+    requirement_ref: subject.current,
+    replacement_ref: subject.replacement,
+    reason,
+    approval,
+    created_at: now(),
+    audit: { actor: attribution.actor, git: attribution.git, run: attribution.run },
+  }));
+  assertRecordSchema(event, "requirement-lifecycle-event.schema.json", `Requirement supersession ${event.id}`);
+  const eventPath = path.join(requirementLifecycleRoot(context), `${normalizeId(event.id)}.json`);
+  writeJsonFile(eventPath, event, { force: false });
+  appendTraceEvent(context, null, {
+    type: "gate",
+    summary: `Superseded requirement ${currentId} with ${replacementId}`,
+    action: "requirement.supersede",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, eventPath)],
+    related: [currentId, replacementId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, { status: "superseded", event, event_path: toProjectPath(context, eventPath) }, [
+    `Superseded ${currentId} with ${replacementId}`,
+    "The old requirement file was not mutated; the lifecycle event is append-only.",
   ]);
 }
 
@@ -4423,13 +5554,2270 @@ function showRequirements(context, options) {
   const records = safeReadDir(requirementsRoot(context))
     .filter((name) => name.endsWith(".json"))
     .map((name) => readProjectJson(context, path.join(requirementsRoot(context), name)))
-    .filter((record) => !id || record.id === id);
+    .filter((record) => !id || record.id === id)
+    .map((record) => {
+      const effective = effectiveRequirementStatus(context, record);
+      const profile = record.autonomy_profile_id
+        ? readRequirementAutonomyProfile(context, record.autonomy_profile_id, { missingOk: true })
+        : null;
+      return {
+        ...record,
+        effective_status: effective.status,
+        supersession: effective.event,
+        autonomy: profile
+          ? { profile_id: profile.id, status: profile.status, ceiling: profile.autonomy_ceiling, profile_hash: profile.profile_hash }
+          : { profile_id: null, status: "legacy", ceiling: "supervised", profile_hash: null },
+      };
+    });
   if (id && records.length === 0) {
     fail(`Requirement ${id} does not exist.`);
   }
   output(options, { requirements: records }, records.length
-    ? records.map((record) => `${record.id}: ${record.status || "unknown"} — ${record.title || "untitled"}`)
+    ? records.map((record) => `${record.id}: ${record.effective_status || record.status || "unknown"} — ceiling ${record.autonomy.ceiling} — ${record.title || "untitled"}`)
     : ["No requirements found."]);
+}
+
+function showRequirementAutonomy(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const requirement = readRequirement(context, id);
+  const profile = requirement.autonomy_profile_id
+    ? readRequirementAutonomyProfile(context, requirement.autonomy_profile_id, { missingOk: true })
+    : null;
+  output(options, {
+    requirement_id: id,
+    requirement_status: effectiveRequirementStatus(context, requirement).status,
+    legacy_fallback: !profile,
+    autonomy_profile: profile,
+  }, profile
+    ? [`Requirement ${id}: autonomy ceiling ${profile.autonomy_ceiling} (${profile.status})`]
+    : [`Requirement ${id}: legacy supervised fallback; create requirement:v2 to negotiate autonomy.`]);
+}
+
+function validateApprovalEvidenceIntegrity(context, approval, label) {
+  for (const evidence of approval?.evidence || []) {
+    const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, evidencePath, `${label} evidence`);
+    if (!evidence.sha256 || hashFile(evidencePath) !== evidence.sha256) {
+      fail(`${label} evidence changed after approval: ${evidence.path}.`);
+    }
+  }
+}
+
+function validateAutonomyApprovalRef(context, profile, label = `Autonomy profile ${profile?.id || "unknown"}`) {
+  if (profile.status !== "active") return null;
+  const ref = profile.approval_ref;
+  if (!ref?.path || !ref?.hash) {
+    fail(`${label} is active but has no immutable approval reference.`);
+  }
+  const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+  if (hashFile(filePath) !== ref.hash) {
+    fail(`${label} approval reference is stale: ${ref.path}.`);
+  }
+  const envelope = readProjectJson(context, filePath);
+  const approvedSnapshot = envelope.subject_snapshot;
+  const snapshotIntegrity = approvedSnapshot?.kind === "requirement_execution_profile"
+    ? validateRequirementExecutionProfileIntegrity(approvedSnapshot)
+    : approvedSnapshot?.kind === "delivery_execution_profile"
+      ? validateDeliveryExecutionProfileIntegrity(approvedSnapshot)
+      : { valid: false, errors: ["unknown autonomy profile kind"] };
+  if (
+    envelope.kind !== "autonomy_profile_approval"
+    || envelope.subject?.id !== profile.id
+    || envelope.subject?.hash !== profile.extensions?.approved_profile_hash
+    || approvedSnapshot?.profile_hash !== envelope.subject?.hash
+    || approvedSnapshot?.status !== "proposed"
+    || approvedSnapshot?.kind !== profile.kind
+    || !snapshotIntegrity.valid
+    || stableJson(autonomyProfileApprovalProjection(profile)) !== stableJson(autonomyProfileApprovalProjection(approvedSnapshot))
+    || hashApprovalSubject(approvedSnapshot) !== envelope.approval?.approved_content_hash
+    || envelope.approval?.status !== "approved"
+    || envelope.approval?.hash_algorithm !== "sha256:stable-json:v1"
+  ) {
+    fail(`${label} approval envelope does not bind the exact proposed profile content.`);
+  }
+  validateApprovalSourceForActor(context, {
+    source: envelope.approval.approval_source || null,
+    status: envelope.approval.status,
+    summary: envelope.approval.summary || null,
+    evidence: Array.isArray(envelope.approval.evidence) ? envelope.approval.evidence : [],
+    actor: envelope.approval.approved_by || null,
+    label: `${label} approval`,
+  });
+  validateApprovalEvidenceIntegrity(context, envelope.approval, `${label} approval`);
+  const approvalReport = { strict: true, errors: [], warnings: [] };
+  validateFormalApprovalRecord(
+    context,
+    approvalReport,
+    envelope.approval,
+    `${label} approval`,
+    envelope.approval.approved_by,
+    { subject_id: profile.id },
+  );
+  if (approvalReport.errors.length > 0) {
+    fail(`${label} approval governance is invalid: ${approvalReport.errors.join("; ")}`);
+  }
+  if (profile.authority_assurance?.mode === "host_verified") {
+    const receiptRef = profile.authority_assurance.receipt_ref;
+    if (!receiptRef?.path || !receiptRef?.hash) {
+      fail(`${label} claims host_verified authority without a receipt reference.`);
+    }
+    const receiptPath = resolveProjectFilePath(context, receiptRef.path, { mustExist: true, fileOnly: true });
+    const receipt = readProjectJson(context, receiptPath);
+    assertRecordSchema(receipt, "host-approval-receipt.schema.json", `${label} host approval receipt`);
+    if (receipt.receipt_hash !== receiptRef.hash) {
+      fail(`${label} host approval receipt hash is stale.`);
+    }
+    let decision;
+    try {
+      decision = validateHostApprovalReceiptAtUse(receipt, {
+        action: envelope.authority_action,
+        subject: envelope.authority_subject,
+        used_at: now(),
+      }, {
+        trusted_host_keys: context.config.authority_policy?.trusted_host_keys || [],
+      });
+    } catch (error) {
+      fail(`${label} host approval receipt is invalid: ${error.message}`);
+    }
+    if (!decision.valid) {
+      fail(`${label} host approval receipt is no longer valid: ${decision.errors.join("; ")}`);
+    }
+  }
+  return envelope;
+}
+
+function autonomyProfileApprovalProjection(profile) {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return null;
+  const {
+    approval_ref: _approvalRef,
+    authority_assurance: _authorityAssurance,
+    profile_hash: _profileHash,
+    status: _status,
+    updated_at: _updatedAt,
+    extensions,
+    ...immutable
+  } = profile;
+  const projectedExtensions = { ...(extensions || {}) };
+  delete projectedExtensions.approved_profile_hash;
+  return { ...immutable, extensions: projectedExtensions };
+}
+
+function requirementByAutonomyProfileId(context, profileId) {
+  return safeReadDir(requirementsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readProjectJson(context, path.join(requirementsRoot(context), name)))
+    .find((requirement) => requirement.autonomy_profile_id === profileId) || null;
+}
+
+function deliveryTargetFromOptions(context, kind, options) {
+  if (kind === "pull_request") {
+    const allowedActions = [...new Set(normalizeListOption(options["allow-action"])
+      .map((action) => normalizeDeliveryAction(kind, action)))].sort();
+    const repository = normalizeGitRepositoryIdentity(requireOption(options, "repository"));
+    if (!repository?.startsWith("github.com/")) {
+      fail("pull_request repository must be an exact GitHub identity (github.com/owner/repo or owner/repo); other providers need an adapter.");
+    }
+    return {
+      pull_request_target: {
+        repository,
+        base_branch: requireOption(options, "base"),
+        head_branch: requireOption(options, "head"),
+        allowed_actions: (allowedActions.length > 0
+          ? allowedActions
+          : ["repository.read", "repository.write", "test.run", "git.commit", "git.push", "pull_request.update"]).sort(),
+        merge_allowed: options["merge-allowed"] === true,
+      },
+      local_release_target: null,
+    };
+  }
+  const rootPath = path.resolve(requireOption(options, "target-root"));
+  const writePaths = normalizeRawListOption(options["write-path"])
+    .map((item) => path.isAbsolute(item) ? path.resolve(item) : path.resolve(rootPath, item))
+    .sort();
+  const allowedActions = [...new Set(normalizeListOption(options["allow-action"])
+    .map((action) => normalizeDeliveryAction(kind, action)))].sort();
+  const localReleaseTarget = {
+    environment: "local",
+    root_path: rootPath,
+    allowed_write_paths: writePaths,
+    allowed_actions: (allowedActions.length > 0 ? allowedActions : ["build.local", "test.run", "release.local"]).sort(),
+    smoke_tests: normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort(),
+    rollback: { required: true, procedure: requireOption(options, "rollback") },
+    external_access_allowed: false,
+    production_access_allowed: false,
+    destructive_actions_allowed: false,
+  };
+  validateLocalReleaseFilesystemBoundary(localReleaseTarget);
+  return {
+    pull_request_target: null,
+    local_release_target: localReleaseTarget,
+  };
+}
+
+function deliveryConcreteIdentity(kind, target) {
+  if (kind === "pull_request") {
+    return {
+      kind,
+      repository: normalizeGitRepositoryIdentity(target.pull_request_target?.repository),
+      base_branch: target.pull_request_target?.base_branch,
+      head_branch: target.pull_request_target?.head_branch,
+    };
+  }
+  return {
+    kind,
+    root_path: fs.realpathSync.native(path.resolve(target.local_release_target?.root_path)),
+  };
+}
+
+function normalizeDeliveryAction(kind, value) {
+  const raw = String(value || "").trim().toLowerCase();
+  const aliases = {
+    implement: "repository.write",
+    read: "repository.read",
+    test: "test.run",
+    commit: "git.commit",
+    push: "git.push",
+    update: "pull_request.update",
+    merge: "pull_request.merge",
+    build: "build.local",
+    release: "release.local",
+  };
+  const action = aliases[raw] || raw;
+  const catalog = kind === "pull_request"
+    ? new Set([
+        "repository.read",
+        "repository.write",
+        "test.run",
+        "git.commit",
+        "git.push",
+        "pull_request.create",
+        "pull_request.update",
+        "pull_request.merge",
+      ])
+    : new Set(["build.local", "test.run", "release.local"]);
+  if (!catalog.has(action)) {
+    fail(`Unknown ${kind} delivery action '${value}'. Valid actions: ${[...catalog].sort().join(", ")}.`);
+  }
+  return action;
+}
+
+function pathMatchesApprovedWriteScope(filePath, allowedPaths) {
+  const normalized = String(filePath || "").replace(/\\/gu, "/").replace(/^\.\//u, "");
+  return allowedPaths.some((allowedPath) => {
+    const allowed = String(allowedPath || "").replace(/\\/gu, "/").replace(/^\.\//u, "").replace(/\/$/u, "");
+    return normalized === allowed || normalized.startsWith(`${allowed}/`);
+  });
+}
+
+function pullRequestChangedPaths(context, runtimeTarget, action) {
+  let output = "";
+  if (action === "git.commit") {
+    output = [
+      execGit(context.root, ["diff", "--name-only", "--cached"]),
+      execGit(context.root, ["diff", "--name-only"]),
+      execGit(context.root, ["ls-files", "--others", "--exclude-standard"]),
+    ].filter(Boolean).join("\n");
+  } else if (["git.push", "pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
+    output = execGit(context.root, ["diff", "--name-only", `${runtimeTarget.base_ref}...HEAD`]) || "";
+  }
+  return [...new Set(output.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+}
+
+function buildDeliveryActionDetails(context, profile, action, runtimeTarget, options) {
+  if (profile.delivery_kind === "local_release") {
+    return {
+      target_root: profile.local_release_target.root_path,
+      allowed_write_paths: profile.local_release_target.allowed_write_paths,
+    };
+  }
+  const observedPaths = pullRequestChangedPaths(context, runtimeTarget, action);
+  const requestedScopePaths = action === "git.commit"
+    ? normalizeRawListOption(options["scope-path"]).map((item) => normalizeProjectPathInput(item))
+    : [];
+  if (action === "git.commit" && requestedScopePaths.length === 0) {
+    fail("git.commit requires at least one exact --scope-path to bind the commit file set.");
+  }
+  const changedPaths = action === "git.commit" ? [...new Set(requestedScopePaths)].sort() : observedPaths;
+  if (action === "git.commit") {
+    const missing = changedPaths.filter((filePath) => !observedPaths.includes(filePath));
+    if (missing.length > 0) {
+      fail(`git.commit --scope-path is not currently changed or untracked: ${missing.join(", ")}.`);
+    }
+  }
+  const allowedPaths = profile.constraints?.allowed_write_paths || [];
+  const outOfScope = changedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
+  if (outOfScope.length > 0) {
+    fail(`Delivery action ${action} includes paths outside the approved write scope: ${outOfScope.join(", ")}.`);
+  }
+  const details = {
+    repository: normalizeGitRepositoryIdentity(profile.pull_request_target.repository),
+    base_branch: profile.pull_request_target.base_branch,
+    head_branch: profile.pull_request_target.head_branch,
+    source_sha: runtimeTarget.head_sha,
+    changed_paths: changedPaths,
+    allowed_write_paths: allowedPaths,
+  };
+  if (action === "git.push") {
+    const remote = getOptionString(options, "remote") || (runtimeTarget.matching_remotes.length === 1
+      ? runtimeTarget.matching_remotes[0]
+      : null);
+    if (!remote || !runtimeTarget.matching_remotes.includes(remote)) {
+      fail("git.push requires --remote naming one exact matching remote.");
+    }
+    details.push = {
+      remote,
+      source_sha: runtimeTarget.head_sha,
+      destination_ref: `refs/heads/${profile.pull_request_target.head_branch}`,
+      force: false,
+      delete: false,
+    };
+  }
+  if (action === "pull_request.merge") {
+    const prUrl = getOptionString(options, "pr-url");
+    if (!prUrl) fail("pull_request.merge requires the exact --pr-url shown at the checkpoint.");
+    let parsed;
+    try {
+      parsed = new URL(prUrl);
+    } catch {
+      fail("pull_request.merge --pr-url must be an absolute URL.");
+    }
+    const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
+    const repository = segments.length >= 2
+      ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
+      : null;
+    if (
+      parsed.protocol !== "https:"
+      || parsed.search
+      || parsed.hash
+      || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
+      || segments[2] !== "pull"
+      || !/^\d+$/u.test(segments[3] || "")
+      || segments.length !== 4
+    ) {
+      fail("pull_request.merge --pr-url does not match the exact approved repository.");
+    }
+    details.merge = { pr_url: canonicalAbsoluteUrl(prUrl), source_sha: runtimeTarget.head_sha, force: false };
+  }
+  return details;
+}
+
+function gitRuntimeWithoutHead(runtimeTarget) {
+  const { head_sha: _headSha, ...boundary } = runtimeTarget || {};
+  return boundary;
+}
+
+function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
+  const beforeSha = authorization.runtime_target?.head_sha;
+  const afterSha = runtimeTarget?.head_sha;
+  if (!beforeSha || !afterSha || beforeSha === afterSha) {
+    fail("git.commit completion requires exactly one new commit after its authorization checkpoint.");
+  }
+  if (stableJson(gitRuntimeWithoutHead(authorization.runtime_target)) !== stableJson(gitRuntimeWithoutHead(runtimeTarget))) {
+    fail("git.commit runtime boundary changed outside the authorized HEAD transition.");
+  }
+  const parentLine = execGit(context.root, ["rev-list", "--parents", "-n", "1", afterSha]);
+  const commitAndParents = String(parentLine || "").split(/\s+/u).filter(Boolean);
+  if (commitAndParents.length !== 2 || commitAndParents[0] !== afterSha || commitAndParents[1] !== beforeSha) {
+    fail("git.commit completion must be one non-merge commit whose exact parent is the authorized source SHA.");
+  }
+  const committedPaths = [...new Set(String(
+    execGit(context.root, ["diff", "--name-only", "--no-renames", beforeSha, afterSha]) || "",
+  ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+  const authorizedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
+  if (committedPaths.length === 0 || stableJson(committedPaths) !== stableJson(authorizedPaths)) {
+    fail("git.commit completion file set differs from the exact authorized --scope-path set.");
+  }
+  const allowedPaths = authorization.action_details?.allowed_write_paths || [];
+  const outOfScope = committedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
+  if (outOfScope.length > 0) {
+    fail(`git.commit completed paths escaped the approved write scope: ${outOfScope.join(", ")}.`);
+  }
+  return {
+    ...authorization.action_details,
+    commit: {
+      before_sha: beforeSha,
+      after_sha: afterSha,
+      committed_paths: committedPaths,
+    },
+  };
+}
+
+function verifyCompletedGitPush(context, authorization) {
+  const push = authorization.action_details?.push;
+  const precondition = authorization.action_details?.push_precondition;
+  if (!push?.remote || !push.destination_ref || !push.source_sha) {
+    fail(`git.push authorization ${authorization.id} lacks an exact remote operation.`);
+  }
+  if (
+    !precondition
+    || precondition.remote !== push.remote
+    || precondition.destination_ref !== push.destination_ref
+    || precondition.observed_sha === push.source_sha
+  ) {
+    fail(`git.push authorization ${authorization.id} lacks a distinct pre-action remote-ref observation.`);
+  }
+  let output;
+  try {
+    output = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+  } catch (error) {
+    fail(`git.push remote verification failed: ${String(error.stderr || error.message).trim()}`);
+  }
+  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
+    parts.length >= 2 && parts[1] === push.destination_ref);
+  if (matches.length !== 1 || matches[0][0] !== push.source_sha) {
+    fail(`git.push completion is not proven: ${push.destination_ref} does not resolve to ${push.source_sha}.`);
+  }
+  return {
+    provider: "git-remote",
+    remote: push.remote,
+    destination_ref: push.destination_ref,
+    observed_sha: matches[0][0],
+    verified_at: now(),
+  };
+}
+
+function observeGitPushPrecondition(context, actionDetails) {
+  const push = actionDetails?.push;
+  let output;
+  try {
+    output = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+  } catch (error) {
+    fail(`git.push precondition verification failed: ${String(error.stderr || error.message).trim()}`);
+  }
+  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
+    parts.length >= 2 && parts[1] === push.destination_ref);
+  if (matches.length > 1) {
+    fail(`git.push precondition returned multiple exact refs for ${push.destination_ref}.`);
+  }
+  const observedSha = matches[0]?.[0] || null;
+  if (observedSha === push.source_sha) {
+    fail(`git.push destination ${push.destination_ref} already equals ${push.source_sha}; no push transition is needed.`);
+  }
+  return {
+    provider: "git-remote",
+    remote: push.remote,
+    destination_ref: push.destination_ref,
+    observed_sha: observedSha,
+  };
+}
+
+function observeGitRemoteBasePrecondition(context, profile, actionDetails) {
+  const remote = actionDetails?.push?.remote;
+  const baseRef = `refs/heads/${profile.pull_request_target.base_branch}`;
+  let output;
+  try {
+    output = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "ls-remote", "--heads", remote, baseRef],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+  } catch (error) {
+    fail(`git.push base precondition verification failed: ${String(error.stderr || error.message).trim()}`);
+  }
+  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
+    parts.length >= 2 && parts[1] === baseRef);
+  if (matches.length !== 1 || !/^[a-f0-9]{40,64}$/u.test(matches[0][0])) {
+    fail(`git.push base precondition requires exactly one live remote ref for ${baseRef}.`);
+  }
+  return {
+    provider: "git-remote",
+    remote,
+    base_ref: baseRef,
+    observed_sha: matches[0][0],
+  };
+}
+
+function canonicalAbsoluteUrl(value) {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.toString().replace(/\/$/u, "");
+  } catch {
+    return null;
+  }
+}
+
+function verifyCompletedGitHubMerge(profile, authorization) {
+  const merge = authorization.action_details?.merge;
+  const precondition = authorization.action_details?.merge_precondition;
+  if (!merge?.pr_url || !merge.source_sha) {
+    fail(`pull_request.merge authorization ${authorization.id} lacks an exact GitHub PR operation.`);
+  }
+  if (
+    precondition?.provider !== "github-cli"
+    || precondition.state !== "OPEN"
+    || precondition.pr_url !== canonicalAbsoluteUrl(merge.pr_url)
+    || precondition.head_sha !== merge.source_sha
+  ) {
+    fail(`pull_request.merge authorization ${authorization.id} lacks an exact open-PR precondition.`);
+  }
+  let raw;
+  try {
+    raw = childProcess.execFileSync(
+      "gh",
+      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    fail(`pull_request.merge provider verification requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
+  }
+  let observed;
+  try {
+    observed = JSON.parse(raw);
+  } catch {
+    fail("pull_request.merge provider returned invalid JSON.");
+  }
+  const authorizedAt = Date.parse(authorization.authorized_at || "");
+  const mergedAt = Date.parse(observed.mergedAt || "");
+  if (
+    observed.state !== "MERGED"
+    || observed.isDraft === true
+    || !observed.mergedAt
+    || !observed.mergeCommit?.oid
+    || observed.headRefOid !== merge.source_sha
+    || observed.headRefName !== profile.pull_request_target.head_branch
+    || observed.baseRefName !== profile.pull_request_target.base_branch
+    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
+    || !Number.isFinite(authorizedAt)
+    || !Number.isFinite(mergedAt)
+    || mergedAt < authorizedAt
+  ) {
+    fail("pull_request.merge completion is not proven by the exact GitHub PR, head SHA, branches, and merged state.");
+  }
+  return {
+    provider: "github-cli",
+    pr_url: canonicalAbsoluteUrl(observed.url),
+    state: observed.state,
+    is_draft: false,
+    head_sha: observed.headRefOid,
+    head_branch: observed.headRefName,
+    base_branch: observed.baseRefName,
+    merge_commit_sha: observed.mergeCommit.oid,
+    merged_at: observed.mergedAt,
+    verified_at: now(),
+  };
+}
+
+function observeGitHubMergePrecondition(profile, actionDetails) {
+  const merge = actionDetails?.merge;
+  let raw;
+  try {
+    raw = childProcess.execFileSync(
+      "gh",
+      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,headRefOid,headRefName,baseRefName"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    fail(`pull_request.merge precondition requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
+  }
+  let observed;
+  try {
+    observed = JSON.parse(raw);
+  } catch {
+    fail("pull_request.merge precondition provider returned invalid JSON.");
+  }
+  if (
+    observed.state !== "OPEN"
+    || observed.isDraft !== false
+    || observed.headRefOid !== merge.source_sha
+    || observed.headRefName !== profile.pull_request_target.head_branch
+    || observed.baseRefName !== profile.pull_request_target.base_branch
+    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
+  ) {
+    fail("pull_request.merge precondition must be the exact open GitHub PR at the authorized head SHA and branches.");
+  }
+  return {
+    provider: "github-cli",
+    pr_url: canonicalAbsoluteUrl(observed.url),
+    state: observed.state,
+    is_draft: false,
+    head_sha: observed.headRefOid,
+    head_branch: observed.headRefName,
+    base_branch: observed.baseRefName,
+  };
+}
+
+function remoteAuthorizationProjection(action, actionDetails) {
+  if (action === "git.push") {
+    const {
+      push_precondition: _pushPrecondition,
+      base_precondition: _basePrecondition,
+      ...projection
+    } = actionDetails || {};
+    return projection;
+  }
+  if (action === "pull_request.merge") {
+    const { merge_precondition: _precondition, ...projection } = actionDetails || {};
+    return projection;
+  }
+  return actionDetails;
+}
+
+function normalizeSmokeTestCommand(value) {
+  const raw = String(value || "").trim();
+  let argv;
+  try {
+    argv = JSON.parse(raw);
+  } catch {
+    fail(`Smoke test must be a shell-free JSON argv array, for example '["node","--version"]': ${raw}`);
+  }
+  if (
+    !Array.isArray(argv)
+    || argv.length === 0
+    || argv.some((item) => typeof item !== "string" || item.length === 0 || item.includes("\0"))
+  ) {
+    fail("Smoke test JSON must be a non-empty array of non-empty strings.");
+  }
+  const executable = path.basename(argv[0]).toLowerCase();
+  if (["sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"].includes(executable)) {
+    fail(`Smoke test shell executable '${argv[0]}' is not allowed; use a direct argv command.`);
+  }
+  if (["node", "python", "python3", "ruby", "perl"].includes(executable)
+      && argv.slice(1).some((item) => ["-e", "--eval", "-c"].includes(item))) {
+    fail(`Smoke test inline code execution is not allowed for ${argv[0]}.`);
+  }
+  return stableJson(argv);
+}
+
+function runApprovedLocalSmokeTests(profile) {
+  const cwd = profile.local_release_target.root_path;
+  return (profile.local_release_target.smoke_tests || []).map((canonicalCommand) => {
+    const argv = JSON.parse(canonicalCommand);
+    const sandbox = localSmokeSandboxCommand(cwd, argv);
+    const startedAt = now();
+    const result = childProcess.spawnSync(sandbox.executable, sandbox.args, {
+      cwd,
+      encoding: "utf8",
+      shell: false,
+      timeout: 60_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: sandbox.env,
+    });
+    const finishedAt = now();
+    const stdout = result.stdout || "";
+    const stderr = result.stderr || "";
+    return {
+      command: argv,
+      cwd,
+      sandbox: sandbox.kind,
+      exit_code: Number.isInteger(result.status) ? result.status : null,
+      signal: result.signal || null,
+      error_code: result.error?.code || null,
+      outcome: !result.error && result.status === 0 ? "passed" : "failed",
+      stdout_sha256: hashBuffer(Buffer.from(stdout, "utf8")),
+      stderr_sha256: hashBuffer(Buffer.from(stderr, "utf8")),
+      started_at: startedAt,
+      finished_at: finishedAt,
+    };
+  });
+}
+
+function localSmokeSandboxCommand(cwd, argv) {
+  const minimalEnv = Object.fromEntries([
+    ["PATH", process.env.PATH || "/usr/bin:/bin"],
+    ["TMPDIR", process.env.TMPDIR || os.tmpdir()],
+    ["SYSTEMROOT", process.env.SYSTEMROOT],
+    ["WINDIR", process.env.WINDIR],
+  ].filter(([, value]) => Boolean(value)));
+  if (process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+    const profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow mach-lookup)";
+    return {
+      kind: "macos-sandbox-exec-readonly-no-network",
+      executable: "/usr/bin/sandbox-exec",
+      args: ["-p", profile, argv[0], ...argv.slice(1)],
+      env: minimalEnv,
+    };
+  }
+  if (process.platform === "linux" && fs.existsSync("/usr/bin/bwrap")) {
+    return {
+      kind: "linux-bwrap-readonly-no-network",
+      executable: "/usr/bin/bwrap",
+      args: [
+        "--unshare-net",
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--chdir", cwd,
+        "--", argv[0], ...argv.slice(1),
+      ],
+      env: minimalEnv,
+    };
+  }
+  fail("Local smoke-test execution requires a configured read-only, no-network sandbox on this host.");
+}
+
+function validateLocalReleaseFilesystemBoundary(target) {
+  const rootPath = path.resolve(String(target?.root_path || ""));
+  if (!target?.root_path || !fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) {
+    fail(`Local release target root must be an existing directory: ${target?.root_path || "missing"}.`);
+  }
+  assertNoSymlinkPathSegments(rootPath);
+  if (fs.lstatSync(rootPath).isSymbolicLink()) {
+    fail(`Local release target root cannot be a symlink: ${rootPath}.`);
+  }
+  const realRoot = fs.realpathSync.native(rootPath);
+  for (const rawWritePath of target.allowed_write_paths || []) {
+    const writePath = path.resolve(String(rawWritePath));
+    const relative = path.relative(rootPath, writePath);
+    if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      fail(`Local release write path must be a strict child of root_path ${rootPath}: ${writePath}.`);
+    }
+    assertNoSymlinkPathSegments(writePath);
+    if (pathEntryExistsNoFollow(writePath) && fs.lstatSync(writePath).isSymbolicLink()) {
+      fail(`Local release write path cannot be a symlink: ${writePath}.`);
+    }
+    const existingBoundary = fs.existsSync(writePath) ? writePath : nearestExistingParent(writePath);
+    const realBoundary = fs.realpathSync.native(existingBoundary);
+    if (!isInsidePath(realRoot, realBoundary)) {
+      fail(`Local release write path resolves outside target root: ${writePath}.`);
+    }
+  }
+}
+
+function localReleaseBoundaryRequiresCheckpoint(context, target) {
+  validateLocalReleaseFilesystemBoundary(target);
+  const realWorkspace = fs.realpathSync.native(context.root);
+  const realTarget = fs.realpathSync.native(path.resolve(target.root_path));
+  const policy = context.config.autonomy_policy?.local_release || {};
+  if (policy.writes_outside_workspace_require_checkpoint !== false && !isInsidePath(realWorkspace, realTarget)) {
+    return true;
+  }
+  if (policy.machine_global_changes_require_checkpoint !== false) {
+    const globalRoots = process.platform === "win32"
+      ? [process.env.ProgramFiles, process.env.ProgramData].filter(Boolean).map((item) => path.resolve(item))
+      : ["/Applications", "/Library", "/usr", "/opt"].map((item) => path.resolve(item));
+    if (globalRoots.some((rootPath) => isInsidePath(rootPath, realTarget))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeGitRepositoryIdentity(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  let host = null;
+  let repositoryPath = raw;
+  const scpMatch = raw.match(/^[^/@\s]+@([^:/\s]+):(.+)$/u);
+  if (scpMatch) {
+    host = scpMatch[1];
+    repositoryPath = scpMatch[2];
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      host = parsed.hostname;
+      repositoryPath = parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  repositoryPath = repositoryPath
+    .replace(/^\/+|\/+$/gu, "")
+    .replace(/\.git$/iu, "")
+    .toLowerCase();
+  const segments = repositoryPath.split("/").filter(Boolean);
+  if (!host && segments.length === 2) host = "github.com";
+  if (!host && segments.length >= 3 && segments[0].includes(".")) {
+    host = segments.shift();
+    repositoryPath = segments.join("/");
+  }
+  return host && repositoryPath.includes("/")
+    ? `${String(host).toLowerCase()}/${repositoryPath}`
+    : null;
+}
+
+function validatePullRequestGitBoundary(context, target) {
+  const metadata = buildGitMetadata(context.root);
+  if (!metadata.is_git_repo) {
+    fail("Pull-request delivery requires the target root to be a Git worktree.");
+  }
+  for (const [label, branch] of [["base", target?.base_branch], ["head", target?.head_branch]]) {
+    if (!branch || execGit(context.root, ["check-ref-format", "--branch", String(branch)]) !== String(branch)) {
+      fail(`Pull-request ${label} branch is invalid: ${branch || "missing"}.`);
+    }
+  }
+  const currentBranch = execGit(context.root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!currentBranch) {
+    fail("Pull-request delivery cannot start from a detached HEAD.");
+  }
+  if (currentBranch !== target.head_branch) {
+    fail(`Pull-request delivery head mismatch: current branch is ${currentBranch}, expected ${target.head_branch}.`);
+  }
+  const expectedRepository = normalizeGitRepositoryIdentity(target.repository);
+  const matchingRemotes = [];
+  const matchingRemoteFingerprints = [];
+  for (const remote of metadata.remotes || []) {
+    const fetchUrls = (execGit(context.root, ["remote", "get-url", "--all", remote]) || "")
+      .split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+    const pushUrls = (execGit(context.root, ["remote", "get-url", "--push", "--all", remote]) || "")
+      .split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+    const fetchMatches = fetchUrls.length > 0
+      && fetchUrls.every((url) => normalizeGitRepositoryIdentity(url) === expectedRepository);
+    const pushIsRequired = (target.allowed_actions || []).includes("git.push");
+    const pushMatches = pushUrls.length > 0
+      && pushUrls.every((url) => normalizeGitRepositoryIdentity(url) === expectedRepository);
+    if (fetchMatches && (!pushIsRequired || pushMatches)) {
+      matchingRemotes.push(remote);
+      matchingRemoteFingerprints.push({
+        remote,
+        fetch: shortHashFull(stableJson(fetchUrls.map(normalizeGitRepositoryIdentity).filter(Boolean).sort())),
+        push: shortHashFull(stableJson(pushUrls.map(normalizeGitRepositoryIdentity).filter(Boolean).sort())),
+      });
+    }
+  }
+  if (!expectedRepository || matchingRemotes.length === 0) {
+    fail(`Pull-request delivery has no Git remote matching repository ${target.repository}.`);
+  }
+  const baseCandidates = matchingRemotes.map((remote) => `refs/remotes/${remote}/${target.base_branch}`);
+  const baseRef = baseCandidates.find((candidate) =>
+    Boolean(execGit(context.root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`])),
+  );
+  if (!baseRef) {
+    fail(`Pull-request delivery base branch ${target.base_branch} has no local tracking ref for a matching remote; fetch it before task start.`);
+  }
+  return {
+    branch: currentBranch,
+    head_sha: metadata.head_sha,
+    base_ref: baseRef,
+    base_sha: execGit(context.root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${baseRef}^{commit}`]),
+    matching_remotes: matchingRemotes.sort(),
+    remote_fingerprint: shortHashFull(stableJson(matchingRemoteFingerprints.sort((left, right) =>
+      left.remote.localeCompare(right.remote)))),
+  };
+}
+
+function deliveryMaterialScope(input) {
+  const { profileId, deliveryId, deliveryKind, requirementProfiles, story, contract, target, constraints } = input;
+  const releaseTarget = deliveryKind === "pull_request"
+    ? target.pull_request_target
+    : target.local_release_target;
+  return {
+    objective: contract.purpose || story.title,
+    scope: {
+      delivery_profile_id: profileId,
+      delivery_id: deliveryId,
+      story_id: story.id,
+      contract_id: contract.id,
+      requirement_profile_ids: requirementProfiles.map((profile) => profile.id).sort(),
+    },
+    acceptance_criteria: storyAcceptanceCriteria(story),
+    environment: deliveryKind === "local_release" ? ["local"] : ["pull_request"],
+    write_paths: deliveryKind === "local_release"
+      ? target.local_release_target.allowed_write_paths
+      : constraints.allowed_write_paths,
+    capabilities: constraints.allowed_capabilities,
+    budget: constraints.budget_ref,
+    release_target: releaseTarget,
+    external_or_production_access: {
+      external: false,
+      production: false,
+      destructive: false,
+    },
+  };
+}
+
+function proposeDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const deliveryId = normalizeId(requireOption(options, "delivery"));
+  const kind = String(requireOption(options, "kind"));
+  if (!["pull_request", "local_release"].includes(kind)) {
+    fail("Delivery autonomy --kind must be pull_request or local_release.");
+  }
+  const target = deliveryTargetFromOptions(context, kind, options);
+  const concreteIdentity = deliveryConcreteIdentity(kind, target);
+  const lockPaths = [
+    path.join(autonomyExecutionsRoot(context), `.delivery-${shortHash(`${kind}:${deliveryId}`)}.lock`),
+    path.join(autonomyExecutionsRoot(context), `.target-${shortHash(stableJson(concreteIdentity))}.lock`),
+    `${deliveryAutonomyPath(context, profileId)}.lock`,
+  ].sort();
+  const releaseLocks = [];
+  try {
+    for (const lockPath of lockPaths) releaseLocks.push(acquireFileLock(lockPath));
+    return proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, kind, target, concreteIdentity);
+  } finally {
+    for (const release of releaseLocks.reverse()) release();
+  }
+}
+
+function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, kind, target, concreteIdentity) {
+  for (const name of safeReadDir(deliveryAutonomyRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const existing = readDeliveryAutonomyProfile(context, path.basename(name, ".json"));
+    if (existing.id === profileId || existing.delivery_kind !== kind) continue;
+    const sameDeliveryId = existing.delivery_id === deliveryId;
+    const existingTarget = {
+      pull_request_target: existing.pull_request_target,
+      local_release_target: existing.local_release_target,
+    };
+    const sameConcreteTarget = stableJson(deliveryConcreteIdentity(kind, existingTarget)) === stableJson(concreteIdentity);
+    if (!sameDeliveryId && !sameConcreteTarget) continue;
+    const state = currentDeliveryExecutionState(context, existing);
+    if (effectiveDeliveryProfileStatus(context, existing).status !== "revoked" && state.lifecycle_status !== "terminal") {
+      fail(`Delivery ${kind} ${deliveryId} or its exact target already has non-terminal autonomy profile ${existing.id}.`);
+    }
+  }
+  const storyId = normalizeId(requireOption(options, "story"));
+  const contractId = normalizeId(requireOption(options, "contract"));
+  const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
+  if (requirementIds.length === 0) {
+    fail("Delivery autonomy proposal needs at least one --requirement.");
+  }
+  const requestedLevel = normalizeAutonomyLevel(requireOption(options, "level"));
+  const requirements = requirementIds.map((id) => readRequirement(context, id));
+  const requirementProfiles = requirements.map((requirement) => {
+    const ready = assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirement.id}`);
+    if (ready.legacy) {
+      fail(`Requirement ${requirement.id} is legacy; create and approve requirement:v2 before selecting per-delivery autonomy.`);
+    }
+    return ready.profile;
+  });
+  const ceiling = mostRestrictiveAutonomyLevel(requirementProfiles.map((profile) => profile.autonomy_ceiling));
+  const levelRank = Object.fromEntries(AUTONOMY_LEVELS.map((level, index) => [level, index]));
+  if (levelRank[requestedLevel] > levelRank[ceiling]) {
+    fail(`Delivery level ${requestedLevel} exceeds the most restrictive requirement ceiling ${ceiling}.`);
+  }
+  const story = readStory(context, storyId);
+  if (!story) fail(`Story ${storyId} does not exist.`);
+  const linkedRequirements = new Set(story.links?.requirements || []);
+  for (const requirementId of requirementIds) {
+    if (!linkedRequirements.has(requirementId)) {
+      fail(`Story ${storyId} is not bound to requirement ${requirementId}.`);
+    }
+  }
+  const contract = readContractById(context, contractId);
+  if (contract.story_id !== storyId) {
+    fail(`Contract ${contractId} is bound to ${contract.story_id || "the project"}, not ${storyId}.`);
+  }
+  if (contract.status !== "approved" || !hasFreshApprovedContractApproval(contract)) {
+    fail(`Contract ${contractId} must be formally approved and fresh before selecting autonomy for a PR or local release.`);
+  }
+  if (contract.delivery_execution_profile_id !== profileId) {
+    fail(`Contract ${contractId} must name --delivery-profile ${profileId} before this exact delivery profile is proposed.`);
+  }
+  const contractLevel = normalizeAutonomyLevel(contract.autonomy_level || "supervised");
+  if (levelRank[requestedLevel] > levelRank[contractLevel]) {
+    fail(`Delivery level ${requestedLevel} exceeds contract boundary ${contractLevel}. Revise the contract or choose a narrower delivery level.`);
+  }
+  const pullRequestWritePaths = kind === "pull_request"
+    ? normalizeRawListOption(options["write-path"]).map((rawPath) => {
+        const resolved = resolveProjectFilePath(context, rawPath, { mustExist: false });
+        const relative = toProjectPath(context, resolved);
+        if (!relative || relative === ".") {
+          fail("Pull-request --write-path must be narrower than the repository root.");
+        }
+        return relative;
+      })
+    : [];
+  if (kind === "pull_request" && pullRequestWritePaths.length === 0) {
+    fail("Pull-request delivery autonomy requires at least one explicit project-relative --write-path.");
+  }
+  const constraints = {
+    allowed_tools: [...new Set(contract.allowed_tools || [])].sort(),
+    allowed_capabilities: [...new Set([
+      ...(contract.capability_bindings || []).map((binding) => binding.name).filter(Boolean),
+      ...(contract.allowed_tools || []),
+    ])].sort(),
+    allowed_environments: kind === "local_release" ? ["local"] : ["pull_request"],
+    allowed_write_paths: kind === "local_release"
+      ? target.local_release_target.allowed_write_paths
+      : [...new Set(pullRequestWritePaths)].sort(),
+    forbidden_actions: [...new Set(context.config.autonomy_policy?.exception_triggers || [])].sort(),
+    budget_ref: null,
+  };
+  const materialScope = deliveryMaterialScope({
+    profileId,
+    deliveryId,
+    deliveryKind: kind,
+    requirementProfiles,
+    story,
+    contract,
+    target,
+    constraints,
+  });
+  const createdAt = now();
+  const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+    id: profileId,
+    status: "proposed",
+    delivery_id: deliveryId,
+    delivery_kind: kind,
+    requirement_profile_refs: requirementProfiles.map((profile) => ({
+      id: profile.id,
+      path: toProjectPath(context, requirementAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    })),
+    story_refs: [{
+      id: storyId,
+      path: toProjectPath(context, path.join(context.sdlcRoot, "stories", storyId, "story.json")),
+      hash: hashApprovalSubject(story),
+    }],
+    contract_refs: [{
+      id: contractId,
+      path: toProjectPath(context, path.join(context.sdlcRoot, "contracts", `${contractId}.json`)),
+      hash: hashApprovalSubject(contract),
+    }],
+    material_scope: materialScope,
+    requested_level: requestedLevel,
+    phase_levels: {},
+    constraints,
+    checkpoints: context.config.autonomy_policy?.presets?.[requestedLevel]?.checkpoints,
+    ...target,
+    authority_assurance: { mode: "audit_only" },
+    approval_ref: null,
+    valid_from: createdAt,
+    expires_at: getOptionString(options, "expires-at"),
+    created_at: createdAt,
+    updated_at: createdAt,
+    extensions: {
+      requirement_ids: requirementIds,
+      exact_delivery_selection: true,
+    },
+  }));
+  assertRecordSchema(profile, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  const profilePath = deliveryAutonomyPath(context, profileId);
+  writeJsonFile(profilePath, profile, { force: false });
+  const attribution = buildAttribution(context, options, "autonomy.delivery.propose");
+  appendTraceEvent(context, storyId, {
+    type: "decision",
+    summary: `Proposed ${requestedLevel} autonomy for ${kind} ${deliveryId}`,
+    action: "autonomy.delivery.propose",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, profilePath)],
+    related: [profileId, deliveryId, storyId, contractId, ...requirementIds],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  const review = {
+    profile_id: profileId,
+    delivery: { id: deliveryId, kind },
+    exact_unit: { story_id: storyId, contract_id: contractId, requirement_ids: requirementIds },
+    requirement_ceilings: requirementProfiles.map((item) => ({
+      profile_id: item.id,
+      ceiling: item.autonomy_ceiling,
+    })),
+    most_restrictive_requirement_ceiling: ceiling,
+    contract_ceiling: contractLevel,
+    requested_level: requestedLevel,
+    authority_effective_cap: (context.config.authority_policy?.mode || "audit_only") === "host_verified"
+      ? "bounded-autonomous"
+      : "checkpointed",
+    target: kind === "pull_request" ? profile.pull_request_target : profile.local_release_target,
+    allowed_actions: deliveryTargetAllowedActions(profile),
+    allowed_write_paths: constraints.allowed_write_paths,
+    automatic_phases: context.config.autonomy_policy?.presets?.[requestedLevel]?.automatic_phases || [],
+    checkpoints: profile.checkpoints,
+    forbidden_actions: constraints.forbidden_actions,
+    proposal_authority_mode: profile.authority_assurance.mode,
+    non_reusable: true,
+  };
+  output(options, {
+    status: "proposed",
+    delivery_profile: profile,
+    delivery_profile_path: toProjectPath(context, profilePath),
+    review,
+  }, [
+    `Proposed ${requestedLevel} autonomy for ${kind} ${deliveryId}`,
+    `Exact profile: ${profileId}`,
+    `Unit: story ${storyId}; contract ${contractId}; requirements ${requirementIds.join(", ")}.`,
+    `Ceiling: requirements ${ceiling}; contract ${contractLevel}; authority cap ${review.authority_effective_cap}; requested ${requestedLevel}.`,
+    `Allowed actions: ${review.allowed_actions.join(", ")}.`,
+    `Allowed write paths: ${review.allowed_write_paths.join(", ")}.`,
+    `Automatic phases: ${review.automatic_phases.join(", ") || "none"}.`,
+    `Checkpoints: ${review.checkpoints.join(", ") || "none beyond global exceptions"}.`,
+    "This selection applies to this delivery only and cannot be reused for another PR or local release.",
+  ]);
+}
+
+function effectiveDeliveryProfileStatus(context, profile) {
+  const revocation = safeReadDir(autonomyRevocationsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => ({
+      path: path.join(autonomyRevocationsRoot(context), name),
+      record: readProjectJson(context, path.join(autonomyRevocationsRoot(context), name)),
+    }))
+    .filter(({ record }) => record.profile_ref?.id === profile.id && record.profile_ref?.hash === profile.profile_hash)
+    .map(({ path: recordPath }) => readAutonomyProfileRevocation(context, recordPath))
+    .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)))
+    .at(-1);
+  return revocation ? { status: "revoked", revocation } : { status: profile.status, revocation: null };
+}
+
+function autonomyLifecycleReceiptHash(record) {
+  const canonical = { ...(record || {}) };
+  delete canonical.receipt_hash;
+  delete canonical.hash_algorithm;
+  return shortHashFull(stableJson(canonical));
+}
+
+function autonomyRevocationSubject(record) {
+  return {
+    profile_id: record.profile_ref?.id,
+    profile_hash: record.profile_ref?.hash,
+    reason: record.reason,
+  };
+}
+
+function readAutonomyProfileRevocation(context, filePath) {
+  const record = readProjectJson(context, filePath);
+  assertRecordSchema(
+    record,
+    "autonomy-profile-revocation.schema.json",
+    `Autonomy profile revocation ${toProjectPath(context, filePath)}`,
+  );
+  if (record.receipt_hash !== autonomyLifecycleReceiptHash(record)) {
+    fail(`Autonomy profile revocation hash is stale: ${toProjectPath(context, filePath)}.`);
+  }
+  if (record.approval?.status !== "approved") {
+    fail(`Autonomy profile revocation ${record.id} lacks formal approval.`);
+  }
+  if (record.approval.approved_content_hash !== hashApprovalSubject(autonomyRevocationSubject(record))) {
+    fail(`Autonomy profile revocation ${record.id} approval does not bind its exact subject.`);
+  }
+  validateApprovalSourceForActor(context, {
+    source: record.approval.approval_source || null,
+    status: record.approval.status,
+    summary: record.approval.summary || null,
+    evidence: Array.isArray(record.approval.evidence) ? record.approval.evidence : [],
+    actor: record.approval.approved_by || null,
+    label: `Autonomy profile revocation ${record.id}`,
+  });
+  validateApprovalEvidenceIntegrity(
+    context,
+    record.approval,
+    `Autonomy profile revocation ${record.id} approval`,
+  );
+  const approvalReport = { strict: true, errors: [], warnings: [] };
+  validateFormalApprovalRecord(
+    context,
+    approvalReport,
+    record.approval,
+    `Autonomy profile revocation ${record.id}`,
+    record.approval.approved_by,
+    { subject_id: record.profile_ref.id },
+  );
+  if (approvalReport.errors.length > 0) {
+    fail(`Autonomy profile revocation ${record.id} governance is invalid: ${approvalReport.errors.join("; ")}`);
+  }
+  return record;
+}
+
+function readDeliveryLifecycleReceipt(context, filePath, schemaName, options = {}) {
+  if (!fs.existsSync(filePath)) {
+    if (options.missingOk) return null;
+    fail(`Delivery lifecycle receipt does not exist: ${toProjectPath(context, filePath)}.`);
+  }
+  const record = readProjectJson(context, filePath);
+  assertRecordSchema(record, schemaName, `Delivery lifecycle receipt ${toProjectPath(context, filePath)}`);
+  if (record.receipt_hash !== autonomyLifecycleReceiptHash(record)) {
+    fail(`Delivery lifecycle receipt hash is stale: ${toProjectPath(context, filePath)}.`);
+  }
+  return record;
+}
+
+function currentDeliveryExecutionState(context, profile) {
+  const startPath = deliveryStartReceiptPath(context, profile.id);
+  const closePath = deliveryCloseReceiptPath(context, profile.id);
+  const start = readDeliveryLifecycleReceipt(
+    context,
+    startPath,
+    "delivery-start-receipt.schema.json",
+    { missingOk: true },
+  );
+  const close = readDeliveryLifecycleReceipt(
+    context,
+    closePath,
+    "delivery-close-receipt.schema.json",
+    { missingOk: true },
+  );
+  if (start && (
+    start.profile_ref?.id !== profile.id
+    || start.profile_ref?.hash !== profile.profile_hash
+    || start.delivery?.id !== profile.delivery_id
+    || start.delivery?.kind !== profile.delivery_kind
+  )) {
+    fail(`Delivery start receipt for ${profile.id} does not match the current exact profile.`);
+  }
+  if (close && (
+    !start
+    || close.profile_ref?.id !== profile.id
+    || close.profile_ref?.hash !== profile.profile_hash
+    || close.start_receipt_ref?.hash !== start?.receipt_hash
+  )) {
+    fail(`Delivery close receipt for ${profile.id} does not match its immutable start receipt.`);
+  }
+  return {
+    delivery_id: profile.delivery_id,
+    status: close?.terminal_status || (start ? "started" : "open"),
+    lifecycle_status: close ? "terminal" : start ? "started" : "available",
+    active_run_count: start && !close ? 1 : 0,
+    start_receipt: start,
+    close_receipt: close,
+    start_receipt_path: start ? toProjectPath(context, startPath) : null,
+    close_receipt_path: close ? toProjectPath(context, closePath) : null,
+  };
+}
+
+function currentDeliveryAutonomyInputs(context, profile, options = {}) {
+  const requirementProfiles = profile.requirement_profile_refs.map((ref) => {
+    const current = readRequirementAutonomyProfile(context, ref.id);
+    if (current.profile_hash !== ref.hash) {
+      fail(`Delivery profile ${profile.id} has a stale requirement profile reference ${ref.id}.`);
+    }
+    validateAutonomyApprovalRef(context, current, `Requirement autonomy profile ${ref.id}`);
+    return current;
+  });
+  const currentRequirements = requirementProfiles.map((requirementProfile) => {
+    const requirement = requirementByAutonomyProfileId(context, requirementProfile.id);
+    assertRequirementReadyForDownstream(context, requirement, `Requirement for profile ${requirementProfile.id}`);
+    return {
+      id: requirement.id,
+      version: requirement.revision,
+      hash: requirementContentHash(requirement),
+      material_scope: requirementMaterialScope(requirement, {
+        environment: requirementProfile.constraints.allowed_environments,
+        "write-path": requirementProfile.constraints.allowed_write_paths,
+        capability: requirementProfile.constraints.allowed_capabilities,
+        tool: requirementProfile.constraints.allowed_tools,
+      }),
+    };
+  });
+  const storyRef = profile.story_refs[0];
+  const story = readStory(context, storyRef.id);
+  if (!story) fail(`Delivery profile ${profile.id} references missing story ${storyRef.id}.`);
+  const contractRef = profile.contract_refs[0];
+  const contract = readContractById(context, contractRef.id);
+  if (contract.delivery_execution_profile_id !== profile.id) {
+    fail(`Contract ${contract.id} is not bound to delivery profile ${profile.id}.`);
+  }
+  const target = {
+    pull_request_target: profile.pull_request_target,
+    local_release_target: profile.local_release_target,
+  };
+  if (profile.delivery_kind === "local_release") {
+    validateLocalReleaseFilesystemBoundary(profile.local_release_target);
+  } else if (options.validateRuntimeTarget === true) {
+    validatePullRequestGitBoundary(context, profile.pull_request_target);
+  }
+  const currentScope = deliveryMaterialScope({
+    profileId: profile.id,
+    deliveryId: profile.delivery_id,
+    deliveryKind: profile.delivery_kind,
+    requirementProfiles,
+    story,
+    contract,
+    target,
+    constraints: profile.constraints,
+  });
+  return {
+    requirementProfiles,
+    currentRequirements,
+    story,
+    contract,
+    currentScope,
+    currentStoryRefs: [{ id: story.id, hash: hashApprovalSubject(story) }],
+    currentContractRefs: [{ id: contract.id, hash: hashApprovalSubject(contract) }],
+  };
+}
+
+function evaluateDeliveryAutonomy(context, profile, options = {}) {
+  const effectiveStatus = effectiveDeliveryProfileStatus(context, profile);
+  if (effectiveStatus.status === "revoked" && options.allowHistorical !== true) {
+    fail(`Delivery autonomy profile ${profile.id} is revoked.`);
+  }
+  if (profile.status !== "active") {
+    fail(`Delivery autonomy profile ${profile.id} is '${profile.status}', expected active.`);
+  }
+  validateAutonomyApprovalRef(context, profile, `Delivery autonomy profile ${profile.id}`);
+  const current = currentDeliveryAutonomyInputs(context, profile, options);
+  const executionState = currentDeliveryExecutionState(context, profile);
+  const evaluatedDeliveryState = options.deliveryStateOverride || {
+    delivery_id: executionState.delivery_id,
+    status: executionState.status,
+    active_run_count: executionState.active_run_count + (options.forStart === true ? 1 : 0),
+  };
+  const contractLevel = current.contract.autonomy_level || profile.requested_level;
+  const decision = buildDomainRecord(`Cannot evaluate delivery autonomy ${profile.id}`, () => evaluateAutonomyPolicy({
+    id: options.id,
+    evaluated_at: options.evaluated_at || now(),
+    phase: options.phase || current.story.phase || current.contract.phase,
+    host_policy: { ...profile.authority_assurance, max_level: "bounded-autonomous" },
+    project_policy: {
+      max_level: context.config.autonomy_policy?.project_max_level || "bounded-autonomous",
+      status: context.config.autonomy_policy?.enabled === false ? "disabled" : "active",
+    },
+    requirement_profiles: current.requirementProfiles,
+    current_requirements: current.currentRequirements,
+    delivery_profile: profile,
+    current_story_refs: current.currentStoryRefs,
+    current_contract_refs: current.currentContractRefs,
+    current_delivery_scope: current.currentScope,
+    delivery_state: evaluatedDeliveryState,
+    contract_policy: {
+      ...current.contract,
+      autonomy_level: contractLevel,
+      delivery_profile_ref: { id: profile.id, hash: profile.profile_hash },
+    },
+    capability_policy: { max_level: profile.requested_level, allowed: true, status: "available" },
+    environment_policy: { max_level: profile.requested_level, allowed: true, status: "available" },
+    budget_policy: { max_level: profile.requested_level, allowed_to_start_next: true, status: "available" },
+  }));
+  const integrity = validateAutonomyDecisionIntegrity(decision);
+  if (!integrity.valid) {
+    fail(`Autonomy decision ${decision.id} failed integrity validation: ${integrity.errors.join("; ")}`);
+  }
+  assertRecordSchema(decision, "autonomy-decision.schema.json", `Autonomy decision ${decision.id}`);
+  return { decision, current, executionState };
+}
+
+function approveDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const profilePath = deliveryAutonomyPath(context, profileId);
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    return approveDeliveryAutonomyLocked(context, options, profileId, profilePath);
+  } finally {
+    releaseLock();
+  }
+}
+
+function approveDeliveryAutonomyLocked(context, options, profileId, profilePath) {
+  const proposed = readDeliveryAutonomyProfile(context, profileId);
+  if (proposed.status !== "proposed") {
+    fail(`Delivery autonomy profile ${profileId} is '${proposed.status}', expected proposed.`);
+  }
+  currentDeliveryAutonomyInputs(context, proposed);
+  const attribution = buildAttribution(context, options, "autonomy.delivery.approve");
+  requireFormalApprovalActor(context, options, attribution, "Approving per-delivery autonomy");
+  const approvalSubject = autonomyApprovalSubject(context, proposed, profilePath);
+  const authorityAssurance = loadAutonomyAuthorityAssurance(
+    context,
+    options,
+    "autonomy.delivery.approve",
+    approvalSubject,
+  );
+  const approval = writeAutonomyApproval(context, proposed, options, attribution, {
+    profilePath,
+    scope: `exact-${proposed.delivery_kind}:${proposed.delivery_id}`,
+    label: `delivery autonomy profile ${profileId}`,
+    authorityAction: "autonomy.delivery.approve",
+    authoritySubject: approvalSubject,
+  });
+  const active = buildDomainRecord(`Cannot activate delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+    ...proposed,
+    status: "active",
+    authority_assurance: authorityAssurance,
+    approval_ref: approval.ref,
+    updated_at: now(),
+    extensions: { ...proposed.extensions, approved_profile_hash: proposed.profile_hash },
+  }));
+  assertRecordSchema(active, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  const { decision } = evaluateDeliveryAutonomy(context, active, {
+    id: `AUT-DEC-${uniqueRecordSuffix()}`,
+    phase: getOptionString(options, "phase") || undefined,
+  });
+  const decisionPath = path.join(autonomyDecisionsRoot(context), `${normalizeId(decision.id)}.json`);
+  writeJsonFile(profilePath, active, { force: true });
+  writeJsonFile(decisionPath, decision, { force: false });
+  appendTraceEvent(context, active.story_refs[0]?.id || null, {
+    type: "gate",
+    summary: `Approved ${active.requested_level} autonomy for ${active.delivery_kind} ${active.delivery_id}; effective ${decision.effective_level}`,
+    action: "autonomy.delivery.approve",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, profilePath), approval.ref.path, toProjectPath(context, decisionPath)],
+    related: [profileId, active.delivery_id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, {
+    status: "active",
+    delivery_profile: active,
+    approval: approval.envelope,
+    autonomy_decision: decision,
+    decision_path: toProjectPath(context, decisionPath),
+  }, [
+    `Approved autonomy for ${active.delivery_kind} ${active.delivery_id}`,
+    `Requested: ${active.requested_level}; effective now: ${decision.effective_level}`,
+    decision.effective_level !== active.requested_level
+      ? `The selection was narrowed by: ${decision.reason_codes.join(", ") || "a stricter boundary"}`
+      : "The selection is valid inside the exact displayed delivery boundary.",
+  ]);
+}
+
+function revokeDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const reason = requireOption(options, "reason");
+  const profilePath = deliveryAutonomyPath(context, profileId);
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    return revokeDeliveryAutonomyLocked(context, options, profileId, profilePath, reason);
+  } finally {
+    releaseLock();
+  }
+}
+
+function revokeDeliveryAutonomyLocked(context, options, profileId, profilePath, reason) {
+  const profile = readDeliveryAutonomyProfile(context, profileId);
+  const currentStatus = effectiveDeliveryProfileStatus(context, profile);
+  if (currentStatus.status === "revoked") {
+    if (currentStatus.revocation.reason !== reason) {
+      fail(`Delivery autonomy profile ${profileId} is already revoked for a different exact reason.`);
+    }
+    const repairedClosePath = ensureRevokedDeliveryCloseReceipt(context, profile, currentStatus.revocation);
+    output(options, {
+      status: "revoked",
+      idempotent: true,
+      revocation: currentStatus.revocation,
+      close_receipt_path: repairedClosePath,
+    }, [`Delivery autonomy profile ${profileId} is already revoked; lifecycle receipts are complete.`]);
+    return;
+  }
+  const attribution = buildAttribution(context, options, "autonomy.delivery.revoke");
+  requireFormalApprovalActor(context, options, attribution, "Revoking per-delivery autonomy");
+  const subject = { profile_id: profileId, profile_hash: profile.profile_hash, reason };
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject,
+    subject_id_field: "profile_id",
+    subject_id: profileId,
+    status: "approved",
+    scope: "delivery-autonomy-revocation",
+    label: `delivery autonomy revocation ${profileId}`,
+  });
+  const recordBase = {
+    id: `AUT-REV-${uniqueRecordSuffix()}`,
+    kind: "autonomy_profile_revocation",
+    schema_version: "autonomy-profile-revocation:v1",
+    profile_ref: { id: profileId, path: toProjectPath(context, profilePath), hash: profile.profile_hash },
+    reason,
+    approval,
+    created_at: now(),
+    audit: { actor: attribution.actor, git: attribution.git, run: attribution.run },
+  };
+  const record = {
+    ...recordBase,
+    receipt_hash: autonomyLifecycleReceiptHash(recordBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  assertRecordSchema(record, "autonomy-profile-revocation.schema.json", `Autonomy profile revocation ${record.id}`);
+  const recordPath = path.join(autonomyRevocationsRoot(context), `${normalizeId(record.id)}.json`);
+  writeJsonFile(recordPath, record, { atomicCreate: true });
+  const closePath = ensureRevokedDeliveryCloseReceipt(context, profile, record);
+  appendTraceEvent(context, profile.story_refs[0]?.id || null, {
+    type: "gate",
+    summary: `Revoked autonomy profile ${profileId}`,
+    action: "autonomy.delivery.revoke",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, recordPath), closePath].filter(Boolean),
+    related: [profileId, profile.delivery_id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  output(options, {
+    status: "revoked",
+    revocation: record,
+    close_receipt_path: closePath,
+  }, [`Revoked delivery autonomy profile ${profileId}`]);
+}
+
+function ensureRevokedDeliveryCloseReceipt(context, profile, revocation) {
+  const executionState = currentDeliveryExecutionState(context, profile);
+  if (executionState.lifecycle_status === "terminal") {
+    return executionState.close_receipt_path;
+  }
+  if (executionState.lifecycle_status !== "started") {
+    return null;
+  }
+  const closeBase = {
+    id: `AUT-CLOSE-${normalizeId(profile.id)}`,
+    kind: "delivery_close_receipt",
+    schema_version: "delivery-close-receipt:v1",
+    profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+    delivery: { id: profile.delivery_id, kind: profile.delivery_kind },
+    start_receipt_ref: {
+      id: executionState.start_receipt.id,
+      path: executionState.start_receipt_path,
+      hash: executionState.start_receipt.receipt_hash,
+    },
+    terminal_action_receipt_ref: null,
+    terminal_status: "revoked",
+    reason: revocation.reason,
+    approval: revocation.approval,
+    closed_by: revocation.approval.approved_by,
+    closed_at: now(),
+    audit: { git: revocation.audit?.git || {}, run: revocation.audit?.run || {} },
+  };
+  const closeReceipt = {
+    ...closeBase,
+    receipt_hash: autonomyLifecycleReceiptHash(closeBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  assertRecordSchema(closeReceipt, "delivery-close-receipt.schema.json", `Delivery close receipt ${profile.id}`);
+  const closePath = deliveryCloseReceiptPath(context, profile.id);
+  writeJsonFile(closePath, closeReceipt, { atomicCreate: true });
+  return toProjectPath(context, closePath);
+}
+
+function deliveryTargetAllowedActions(profile) {
+  return profile.delivery_kind === "pull_request"
+    ? profile.pull_request_target?.allowed_actions || []
+    : profile.local_release_target?.allowed_actions || [];
+}
+
+function deliveryActionCheckpointRequired(context, profile, effectiveLevel, action) {
+  const preset = context.config.autonomy_policy?.presets?.[effectiveLevel] || {};
+  const checkpoints = new Set([
+    ...normalizeListValue(preset.checkpoints, []),
+    ...(profile.checkpoints || []),
+  ]);
+  const localBoundaryCheckpoint = profile.delivery_kind === "local_release"
+    && localReleaseBoundaryRequiresCheckpoint(context, profile.local_release_target);
+  return {
+    required: effectiveLevel === "supervised"
+      || checkpoints.has(action)
+      || ["pull_request.merge", "deploy.remote"].includes(action)
+      || localBoundaryCheckpoint,
+    checkpoints: [...checkpoints].sort(),
+  };
+}
+
+function deliveryActionReceipts(context, profileId) {
+  return safeReadDir(autonomyActionsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readDeliveryLifecycleReceipt(
+      context,
+      path.join(autonomyActionsRoot(context), name),
+      "delivery-action-receipt.schema.json",
+    ))
+    .filter((record) => record.profile_ref?.id === profileId);
+}
+
+function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions = null) {
+  const errors = [];
+  const baseSha = runtimeTarget?.base_sha;
+  const headSha = runtimeTarget?.head_sha;
+  if (!baseSha || !headSha) {
+    return ["Git commit coverage requires exact base and head SHAs."];
+  }
+  if (execGit(context.root, ["merge-base", baseSha, headSha]) !== baseSha) {
+    return [`Git head ${headSha} is not descended from the approved base ${baseSha}.`];
+  }
+  const rangeOutput = execGit(context.root, ["rev-list", "--reverse", "--topo-order", `${baseSha}..${headSha}`]);
+  const commitShas = String(rangeOutput || "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  const receipts = actions || deliveryActionReceipts(context, profile.id);
+  const completions = receipts.filter((receipt) =>
+    receipt.action === "git.commit"
+    && receipt.status === "completed"
+    && receipt.outcome === "passed"
+    && receipt.profile_ref?.hash === profile.profile_hash
+    && receipt.delivery?.id === profile.delivery_id
+    && receipt.delivery?.kind === profile.delivery_kind);
+  for (const commitSha of commitShas) {
+    const matchingCompletions = completions.filter((receipt) => receipt.action_details?.commit?.after_sha === commitSha);
+    if (matchingCompletions.length !== 1) {
+      errors.push(`Commit ${commitSha} requires exactly one passing completed git.commit receipt before git.push.`);
+      continue;
+    }
+    const completion = matchingCompletions[0];
+    const authorization = receipts.find((receipt) =>
+      receipt.id === completion.authorization_receipt_ref?.id
+      && receipt.receipt_hash === completion.authorization_receipt_ref?.hash
+      && receipt.action === "git.commit"
+      && receipt.status === "authorized"
+      && receipt.profile_ref?.hash === profile.profile_hash);
+    if (!authorization) {
+      errors.push(`Commit ${commitSha} completion lacks its exact git.commit authorization receipt.`);
+      continue;
+    }
+    const validation = { errors: [] };
+    validateCompletedGitCommitReceipt(
+      context,
+      validation,
+      completion,
+      authorization,
+      `Commit ${commitSha}`,
+    );
+    errors.push(...validation.errors);
+  }
+  return errors;
+}
+
+function assertGitCommitReceiptCoverage(context, profile, runtimeTarget) {
+  const errors = gitCommitReceiptCoverageErrors(context, profile, runtimeTarget);
+  if (errors.length > 0) {
+    fail(`git.push cannot authorize unmediated commits: ${errors.join("; ")}`);
+  }
+}
+
+function buildActionEvidence(context, values) {
+  return normalizeRawListOption(values).map((rawPath) => {
+    const evidencePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, evidencePath, "Delivery action evidence");
+    return { path: toProjectPath(context, evidencePath), sha256: hashFile(evidencePath) };
+  });
+}
+
+function validateDeliveryActionHostAuthority(context, profile, authorization) {
+  const assurance = authorization.approval?.authority_assurance;
+  if (profile.authority_assurance?.mode === "host_verified" && assurance?.mode !== "host_verified") {
+    fail(`Delivery action authorization ${authorization.id} requires exact host-verified checkpoint authority.`);
+  }
+  if (assurance?.mode !== "host_verified") return;
+  const receiptRef = assurance.receipt_ref;
+  if (!receiptRef?.path || !receiptRef?.hash) {
+    fail(`Delivery action authorization ${authorization.id} host authority lacks a receipt reference.`);
+  }
+  const receiptPath = resolveProjectFilePath(context, receiptRef.path, { mustExist: true, fileOnly: true });
+  const hostReceipt = readProjectJson(context, receiptPath);
+  assertRecordSchema(hostReceipt, "host-approval-receipt.schema.json", `Delivery action host receipt ${receiptRef.id}`);
+  if (hostReceipt.id !== receiptRef.id || hostReceipt.receipt_hash !== receiptRef.hash) {
+    fail(`Delivery action authorization ${authorization.id} host receipt reference is stale.`);
+  }
+  const subject = {
+    profile_id: profile.id,
+    profile_hash: profile.profile_hash,
+    delivery_id: profile.delivery_id,
+    action: authorization.action,
+    runtime_target: authorization.runtime_target,
+    action_details: authorization.action_details,
+  };
+  let decision;
+  try {
+    decision = validateHostApprovalReceiptAtUse(hostReceipt, {
+      action: `autonomy.delivery.action.${authorization.action}`,
+      subject,
+      used_at: authorization.authorized_at,
+    }, {
+      trusted_host_keys: context.config.authority_policy?.trusted_host_keys || [],
+    });
+  } catch (error) {
+    fail(`Delivery action authorization ${authorization.id} host receipt is invalid: ${error.message}`);
+  }
+  if (!decision.valid) {
+    fail(`Delivery action authorization ${authorization.id} host receipt is invalid: ${decision.errors.join("; ")}`);
+  }
+}
+
+function assertCurrentDeliveryActionAuthorization(context, profile, decision, actionPolicy, authorization) {
+  if (
+    authorization.profile_ref?.id !== profile.id
+    || authorization.profile_ref?.hash !== profile.profile_hash
+    || authorization.delivery?.id !== profile.delivery_id
+    || authorization.delivery?.kind !== profile.delivery_kind
+    || authorization.effective_level !== decision.effective_level
+    || authorization.checkpoint_required !== actionPolicy.required
+  ) {
+    fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
+  }
+  if (!actionPolicy.required) return;
+  if (authorization.approval?.status !== "approved") {
+    fail(`Delivery action authorization ${authorization.id} lacks its currently required formal approval.`);
+  }
+  const subject = {
+    profile_id: profile.id,
+    profile_hash: profile.profile_hash,
+    delivery_id: profile.delivery_id,
+    action: authorization.action,
+    runtime_target: authorization.runtime_target,
+    action_details: authorization.action_details,
+  };
+  if (authorization.approval.approved_content_hash !== hashApprovalSubject(subject)) {
+    fail(`Delivery action authorization ${authorization.id} approval does not bind its exact action subject.`);
+  }
+  validateApprovalSourceForActor(context, {
+    source: authorization.approval.approval_source || null,
+    status: authorization.approval.status,
+    summary: authorization.approval.summary || null,
+    evidence: Array.isArray(authorization.approval.evidence) ? authorization.approval.evidence : [],
+    actor: authorization.approval.approved_by || null,
+    label: `Delivery action authorization ${authorization.id}`,
+  });
+  validateApprovalEvidenceIntegrity(
+    context,
+    authorization.approval,
+    `Delivery action authorization ${authorization.id} approval`,
+  );
+  const report = { strict: true, errors: [], warnings: [] };
+  validateFormalApprovalRecord(
+    context,
+    report,
+    authorization.approval,
+    `Delivery action authorization ${authorization.id}`,
+    authorization.approval.approved_by,
+    { subject_id: profile.id },
+  );
+  if (report.errors.length > 0) {
+    fail(`Delivery action authorization ${authorization.id} governance is invalid: ${report.errors.join("; ")}`);
+  }
+  validateDeliveryActionHostAuthority(context, profile, authorization);
+}
+
+function terminalStatusForDeliveryAction(action) {
+  return action === "pull_request.merge"
+    ? "merged"
+    : action === "release.local"
+      ? "released"
+      : null;
+}
+
+function repairTerminalDeliveryClose(context, profile, executionState) {
+  if (executionState.lifecycle_status !== "started") return null;
+  const actions = deliveryActionReceipts(context, profile.id);
+  const terminalCompletions = actions.filter((receipt) =>
+    terminalStatusForDeliveryAction(receipt.action)
+    && receipt.status === "completed"
+    && receipt.outcome === "passed");
+  if (terminalCompletions.length === 0) return null;
+  if (terminalCompletions.length > 1) {
+    fail(`Delivery ${profile.delivery_id} has multiple passing terminal action receipts; manual recovery is required.`);
+  }
+  const completion = terminalCompletions[0];
+  const validation = { strict: true, errors: [], warnings: [], checked: [] };
+  validateDeliveryExecutionReceipts(
+    context,
+    validation,
+    profile,
+    executionState,
+    `delivery autonomy profile ${profile.id}`,
+    { allowRecoverableTerminal: true },
+  );
+  if (validation.errors.length > 0) {
+    fail(`Terminal action receipt ${completion.id} cannot close the delivery: ${validation.errors.join("; ")}`);
+  }
+  const authorization = actions.find((receipt) =>
+    receipt.id === completion.authorization_receipt_ref?.id
+    && receipt.receipt_hash === completion.authorization_receipt_ref?.hash
+    && receipt.status === "authorized");
+  if (!authorization) {
+    fail(`Terminal action receipt ${completion.id} lacks its exact authorization receipt.`);
+  }
+  const terminalStatus = terminalStatusForDeliveryAction(completion.action);
+  const closeBase = {
+    id: `AUT-CLOSE-${normalizeId(profile.id)}`,
+    kind: "delivery_close_receipt",
+    schema_version: "delivery-close-receipt:v1",
+    profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+    delivery: { id: profile.delivery_id, kind: profile.delivery_kind },
+    start_receipt_ref: {
+      id: executionState.start_receipt.id,
+      path: executionState.start_receipt_path,
+      hash: executionState.start_receipt.receipt_hash,
+    },
+    terminal_action_receipt_ref: {
+      id: completion.id,
+      path: toProjectPath(
+        context,
+        path.join(autonomyActionsRoot(context), `${normalizeId(completion.id)}.json`),
+      ),
+      hash: completion.receipt_hash,
+    },
+    terminal_status: terminalStatus,
+    reason: `Completed passing terminal action ${completion.action}.`,
+    approval: authorization.approval || {
+      status: "derived-from-approved-delivery-profile",
+      profile_approval_ref: profile.approval_ref,
+    },
+    closed_by: completion.authorized_by,
+    closed_at: now(),
+    audit: completion.audit,
+  };
+  const closeReceipt = {
+    ...closeBase,
+    receipt_hash: autonomyLifecycleReceiptHash(closeBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  assertRecordSchema(closeReceipt, "delivery-close-receipt.schema.json", `Delivery close receipt ${profile.id}`);
+  const closePath = deliveryCloseReceiptPath(context, profile.id);
+  writeJsonFile(closePath, closeReceipt, { atomicCreate: true });
+  appendTraceEvent(context, profile.story_refs[0]?.id || null, {
+    type: "gate",
+    summary: `Closed ${profile.delivery_kind} ${profile.delivery_id} from passing ${completion.action} receipt`,
+    action: "autonomy.delivery.close.terminal-action",
+    actor: completion.authorized_by,
+    outcome: "passed",
+    evidence: [
+      toProjectPath(context, path.join(autonomyActionsRoot(context), `${normalizeId(completion.id)}.json`)),
+      toProjectPath(context, closePath),
+    ],
+    related: [profile.id, profile.delivery_id, completion.id],
+    git: completion.audit?.git || {},
+    run: completion.audit?.run || {},
+  });
+  return { receipt: closeReceipt, path: toProjectPath(context, closePath), completion };
+}
+
+function evaluateDeliveryAction(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const requestedAction = requireOption(options, "action");
+  const profilePath = deliveryAutonomyPath(context, profileId);
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    const profile = readDeliveryAutonomyProfile(context, profileId);
+    const action = normalizeDeliveryAction(profile.delivery_kind, requestedAction);
+    const executionState = currentDeliveryExecutionState(context, profile);
+    if (executionState.lifecycle_status === "terminal") {
+      const expectedAction = executionState.close_receipt.terminal_status === "merged"
+        ? "pull_request.merge"
+        : executionState.close_receipt.terminal_status === "released"
+          ? "release.local"
+          : null;
+      if (expectedAction === action && executionState.close_receipt.terminal_action_receipt_ref) {
+        const completion = deliveryActionReceipts(context, profile.id).find((receipt) =>
+          receipt.id === executionState.close_receipt.terminal_action_receipt_ref.id
+          && receipt.receipt_hash === executionState.close_receipt.terminal_action_receipt_ref.hash);
+        output(options, {
+          status: "terminal",
+          idempotent: true,
+          lifecycle_status: "terminal",
+          terminal_status: executionState.close_receipt.terminal_status,
+          action_receipt: completion || null,
+          close_receipt: executionState.close_receipt,
+          close_receipt_path: executionState.close_receipt_path,
+        }, [`Delivery ${profile.delivery_id} is already terminal as ${executionState.close_receipt.terminal_status}.`]);
+        return;
+      }
+    }
+    if (executionState.lifecycle_status !== "started") {
+      fail(`Delivery action ${action} requires ${profileId} to be started and non-terminal.`);
+    }
+    const recoveredTerminal = repairTerminalDeliveryClose(context, profile, executionState);
+    if (recoveredTerminal) {
+      output(options, {
+        status: "terminal",
+        idempotent_repair: true,
+        lifecycle_status: "terminal",
+        terminal_status: recoveredTerminal.receipt.terminal_status,
+        action_receipt: recoveredTerminal.completion,
+        close_receipt: recoveredTerminal.receipt,
+        close_receipt_path: recoveredTerminal.path,
+      }, [`Recovered terminal close for ${profile.delivery_kind} ${profile.delivery_id}.`]);
+      return;
+    }
+    const runtimeTarget = profile.delivery_kind === "pull_request"
+      ? validatePullRequestGitBoundary(context, profile.pull_request_target)
+      : null;
+    const { decision } = evaluateDeliveryAutonomy(context, profile, {
+      id: `AUT-ACTION-${uniqueRecordSuffix()}`,
+      phase: getOptionString(options, "phase") || undefined,
+      validateRuntimeTarget: profile.delivery_kind === "pull_request",
+    });
+    const invalidConstraints = decision.source_constraints.filter((constraint) => constraint.valid === false);
+    if (decision.blocked || invalidConstraints.length > 0 || decision.material_drift.length > 0) {
+      fail(`Delivery action ${action} is blocked by the current autonomy evaluation: ${[
+        ...decision.reason_codes,
+        ...invalidConstraints.flatMap((constraint) => constraint.reason_codes),
+        ...decision.material_drift.map((item) => item.reason_code),
+      ].filter(Boolean).join(", ") || "invalid delivery boundary"}.`);
+    }
+    const allowedActions = deliveryTargetAllowedActions(profile);
+    if (!allowedActions.includes(action)) {
+      fail(`Delivery action ${action} is outside the approved action set for ${profileId}.`);
+    }
+    if (profile.constraints?.forbidden_actions?.includes(action)) {
+      fail(`Delivery action ${action} is explicitly forbidden by ${profileId}.`);
+    }
+    if (action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
+      fail(`Delivery profile ${profileId} does not authorize pull_request.merge.`);
+    }
+    const actionPolicy = deliveryActionCheckpointRequired(context, profile, decision.effective_level, action);
+    const checkpointRequired = actionPolicy.required;
+    const reportedOutcome = getOptionString(options, "outcome");
+    const completingAction = Boolean(reportedOutcome);
+    if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
+      fail("Delivery action completion --outcome must be passed or failed.");
+    }
+    let actionDetails = completingAction
+      ? null
+      : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
+    if (!completingAction && action === "git.push") {
+      const basePrecondition = observeGitRemoteBasePrecondition(context, profile, actionDetails);
+      assertGitCommitReceiptCoverage(context, profile, {
+        ...runtimeTarget,
+        base_sha: basePrecondition.observed_sha,
+      });
+      actionDetails = {
+        ...actionDetails,
+        base_precondition: basePrecondition,
+        push_precondition: observeGitPushPrecondition(context, actionDetails),
+      };
+    }
+    if (!completingAction && action === "pull_request.merge") {
+      actionDetails = { ...actionDetails, merge_precondition: observeGitHubMergePrecondition(profile, actionDetails) };
+    }
+    if (!completingAction && checkpointRequired && options["confirm-action"] !== true) {
+      output(options, {
+        status: "checkpoint_required",
+        execution_allowed: false,
+        profile_id: profileId,
+        action,
+        effective_level: decision.effective_level,
+        runtime_target: runtimeTarget,
+        action_details: actionDetails,
+        checkpoints: actionPolicy.checkpoints,
+        reason_codes: ["autonomy.action_checkpoint_required"],
+      }, [
+        `Action ${action} requires a fresh checkpoint for exact delivery ${profile.delivery_id}.`,
+        "Rerun with --confirm-action and formal approval attribution after the exact action and target are shown.",
+      ]);
+      return;
+    }
+    const attribution = buildAttribution(context, options, `autonomy.delivery.action.${action}`);
+    let approval = null;
+    if (!completingAction && checkpointRequired) {
+      requireFormalApprovalActor(context, options, attribution, `Authorizing delivery action ${action}`);
+      const subject = {
+        profile_id: profile.id,
+        profile_hash: profile.profile_hash,
+        delivery_id: profile.delivery_id,
+        action,
+        runtime_target: runtimeTarget,
+        action_details: actionDetails,
+      };
+      const authorityAssurance = loadAutonomyAuthorityAssurance(
+        context,
+        options,
+        `autonomy.delivery.action.${action}`,
+        subject,
+      );
+      approval = {
+        ...buildApprovalRecord(context, options, attribution, {
+        subject,
+        subject_id_field: "profile_id",
+        subject_id: profile.id,
+        status: "approved",
+        scope: `delivery-action:${action}`,
+        label: `delivery action ${action} for ${profile.id}`,
+        }),
+        authority_assurance: authorityAssurance,
+      };
+    }
+    const evidence = buildActionEvidence(context, options.evidence);
+    const existingActionReceipts = completingAction ? deliveryActionReceipts(context, profile.id) : [];
+    const consumedAuthorizationIds = new Set(existingActionReceipts
+      .filter((receipt) => receipt.status === "completed")
+      .map((receipt) => receipt.authorization_receipt_ref?.id)
+      .filter(Boolean));
+    const priorAuthorization = completingAction
+      ? existingActionReceipts
+          .filter((receipt) =>
+            receipt.action === action
+            && receipt.status === "authorized"
+            && receipt.profile_ref?.hash === profile.profile_hash
+            && !consumedAuthorizationIds.has(receipt.id))
+          .sort((left, right) => String(left.authorized_at).localeCompare(String(right.authorized_at)))
+          .at(-1) || null
+      : null;
+    if (completingAction && !priorAuthorization) {
+      fail(`Delivery action ${action} must be authorized before recording its outcome.`);
+    }
+    if (completingAction) {
+      assertCurrentDeliveryActionAuthorization(context, profile, decision, actionPolicy, priorAuthorization);
+    }
+    if (completingAction) {
+      actionDetails = action === "git.commit" && reportedOutcome === "passed"
+        ? buildCompletedGitCommitDetails(context, priorAuthorization, runtimeTarget)
+        : priorAuthorization.action_details;
+    }
+    if (
+      completingAction
+      && profile.delivery_kind === "pull_request"
+      && (action !== "git.commit" || reportedOutcome === "failed")
+      && stableJson(priorAuthorization.runtime_target) !== stableJson(runtimeTarget)
+    ) {
+      fail(`Delivery action ${action} runtime Git target changed after authorization; request a fresh checkpoint.`);
+    }
+    if (completingAction && ["git.push", "pull_request.merge"].includes(action)) {
+      const currentDetails = buildDeliveryActionDetails(context, profile, action, runtimeTarget, {
+        ...options,
+        remote: priorAuthorization.action_details?.push?.remote,
+        "pr-url": priorAuthorization.action_details?.merge?.pr_url,
+      });
+      if (stableJson(currentDetails) !== stableJson(remoteAuthorizationProjection(action, priorAuthorization.action_details))) {
+        fail(`Delivery action ${action} exact operation changed after authorization; request a fresh checkpoint.`);
+      }
+      if (reportedOutcome === "passed") {
+        actionDetails = action === "git.push"
+          ? { ...priorAuthorization.action_details, remote_verification: verifyCompletedGitPush(context, priorAuthorization) }
+          : { ...priorAuthorization.action_details, provider_verification: verifyCompletedGitHubMerge(profile, priorAuthorization) };
+      }
+    }
+    if (completingAction && evidence.length === 0) {
+      fail(`Delivery action ${action} completion requires at least one immutable --evidence file.`);
+    }
+    let localReleaseVerification = null;
+    if (action === "release.local" && completingAction) {
+      const smokeTests = normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort();
+      const approvedSmokeTests = [...(profile.local_release_target?.smoke_tests || [])].sort();
+      if (stableJson(smokeTests) !== stableJson(approvedSmokeTests)) {
+        fail("release.local must report the exact approved smoke-test command set.");
+      }
+      if (reportedOutcome !== "passed") {
+        fail("release.local completion must report --outcome passed before the delivery can be released.");
+      }
+      if (getOptionString(options, "rollback") !== profile.local_release_target?.rollback?.procedure) {
+        fail("release.local must confirm the exact approved rollback procedure with --rollback.");
+      }
+      validateLocalReleaseFilesystemBoundary(profile.local_release_target);
+      const smokeTestReceipts = runApprovedLocalSmokeTests(profile);
+      if (smokeTestReceipts.some((item) => item.outcome !== "passed")) {
+        fail("release.local smoke-test execution failed; the delivery remains started and is not released.");
+      }
+      localReleaseVerification = {
+        target_root: profile.local_release_target.root_path,
+        allowed_write_paths: profile.local_release_target.allowed_write_paths,
+        smoke_tests: approvedSmokeTests,
+        smoke_test_receipts: smokeTestReceipts,
+        outcome: "passed",
+        evidence,
+        rollback: profile.local_release_target.rollback,
+      };
+    }
+    const createdAt = now();
+    const receiptBase = {
+      id: `AUT-ACT-${uniqueRecordSuffix()}`,
+      kind: "delivery_action_receipt",
+      schema_version: "delivery-action-receipt:v1",
+      profile_ref: {
+        id: profile.id,
+        path: toProjectPath(context, profilePath),
+        hash: profile.profile_hash,
+      },
+      delivery: { id: profile.delivery_id, kind: profile.delivery_kind },
+      action,
+      effective_level: decision.effective_level,
+      checkpoint_required: checkpointRequired,
+      approval,
+      runtime_target: runtimeTarget,
+      action_details: actionDetails,
+      authorization_receipt_ref: priorAuthorization
+        ? {
+            id: priorAuthorization.id,
+            path: toProjectPath(
+              context,
+              path.join(autonomyActionsRoot(context), `${normalizeId(priorAuthorization.id)}.json`),
+            ),
+            hash: priorAuthorization.receipt_hash,
+          }
+        : null,
+      local_release_verification: localReleaseVerification,
+      evidence,
+      outcome: reportedOutcome || null,
+      status: completingAction ? "completed" : "authorized",
+      authorized_by: attribution.actor,
+      authorized_at: createdAt,
+      audit: { git: attribution.git, run: attribution.run },
+    };
+    const receipt = {
+      ...receiptBase,
+      receipt_hash: autonomyLifecycleReceiptHash(receiptBase),
+      hash_algorithm: "sha256:stable-json:v1",
+    };
+    assertRecordSchema(receipt, "delivery-action-receipt.schema.json", `Delivery action receipt ${receipt.id}`);
+    const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
+    writeJsonFile(receiptPath, receipt, { atomicCreate: true });
+    const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
+      ? repairTerminalDeliveryClose(context, profile, executionState)
+      : null;
+    const autoClosePath = autoClose?.path || null;
+    appendTraceEvent(context, profile.story_refs[0]?.id || null, {
+      type: action === "release.local" && completingAction ? "release" : "gate",
+      summary: `${completingAction ? "Completed" : "Authorized"} ${action} for exact delivery ${profile.delivery_id}`,
+      action,
+      actor: attribution.actor,
+      outcome: completingAction ? reportedOutcome : "ready",
+      evidence: [
+        toProjectPath(context, receiptPath),
+        autoClosePath,
+        ...evidence.map((item) => item.path),
+      ].filter(Boolean),
+      related: [profile.id, profile.delivery_id],
+      git: attribution.git,
+      run: attribution.run,
+    });
+    output(options, {
+      status: completingAction ? "completed" : "authorized",
+      execution_allowed: !completingAction,
+      profile_id: profile.id,
+      action,
+      effective_level: decision.effective_level,
+      checkpoint_required: checkpointRequired,
+      action_receipt: receipt,
+      action_receipt_path: toProjectPath(context, receiptPath),
+      lifecycle_status: autoClosePath ? "terminal" : "started",
+      close_receipt_path: autoClosePath,
+    }, [`${completingAction ? "Completed" : "Authorized"} ${action} for ${profile.delivery_kind} ${profile.delivery_id}`]);
+  } finally {
+    releaseLock();
+  }
+}
+
+function closeDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const terminalStatus = requireOption(options, "terminal-status");
+  const reason = requireOption(options, "reason");
+  if (!DELIVERY_TERMINAL_STATUSES.has(terminalStatus)) {
+    fail(`Unknown terminal status '${terminalStatus}'.`);
+  }
+  const profilePath = deliveryAutonomyPath(context, profileId);
+  const releaseLock = acquireFileLock(`${profilePath}.lock`);
+  try {
+    const profile = readDeliveryAutonomyProfile(context, profileId);
+    const allowedStatuses = profile.delivery_kind === "pull_request"
+      ? new Set(["merged", "closed", "cancelled", "superseded", "revoked"])
+      : new Set(["released", "rolled_back", "cancelled", "superseded", "revoked"]);
+    if (!allowedStatuses.has(terminalStatus)) {
+      fail(`${terminalStatus} is not a valid terminal status for ${profile.delivery_kind}.`);
+    }
+    if (["merged", "released", "revoked"].includes(terminalStatus)) {
+      fail(terminalStatus === "revoked"
+        ? "revoked is derived from a validated autonomy delivery revoke record; use autonomy delivery revoke instead."
+        : `${terminalStatus} is derived automatically from a completed passing terminal action receipt; use autonomy delivery action instead.`);
+    }
+    const state = currentDeliveryExecutionState(context, profile);
+    if (state.lifecycle_status === "terminal") {
+      fail(`Delivery ${profile.delivery_id} is already terminal as ${state.status}.`);
+    }
+    if (state.lifecycle_status !== "started") {
+      fail(`Delivery ${profile.delivery_id} cannot close before its immutable start receipt exists.`);
+    }
+    const attribution = buildAttribution(context, options, "autonomy.delivery.close");
+    requireFormalApprovalActor(context, options, attribution, `Closing delivery ${profile.delivery_id}`);
+    const subject = {
+      profile_id: profile.id,
+      profile_hash: profile.profile_hash,
+      start_receipt_hash: state.start_receipt.receipt_hash,
+      terminal_status: terminalStatus,
+      reason,
+    };
+    const approval = buildApprovalRecord(context, options, attribution, {
+      subject,
+      subject_id_field: "profile_id",
+      subject_id: profile.id,
+      status: "approved",
+      scope: `delivery-terminal:${terminalStatus}`,
+      label: `delivery close ${profile.id}`,
+    });
+    const closedAt = now();
+    const closeBase = {
+      id: `AUT-CLOSE-${normalizeId(profile.id)}`,
+      kind: "delivery_close_receipt",
+      schema_version: "delivery-close-receipt:v1",
+      profile_ref: {
+        id: profile.id,
+        path: toProjectPath(context, profilePath),
+        hash: profile.profile_hash,
+      },
+      delivery: { id: profile.delivery_id, kind: profile.delivery_kind },
+      start_receipt_ref: {
+        id: state.start_receipt.id,
+        path: state.start_receipt_path,
+        hash: state.start_receipt.receipt_hash,
+      },
+      terminal_action_receipt_ref: null,
+      terminal_status: terminalStatus,
+      reason,
+      approval,
+      closed_by: attribution.actor,
+      closed_at: closedAt,
+      audit: { git: attribution.git, run: attribution.run },
+    };
+    const closeReceipt = {
+      ...closeBase,
+      receipt_hash: autonomyLifecycleReceiptHash(closeBase),
+      hash_algorithm: "sha256:stable-json:v1",
+    };
+    assertRecordSchema(closeReceipt, "delivery-close-receipt.schema.json", `Delivery close receipt ${profile.id}`);
+    const closePath = deliveryCloseReceiptPath(context, profile.id);
+    writeJsonFile(closePath, closeReceipt, { atomicCreate: true });
+    appendTraceEvent(context, profile.story_refs[0]?.id || null, {
+      type: "release",
+      summary: `Closed ${profile.delivery_kind} ${profile.delivery_id} as ${terminalStatus}`,
+      action: "autonomy.delivery.close",
+      actor: attribution.actor,
+      outcome: "passed",
+      evidence: [toProjectPath(context, closePath)],
+      related: [profile.id, profile.delivery_id],
+      git: attribution.git,
+      run: attribution.run,
+    });
+    output(options, {
+      status: "terminal",
+      terminal_status: terminalStatus,
+      close_receipt: closeReceipt,
+      close_receipt_path: toProjectPath(context, closePath),
+    }, [`Closed ${profile.delivery_kind} ${profile.delivery_id} as ${terminalStatus}`]);
+  } finally {
+    releaseLock();
+  }
+}
+
+function showDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const id = options.id ? normalizeId(String(options.id)) : null;
+  const profiles = safeReadDir(deliveryAutonomyRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readDeliveryAutonomyProfile(context, path.basename(name, ".json")))
+    .filter((profile) => !id || profile.id === id)
+    .map((profile) => {
+      const execution = currentDeliveryExecutionState(context, profile);
+      return {
+        ...profile,
+        effective_status: effectiveDeliveryProfileStatus(context, profile).status,
+        lifecycle_status: execution.lifecycle_status,
+        delivery_status: execution.status,
+        active_run_count: execution.active_run_count,
+        start_receipt_path: execution.start_receipt_path,
+        close_receipt_path: execution.close_receipt_path,
+      };
+    });
+  if (id && profiles.length === 0) fail(`Delivery autonomy profile ${id} does not exist.`);
+  output(options, { delivery_profiles: profiles }, profiles.length
+    ? profiles.map((profile) => `${profile.id}: ${profile.effective_status}/${profile.lifecycle_status} — ${profile.delivery_kind} ${profile.delivery_id} — ${profile.requested_level}`)
+    : ["No delivery autonomy profiles found."]);
+}
+
+function explainDeliveryAutonomy(context, options) {
+  ensureInitialized(context);
+  const profileId = normalizeId(requireOption(options, "id"));
+  const profile = readDeliveryAutonomyProfile(context, profileId);
+  if (profile.status !== "active") {
+    output(options, { delivery_profile: profile, autonomy_decision: null }, [
+      `Delivery autonomy profile ${profileId} is ${profile.status}; approve it before execution evaluation.`,
+    ]);
+    return;
+  }
+  const { decision } = evaluateDeliveryAutonomy(context, profile, {
+    id: `AUT-DEC-${uniqueRecordSuffix()}`,
+    phase: getOptionString(options, "phase") || undefined,
+  });
+  if (options.out) {
+    const outputPath = resolveProjectFilePath(context, options.out, { mustExist: false });
+    writeJsonFile(outputPath, decision, { force: Boolean(options.force) });
+  }
+  output(options, { delivery_profile: profile, autonomy_decision: decision }, [
+    `Delivery ${profile.delivery_id}: requested ${decision.requested_level}, effective ${decision.effective_level}`,
+    `Execution status: ${decision.execution_status}`,
+    ...(decision.reason_codes.length > 0 ? decision.reason_codes.map((reason) => `- ${reason}`) : ["- no narrowing reason"]),
+  ]);
 }
 
 function assessmentsRoot(context) {
@@ -11004,6 +14392,56 @@ function collectStoryTemplateIds(context, storyId, registry = null) {
   return ids;
 }
 
+function storyRequirementExecutionContext(context, storyId) {
+  if (!storyId) {
+    return {
+      requirements: [],
+      requirement_refs: [],
+      requirement_profiles: [],
+      requirement_profile_refs: [],
+      autonomy_ceiling: "supervised",
+      has_v2_requirements: false,
+    };
+  }
+  const story = readStory(context, storyId);
+  if (!story) fail(`Story ${storyId} does not exist.`);
+  const requirements = (story.links?.requirements || []).map((requirementId) => {
+    const requirement = readRequirement(context, requirementId, { missingOk: true });
+    if (!requirement) fail(`Story ${storyId} references missing requirement ${requirementId}.`);
+    return requirement;
+  });
+  const v2 = [];
+  const levels = [];
+  for (const requirement of requirements) {
+    const ready = assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirement.id}`);
+    levels.push(ready.autonomy_level);
+    if (!ready.legacy) v2.push({ requirement, profile: ready.profile });
+  }
+  const storyRefs = new Map((story.requirement_refs || []).map((ref) => [ref.id, ref]));
+  for (const { requirement } of v2) {
+    const expected = buildRequirementRef(requirement, toProjectPath(context, requirementPath(context, requirement.id)));
+    const recorded = storyRefs.get(requirement.id);
+    if (!recorded || recorded.content_hash !== expected.content_hash || recorded.revision !== expected.revision) {
+      fail(`Story ${storyId} has a stale exact requirement binding for ${requirement.id}; create or revise the story from the current approved requirement.`);
+    }
+  }
+  return {
+    requirements,
+    requirement_refs: v2.map(({ requirement }) => buildRequirementRef(
+      requirement,
+      toProjectPath(context, requirementPath(context, requirement.id)),
+    )),
+    requirement_profiles: v2.map(({ profile }) => profile),
+    requirement_profile_refs: v2.map(({ profile }) => ({
+      id: profile.id,
+      path: toProjectPath(context, requirementAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    })),
+    autonomy_ceiling: levels.length > 0 ? mostRestrictiveAutonomyLevel(levels) : "supervised",
+    has_v2_requirements: v2.length > 0,
+  };
+}
+
 function createContract(context, options) {
   ensureInitialized(context);
   const phase = requireOption(options, "phase");
@@ -11011,6 +14449,25 @@ function createContract(context, options) {
     fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
   }
   const storyId = options.story ? normalizeId(String(options.story)) : null;
+  const requirementContext = storyRequirementExecutionContext(context, storyId);
+  const deliveryProfileId = getOptionString(options, "delivery-profile")
+    ? normalizeId(getOptionString(options, "delivery-profile"))
+    : null;
+  if (
+    requirementContext.has_v2_requirements
+    && ["implementation", "validation", "release"].includes(phase)
+    && ["enforce_new_only", "enforce_all"].includes(context.config.autonomy_policy?.mode)
+    && !deliveryProfileId
+  ) {
+    fail(`A ${phase} contract for requirement:v2 needs --delivery-profile <new-profile-id>. The exact PR or local release selection is approved separately.`);
+  }
+  const autonomyLevel = normalizeAutonomyLevel(
+    getOptionString(options, "level") || requirementContext.autonomy_ceiling,
+  );
+  const levelRank = Object.fromEntries(AUTONOMY_LEVELS.map((level, index) => [level, index]));
+  if (levelRank[autonomyLevel] > levelRank[requirementContext.autonomy_ceiling]) {
+    fail(`Contract autonomy ${autonomyLevel} exceeds requirement ceiling ${requirementContext.autonomy_ceiling}.`);
+  }
   const id = normalizeId(
     options.id || (storyId ? `contract-${storyId}-${phase}` : `contract-${phase}-${shortDate()}`),
   );
@@ -11021,6 +14478,10 @@ function createContract(context, options) {
   const contract = buildContract(context, phase, {
     id,
     story_id: storyId,
+    requirement_refs: requirementContext.requirement_refs,
+    requirement_execution_profile_refs: requirementContext.requirement_profile_refs,
+    delivery_execution_profile_id: deliveryProfileId,
+    autonomy_level: autonomyLevel,
     owner_agent: options["owner-agent"],
     status: String(options.status || "draft"),
     context_summary: options["context-summary"],
@@ -11056,24 +14517,49 @@ function createContract(context, options) {
   validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   let linkedStory;
-  const releaseStoryLock = storyId
-    ? acquireFileLock(path.join(context.sdlcRoot, "contracts", `.story-${shortHash(storyId)}.lock`))
-    : () => {};
+  let releaseDeliveryProfileLock = () => {};
+  let releaseStoryLock = () => {};
   let releaseContractLock;
   try {
+    if (deliveryProfileId) {
+      releaseDeliveryProfileLock = acquireFileLock(
+        path.join(context.sdlcRoot, "contracts", `.delivery-profile-${shortHash(deliveryProfileId)}.lock`),
+      );
+    }
+    if (storyId) {
+      releaseStoryLock = acquireFileLock(
+        path.join(context.sdlcRoot, "contracts", `.story-${shortHash(storyId)}.lock`),
+      );
+    }
     releaseContractLock = acquireFileLock(`${contractPath}.lock`);
+    assertDeliveryProfileReservationUnique(context, deliveryProfileId, id);
     const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
     writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
     linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
   } finally {
     releaseContractLock?.();
     releaseStoryLock();
+    releaseDeliveryProfileLock();
   }
   output(
     options,
     { status: "created", contract_path: contractPath, contract, story_link: linkedStory },
     [`Created contract ${id} for phase ${phase}`],
   );
+}
+
+function assertDeliveryProfileReservationUnique(context, deliveryProfileId, contractId) {
+  if (!deliveryProfileId) return;
+  const contractsRoot = path.join(context.sdlcRoot, "contracts");
+  for (const name of safeReadDir(contractsRoot).filter((item) => item.endsWith(".json"))) {
+    const candidate = readProjectJson(context, path.join(contractsRoot, name));
+    if (
+      candidate.id !== contractId
+      && candidate.delivery_execution_profile_id === deliveryProfileId
+    ) {
+      fail(`Delivery profile ID ${deliveryProfileId} is already reserved by contract ${candidate.id}; every contract delivery needs a unique profile ID.`);
+    }
+  }
 }
 
 function validateStoryContractLinkForCreate(context, storyId, contractId, options = {}) {
@@ -11350,6 +14836,53 @@ function validateContractOutputRefsForCreate(context, rawRefs, options = {}) {
   }
 }
 
+function validateContractAutonomyBinding(context, contract, options = {}) {
+  const profileRefs = Array.isArray(contract.requirement_execution_profile_refs)
+    ? contract.requirement_execution_profile_refs
+    : [];
+  for (const ref of profileRefs) {
+    const profile = readRequirementAutonomyProfile(context, ref.id);
+    if (profile.status !== "active" || profile.profile_hash !== ref.hash) {
+      fail(`Contract ${contract.id} has a stale requirement autonomy profile reference ${ref.id}.`);
+    }
+    validateAutonomyApprovalRef(context, profile, `Requirement autonomy profile ${ref.id}`);
+  }
+  if (profileRefs.length === 0 || !["implementation", "validation", "release"].includes(contract.phase)) {
+    return null;
+  }
+  if (!contract.delivery_execution_profile_id) {
+    if (!["enforce_new_only", "enforce_all"].includes(context.config.autonomy_policy?.mode)) {
+      return null;
+    }
+    fail(`Contract ${contract.id} requires an explicit delivery autonomy profile before approval.`);
+  }
+  const profile = readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id, {
+    missingOk: options.requireDelivery === false,
+  });
+  if (!profile && options.requireDelivery === false) {
+    return null;
+  }
+  const executionState = currentDeliveryExecutionState(context, profile);
+  const historicalTerminal = executionState.lifecycle_status === "terminal";
+  if (
+    profile.status !== "active"
+    || (effectiveDeliveryProfileStatus(context, profile).status !== "active" && !historicalTerminal)
+  ) {
+    fail(`Delivery autonomy profile ${profile.id} is not active for contract ${contract.id}.`);
+  }
+  validateAutonomyApprovalRef(context, profile, `Delivery autonomy profile ${profile.id}`);
+  const ref = profile.contract_refs.find((item) => item.id === contract.id);
+  if (!ref || ref.hash !== hashApprovalSubject(contract)) {
+    fail(`Delivery autonomy profile ${profile.id} is stale for contract ${contract.id}.`);
+  }
+  const levelRank = Object.fromEntries(AUTONOMY_LEVELS.map((level, index) => [level, index]));
+  const contractLevel = normalizeAutonomyLevel(contract.autonomy_level || "supervised");
+  if (levelRank[profile.requested_level] > levelRank[contractLevel]) {
+    fail(`Delivery autonomy ${profile.requested_level} exceeds contract boundary ${contractLevel}.`);
+  }
+  return profile;
+}
+
 function approveContract(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -11364,6 +14897,7 @@ function approveContract(context, options) {
   const releaseLock = acquireFileLock(`${contractPath}.lock`);
   try {
     contract = readProjectJson(context, contractPath);
+    validateContractAutonomyBinding(context, contract, { requireDelivery: false });
     if (contract.human_gate === true) {
       requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
     }
@@ -11438,6 +14972,10 @@ function buildContract(context, phase, overrides = {}) {
       : null,
     phase,
     story_id: overrides.story_id || null,
+    requirement_refs: overrides.requirement_refs || [],
+    requirement_execution_profile_refs: overrides.requirement_execution_profile_refs || [],
+    delivery_execution_profile_id: overrides.delivery_execution_profile_id || null,
+    autonomy_level: overrides.autonomy_level || "supervised",
     status: overrides.status || "draft",
     purpose: template.purpose,
     owner_agent: String(overrides.owner_agent || template.owner_agent),
@@ -12561,6 +16099,27 @@ function createStory(context, options) {
   ensureDir(storyDir);
 
   const acceptanceCriteria = normalizeListOption(options.acceptance);
+  const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
+  const requirementRefs = [];
+  const requirementLevels = [];
+  for (const requirementId of requirementIds) {
+    const requirement = readRequirement(context, requirementId, { missingOk: true });
+    if (!requirement) {
+      if (context.config.autonomy_policy?.mode === "enforce_all") {
+        fail(`Requirement ${requirementId} does not exist; agree and persist the requirement before creating story ${id}.`);
+      }
+      requirementLevels.push("supervised");
+      continue;
+    }
+    const ready = assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirementId}`);
+    requirementLevels.push(ready.autonomy_level);
+    if (!ready.legacy) {
+      requirementRefs.push(buildRequirementRef(
+        requirement,
+        toProjectPath(context, requirementPath(context, requirementId)),
+      ));
+    }
+  }
   const attribution = buildAttribution(context, options, "story.create");
   const story = {
     id,
@@ -12572,8 +16131,12 @@ function createStory(context, options) {
     work_breakdown_id: options.breakdown ? normalizeId(String(options.breakdown)) : null,
     acceptance: acceptanceCriteria,
     acceptance_criteria: acceptanceCriteria,
+    requirement_refs: requirementRefs,
+    autonomy_ceiling: requirementLevels.length > 0
+      ? mostRestrictiveAutonomyLevel(requirementLevels)
+      : "supervised",
     links: {
-      requirements: normalizeListOption(options.requirement),
+      requirements: requirementIds,
       decisions: [],
       tests: [],
     },
@@ -12619,6 +16182,14 @@ function createWorkItem(context, options) {
   }
   const id = normalizeId(requireOption(options, "id"));
   const title = requireOption(options, "title");
+  const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
+  for (const requirementId of requirementIds) {
+    assertRequirementReadyForDownstream(
+      context,
+      readRequirement(context, requirementId, { missingOk: true }),
+      `Requirement ${requirementId}`,
+    );
+  }
   const attribution = buildAttribution(context, options, "work_item.create");
   const item = {
     id,
@@ -12628,7 +16199,7 @@ function createWorkItem(context, options) {
     status: String(options.status || "draft"),
     parent_id: options.parent ? normalizeId(String(options.parent)) : null,
     story_id: options.story ? normalizeId(String(options.story)) : null,
-    requirement_ids: normalizeListOption(options.requirement).map(normalizeId),
+    requirement_ids: requirementIds,
     acceptance: normalizeListOption(options.acceptance),
     acceptance_criteria: normalizeListOption(options.acceptance),
     created_at: now(),
@@ -12701,6 +16272,11 @@ function proposeBreakdown(context, options) {
     fail("breakdown id 'project-policy' is reserved");
   }
   const requirementId = normalizeId(requireOption(options, "requirement"));
+  assertRequirementReadyForDownstream(
+    context,
+    readRequirement(context, requirementId, { missingOk: true }),
+    `Requirement ${requirementId}`,
+  );
   const items = normalizeRawListOption(options.item).map(parseBreakdownItemRef);
   if (items.length === 0) {
     fail("breakdown propose requires at least one --item type:id.");
@@ -19021,6 +22597,7 @@ function gateCheck(context, options) {
     validateAuthorizations(context, report);
     validateBaselines(context, report, storyId && scope === "story" ? storyId : null);
     validateLocks(context, report);
+    validateAutonomyRecords(context, report, storyId && scope === "story" ? storyId : null);
   }
 
   if (storyId && scope === "story") {
@@ -20288,6 +23865,632 @@ function buildOutputLinkDecisionSubject(link) {
   };
 }
 
+function autonomyDecisionSemanticProjection(decision) {
+  if (!decision || typeof decision !== "object") return null;
+  const {
+    id: _id,
+    evaluated_at: _evaluatedAt,
+    decision_hash: _decisionHash,
+    hash_algorithm: _hashAlgorithm,
+    ...semantic
+  } = decision;
+  return semantic;
+}
+
+function validateCompletedGitCommitReceipt(context, report, receipt, authorization, label) {
+  const commit = receipt.action_details?.commit;
+  const { commit: _commit, ...authorizedProjection } = receipt.action_details || {};
+  if (
+    !commit
+    || stableJson(authorizedProjection) !== stableJson(authorization.action_details)
+    || stableJson(gitRuntimeWithoutHead(receipt.runtime_target))
+      !== stableJson(gitRuntimeWithoutHead(authorization.runtime_target))
+    || commit.before_sha !== authorization.runtime_target?.head_sha
+    || commit.after_sha !== receipt.runtime_target?.head_sha
+  ) {
+    report.errors.push(`${label} commit transition differs from its exact authorization boundary`);
+    return;
+  }
+  const parentLine = execGit(context.root, ["rev-list", "--parents", "-n", "1", commit.after_sha]);
+  const commitAndParents = String(parentLine || "").split(/\s+/u).filter(Boolean);
+  const committedPaths = [...new Set(String(
+    execGit(context.root, ["diff", "--name-only", "--no-renames", commit.before_sha, commit.after_sha]) || "",
+  ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+  const expectedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
+  if (
+    commitAndParents.length !== 2
+    || commitAndParents[0] !== commit.after_sha
+    || commitAndParents[1] !== commit.before_sha
+    || stableJson(commit.committed_paths) !== stableJson(expectedPaths)
+    || stableJson(committedPaths) !== stableJson(expectedPaths)
+  ) {
+    report.errors.push(`${label} does not prove one exact non-merge commit for its authorized file set`);
+  }
+}
+
+function validateCompletedRemoteActionReceipt(report, receipt, authorization, label) {
+  const verificationField = receipt.action === "git.push" ? "remote_verification" : "provider_verification";
+  const { [verificationField]: verification, ...authorizedProjection } = receipt.action_details || {};
+  if (
+    stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+    || stableJson(authorizedProjection) !== stableJson(authorization.action_details)
+    || !verification
+  ) {
+    report.errors.push(`${label} remote completion differs from its exact authorization boundary`);
+    return;
+  }
+  if (receipt.action === "git.push") {
+    const push = authorization.action_details?.push;
+    const precondition = authorization.action_details?.push_precondition;
+    const basePrecondition = authorization.action_details?.base_precondition;
+    if (
+      verification.provider !== "git-remote"
+      || verification.remote !== push?.remote
+      || verification.destination_ref !== push?.destination_ref
+      || verification.observed_sha !== push?.source_sha
+      || precondition?.provider !== "git-remote"
+      || precondition.remote !== push?.remote
+      || precondition.destination_ref !== push?.destination_ref
+      || precondition.observed_sha === push?.source_sha
+      || basePrecondition?.provider !== "git-remote"
+      || basePrecondition.remote !== push?.remote
+      || basePrecondition.base_ref !== `refs/heads/${authorization.action_details?.base_branch}`
+      || !/^[a-f0-9]{40,64}$/u.test(basePrecondition.observed_sha || "")
+      || !Number.isFinite(Date.parse(verification.verified_at || ""))
+    ) {
+      report.errors.push(`${label} lacks exact remote-ref proof for the authorized push`);
+    }
+    return;
+  }
+  const merge = authorization.action_details?.merge;
+  const precondition = authorization.action_details?.merge_precondition;
+  const authorizedAt = Date.parse(authorization.authorized_at || "");
+  const mergedAt = Date.parse(verification.merged_at || "");
+  if (
+    verification.provider !== "github-cli"
+    || verification.state !== "MERGED"
+    || verification.is_draft !== false
+    || verification.pr_url !== canonicalAbsoluteUrl(merge?.pr_url)
+    || verification.head_sha !== merge?.source_sha
+    || !verification.merge_commit_sha
+    || !verification.merged_at
+    || precondition?.provider !== "github-cli"
+    || precondition.state !== "OPEN"
+    || precondition.is_draft !== false
+    || precondition.pr_url !== canonicalAbsoluteUrl(merge?.pr_url)
+    || precondition.head_sha !== merge?.source_sha
+    || !Number.isFinite(authorizedAt)
+    || !Number.isFinite(mergedAt)
+    || mergedAt < authorizedAt
+  ) {
+    report.errors.push(`${label} lacks exact GitHub provider proof for the authorized merge`);
+  }
+}
+
+function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
+  if (state.lifecycle_status === "available") return;
+  const actions = deliveryActionReceipts(context, profile.id);
+  let expectedEffectiveLevel = "supervised";
+  try {
+    const start = state.start_receipt;
+    const decisionPath = resolveProjectFilePath(context, start.autonomy_decision_ref.path, { mustExist: true, fileOnly: true });
+    const startDecision = readProjectJson(context, decisionPath);
+    const integrity = validateAutonomyDecisionIntegrity(startDecision);
+    if (
+      !integrity.valid
+      || startDecision.id !== start.autonomy_decision_ref.id
+      || startDecision.decision_hash !== start.autonomy_decision_ref.hash
+      || startDecision.delivery?.profile_id !== profile.id
+      || startDecision.delivery?.profile_hash !== profile.profile_hash
+      || start.effective_level !== startDecision.effective_level
+    ) {
+      report.errors.push(`${label} immutable start receipt has a stale or tampered autonomy decision`);
+    } else {
+      const { decision: freshStartDecision } = evaluateDeliveryAutonomy(context, profile, {
+        id: startDecision.id,
+        phase: startDecision.phase || undefined,
+        evaluated_at: startDecision.evaluated_at,
+        allowHistorical: true,
+        deliveryStateOverride: {
+          delivery_id: profile.delivery_id,
+          status: "open",
+          active_run_count: 1,
+        },
+      });
+      if (stableJson(autonomyDecisionSemanticProjection(startDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshStartDecision))) {
+        report.errors.push(`${label} immutable start decision is not reproducible from its exact profile inputs`);
+      }
+      expectedEffectiveLevel = freshStartDecision.effective_level;
+    }
+    const currentContract = readContractById(context, start.contract_ref.id, { missingOk: true });
+    const currentStory = readStory(context, start.story_ref.id);
+    if (
+      !currentContract
+      || !currentStory
+      || start.contract_ref.hash !== hashApprovalSubject(currentContract)
+      || start.story_ref.hash !== hashApprovalSubject(currentStory)
+      || start.contract_approval_hash !== latestContractApproval(currentContract)?.approved_content_hash
+      || start.delivery?.id !== profile.delivery_id
+      || start.delivery?.kind !== profile.delivery_kind
+      || start.phase !== startDecision.phase
+      || start.phase !== currentContract.phase
+    ) {
+      report.errors.push(`${label} immutable start receipt is stale for its story, contract, phase, or delivery identity`);
+    }
+    const taskReceiptPath = path.join(context.sdlcRoot, "stories", start.story_ref.id, "task-start.json");
+    if (fs.existsSync(taskReceiptPath)) {
+      const taskReceipt = readProjectJson(context, taskReceiptPath);
+      if (
+        taskReceipt.delivery_start_receipt_ref?.id !== start.id
+        || taskReceipt.delivery_start_receipt_ref?.hash !== start.receipt_hash
+        || taskReceipt.route !== start.route
+        || taskReceipt.phase !== start.phase
+      ) {
+        report.errors.push(`${label} immutable start receipt disagrees with its task-start receipt`);
+      }
+    }
+  } catch (error) {
+    report.errors.push(`${label} immutable start receipt cannot be verified: ${error.message}`);
+  }
+  for (const receipt of actions) {
+    const actionLabel = `${label} action receipt ${receipt.id}`;
+    if (receipt.profile_ref?.hash !== profile.profile_hash) {
+      report.errors.push(`${actionLabel} is bound to stale profile content`);
+    }
+    if (receipt.delivery?.id !== profile.delivery_id || receipt.delivery?.kind !== profile.delivery_kind) {
+      report.errors.push(`${actionLabel} is bound to the wrong delivery identity`);
+    }
+    let canonicalAction = null;
+    try {
+      canonicalAction = normalizeDeliveryAction(profile.delivery_kind, receipt.action);
+    } catch (error) {
+      report.errors.push(`${actionLabel} has an invalid action: ${error.message}`);
+    }
+    if (canonicalAction !== receipt.action || !deliveryTargetAllowedActions(profile).includes(receipt.action)) {
+      report.errors.push(`${actionLabel} action is outside the exact profile action catalog`);
+    }
+    if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
+      report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
+    }
+    const actionPolicy = deliveryActionCheckpointRequired(
+      context,
+      profile,
+      expectedEffectiveLevel,
+      receipt.action,
+    );
+    if (receipt.effective_level !== expectedEffectiveLevel) {
+      report.errors.push(`${actionLabel} effective level differs from the immutable delivery start decision`);
+    }
+    if (receipt.checkpoint_required !== actionPolicy.required) {
+      report.errors.push(`${actionLabel} checkpoint flag does not match the current exact profile policy`);
+    }
+    if (actionPolicy.required && receipt.status === "authorized") {
+      if (receipt.approval?.status !== "approved") {
+        report.errors.push(`${actionLabel} is missing its required formal checkpoint approval`);
+      }
+      validateFormalApprovalRecord(
+        context,
+        report,
+        receipt.approval,
+        `${actionLabel} approval`,
+        receipt.approval?.approved_by,
+        { subject_id: profile.id },
+      );
+      const approvalSubject = {
+        profile_id: profile.id,
+        profile_hash: profile.profile_hash,
+        delivery_id: profile.delivery_id,
+        action: receipt.action,
+        runtime_target: receipt.runtime_target,
+        action_details: receipt.action_details,
+      };
+      if (receipt.approval?.approved_content_hash !== hashApprovalSubject(approvalSubject)) {
+        report.errors.push(`${actionLabel} approval does not bind its exact action and runtime target`);
+      }
+      try {
+        validateApprovalEvidenceIntegrity(context, receipt.approval, `${actionLabel} approval`);
+      } catch (error) {
+        report.errors.push(`${actionLabel} approval evidence is invalid: ${error.message}`);
+      }
+      try {
+        validateDeliveryActionHostAuthority(context, profile, receipt);
+      } catch (error) {
+        report.errors.push(`${actionLabel} host authority is invalid: ${error.message}`);
+      }
+    }
+    for (const evidence of receipt.evidence || []) {
+      try {
+        const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+        if (hashFile(evidencePath) !== evidence.sha256) {
+          report.errors.push(`${actionLabel} evidence changed after recording: ${evidence.path}`);
+        }
+      } catch (error) {
+        report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
+      }
+    }
+    if (receipt.status === "completed") {
+      if (!Array.isArray(receipt.evidence) || receipt.evidence.length === 0) {
+        report.errors.push(`${actionLabel} completion has no immutable evidence`);
+      }
+      const authorization = actions.find((candidate) =>
+        candidate.id === receipt.authorization_receipt_ref?.id
+        && candidate.receipt_hash === receipt.authorization_receipt_ref?.hash
+        && candidate.action === receipt.action
+        && candidate.status === "authorized");
+      if (!authorization) {
+        report.errors.push(`${actionLabel} does not reference its matching authorization receipt`);
+      } else if (receipt.effective_level !== authorization.effective_level) {
+        report.errors.push(`${actionLabel} completion differs from its authorized effective level`);
+      } else if (receipt.action === "git.commit" && receipt.outcome === "passed") {
+        validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
+      } else if (["git.push", "pull_request.merge"].includes(receipt.action) && receipt.outcome === "passed") {
+        validateCompletedRemoteActionReceipt(report, receipt, authorization, actionLabel);
+      } else if (
+        stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+        || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
+      ) {
+        report.errors.push(`${actionLabel} completion differs from its exact authorization boundary`);
+      }
+      if (receipt.action === "release.local") {
+        const verification = receipt.local_release_verification;
+        const commands = (verification?.smoke_test_receipts || []).map((item) => stableJson(item.command)).sort();
+        const approvedCommands = [...(profile.local_release_target?.smoke_tests || [])].sort();
+        if (
+          verification?.target_root !== profile.local_release_target?.root_path
+          || stableJson(commands) !== stableJson(approvedCommands)
+          || (verification?.smoke_test_receipts || []).some((item) =>
+            item.cwd !== profile.local_release_target?.root_path
+            || item.outcome !== "passed"
+            || item.exit_code !== 0)
+        ) {
+          report.errors.push(`${actionLabel} does not prove the exact approved local smoke-test set and target`);
+        }
+      }
+      for (const evidence of receipt.local_release_verification?.evidence || []) {
+        try {
+          const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+          if (hashFile(evidencePath) !== evidence.sha256) {
+            report.errors.push(`${actionLabel} evidence changed after completion: ${evidence.path}`);
+          }
+        } catch (error) {
+          report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
+        }
+      }
+    }
+    report.checked.push(actionLabel);
+  }
+  for (const authorization of actions.filter((receipt) => receipt.status === "authorized")) {
+    const uses = actions.filter((receipt) =>
+      receipt.status === "completed"
+      && receipt.authorization_receipt_ref?.id === authorization.id
+      && receipt.authorization_receipt_ref?.hash === authorization.receipt_hash);
+    if (uses.length > 1) {
+      report.errors.push(`${label} action authorization ${authorization.id} was consumed more than once`);
+    }
+  }
+  for (const authorization of actions.filter((receipt) =>
+    receipt.action === "git.push" && receipt.status === "authorized")) {
+    const basePrecondition = authorization.action_details?.base_precondition;
+    const coverageRuntime = {
+      ...authorization.runtime_target,
+      base_sha: basePrecondition?.observed_sha,
+    };
+    const coverageErrors = gitCommitReceiptCoverageErrors(context, profile, coverageRuntime, actions);
+    if (
+      basePrecondition?.provider !== "git-remote"
+      || basePrecondition.remote !== authorization.action_details?.push?.remote
+      || basePrecondition.base_ref !== `refs/heads/${profile.pull_request_target?.base_branch}`
+    ) {
+      coverageErrors.unshift("Push authorization lacks the exact live remote base observation.");
+    }
+    report.errors.push(...coverageErrors.map((error) =>
+      `${label} git.push authorization ${authorization.id} has incomplete commit mediation: ${error}`));
+  }
+  if (
+    state.lifecycle_status === "started"
+    && options.allowRecoverableTerminal !== true
+    && actions.some((receipt) =>
+      terminalStatusForDeliveryAction(receipt.action)
+      && receipt.status === "completed"
+      && receipt.outcome === "passed")
+  ) {
+    report.errors.push(`${label} has a passing terminal action receipt but no close receipt; rerun that action command to repair the close`);
+  }
+  if (state.lifecycle_status === "terminal") {
+    const close = state.close_receipt;
+    if (
+      close.delivery?.id !== profile.delivery_id
+      || close.delivery?.kind !== profile.delivery_kind
+      || (profile.delivery_kind === "pull_request" && !["merged", "closed", "cancelled", "superseded", "revoked"].includes(close.terminal_status))
+      || (profile.delivery_kind === "local_release" && !["released", "rolled_back", "cancelled", "superseded", "revoked"].includes(close.terminal_status))
+    ) {
+      report.errors.push(`${label} terminal receipt has an invalid delivery identity or terminal status`);
+    }
+    const requiredAction = close.terminal_status === "merged"
+      ? "pull_request.merge"
+      : close.terminal_status === "released"
+        ? "release.local"
+        : null;
+    if (requiredAction) {
+      const completion = actions.find((receipt) =>
+        receipt.id === close.terminal_action_receipt_ref?.id
+        && receipt.receipt_hash === close.terminal_action_receipt_ref?.hash
+        && receipt.action === requiredAction
+        && receipt.status === "completed"
+        && receipt.outcome === "passed");
+      if (!completion) {
+        report.errors.push(`${label} terminal ${close.terminal_status} receipt lacks a passing ${requiredAction} completion`);
+      }
+    } else if (close.terminal_status === "revoked") {
+      let revocation = null;
+      try {
+        revocation = effectiveDeliveryProfileStatus(context, profile).revocation;
+      } catch (error) {
+        report.errors.push(`${label} terminal revocation cannot be verified: ${error.message}`);
+      }
+      if (
+        !revocation
+        || revocation.reason !== close.reason
+        || stableJson(revocation.approval) !== stableJson(close.approval)
+      ) {
+        report.errors.push(`${label} terminal revoked receipt lacks its exact validated revocation approval`);
+      }
+    } else {
+      if (close.approval?.status !== "approved") {
+        report.errors.push(`${label} terminal ${close.terminal_status} receipt lacks formal approval`);
+        report.checked.push(`${label} terminal receipt ${close.id}`);
+        return;
+      }
+      const closeSubject = {
+        profile_id: profile.id,
+        profile_hash: profile.profile_hash,
+        start_receipt_hash: state.start_receipt.receipt_hash,
+        terminal_status: close.terminal_status,
+        reason: close.reason,
+      };
+      if (close.approval.approved_content_hash !== hashApprovalSubject(closeSubject)) {
+        report.errors.push(`${label} terminal ${close.terminal_status} approval does not bind its exact close subject`);
+      }
+      validateFormalApprovalRecord(
+        context,
+        report,
+        close.approval,
+        `${label} terminal ${close.terminal_status} approval`,
+        close.approval?.approved_by,
+        { subject_id: profile.id },
+      );
+    }
+    report.checked.push(`${label} terminal receipt ${close.id}`);
+  }
+}
+
+function validateAutonomyRecords(context, report, storyId = null) {
+  const requirementProfileIds = storyId
+    ? new Set((readStory(context, storyId)?.links?.requirements || []).map((requirementId) =>
+        readRequirement(context, requirementId, { missingOk: true })?.autonomy_profile_id,
+      ).filter(Boolean))
+    : null;
+  for (const name of safeReadDir(requirementAutonomyRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const profile = readProjectJson(context, path.join(requirementAutonomyRoot(context), name));
+    if (requirementProfileIds && !requirementProfileIds.has(profile.id)) continue;
+    const label = `requirement autonomy profile ${profile.id || name}`;
+    appendRecordSchemaIssues(report, profile, "requirement-execution-profile.schema.json", label);
+    const integrity = validateRequirementExecutionProfileIntegrity(profile);
+    for (const error of integrity.errors || []) report.errors.push(`${label}: ${error}`);
+    if (profile.status === "active") {
+      try {
+        const envelope = validateAutonomyApprovalRef(context, profile, label);
+        const approval = envelope?.approval;
+        if (!hasFormalApprovalAttribution(approval?.approved_by, approval?.approval_source)) {
+          report.errors.push(`${label} approval is missing ${formalApprovalActorDescription(approval?.approval_source)} attribution`);
+        }
+        validateFormalApprovalRecord(context, report, approval, `${label} approval`, approval?.approved_by, {
+          subject_id: profile.id,
+        });
+      } catch (error) {
+        report.errors.push(`${label}: ${error.message}`);
+      }
+    }
+    report.checked.push(label);
+  }
+
+  for (const name of safeReadDir(autonomyRevocationsRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const recordPath = path.join(autonomyRevocationsRoot(context), name);
+    const raw = readProjectJson(context, recordPath);
+    if (storyId) {
+      const scopedProfile = readDeliveryAutonomyProfile(context, raw.profile_ref?.id || "missing", { missingOk: true });
+      if (!scopedProfile || !(scopedProfile.story_refs || []).some((ref) => ref.id === storyId)) continue;
+    }
+    const label = `autonomy profile revocation ${raw.id || name}`;
+    appendRecordSchemaIssues(report, raw, "autonomy-profile-revocation.schema.json", label);
+    try {
+      readAutonomyProfileRevocation(context, recordPath);
+    } catch (error) {
+      report.errors.push(`${label}: ${error.message}`);
+    }
+    report.checked.push(label);
+  }
+
+  const deliveryProfiles = [];
+  for (const name of safeReadDir(deliveryAutonomyRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const profile = readProjectJson(context, path.join(deliveryAutonomyRoot(context), name));
+    if (storyId && !(profile.story_refs || []).some((ref) => ref.id === storyId)) continue;
+    const label = `delivery autonomy profile ${profile.id || name}`;
+    deliveryProfiles.push(profile);
+    appendRecordSchemaIssues(report, profile, "delivery-execution-profile.schema.json", label);
+    const integrity = validateDeliveryExecutionProfileIntegrity(profile);
+    for (const error of integrity.errors || []) report.errors.push(`${label}: ${error}`);
+    if (profile.status === "active") {
+      try {
+        const envelope = validateAutonomyApprovalRef(context, profile, label);
+        const approval = envelope?.approval;
+        if (!hasFormalApprovalAttribution(approval?.approved_by, approval?.approval_source)) {
+          report.errors.push(`${label} approval is missing ${formalApprovalActorDescription(approval?.approval_source)} attribution`);
+        }
+        validateFormalApprovalRecord(context, report, approval, `${label} approval`, approval?.approved_by, {
+          subject_id: profile.id,
+        });
+        const effectiveStatus = effectiveDeliveryProfileStatus(context, profile);
+        const executionState = currentDeliveryExecutionState(context, profile);
+        validateDeliveryExecutionReceipts(context, report, profile, executionState, label);
+        if (effectiveStatus.status === "revoked") {
+          report.warnings.push(`${label} is revoked and cannot authorize execution`);
+          if (executionState.lifecycle_status === "started") {
+            report.errors.push(`${label} is revoked but its started execution has no terminal revocation receipt`);
+          }
+        } else if (executionState.lifecycle_status !== "terminal") {
+          const { decision } = evaluateDeliveryAutonomy(context, profile, {
+            id: `AUT-GATE-${uniqueRecordSuffix()}`,
+          });
+          const invalid = decision.source_constraints.filter((constraint) => !constraint.valid);
+          if (decision.blocked || invalid.length > 0) {
+            report.errors.push(`${label} fails current evaluation: ${[
+              ...decision.reason_codes,
+              ...invalid.flatMap((constraint) => constraint.reason_codes),
+            ].filter(Boolean).join(", ") || "invalid boundary"}`);
+          }
+        }
+      } catch (error) {
+        report.errors.push(`${label}: ${error.message}`);
+      }
+    }
+    report.checked.push(label);
+  }
+
+  const deliveryById = new Map(deliveryProfiles.map((profile) => [profile.id, profile]));
+  for (const name of safeReadDir(autonomyDecisionsRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const decision = readProjectJson(context, path.join(autonomyDecisionsRoot(context), name));
+    if (storyId) {
+      const profile = deliveryById.get(decision.delivery?.profile_id);
+      if (!profile || !(profile.story_refs || []).some((ref) => ref.id === storyId)) continue;
+    }
+    const label = `autonomy decision ${decision.id || name}`;
+    appendRecordSchemaIssues(report, decision, "autonomy-decision.schema.json", label);
+    const integrity = validateAutonomyDecisionIntegrity(decision);
+    for (const error of integrity.errors || []) report.errors.push(`${label}: ${error}`);
+    const profile = deliveryById.get(decision.delivery?.profile_id)
+      || readDeliveryAutonomyProfile(context, decision.delivery?.profile_id || "missing", { missingOk: true });
+    if (!profile || profile.profile_hash !== decision.delivery?.profile_hash) {
+      report.errors.push(`${label} references a missing or stale delivery profile`);
+    } else {
+      const executionState = currentDeliveryExecutionState(context, profile);
+      if (executionState.lifecycle_status !== "terminal") {
+        try {
+          const revoked = effectiveDeliveryProfileStatus(context, profile).status === "revoked";
+          const { decision: freshDecision } = evaluateDeliveryAutonomy(context, profile, {
+            id: decision.id,
+            phase: decision.phase || undefined,
+            evaluated_at: decision.evaluated_at,
+            allowHistorical: revoked,
+            deliveryStateOverride: revoked
+              ? { delivery_id: profile.delivery_id, status: "open", active_run_count: 0 }
+              : undefined,
+          });
+          if (stableJson(autonomyDecisionSemanticProjection(decision)) !== stableJson(autonomyDecisionSemanticProjection(freshDecision))) {
+            report.errors.push(`${label} does not match a fresh deterministic evaluation of its bound profile`);
+          }
+        } catch (error) {
+          report.errors.push(`${label} cannot be reproduced from its bound profile: ${error.message}`);
+        }
+      }
+    }
+    report.checked.push(label);
+  }
+
+  for (const name of safeReadDir(requirementLifecycleRoot(context)).filter((item) => item.endsWith(".json"))) {
+    const event = readProjectJson(context, path.join(requirementLifecycleRoot(context), name));
+    if (storyId) {
+      const ids = new Set(readStory(context, storyId)?.links?.requirements || []);
+      if (!ids.has(event.requirement_ref?.id) && !ids.has(event.replacement_ref?.id)) continue;
+    }
+    appendRecordSchemaIssues(report, event, "requirement-lifecycle-event.schema.json", `requirement lifecycle event ${event.id || name}`);
+    for (const error of requirementSupersessionGovernanceErrors(context, event)) {
+      report.errors.push(error);
+    }
+    report.checked.push(`requirement lifecycle event ${event.id || name}`);
+  }
+  validateRequirementLineage(context, report, storyId);
+}
+
+function validateRequirementLineage(context, report, storyId = null) {
+  const scopedIds = storyId ? new Set(readStory(context, storyId)?.links?.requirements || []) : null;
+  const allRequirements = safeReadDir(requirementsRoot(context))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readProjectJson(context, path.join(requirementsRoot(context), name)))
+    .filter((requirement) => requirement.schema_version === "requirement:v2");
+  const scopedLogicalIds = scopedIds
+    ? new Set(allRequirements.filter((item) => scopedIds.has(item.id)).map((item) => item.logical_id))
+    : null;
+  const relevant = scopedLogicalIds
+    ? allRequirements.filter((item) => scopedLogicalIds.has(item.logical_id))
+    : allRequirements;
+  const byId = new Map(relevant.map((item) => [item.id, item]));
+  const groups = new Map();
+  for (const requirement of relevant) {
+    const values = groups.get(requirement.logical_id) || [];
+    values.push(requirement);
+    groups.set(requirement.logical_id, values);
+  }
+  for (const [logicalId, requirements] of groups) {
+    const revisions = new Set();
+    const children = new Map();
+    for (const requirement of requirements) {
+      if (revisions.has(requirement.revision)) {
+        report.errors.push(`requirement lineage ${logicalId} contains duplicate revision ${requirement.revision}`);
+      }
+      revisions.add(requirement.revision);
+      const previous = requirement.previous_revision_ref;
+      if (requirement.revision === 1) {
+        if (previous !== null) report.errors.push(`requirement ${requirement.id} revision 1 must not have a parent`);
+        continue;
+      }
+      const parent = byId.get(previous?.id);
+      if (!parent || parent.logical_id !== logicalId) {
+        report.errors.push(`requirement ${requirement.id} references a missing or cross-lineage parent`);
+        continue;
+      }
+      const expected = buildRequirementRef(parent, toProjectPath(context, requirementPath(context, parent.id)));
+      if (
+        requirement.revision !== parent.revision + 1
+        || previous.revision !== expected.revision
+        || previous.content_hash !== expected.content_hash
+      ) {
+        report.errors.push(`requirement ${requirement.id} is not the exact direct child of ${parent.id}`);
+      }
+      const childIds = children.get(parent.id) || [];
+      childIds.push(requirement.id);
+      children.set(parent.id, childIds);
+    }
+    for (const [parentId, childIds] of children) {
+      if (childIds.length > 1) {
+        report.errors.push(`requirement lineage ${logicalId} forks at ${parentId}: ${childIds.sort().join(", ")}`);
+      }
+    }
+    const approvedHeads = requirements.filter((requirement) =>
+      requirement.status === "approved"
+      && effectiveRequirementStatus(context, requirement).status !== "superseded");
+    if (approvedHeads.length > 1) {
+      report.errors.push(`requirement lineage ${logicalId} has multiple approved heads: ${approvedHeads.map((item) => item.id).sort().join(", ")}`);
+    }
+    report.checked.push(`requirement lineage ${logicalId}`);
+  }
+  for (const event of requirementSupersessionEvents(context)) {
+    const current = byId.get(event.requirement_ref?.id);
+    const replacement = byId.get(event.replacement_ref?.id);
+    if (!current && !replacement) continue;
+    if (
+      !current
+      || !replacement
+      || replacement.previous_revision_ref?.id !== current.id
+      || replacement.revision !== current.revision + 1
+      || event.requirement_ref?.content_hash !== requirementContentHash(current)
+      || event.replacement_ref?.content_hash !== requirementContentHash(replacement)
+    ) {
+      report.errors.push(`requirement lifecycle event ${event.id || "unknown"} does not bind a direct immutable revision edge`);
+    }
+  }
+}
+
 function validateContracts(context, report, contractIds = null) {
   const contractsRoot = path.join(context.sdlcRoot, "contracts");
   const files = safeReadDir(contractsRoot).filter((name) => {
@@ -20306,6 +24509,7 @@ function validateContracts(context, report, contractIds = null) {
   for (const file of files) {
     const contract = readProjectJson(context, path.join(contractsRoot, file));
     const label = `contract ${file}`;
+    appendRecordSchemaIssues(report, contract, "contract.schema.json", label);
     for (const field of context.config.gate_policy.contract_required_fields) {
       if (contract[field] === undefined || contract[field] === null || contract[field] === "") {
         report.errors.push(`${label} is missing required field '${field}'`);
@@ -20355,6 +24559,35 @@ function validateContracts(context, report, contractIds = null) {
     validateExecutionPolicy(context, contract, label, report);
     validateCapabilityBindings(context, contract, label, report);
     validateContractCapabilityRecommendations(context, report, contract, label);
+    if ((contract.requirement_execution_profile_refs || []).length > 0) {
+      try {
+        const deliveryProfile = validateContractAutonomyBinding(context, contract);
+        if (deliveryProfile) {
+          const executionState = currentDeliveryExecutionState(context, deliveryProfile);
+          validateDeliveryExecutionReceipts(context, report, deliveryProfile, executionState, label);
+          if (executionState.lifecycle_status !== "terminal") {
+            const { decision } = evaluateDeliveryAutonomy(context, deliveryProfile, {
+              id: `AUT-GATE-${uniqueRecordSuffix()}`,
+              phase: contract.phase,
+            });
+            const invalidSources = decision.source_constraints.filter((constraint) => !constraint.valid);
+            if (decision.blocked || invalidSources.length > 0) {
+              report.errors.push(
+                `${label} autonomy decision is not valid: ${[
+                  ...decision.reason_codes,
+                  ...invalidSources.flatMap((constraint) => constraint.reason_codes),
+                ].filter(Boolean).join(", ") || "unknown boundary"}`,
+              );
+            }
+          }
+          report.checked.push(`delivery autonomy profile ${deliveryProfile.id}`);
+        }
+      } catch (error) {
+        report.errors.push(`${label} autonomy validation failed: ${error.message}`);
+      }
+    } else if (report.strict) {
+      report.warnings.push(`${label} has no requirement:v2 autonomy bindings and is restricted to supervised legacy behavior`);
+    }
     report.checked.push(label);
   }
 }
@@ -20600,6 +24833,7 @@ function validateTraces(context, report, storyId = null) {
       if (!event.run || typeof event.run !== "object") {
         report.errors.push(`${label}:${index + 1} is missing run metadata`);
       }
+      validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
       if (report.strict && ["test", "release"].includes(event.type)) {
         validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
         latestOutcomeEvents.set(event.type, { event, line: index + 1 });
@@ -20614,6 +24848,60 @@ function validateTraces(context, report, storyId = null) {
       }
     }
     report.checked.push(label);
+  }
+}
+
+function validateProtectedAutonomyTrace(context, report, event, label) {
+  if (!event.story_id) return;
+  const mappedAction = {
+    "sync.commit": "git.commit",
+    "sync.push": "git.push",
+    "sync.merge": "pull_request.merge",
+    "git.commit": "git.commit",
+    "git.push": "git.push",
+    "pull_request.merge": "pull_request.merge",
+    "release.local": "release.local",
+  }[event.action];
+  if (!mappedAction) return;
+  const story = readStory(context, event.story_id);
+  const contract = story?.contract_id
+    ? readContractById(context, story.contract_id, { missingOk: true })
+    : null;
+  const profileId = contract?.delivery_execution_profile_id;
+  if (!profileId) return;
+  let receipts;
+  try {
+    receipts = deliveryActionReceipts(context, profileId).filter((receipt) => receipt.action === mappedAction);
+  } catch (error) {
+    report.errors.push(`${label} cannot validate protected action receipts: ${error.message}`);
+    return;
+  }
+  const requiredStatus = event.action === mappedAction && event.outcome === "ready"
+    ? "authorized"
+    : "completed";
+  const evidence = new Set(Array.isArray(event.evidence) ? event.evidence : []);
+  const matching = receipts.filter((receipt) => {
+    const receiptPath = toProjectPath(
+      context,
+      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+    );
+    if (receipt.status !== requiredStatus || !evidence.has(receiptPath)) return false;
+    if (event.action === "sync.commit" && event.git?.after_sha) {
+      return receipt.action_details?.commit?.after_sha === event.git.after_sha;
+    }
+    if (event.action === "sync.push") {
+      return (!event.git?.after_sha || receipt.action_details?.push?.source_sha === event.git.after_sha)
+        && (!event.git?.remote || receipt.action_details?.push?.remote === event.git.remote);
+    }
+    if (event.action === "sync.merge" && event.git?.pr_url) {
+      return canonicalAbsoluteUrl(receipt.action_details?.merge?.pr_url) === canonicalAbsoluteUrl(event.git.pr_url);
+    }
+    return true;
+  });
+  if (matching.length !== 1) {
+    report.errors.push(
+      `${label} protected action ${event.action} requires one exact ${requiredStatus} ${mappedAction} receipt in trace evidence`,
+    );
   }
 }
 
@@ -20718,6 +25006,52 @@ function validateStory(context, storyId, report) {
       continue;
     }
     appendRecordSchemaIssues(report, requirement, "requirement.schema.json", `requirement ${requirementId}`);
+    if (requirement.schema_version === "requirement:v2") {
+      const label = `requirement ${requirementId}`;
+      const integrity = validateRequirementIntegrity(requirement);
+      for (const error of integrity.errors || []) {
+        report.errors.push(`${label}: ${error}`);
+      }
+      if (requirement.status !== "approved" || !isApprovedRecordFresh(requirement)) {
+        report.errors.push(`${label} must have a fresh formal approval`);
+      }
+      for (const stale of validateRequirementSourceHashes(context, requirement, label)) {
+        report.errors.push(`${label} source ${stale.path} is missing or changed`);
+      }
+      if (effectiveRequirementStatus(context, requirement).status === "superseded") {
+        report.errors.push(`${label} is superseded and cannot remain an active story input`);
+      }
+      const exactRef = (story.requirement_refs || []).find((ref) => ref.id === requirementId);
+      const expectedRef = buildRequirementRef(
+        requirement,
+        toProjectPath(context, requirementPath(context, requirementId)),
+      );
+      if (
+        !exactRef
+        || exactRef.content_hash !== expectedRef.content_hash
+        || exactRef.revision !== expectedRef.revision
+      ) {
+        report.errors.push(`Story ${storyId} has no current exact binding for ${label}`);
+      }
+      try {
+        const profile = readRequirementAutonomyProfile(context, requirement.autonomy_profile_id);
+        appendRecordSchemaIssues(
+          report,
+          profile,
+          "requirement-execution-profile.schema.json",
+          `requirement autonomy profile ${profile.id}`,
+        );
+        if (profile.status !== "active" || profile.requirement_ref.hash !== requirementContentHash(requirement)) {
+          report.errors.push(`${label} autonomy profile ${profile.id} is inactive or stale`);
+        }
+        validateAutonomyApprovalRef(context, profile, `Requirement autonomy profile ${profile.id}`);
+        report.checked.push(`requirement autonomy profile ${profile.id}`);
+      } catch (error) {
+        report.errors.push(`${label} autonomy validation failed: ${error.message}`);
+      }
+    } else if (report.strict) {
+      report.warnings.push(`requirement ${requirementId} is legacy requirement:v1 and is restricted to supervised autonomy`);
+    }
     if (
       story.proposal_ref &&
       (requirement.proposal_ref?.id !== story.proposal_ref.id || requirement.proposal_ref?.hash !== story.proposal_ref.hash)
@@ -21340,7 +25674,7 @@ function assertNoSymlinkPathSegments(filePath) {
     if (index === 0) {
       continue;
     }
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+    if (pathEntryExistsNoFollow(current) && fs.lstatSync(current).isSymbolicLink()) {
       fail(`Refusing to follow symlink while writing: ${current}`);
     }
   }
@@ -21731,11 +26065,53 @@ Usage:
   agentic-sdlc budget status --proposal ASSESS-001
   agentic-sdlc budget amend --proposal ASSESS-001 --budget-json json --reason text
       --actor-type human|ci --approval-source explicit-user|ci [--host-receipt-file path]
-  agentic-sdlc requirement create --id REQ-001 --title title --summary outcome
-      --acceptance "observable success criterion" [--source path]
-      [--proposal id --proposal-hash sha256]
+  agentic-sdlc requirement propose --id REQ-001 --title title --summary outcome
+      --acceptance "observable success criterion"
+      --autonomy-ceiling supervised|checkpointed|bounded-autonomous
+      [--constraint text] [--non-goal text] [--nfr text] [--integration text]
+      [--source path] [--proposal id --proposal-hash sha256]
+  agentic-sdlc requirement approve --id REQ-001
+      --actor-type human|ci --approval-source explicit-user|ci
+      --summary "Approve this requirement and autonomy ceiling" [--host-receipt-file path]
+  agentic-sdlc requirement revise --id REQ-001 --new-id REQ-001-R2
+      [--title title] [--summary outcome] [--acceptance criterion]
+      [--autonomy-ceiling supervised|checkpointed|bounded-autonomous]
+  agentic-sdlc requirement supersede --id REQ-001 --new-id REQ-001-R2 --reason text
+      --actor-type human|ci --approval-source explicit-user|ci --summary text
   agentic-sdlc requirement status [--id REQ-001]
+  agentic-sdlc autonomy requirement status --id REQ-001
+  agentic-sdlc autonomy delivery propose --id AUT-PR-1 --delivery PR-1
+      --kind pull_request --story ST-001 --contract CONTRACT-001
+      --requirement REQ-001 --level supervised|checkpointed|bounded-autonomous
+      --repository owner/repo --base main --head codex/ST-001
+      --write-path src [--write-path test]
+      [--allow-action repository.read|repository.write|test.run|git.commit|git.push|pull_request.create|pull_request.update|pull_request.merge]
+      [--merge-allowed]
+  agentic-sdlc autonomy delivery propose --id AUT-LOCAL-1 --delivery LOCAL-1
+      --kind local_release --story ST-001 --contract CONTRACT-001
+      --requirement REQ-001 --level supervised|checkpointed|bounded-autonomous
+      --target-root /absolute/local/root --write-path /absolute/local/root/output
+      --smoke-test '["node","--test"]' --rollback "reversible procedure"
+      [--allow-action build.local|test.run|release.local]
+  agentic-sdlc autonomy delivery approve --id AUT-PR-1 [--phase implementation]
+      --actor-type human|ci --approval-source explicit-user|ci --summary text
+      [--host-receipt-file path]
+  agentic-sdlc autonomy delivery revoke --id AUT-PR-1 --reason text
+      --actor-type human|ci --approval-source explicit-user|ci --summary text
+  agentic-sdlc autonomy delivery action --id AUT-PR-1 --action canonical-action
+      [--scope-path src/file.ts] [--remote origin] [--pr-url https://github.com/owner/repo/pull/1]
+      [--confirm-action --actor-type human|ci --approval-source explicit-user|ci --summary text]
+      [--host-receipt-file path]
+      [--outcome passed|failed --evidence path]
+      [--smoke-test '["node","--test"]' --rollback "exact approved procedure"]
+  agentic-sdlc autonomy delivery close --id AUT-PR-1
+      --terminal-status closed|rolled_back|cancelled|superseded
+      --reason text --actor-type human|ci --approval-source explicit-user|ci --summary text
+  agentic-sdlc autonomy delivery status [--id AUT-PR-1]
+  agentic-sdlc autonomy delivery explain --id AUT-PR-1 [--phase implementation] [--out path]
   agentic-sdlc contract create --phase phase [--id id] [--story ST-001]
+      [--delivery-profile AUT-PR-1]
+      [--level supervised|checkpointed|bounded-autonomous]
       [--context-file path] [--context-summary text] [--question text]
       [--qa "question|answer"] [--constraint text] [--assumption text]
       [--output-ref artifact-type:template-id:mode]
@@ -21743,7 +26119,8 @@ Usage:
       [--model model-id] [--reasoning inherit|minimal|low|medium|high]
   agentic-sdlc contract approve --id contract-id
       --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
-  agentic-sdlc story create --id ST-001 --title title [--acceptance text]
+  agentic-sdlc story create --id ST-001 --title title --requirement REQ-001
+      [--acceptance text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story complete-step --id ST-001 --step functional-analysis
@@ -21785,6 +26162,7 @@ Usage:
   agentic-sdlc authorization revoke --id id --actor-type human|ci [--reason text]
   agentic-sdlc task start [--intent-json json | --intent-file path] [--text raw]
       [--story ST-001] [--phase phase] [--contract-id id]
+      [--delivery-profile AUT-PR-1]
       [--confirm-start] [--authorization id] [--revise-contract] [--json]
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
@@ -21946,9 +26324,13 @@ Approval governance options:
 
 Task front-door options:
   --contract-id id       Force task start to evaluate a specific contract.
+  --delivery-profile id  Select the approved autonomy profile for this exact
+                         pull request or local release. It is never inherited
+                         from a previous delivery.
   --confirm-start        Record that the human already confirmed this concrete
-                         task start. This is operational authorization only;
-                         it is not formal contract approval.
+                         supervised/checkpointed task start. Bounded autonomy
+                         still requires exact, host-verifiable authority.
+                         This is not formal contract or profile approval.
   --revise-contract      Stop for contract revision even if an applicable
                          contract exists.
 
