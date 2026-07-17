@@ -132,6 +132,24 @@ test("memoizes parsed content by canonical hash and still detects external file 
   assert.ok(session.metrics().parsed_cache_hits >= 2);
 });
 
+test("parses each canonical snapshot with one read and one post-parse integrity check", (t) => {
+  const { root } = fixture(t);
+  const session = openCanonicalQuerySession({ root });
+
+  session.readJson("stories/ST-1/story.json");
+  session.readJson("stories/ST-1/story.json");
+  session.readJsonLines("traces/ST-1.jsonl");
+  session.readJsonLines("traces/ST-1.jsonl");
+
+  const metrics = session.metrics().store;
+  assert.equal(metrics.physical_reads, 2);
+  assert.equal(metrics.hash_calls, 6);
+  assert.equal(metrics.cache_hits, 4);
+  assert.equal(metrics.read_json_calls, 1);
+  assert.equal(metrics.read_text_calls, 1);
+  assert.equal(metrics.json_parses, 1);
+});
+
 test("reads snapshot content only while its canonical hash remains stable", (t) => {
   const { root, write } = fixture(t);
   const session = openCanonicalQuerySession({ root });

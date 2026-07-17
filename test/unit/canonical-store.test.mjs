@@ -52,6 +52,26 @@ test("reuses bytes by deterministic project-relative key and reports command-sco
   assert.equal(store.metrics().physical_reads, 2);
 });
 
+test("returns content-bound text and JSON snapshots without an extra physical read", (t) => {
+  const root = fixture(t);
+  const store = openCanonicalStore({ root });
+
+  const text = store.snapshot("alpha.txt");
+  assert.equal(text.readText(), "alpha\n");
+  assert.equal(
+    text.sha256,
+    crypto.createHash("sha256").update("alpha\n").digest("hex"),
+  );
+  const json = store.snapshot("nested/data.json");
+  assert.deepEqual(json.readJson(), { value: 1, items: ["a"] });
+  assert.equal(
+    json.sha256,
+    crypto.createHash("sha256").update('{"value":1,"items":["a"]}\n').digest("hex"),
+  );
+  assert.equal(store.metrics().physical_reads, 2);
+  assert.equal(store.metrics().hash_computations, 2);
+});
+
 test("detects external changes and supports exact, directory, and full invalidation", (t) => {
   const root = fixture(t);
   const store = openCanonicalStore({ root });
