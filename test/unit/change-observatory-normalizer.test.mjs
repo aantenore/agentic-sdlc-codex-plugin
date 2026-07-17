@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,10 @@ import {
   buildObservatoryViewModel,
   readSourceRecord,
 } from "../../lib/change-observatory/index.mjs";
+import {
+  createRecordIndex,
+  recordIndexEntry,
+} from "../../lib/change-observatory/record-index.mjs";
 
 const FIXED_TIME = "2026-07-16T09:00:00.000Z";
 const INTENTABI_EVENT_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -46,6 +51,200 @@ function intentAbiEnvelope(overrides = {}) {
     ...overrides,
   };
 }
+
+test("builds deterministic immutable record buckets in canonical input order", () => {
+  const records = [
+    { id: "A", group: "shared", tags: ["first", "common"] },
+    { id: "B", group: "other", tags: ["common"] },
+    { id: "C", group: "shared", tags: ["last", "common"] },
+  ];
+  const index = createRecordIndex(records, {
+    byGroup: (record) => [recordIndexEntry(record.group, record)],
+    byTag: (record) => record.tags.map((tag, tagIndex) =>
+      recordIndexEntry(tag, { record, tagIndex })),
+  });
+
+  assert.deepEqual(index.get("byGroup", "shared").map((record) => record.id), ["A", "C"]);
+  assert.deepEqual(
+    index.get("byTag", "common").map(({ record, tagIndex }) => [record.id, tagIndex]),
+    [["A", 1], ["B", 0], ["C", 1]],
+  );
+  assert.deepEqual([...index.keys("byGroup")], ["shared", "other"]);
+  assert.equal(index.size("byTag"), 3);
+  assert.equal(Object.isFrozen(index.get("byGroup", "shared")), true);
+  assert.equal(Object.isFrozen(index.get("byGroup", "missing")), true);
+  assert.throws(() => index.get("unknown", "shared"), /Unknown record index/u);
+});
+
+test("bounds multi-valued record indexes without reordering retained entries", () => {
+  const records = [
+    { id: "A", tags: ["one", "two", "three"] },
+    { id: "B", tags: ["four", "five", "six"] },
+  ];
+  const index = createRecordIndex(records, {
+    byTag: (record) => record.tags.map((tag, tagIndex) =>
+      recordIndexEntry(tag, { record, tagIndex })),
+    direct: (record) => [recordIndexEntry(record.id, record)],
+  }, {
+    maxEntriesByIndex: { byTag: 4, direct: 2 },
+  });
+
+  assert.deepEqual(
+    [...index.entries("byTag")].map(([key, [{ record, tagIndex }]]) => [key, record.id, tagIndex]),
+    [
+      ["one", "A", 0],
+      ["two", "A", 1],
+      ["three", "A", 2],
+      ["four", "B", 0],
+    ],
+  );
+  assert.equal(index.entryCount("byTag"), 4);
+  assert.equal(index.truncated("byTag"), true);
+  assert.equal(index.entryCount("direct"), 2);
+  assert.equal(index.truncated("direct"), false);
+  assert.deepEqual([...index.keys("direct")], ["A", "B"]);
+});
+
+test("retains later primary index entries when earlier optional fan-out fills the budget", () => {
+  const records = [
+    { id: "A", tags: ["a-primary", "a-extra-1", "a-extra-2", "a-extra-3"] },
+    { id: "B", tags: ["b-primary"] },
+  ];
+  const index = createRecordIndex(records, {
+    byTag: (record) => record.tags.map((tag, tagIndex) => recordIndexEntry(
+      tag,
+      { record, tagIndex },
+      { priority: tagIndex === 0 ? 1 : 0 },
+    )),
+  }, {
+    maxEntriesByIndex: { byTag: 3 },
+  });
+
+  assert.deepEqual(
+    [...index.entries("byTag")].map(([key, [{ record, tagIndex }]]) => [
+      key,
+      record.id,
+      tagIndex,
+    ]),
+    [
+      ["a-primary", "A", 0],
+      ["a-extra-1", "A", 1],
+      ["b-primary", "B", 0],
+    ],
+  );
+  assert.equal(index.entryCount("byTag"), 3);
+  assert.equal(index.truncated("byTag"), true);
+});
+
+test("direct record indexes preserve generic buckets without retained heap candidates", () => {
+  const records = [
+    { id: "A", key: "shared" },
+    { id: "B", key: null },
+    { id: "C", key: "" },
+    { id: "D", key: "shared" },
+    { id: "E", key: "other" },
+  ];
+  const definitions = {
+    lookup(record) {
+      if (record.id === "A") return [recordIndexEntry(record.key, { marker: record.id })];
+      if (record.id === "D") {
+        return [recordIndexEntry(record.key, undefined, { priority: 7 })];
+      }
+      if (record.id === "E") return [recordIndexEntry(record.key, null)];
+      return [recordIndexEntry(record.key, record)];
+    },
+  };
+
+  const generic = createRecordIndex(records, definitions);
+  const direct = createRecordIndex(records, definitions, { directIndexes: ["lookup"] });
+
+  assert.deepEqual([...direct.entries("lookup")], [...generic.entries("lookup")]);
+  assert.deepEqual(direct.get("lookup", "shared"), [{ marker: "A" }, records[3]]);
+  assert.deepEqual(direct.get("lookup", "other"), [null]);
+  assert.equal(direct.has("lookup", null), false);
+  assert.equal(direct.has("lookup", ""), false);
+  assert.equal(direct.size("lookup"), 2);
+  assert.equal(direct.entryCount("lookup"), 3);
+  assert.equal(direct.truncated("lookup"), false);
+  assert.equal(Object.isFrozen(direct.get("lookup", "shared")), true);
+  assert.equal(Object.isFrozen(direct.get("lookup", "missing")), true);
+});
+
+test("direct record indexes retain exact priority and budget semantics on fallback", () => {
+  const records = [
+    { id: "A", priority: 0 },
+    { id: "B", priority: 2 },
+    { id: "C", priority: 1 },
+    { id: "D", priority: 3 },
+    { id: "E", priority: 0 },
+  ];
+  const definitions = {
+    lookup: (record) => [recordIndexEntry(
+      record.id,
+      record,
+      { priority: record.priority },
+    )],
+  };
+  const options = { maxEntriesByIndex: { lookup: 2 } };
+  const generic = createRecordIndex(records, definitions, options);
+  const direct = createRecordIndex(records, definitions, {
+    ...options,
+    directIndexes: ["lookup"],
+  });
+
+  assert.deepEqual([...direct.entries("lookup")], [...generic.entries("lookup")]);
+  assert.deepEqual([...direct.keys("lookup")], ["B", "D"]);
+  assert.equal(direct.entryCount("lookup"), 2);
+  assert.equal(direct.truncated("lookup"), true);
+  assert.equal(Object.isFrozen(direct.get("lookup", "B")), true);
+});
+
+test("validates direct record index declarations and one-entry selectors", () => {
+  const records = [{ id: "A" }];
+  const definitions = {
+    lookup: (record) => [recordIndexEntry(record.id, record)],
+  };
+
+  assert.throws(
+    () => createRecordIndex(records, definitions, { directIndexes: {} }),
+    /directIndexes must be an array/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, definitions, { directIndexes: [""] }),
+    /must contain non-empty strings/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, definitions, { directIndexes: ["missing"] }),
+    /Unknown direct record index 'missing'/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, {
+      lookup: (record) => [
+        recordIndexEntry(record.id, record),
+        recordIndexEntry(`${record.id}-duplicate`, record),
+      ],
+    }, { directIndexes: ["lookup"] }),
+    /must return at most one entry/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, { lookup: () => ({ key: "A" }) }, {
+      directIndexes: ["lookup"],
+    }),
+    /must return an array/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, { lookup: () => [{}] }, {
+      directIndexes: ["lookup"],
+    }),
+    /returned an invalid entry/u,
+  );
+  assert.throws(
+    () => createRecordIndex(records, { lookup: () => [{ key: "A", priority: -1 }] }, {
+      directIndexes: ["lookup"],
+    }),
+    /returned an invalid entry priority/u,
+  );
+});
 
 test("normalizes representative SDLC lineage with explicit provenance and narrative", async (t) => {
   const root = await createProject(t);
@@ -211,6 +410,71 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
       assert.ok(Array.isArray(item.sourceRefs));
     }
   }
+});
+
+test("preserves the representative v1 model byte-for-byte after bounded indexing", async (t) => {
+  const root = await createProject(t);
+  const writeCompactJson = (relativePath, value) =>
+    writeText(root, relativePath, `${JSON.stringify(value)}\n`);
+  await writeCompactJson(".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "compat",
+    project_name: "Compatibility",
+  });
+  await writeCompactJson(".sdlc/requirements/REQ-C.json", {
+    schema_version: "requirement:v1",
+    id: "REQ-C",
+    title: "Keep output stable",
+    summary: "Preserve the v1 view.",
+  });
+  await writeCompactJson(".sdlc/contracts/CONTRACT-C.json", {
+    schema_version: "0.1.0",
+    id: "CONTRACT-C",
+    story_id: "ST-C",
+    status: "approved",
+    purpose: "Implement compat.",
+  });
+  await writeCompactJson(".sdlc/stories/ST-C/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-C",
+    title: "Compatibility story",
+    summary: "Stable output",
+    phase: "implementation",
+    status: "in_progress",
+    contract_id: "CONTRACT-C",
+    links: { requirements: ["REQ-C"], decisions: [], tests: [] },
+  });
+  await writeJsonLines(root, ".sdlc/traces/ST-C.jsonl", [{
+    id: "TR-C-REQ",
+    story_id: "ST-C",
+    type: "decision",
+    action: "task.start.confirm",
+    summary: "Confirmed work.",
+    request: { summary: "Implement compatibility." },
+    created_at: "2026-07-16T08:00:00Z",
+  }, {
+    id: "TR-C-IMP",
+    story_id: "ST-C",
+    type: "implementation",
+    summary: "Implemented compatibility.",
+    evidence: ["artifact.txt"],
+    created_at: "2026-07-16T08:10:00Z",
+  }, {
+    id: "TR-C-TEST",
+    story_id: "ST-C",
+    type: "test",
+    outcome: "passed",
+    summary: "Compatibility passed.",
+    created_at: "2026-07-16T08:20:00Z",
+  }]);
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => new Date(FIXED_TIME),
+    limits: { maxCollectionItems: 1_000 },
+  });
+  const digest = crypto.createHash("sha256").update(JSON.stringify(model)).digest("hex");
+
+  assert.equal(digest, "f00db93ad53210f26e7c302e18f1f2a6de6cdeef6e452715ae94d5c77be5277e");
 });
 
 test("builds proof-bound dossiers without cross-story, shared, or ambiguous lineage", async (t) => {
@@ -606,6 +870,86 @@ test("fails closed when canonical story IDs are duplicated", async (t) => {
   );
 });
 
+test("keeps stories with colliding bounded display IDs in separate dossiers", async (t) => {
+  const root = await createProject(t);
+  const storyA = "ST-COLLISION-A";
+  const storyB = "ST-COLLISION-B";
+  const displayId = storyA.slice(0, 8);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "story-id-collision",
+    project_name: "Story ID Collision",
+  });
+  for (const [storyId, title, traceId] of [
+    [storyA, "Alpha", "TR-A"],
+    [storyB, "Beta", "TR-B"],
+  ]) {
+    await writeJson(root, `.sdlc/stories/${storyId}/story.json`, {
+      id: storyId,
+      title,
+      phase: "implementation",
+      status: "in_progress",
+    });
+    await writeJsonLines(root, `.sdlc/traces/${traceId}.jsonl`, [{
+      id: traceId,
+      story_id: storyId,
+      type: "implementation",
+      summary: `Implemented ${title}.`,
+    }]);
+  }
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxTextChars: 8 },
+  });
+  const dossierA = model.dossiers.find((dossier) => dossier.title === "Alpha");
+  const dossierB = model.dossiers.find((dossier) => dossier.title === "Beta");
+
+  assert.equal(model.dossiers.length, 2);
+  assert.equal(dossierA.storyId, displayId);
+  assert.equal(dossierB.storyId, displayId);
+  assert.equal(dossierA.lanes.asked.items.some((item) => item.title === "Alpha"), true);
+  assert.equal(dossierB.lanes.asked.items.some((item) => item.title === "Beta"), true);
+  assert.deepEqual(dossierA.lanes.done.items.map((item) => item.id), ["TR-A"]);
+  assert.deepEqual(dossierB.lanes.done.items.map((item) => item.id), ["TR-B"]);
+  assert.equal(model.iterations.find((iteration) => iteration.title === "Alpha").dossier, dossierA);
+  assert.equal(model.iterations.find((iteration) => iteration.title === "Beta").dossier, dossierB);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "dossier_story_id_ambiguous"),
+    false,
+  );
+});
+
+test("retains a long canonical story record in its own bounded-display dossier", async (t) => {
+  const root = await createProject(t);
+  const storyId = "ST-SELF-LONG-IDENTITY";
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "long-self-story",
+    project_name: "Long Self Story",
+  });
+  await writeJson(root, `.sdlc/stories/${storyId}/story.json`, {
+    id: storyId,
+    title: "Self",
+    phase: "analysis",
+    status: "in_progress",
+  });
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxTextChars: 5 },
+  });
+  const dossier = model.dossiers.find((item) => item.title === "Self");
+
+  assert.ok(dossier);
+  assert.equal(dossier.storyId, storyId.slice(0, 5));
+  assert.equal(dossier.lanes.asked.items.some((item) => item.type === "story"), true);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "dossier_cross_story_link_blocked"),
+    false,
+  );
+});
+
 test("orders dossiers deterministically and enforces one global nested-item limit", async (t) => {
   const populate = async (root, reverse) => {
     const records = [
@@ -671,6 +1015,229 @@ test("orders dossiers deterministically and enforces one global nested-item limi
   assert.equal(
     first.dossiers.some((dossier) => Object.values(dossier.lanes)
       .some((lane) => lane.status === "malformed")),
+    true,
+  );
+});
+
+test("bounds optional fan-out without losing direct story lineage or cross-story controls", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "bounded-fanout",
+    project_name: "Bounded Fanout",
+  });
+  for (const storyId of ["ST-A", "ST-B"]) {
+    await writeJson(root, `.sdlc/stories/${storyId}/story.json`, {
+      schema_version: "0.1.0",
+      id: storyId,
+      title: `Story ${storyId}`,
+      phase: "implementation",
+      status: "in_progress",
+      links: { requirements: [], decisions: [], tests: [] },
+    });
+    await writeJsonLines(root, `.sdlc/traces/${storyId}.jsonl`, [1, 2].map((index) => ({
+      id: `${storyId}-IMP-${index}`,
+      story_id: storyId,
+      type: "implementation",
+      summary: `Implemented ${storyId} ${index}.`,
+      related: ["ST-A", "ST-B", "ST-X-1", "ST-X-2", "ST-X-3", "ST-X-4", "ST-X-5"],
+    })));
+  }
+  await writeJson(root, ".sdlc/decisions/DEC-APPROVALS.json", {
+    schema_version: "decision:v1",
+    id: "DEC-APPROVALS",
+    summary: "A decision with intentionally wide approvals.",
+    approvals: Array.from({ length: 7 }, (_, index) => ({
+      id: `APR-${index + 1}`,
+      status: "approved",
+      summary: `Approval ${index + 1}`,
+    })),
+  });
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxCollectionItems: 5, maxRecords: 9 },
+  });
+  const dossierA = model.dossiers.find((dossier) => dossier.storyId === "ST-A");
+  const dossierB = model.dossiers.find((dossier) => dossier.storyId === "ST-B");
+
+  assert.deepEqual(
+    dossierA.lanes.done.items.map((item) => item.id),
+    ["ST-A-IMP-1", "ST-A-IMP-2"],
+  );
+  assert.equal(dossierB.lanes.done.items.some((item) => item.id === "ST-B-IMP-1"), true);
+  assert.equal(dossierB.lanes.done.items.some((item) => item.id.startsWith("ST-A")), false);
+  assert.deepEqual(model.decisions.map((item) => item.id), ["APR-1", "APR-2", "APR-3", "APR-4", "APR-5"]);
+  for (const code of [
+    "record_fanout_truncated",
+    "record_index_truncated",
+    "dossier_cross_story_link_blocked",
+    "dossier_nested_items_truncated",
+  ]) {
+    assert.equal(model.diagnostics.some((diagnostic) => diagnostic.code === code), true, code);
+  }
+});
+
+test("does not let earlier optional fan-out evict a later delivery ownership link", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/autonomy/deliveries/00-WIDE.json", {
+    id: "AUT-WIDE",
+    story_refs: Array.from({ length: 5 }, (_, index) => ({ id: `ST-X-${index + 1}` })),
+  });
+  await writeJson(root, ".sdlc/autonomy/deliveries/ZZ-TARGET.json", {
+    id: "AUT-TARGET",
+    story_refs: [{ id: "ST-A" }],
+  });
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "primary-index-lineage",
+    project_name: "Primary Index Lineage",
+  });
+  await writeJson(root, ".sdlc/stories/ST-A/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-A",
+    title: "Story A",
+    phase: "implementation",
+    status: "in_progress",
+  });
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxCollectionItems: 5, maxRecords: 4 },
+  });
+  const dossier = model.dossiers.find((item) => item.storyId === "ST-A");
+
+  assert.ok(dossier);
+  assert.equal(dossier.lanes.decided.items.some((item) => item.id === "AUT-TARGET"), true);
+  assert.equal(dossier.lanes.decided.items.some((item) => item.id === "AUT-WIDE"), false);
+  assert.equal(model.unlinked.some((item) => item.id === "AUT-WIDE"), true);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "record_index_truncated"),
+    true,
+  );
+});
+
+test("keeps canonical relationship keys while bounding identifier display", async (t) => {
+  const root = await createProject(t);
+  const storyId = "ST-LONG-000001";
+  const contractId = "CONTRACT-LONG-000001";
+  const requirementId = "REQ-LONG-000001";
+  const profileId = "PROFILE-LONG-000001";
+  const bounded = (value) => value.slice(0, 10);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "bounded-index-ids",
+    project_name: "Bounded Index IDs",
+  });
+  await writeJson(root, `.sdlc/stories/${storyId}/story.json`, {
+    id: storyId,
+    title: "Long identifier story",
+    phase: "implementation",
+    status: "in_progress",
+    contract_id: contractId,
+  });
+  await writeJson(root, `.sdlc/stories/${storyId}/steps/implementation.json`, {
+    id: "STEP",
+    phase: "implementation",
+    status: "completed",
+  });
+  await writeJson(root, ".sdlc/contracts/LONG.json", {
+    id: contractId,
+    story_id: storyId,
+    status: "approved",
+  });
+  await writeJson(root, ".sdlc/requirements/LONG.json", {
+    id: requirementId,
+    title: "Long requirement",
+  });
+  await writeJson(root, ".sdlc/work-breakdown/LONG.json", {
+    id: "WB",
+    requirement_id: requirementId,
+    items: [{ type: "story", id: storyId }],
+  });
+  await writeJson(root, ".sdlc/decisions/RELATED.json", {
+    id: "DEC-REL",
+    summary: "Related by a bounded story ID.",
+    related: [storyId],
+  });
+  await writeJson(root, ".sdlc/autonomy/deliveries/LONG.json", {
+    id: profileId,
+    story_refs: [{ id: storyId }],
+  });
+  await writeJson(root, ".sdlc/autonomy/decisions/LONG.json", {
+    id: "AUT-DEC",
+    delivery: { profile_id: profileId },
+  });
+  await writeJsonLines(root, ".sdlc/traces/LONG.jsonl", [{
+    id: "TR-ST",
+    story_id: storyId,
+    type: "implementation",
+    summary: "Linked by story ID.",
+  }, {
+    id: "TR-CT",
+    contract_id: contractId,
+    type: "implementation",
+    summary: "Linked by contract ID.",
+  }]);
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxTextChars: 10 },
+  });
+  const dossier = model.dossiers.find((item) => item.storyId === bounded(storyId));
+
+  assert.ok(dossier);
+  assert.equal(dossier.lanes.asked.items.some((item) => item.id === bounded(requirementId)), true);
+  assert.equal(dossier.lanes.contract.items.some((item) => item.id === bounded(contractId)), true);
+  assert.equal(dossier.lanes.decided.items.some((item) => item.id === "DEC-REL"), true);
+  assert.equal(dossier.lanes.decided.items.some((item) => item.id === bounded(profileId)), true);
+  assert.equal(dossier.lanes.decided.items.some((item) => item.id === "AUT-DEC"), true);
+  assert.equal(dossier.lanes.done.items.some((item) => item.id === "TR-ST"), true);
+  assert.equal(dossier.lanes.done.items.some((item) => item.id === "TR-CT"), true);
+  assert.equal(
+    model.iterations.find((item) => item.id === bounded(storyId)).phases
+      .find((phase) => phase.phase === "implementation").status,
+    "complete",
+  );
+});
+
+test("bounds many unlinked fan-out records while preserving total count and order", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "bounded-unlinked",
+    project_name: "Bounded Unlinked",
+  });
+  await writeJsonLines(root, ".sdlc/traces/unlinked.jsonl", Array.from(
+    { length: 12 },
+    (_, index) => ({
+      id: `UN-${String(index + 1).padStart(2, "0")}`,
+      type: "implementation",
+      summary: `Unlinked implementation ${index + 1}.`,
+      related: Array.from({ length: 5 }, (__, relatedIndex) =>
+        `MISSING-${index + 1}-${relatedIndex + 1}`),
+      created_at: `2026-07-16T08:${String(index).padStart(2, "0")}:00Z`,
+    }),
+  ));
+  const options = {
+    clock: () => FIXED_TIME,
+    limits: { maxCollectionItems: 3 },
+  };
+
+  const first = await buildObservatoryViewModel(root, options);
+  const second = await buildObservatoryViewModel(root, options);
+
+  assert.deepEqual(first, second);
+  assert.deepEqual(first.unlinked.map((item) => item.id), ["UN-12", "UN-11", "UN-10"]);
+  assert.equal(first.snapshots.counts.unlinked, 12);
+  assert.equal(
+    first.diagnostics.some((diagnostic) =>
+      diagnostic.code === "collection_truncated"
+      && diagnostic.message.includes("unlinked")),
+    true,
+  );
+  assert.equal(
+    first.diagnostics.some((diagnostic) => diagnostic.code === "record_fanout_truncated"),
     true,
   );
 });
@@ -948,6 +1515,106 @@ test("tolerates legacy records and isolates malformed JSON and JSONL", async (t)
   assert.equal(model.diagnostics.some((diagnostic) => diagnostic.code === "diagnostics_truncated"), true);
 });
 
+test("materializes only the configured JSONL prefix and records deterministic truncation", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "jsonl-prefix",
+    project_name: "JSONL Prefix",
+  });
+  await writeJsonLines(root, ".sdlc/traces/prefix.jsonl", Array.from({ length: 20 }, (_, index) => ({
+    id: `TR-${String(index + 1).padStart(2, "0")}`,
+    type: "decision",
+    summary: `Trace ${index + 1}`,
+  })));
+
+  const first = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxJsonLines: 2 },
+  });
+  const second = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxJsonLines: 2 },
+  });
+
+  assert.deepEqual(first, second);
+  assert.deepEqual(first.decisions.map((item) => item.id), ["TR-01", "TR-02"]);
+  assert.deepEqual(
+    first.records.filter((record) => record.type === "trace").map((record) => record.line),
+    [1, 2],
+  );
+  assert.equal(
+    first.diagnostics.some((diagnostic) => diagnostic.code === "max_json_lines_exceeded"),
+    true,
+  );
+});
+
+test("does not report JSONL overflow for exactly the line limit plus a terminal newline", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "jsonl-exact-limit",
+    project_name: "JSONL Exact Limit",
+  });
+  await writeJsonLines(root, ".sdlc/traces/exact.jsonl", [{
+    id: "TR-01",
+    type: "decision",
+    summary: "Trace 1",
+  }, {
+    id: "TR-02",
+    type: "decision",
+    summary: "Trace 2",
+  }]);
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxJsonLines: 2 },
+  });
+
+  assert.deepEqual(model.decisions.map((item) => item.id), ["TR-01", "TR-02"]);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "max_json_lines_exceeded"),
+    false,
+  );
+});
+
+test("keeps bounded summary ranking and collection ordering stable across compaction batches", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "bounded-ranking",
+    project_name: "Bounded Ranking",
+  });
+  const older = Array.from({ length: 6 }, (_, index) => ({
+    id: `OLD-${index + 1}`,
+    type: "implementation",
+    summary: `Older implementation ${index + 1}`,
+    created_at: "2026-07-16T08:00:00Z",
+  }));
+  const tied = ["Z-TOP", "A-TOP", "M-TOP"].map((id) => ({
+    id,
+    type: "implementation",
+    summary: `Tied implementation ${id}`,
+    created_at: "2026-07-16T09:00:00Z",
+  }));
+  const newerSync = ["S-3", "S-1", "S-2"].map((id) => ({
+    id,
+    type: "sync",
+    action: "story.release",
+    summary: `Newer sync ${id}`,
+    created_at: "2026-07-16T10:00:00Z",
+  }));
+  await writeJsonLines(root, ".sdlc/traces/ranking.jsonl", [...older, ...tied, ...newerSync]);
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxCollectionItems: 3 },
+  });
+
+  assert.deepEqual(model.summary.changed.map((item) => item.id), ["Z-TOP", "A-TOP", "M-TOP"]);
+  assert.deepEqual(model.changes.map((item) => item.id), ["S-1", "S-2", "S-3"]);
+});
+
 test("redacts explicitly stored private reasoning from normalized and source views", async (t) => {
   const root = await createProject(t);
   await writeJson(root, ".sdlc/project.json", {
@@ -1051,6 +1718,31 @@ test("bounds private-reasoning traversal iteratively and fails closed on extreme
   );
   assert.equal(
     model.diagnostics.some((diagnostic) => diagnostic.code === "private_reasoning_redacted"),
+    true,
+  );
+});
+
+test("fails closed before materializing an excessively wide private-reasoning stack", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "wide-reasoning-scan",
+    project_name: "Wide Reasoning Scan",
+  });
+  await writeJson(root, ".sdlc/decisions/WIDE.json", {
+    id: "DEC-WIDE",
+    summary: "A safe bounded summary.",
+    payload: Array.from({ length: 25_100 }, () => ({})),
+  });
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+  const decision = model.decisions.find((item) => item.id === "DEC-WIDE");
+
+  assert.ok(decision);
+  assert.equal(decision.explanation.text, "A safe bounded summary.");
+  assert.equal(decision.narrative, null);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "private_reasoning_scan_limited"),
     true,
   );
 });
