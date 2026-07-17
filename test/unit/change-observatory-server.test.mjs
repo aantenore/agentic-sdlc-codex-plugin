@@ -224,6 +224,34 @@ test("GET, HEAD, and rejected writes do not mutate canonical project evidence", 
   assert.deepEqual(await snapshotTree(fixture.projectRoot), before);
 });
 
+test("omits deeply nested raw JSON when bounded private-reasoning redaction cannot finish", async (t) => {
+  const fixture = await createServerFixture(t);
+  const depth = 12_000;
+  const nested = `${'{"next":'.repeat(depth)}{"private_reasoning":"DEEP_PRIVATE_MUST_NOT_LEAK"}${"}".repeat(depth)}`;
+  await fs.writeFile(
+    path.join(fixture.projectRoot, ".sdlc", "deep-private.json"),
+    `{"id":"DEEP-PRIVATE","payload":${nested}}\n`,
+    "utf8",
+  );
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  const source = await request(
+    running,
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/deep-private.json")}`,
+  );
+  assert.equal(source.statusCode, 200);
+  assert.equal(source.json.provenance, "malformed");
+  assert.equal(source.json.parseError, "private_reasoning_scan_limited");
+  assert.equal(source.json.contentOmitted, true);
+  assert.equal(Object.hasOwn(source.json, "data"), false);
+  assert.deepEqual(source.json.redactions, [""]);
+  assert.doesNotMatch(source.body, /DEEP_PRIVATE_MUST_NOT_LEAK/);
+});
+
 test("refuses non-loopback bind configuration", async (t) => {
   const fixture = await createServerFixture(t);
   await assert.rejects(

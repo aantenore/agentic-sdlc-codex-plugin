@@ -1,4 +1,13 @@
 export const VIEW_MODEL_SCHEMA = "change-observatory:view:v1";
+export const DOSSIER_SCHEMA = "change-observatory:iteration-dossier:v1";
+
+export const DOSSIER_LANES = Object.freeze([
+  Object.freeze({ key: "asked", label: "Asked" }),
+  Object.freeze({ key: "decided", label: "Decided" }),
+  Object.freeze({ key: "contract", label: "Contract" }),
+  Object.freeze({ key: "done", label: "Done" }),
+  Object.freeze({ key: "verified", label: "Verified" }),
+]);
 
 export const PHASES = Object.freeze([
   "discovery",
@@ -85,14 +94,29 @@ function normalizeSourceRef(value) {
 
 function normalizeNarrative(value) {
   const narrative = objectOrEmpty(value);
+  const inputSummaries = arrayOrEmpty(narrative.input_summaries ?? narrative.inputSummaries)
+    .map(normalizeNarrativeEntry)
+    .filter(Boolean);
+  const outputSummaries = arrayOrEmpty(narrative.output_summaries ?? narrative.outputSummaries)
+    .map(normalizeNarrativeEntry)
+    .filter(Boolean);
   return {
     inputSummary: readable(narrative.input_summary ?? narrative.inputSummary, "") || null,
     outputSummary: readable(narrative.output_summary ?? narrative.outputSummary, "") || null,
-    rationale: readable(narrative.rationale, "") || null,
+    inputSummaries,
+    outputSummaries,
+    rationaleSummary:
+      readable(
+        narrative.rationale_summary ?? narrative.rationaleSummary ?? narrative.rationale,
+        "",
+      ) || null,
     generatedExplanation:
       readable(narrative.generated_explanation ?? narrative.generatedExplanation, "") || null,
     explanationSource:
       readable(narrative.explanation_source ?? narrative.explanationSource, "") || null,
+    provenance: normalizeProvenance(narrative.provenance),
+    sourceRefs: arrayOrEmpty(narrative.sourceRefs).map(normalizeSourceRef).filter(Boolean),
+    truncated: narrative.truncated === true,
     alternatives: arrayOrEmpty(narrative.alternatives).map(normalizeNarrativeEntry).filter(Boolean),
     evidence: arrayOrEmpty(narrative.evidence).map(normalizeNarrativeEntry).filter(Boolean),
     chainOfThoughtIncluded: narrative.chain_of_thought_included === true,
@@ -117,6 +141,21 @@ function normalizeNarrativeEntry(value) {
 
 function normalizeMappedEntry(value) {
   return normalizeNarrativeEntry(value);
+}
+
+function normalizeLinkage(value) {
+  const linkage = objectOrEmpty(value);
+  const status = linkage.status === "linked" ? "linked" : "unlinked";
+  return {
+    status,
+    storyId: status === "linked" ? readable(linkage.storyId ?? linkage.story_id, "") || null : null,
+    via: status === "linked"
+      ? [...new Set(arrayOrEmpty(linkage.via).map((entry) => readable(entry, "")).filter(Boolean))]
+      : [],
+    sourceRefs: status === "linked"
+      ? arrayOrEmpty(linkage.sourceRefs).map(normalizeSourceRef).filter(Boolean)
+      : [],
+  };
 }
 
 export function normalizeSemanticObservation(value) {
@@ -199,6 +238,30 @@ export function normalizeItem(value) {
   const sourceRefs = arrayOrEmpty(item.sourceRefs).map(normalizeSourceRef).filter(Boolean);
   const narrative = normalizeNarrative(item.narrative);
   const explanation = objectOrEmpty(item.explanation);
+  const rationale = objectOrEmpty(item.rationale);
+  const explicitRationale = readable(
+    item.rationaleSummary
+      ?? item.rationale_summary
+      ?? (typeof item.rationale === "string" ? item.rationale : rationale.text),
+    "",
+  ) || null;
+  const explicitGeneratedExplanation =
+    readable(item.generatedExplanation ?? item.generated_explanation, "") || null;
+  if (!narrative.rationaleSummary && explicitRationale) {
+    narrative.rationaleSummary = explicitRationale;
+    narrative.provenance = normalizeProvenance(
+      item.rationaleProvenance ?? rationale.provenance ?? item.provenance,
+    );
+    narrative.sourceRefs = arrayOrEmpty(rationale.sourceRefs)
+      .map(normalizeSourceRef)
+      .filter(Boolean);
+  }
+  if (!narrative.generatedExplanation && explicitGeneratedExplanation) {
+    narrative.generatedExplanation = explicitGeneratedExplanation;
+    narrative.explanationSource =
+      readable(item.explanationSource ?? item.explanation_source, "") || null;
+    narrative.provenance = normalizeProvenance(item.explanationProvenance ?? item.provenance);
+  }
 
   return {
     id: readable(item.id, "Unidentified record"),
@@ -213,6 +276,14 @@ export function normalizeItem(value) {
     sourceRefs,
     rawHref: safeRawHref(item.rawHref),
     intent: readable(item.intent, "") || null,
+    storyId: readable(item.storyId ?? item.story_id, "") || null,
+    requirementId: readable(item.requirementId ?? item.requirement_id, "") || null,
+    requirementIds: arrayOrEmpty(item.requirementIds ?? item.requirement_ids)
+      .map((entry) => readable(entry, ""))
+      .filter(Boolean),
+    contractId: readable(item.contractId ?? item.contract_id, "") || null,
+    related: arrayOrEmpty(item.related).map((entry) => readable(entry, "")).filter(Boolean),
+    linkage: normalizeLinkage(item.linkage),
     narrative,
     explanation: {
       text: readable(explanation.text, "") || null,
@@ -227,6 +298,138 @@ export function normalizeItem(value) {
   };
 }
 
+function normalizeDossierLane(value) {
+  const lane = Array.isArray(value) ? { items: value } : objectOrEmpty(value);
+  const items = arrayOrEmpty(lane.items).map(normalizeItem);
+  const explicitStatus = ["recorded", "missing", "malformed"].includes(lane.status)
+    ? lane.status
+    : null;
+  const explicitProvenance = PROVENANCE.has(lane.provenance) ? lane.provenance : null;
+  return {
+    status: explicitStatus ?? (items.length ? "recorded" : "missing"),
+    provenance: explicitProvenance ?? (items.length ? "recorded" : "missing"),
+    sourceRefs: arrayOrEmpty(lane.sourceRefs).map(normalizeSourceRef).filter(Boolean),
+    items,
+    declaredStatus: explicitStatus,
+    declaredProvenance: explicitProvenance,
+    statusWasPresent: Object.hasOwn(lane, "status"),
+    provenanceWasPresent: Object.hasOwn(lane, "provenance"),
+  };
+}
+
+function normalizeDossierLinks(value) {
+  const links = objectOrEmpty(value);
+  return {
+    requirementIds: arrayOrEmpty(links.requirementIds ?? links.requirement_ids)
+      .map((entry) => readable(entry, ""))
+      .filter(Boolean),
+    contractIds: arrayOrEmpty(links.contractIds ?? links.contract_ids)
+      .map((entry) => readable(entry, ""))
+      .filter(Boolean),
+  };
+}
+
+function enforceDossierLaneOwnership(lane, dossierStoryId, laneKey, diagnostics) {
+  const {
+    declaredStatus,
+    declaredProvenance,
+    statusWasPresent,
+    provenanceWasPresent,
+    ...publicLane
+  } = lane;
+  const rejected = [];
+  const items = lane.items.filter((item) => {
+    const owned = Boolean(
+      dossierStoryId
+      && item.linkage?.status === "linked"
+      && item.linkage.storyId === dossierStoryId
+      && (!item.storyId || item.storyId === dossierStoryId),
+    );
+    if (!owned) rejected.push(item);
+    return owned;
+  });
+  if (rejected.length) {
+    diagnostics.push(normalizeDiagnostic({
+      code: "dossier_item_ownership_mismatch",
+      severity: "error",
+      message: `${rejected.length} ${laneKey} ${rejected.length === 1 ? "item was" : "items were"} excluded because explicit story ownership did not match the dossier.`,
+      occurrences: rejected.length,
+      provenance: "malformed",
+      sourceRefs: rejected.flatMap((item) => item.sourceRefs).slice(0, 12),
+    }));
+  }
+  const expectedState = items.length ? "recorded" : "missing";
+  const stateContradiction = declaredStatus === "malformed"
+    || (statusWasPresent && declaredStatus !== expectedState)
+    || (provenanceWasPresent && declaredProvenance !== expectedState);
+  if (stateContradiction) {
+    diagnostics.push(normalizeDiagnostic({
+      code: "dossier_lane_state_inconsistent",
+      severity: "error",
+      message: `The ${laneKey} lane declared status or provenance that contradicts its accepted items.`,
+      provenance: "malformed",
+      sourceRefs: publicLane.sourceRefs,
+    }));
+  }
+  const malformed = rejected.length > 0 || stateContradiction;
+  return {
+    ...publicLane,
+    status: malformed ? "malformed" : expectedState,
+    provenance: malformed ? "malformed" : expectedState,
+    items,
+  };
+}
+
+export function normalizeDossier(value) {
+  const dossier = objectOrEmpty(value);
+  const lanes = objectOrEmpty(dossier.lanes);
+  const schemaVersion = readable(dossier.schemaVersion ?? dossier.schema_version, "") || null;
+  const sourceRefs = arrayOrEmpty(dossier.sourceRefs).map(normalizeSourceRef).filter(Boolean);
+  const status = ["complete", "partial", "missing", "malformed"].includes(dossier.status)
+    ? dossier.status
+    : "malformed";
+  const storyId = readable(dossier.storyId ?? dossier.story_id, "") || null;
+  const diagnostics = arrayOrEmpty(dossier.diagnostics).map(normalizeDiagnostic);
+  const normalizedLanes = {
+    asked: normalizeDossierLane(lanes.asked),
+    decided: normalizeDossierLane(lanes.decided),
+    contract: normalizeDossierLane(lanes.contract),
+    done: normalizeDossierLane(lanes.done),
+    verified: normalizeDossierLane(lanes.verified),
+    release: normalizeDossierLane(lanes.release),
+  };
+  const ownedLanes = Object.fromEntries(
+    Object.entries(normalizedLanes).map(([laneKey, lane]) => [
+      laneKey,
+      enforceDossierLaneOwnership(lane, storyId, laneKey, diagnostics),
+    ]),
+  );
+  const canonicalLaneStates = DOSSIER_LANES.map(({ key }) => ownedLanes[key].status);
+  const derivedStatus = canonicalLaneStates.includes("malformed") || status === "malformed"
+    ? "malformed"
+    : canonicalLaneStates.every((laneStatus) => laneStatus === "recorded")
+      ? "complete"
+      : "partial";
+
+  return {
+    schemaVersion,
+    schemaSupported: schemaVersion === DOSSIER_SCHEMA,
+    storyId,
+    iterationId: readable(dossier.iterationId ?? dossier.iteration_id, "") || null,
+    title: readable(dossier.title, "") || null,
+    summary: readable(dossier.summary, "") || null,
+    status: derivedStatus,
+    provenance: derivedStatus === "malformed"
+      ? "malformed"
+      : normalizeProvenance(dossier.provenance),
+    sourceRefs,
+    rawHref: safeRawHref(dossier.rawHref),
+    links: normalizeDossierLinks(dossier.links),
+    lanes: ownedLanes,
+    diagnostics,
+  };
+}
+
 function normalizePhase(value, fallbackPhase) {
   const phase = objectOrEmpty(value);
   const status = PHASE_STATES.has(phase.status) ? phase.status : "missing";
@@ -238,7 +441,7 @@ function normalizePhase(value, fallbackPhase) {
   };
 }
 
-function normalizeIteration(value, index) {
+function normalizeIteration(value, index, dossier = null) {
   const iteration = normalizeItem(value);
   const byPhase = new Map(
     arrayOrEmpty(value?.phases).map((phase) => [readable(phase?.phase, "").toLowerCase(), phase]),
@@ -248,6 +451,7 @@ function normalizeIteration(value, index) {
     title: readable(value?.title, `Iteration ${index + 1}`),
     currentPhase: readable(value?.currentPhase, "") || null,
     phases: PHASES.map((phase) => normalizePhase(byPhase.get(phase), phase)),
+    dossier,
   };
 }
 
@@ -321,6 +525,81 @@ export function normalizeViewModel(payload) {
   const summary = objectOrEmpty(payload.summary);
   const project = objectOrEmpty(payload.project);
   const snapshots = objectOrEmpty(payload.snapshots);
+  const rawIterations = arrayOrEmpty(payload.iterations);
+  const iterationIds = new Set(rawIterations.map((iteration) => readable(
+    iteration?.id ?? iteration?.storyId ?? iteration?.story_id,
+    "",
+  )).filter(Boolean));
+  const topLevelDossiers = arrayOrEmpty(payload.dossiers).map(normalizeDossier);
+  const ownershipDiagnostics = [];
+  for (const dossier of topLevelDossiers) {
+    if (!dossier.storyId || dossier.storyId !== dossier.iterationId) {
+      ownershipDiagnostics.push({
+        code: "dossier_iteration_ownership_mismatch",
+        severity: "error",
+        message: "A top-level dossier was not associated because its story and iteration IDs do not match exactly.",
+        provenance: "malformed",
+        sourceRefs: dossier.sourceRefs,
+      });
+    } else if (!iterationIds.has(dossier.iterationId)) {
+      ownershipDiagnostics.push({
+        code: "dossier_iteration_not_found",
+        severity: "warning",
+        message: "A top-level dossier references an iteration that is not present in this view and remains unassociated.",
+        provenance: "missing",
+        sourceRefs: dossier.sourceRefs,
+      });
+    }
+  }
+  const iterations = rawIterations.map((iteration, index) => {
+    const explicitIterationId = readable(
+      iteration?.id ?? iteration?.storyId ?? iteration?.story_id,
+      "",
+    );
+    let dossier = null;
+    if (iteration?.dossier && typeof iteration.dossier === "object") {
+      const inlineDossier = normalizeDossier(iteration.dossier);
+      if (
+        inlineDossier.storyId === explicitIterationId
+        && inlineDossier.iterationId === explicitIterationId
+      ) {
+        dossier = inlineDossier;
+      } else {
+        ownershipDiagnostics.push({
+          code: "dossier_iteration_ownership_mismatch",
+          severity: "error",
+          message: "An inline dossier was not associated because its story and iteration IDs do not match the owning iteration exactly.",
+          provenance: "malformed",
+          sourceRefs: inlineDossier.sourceRefs,
+        });
+      }
+    }
+    if (!dossier) {
+      const candidates = topLevelDossiers.filter((candidate) =>
+        candidate.storyId === explicitIterationId
+        && candidate.iterationId === explicitIterationId);
+      if (candidates.length === 1) dossier = candidates[0];
+      if (candidates.length > 1) {
+        ownershipDiagnostics.push({
+          code: "dossier_iteration_ownership_ambiguous",
+          severity: "error",
+          message: "Multiple top-level dossiers claim the same iteration, so none was associated.",
+          provenance: "malformed",
+          sourceRefs: candidates.flatMap((candidate) => candidate.sourceRefs).slice(0, 12),
+        });
+      }
+    }
+    return normalizeIteration(iteration, index, dossier);
+  });
+  const inlineDossiers = iterations.map((iteration) => iteration.dossier).filter(Boolean);
+  const dossierKeys = new Set(
+    inlineDossiers.map((dossier) => `${dossier.storyId ?? ""}\u0000${dossier.iterationId ?? ""}`),
+  );
+  const dossiers = [
+    ...inlineDossiers,
+    ...topLevelDossiers.filter((dossier) =>
+      !dossierKeys.has(`${dossier.storyId ?? ""}\u0000${dossier.iterationId ?? ""}`)),
+  ];
 
   return {
     schemaVersion: VIEW_MODEL_SCHEMA,
@@ -341,7 +620,8 @@ export function normalizeViewModel(payload) {
       changed: arrayOrEmpty(summary.changed).map(normalizeItem),
       decided: arrayOrEmpty(summary.decided).map(normalizeItem),
     },
-    iterations: arrayOrEmpty(payload.iterations).map(normalizeIteration),
+    iterations,
+    dossiers,
     contracts: arrayOrEmpty(payload.contracts).map(normalizeItem),
     decisions: arrayOrEmpty(payload.decisions).map(normalizeItem),
     changes: arrayOrEmpty(payload.changes).map(normalizeItem),
@@ -349,8 +629,12 @@ export function normalizeViewModel(payload) {
     semanticObservations: arrayOrEmpty(payload.semanticObservations)
       .map(normalizeSemanticObservation)
       .filter(Boolean),
+    unlinkedLineage: arrayOrEmpty(payload.unlinked ?? payload.unlinkedLineage).map(normalizeItem),
     records: arrayOrEmpty(payload.records).map(normalizeRecord).filter((record) => record.path),
-    diagnostics: normalizeDiagnostics(payload.diagnostics),
+    diagnostics: normalizeDiagnostics([
+      ...arrayOrEmpty(payload.diagnostics),
+      ...ownershipDiagnostics,
+    ]),
   };
 }
 
@@ -383,8 +667,10 @@ export function narrativeFor(item) {
       inputs: [],
       outputs: [],
       rationale: null,
+      rationaleProvenance: "missing",
       generatedExplanation: null,
       explanationLabel: null,
+      explanationProvenance: "missing",
       alternatives: [],
       evidence: [],
       chainOfThoughtIncluded: false,
@@ -397,15 +683,23 @@ export function narrativeFor(item) {
     narrative.explanationSource || item.explanation?.authoring || (generatedExplanation ? "recorded" : null);
 
   return {
-    inputs: narrative.inputSummary
+    inputs: narrative.inputSummaries?.length
+      ? narrative.inputSummaries
+      : narrative.inputSummary
       ? [{ title: narrative.inputSummary, summary: null, sourceRefs: item.sourceRefs }]
       : item.inputs ?? [],
-    outputs: narrative.outputSummary
+    outputs: narrative.outputSummaries?.length
+      ? narrative.outputSummaries
+      : narrative.outputSummary
       ? [{ title: narrative.outputSummary, summary: null, sourceRefs: item.sourceRefs }]
       : item.outputs ?? [],
-    rationale: narrative.rationale,
+    rationale: narrative.rationaleSummary,
+    rationaleProvenance: narrative.rationaleSummary ? narrative.provenance : "missing",
     generatedExplanation,
     explanationLabel: explanationSource,
+    explanationProvenance: generatedExplanation
+      ? (item.explanation?.text ? item.explanation.provenance : narrative.provenance)
+      : "missing",
     alternatives: narrative.alternatives.length ? narrative.alternatives : item.alternatives ?? [],
     evidence: narrative.evidence.length ? narrative.evidence : item.evidence ?? [],
     chainOfThoughtIncluded: narrative.chainOfThoughtIncluded,

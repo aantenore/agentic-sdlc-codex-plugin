@@ -213,6 +213,315 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
   }
 });
 
+test("builds proof-bound dossiers without cross-story, shared, or ambiguous lineage", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "dossier-boundary",
+    project_name: "Dossier Boundary",
+  });
+  await writeJson(root, ".sdlc/requirements/REQ-SHARED.json", {
+    schema_version: "requirement:v1",
+    id: "REQ-SHARED",
+    title: "Shared product outcome",
+    summary: "A requirement explicitly shared by two stories.",
+  });
+  for (const storyId of ["ST-A", "ST-B"]) {
+    await writeJson(root, `.sdlc/stories/${storyId}/story.json`, {
+      schema_version: "0.1.0",
+      id: storyId,
+      title: `Story ${storyId}`,
+      summary: `Summary ${storyId}`,
+      phase: "implementation",
+      status: "in_progress",
+      contract_id: `CONTRACT-${storyId}`,
+      links: { requirements: ["REQ-SHARED"], decisions: [], tests: [] },
+    });
+    await writeJson(root, `.sdlc/contracts/CONTRACT-${storyId}.json`, {
+      schema_version: "0.1.0",
+      id: `CONTRACT-${storyId}`,
+      story_id: storyId,
+      phase: "implementation",
+      purpose: `Contract ${storyId}`,
+      status: "approved",
+    });
+  }
+  await writeJson(root, ".sdlc/decisions/DEC-UNIQUE.json", {
+    schema_version: "0.1.0",
+    id: "DEC-UNIQUE",
+    summary: "A uniquely addressed decision.",
+  });
+  await writeJson(root, ".sdlc/decisions/DUPLICATE-ONE.json", {
+    schema_version: "0.1.0",
+    id: "DUPLICATE-ID",
+    summary: "First duplicate.",
+  });
+  await writeJson(root, ".sdlc/decisions/DUPLICATE-TWO.json", {
+    schema_version: "0.1.0",
+    id: "DUPLICATE-ID",
+    summary: "Second duplicate.",
+  });
+  await writeJson(root, ".sdlc/decisions/REQ-ONLY.json", {
+    schema_version: "0.1.0",
+    id: "DEC-REQ-ONLY",
+    requirement_id: "REQ-SHARED",
+    summary: "A requirement-only record must not fan out across stories.",
+  });
+  await writeJson(root, ".sdlc/tests/A.json", {
+    schema_version: "test-evidence:v1",
+    id: "TEST-A",
+    story_id: "ST-A",
+    outcome: "passed",
+    summary: "A verification passed.",
+  });
+  await writeJson(root, ".sdlc/tests/shared.json", {
+    schema_version: "test-evidence:v1",
+    id: "TEST-SHARED",
+    outcome: "passed",
+    summary: "A path cited by both stories is not dossier evidence.",
+  });
+  await writeJson(root, ".sdlc/tests/mismatch.json", {
+    schema_version: "test-evidence:v1",
+    id: "TEST-B-OWNED",
+    story_id: "ST-B",
+    outcome: "passed",
+    summary: "Evidence owned by B.",
+  });
+  await writeJsonLines(root, ".sdlc/tests/multi.jsonl", [
+    { id: "TEST-MULTI-1", outcome: "passed" },
+    { id: "TEST-MULTI-2", outcome: "passed" },
+  ]);
+  await writeJsonLines(root, ".sdlc/tests/single.jsonl", [
+    { id: "TEST-SINGLE-JSONL", outcome: "passed" },
+  ]);
+  await writeText(root, ".sdlc/tests/broken.json", "{not-json");
+  await writeJson(root, ".sdlc/stories/ST-A/steps/implementation.json", {
+    id: "STEP-A",
+    story_id: "ST-A",
+    phase: "implementation",
+    status: "completed",
+    summary: "Completed the implementation step.",
+  });
+  await writeJsonLines(root, ".sdlc/traces/ST-A.jsonl", [
+    {
+      id: "IMP-A",
+      story_id: "ST-A",
+      type: "implementation",
+      summary: "Implemented A.",
+      request: { summary: "Deliver A." },
+      related: ["DEC-UNIQUE", "DUPLICATE-ID"],
+      evidence: [
+        ".sdlc/tests/A.json",
+        ".sdlc/tests/shared.json",
+        ".sdlc/tests/mismatch.json",
+        ".sdlc/tests/multi.jsonl",
+        ".sdlc/tests/single.jsonl",
+        ".sdlc/tests/broken.json",
+        ".sdlc/../outside.json",
+      ],
+      narrative: {
+        schema_version: "trace-narrative:v1",
+        rationale_summary: "A recorded rationale, not an explanation.",
+      },
+      created_at: "2026-07-16T08:50:00Z",
+    },
+    {
+      id: "CROSS-A",
+      story_id: "ST-A",
+      type: "implementation",
+      summary: "A-owned evidence that also names B in related.",
+      related: ["ST-B"],
+    },
+    {
+      id: "RELEASE-A",
+      story_id: "ST-A",
+      type: "release",
+      summary: "Released product A.",
+      outcome: "passed",
+    },
+    {
+      id: "SYNC-A",
+      story_id: "ST-A",
+      type: "sync",
+      action: "story.release",
+      summary: "Released an operational claim only.",
+    },
+  ]);
+  await writeJsonLines(root, ".sdlc/traces/ST-B.jsonl", [{
+    id: "IMP-B",
+    story_id: "ST-B",
+    contract_id: "CONTRACT-ST-A",
+    type: "implementation",
+    summary: "Implemented B without leaking through A's contract.",
+    evidence: [".sdlc/tests/shared.json"],
+  }]);
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+  assert.equal(model.schemaVersion, OBSERVATORY_VIEW_SCHEMA_VERSION);
+  assert.equal(model.dossiers.length, 2);
+  const dossierA = model.dossiers.find((dossier) => dossier.storyId === "ST-A");
+  const dossierB = model.dossiers.find((dossier) => dossier.storyId === "ST-B");
+  assert.ok(dossierA);
+  assert.ok(dossierB);
+  assert.equal(dossierA.schemaVersion, "change-observatory:iteration-dossier:v1");
+  assert.equal(dossierA.iterationId, "ST-A");
+  assert.equal(dossierA.title, "Story ST-A");
+  assert.equal(dossierA.summary, "Summary ST-A");
+  assert.deepEqual(
+    model.iterations.find((iteration) => iteration.id === "ST-A").dossier,
+    dossierA,
+  );
+  assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
+  assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "ST-A"), true);
+  assert.equal(dossierB.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
+  assert.equal(dossierA.lanes.decided.items.some((item) => item.id === "DEC-REQ-ONLY"), false);
+  assert.equal(dossierB.lanes.decided.items.some((item) => item.id === "DEC-REQ-ONLY"), false);
+  assert.equal(dossierA.lanes.decided.items.some((item) => item.id === "DEC-UNIQUE"), true);
+  assert.equal(dossierA.lanes.decided.items.some((item) => item.id === "DUPLICATE-ID"), false);
+  assert.equal(dossierB.lanes.done.items.some((item) => item.id === "CROSS-A"), false);
+  assert.equal(dossierA.lanes.done.items.some((item) => item.id === "IMP-B"), false);
+
+  const implementation = dossierA.lanes.done.items.find((item) => item.id === "IMP-A");
+  assert.equal(implementation.rationale.text, "A recorded rationale, not an explanation.");
+  assert.equal(implementation.narrative.rationaleSummary, "A recorded rationale, not an explanation.");
+  assert.equal(implementation.narrative.generatedExplanation, null);
+  assert.equal(implementation.explanation.text, "Implemented A.");
+  assert.notEqual(implementation.explanation.text, implementation.rationale.text);
+  assert.equal(implementation.storyId, "ST-A");
+  assert.deepEqual(implementation.related, ["DEC-UNIQUE", "DUPLICATE-ID"]);
+  assert.equal(implementation.linkage.status, "linked");
+  assert.equal(implementation.linkage.via.includes("story_id"), true);
+
+  const verifiedIdsA = dossierA.lanes.verified.items.map((item) => item.id);
+  assert.equal(verifiedIdsA.includes("TEST-A"), true);
+  assert.equal(verifiedIdsA.includes("TEST-SHARED"), false);
+  assert.equal(verifiedIdsA.includes("TEST-B-OWNED"), false);
+  assert.equal(verifiedIdsA.includes("TEST-MULTI-1"), false);
+  assert.equal(verifiedIdsA.includes("TEST-SINGLE-JSONL"), false);
+  assert.equal(verifiedIdsA.some((id) => String(id).includes("broken.json")), false);
+  assert.equal(verifiedIdsA.includes("RELEASE-A"), true);
+  assert.equal(dossierA.lanes.done.items.some((item) => item.id === "SYNC-A"), true);
+  assert.equal(dossierA.lanes.verified.items.some((item) => item.id === "SYNC-A"), false);
+  assert.equal(dossierA.lanes.done.items.some((item) => item.id === "STEP-A"), true);
+  assert.equal(dossierA.lanes.verified.items.some((item) => item.id === "STEP-A"), true);
+  assert.equal(model.unlinked.some((item) => item.id === "DEC-REQ-ONLY"), true);
+  assert.equal(model.unlinked.some((item) => item.id === "TEST-SHARED"), true);
+  for (const code of [
+    "dossier_cross_story_link_blocked",
+    "dossier_link_target_ambiguous",
+    "dossier_evidence_link_shared",
+    "dossier_evidence_target_jsonl_unsupported",
+    "dossier_evidence_target_malformed",
+    "dossier_evidence_path_noncanonical",
+  ]) {
+    assert.equal(model.diagnostics.some((diagnostic) => diagnostic.code === code), true, code);
+  }
+});
+
+test("fails closed when canonical story IDs are duplicated", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "duplicate-stories",
+    project_name: "Duplicate Stories",
+  });
+  await writeJson(root, ".sdlc/stories/first/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-DUPLICATE",
+    title: "First duplicate",
+    phase: "implementation",
+    status: "in_progress",
+  });
+  await writeJson(root, ".sdlc/stories/second/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-DUPLICATE",
+    title: "Second duplicate",
+    phase: "validation",
+    status: "in_progress",
+  });
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+  assert.equal(model.dossiers.length, 0);
+  assert.equal(
+    model.iterations.filter((iteration) => iteration.id === "ST-DUPLICATE")
+      .every((iteration) => iteration.dossier === null),
+    true,
+  );
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "dossier_story_id_ambiguous"),
+    true,
+  );
+});
+
+test("orders dossiers deterministically and enforces one global nested-item limit", async (t) => {
+  const populate = async (root, reverse) => {
+    const records = [
+      ["json", ".sdlc/project.json", {
+        schema_version: "0.1.0",
+        project_id: "bounded-dossiers",
+        project_name: "Bounded Dossiers",
+      }],
+      ...["ST-A", "ST-B"].flatMap((storyId) => [
+        ["json", `.sdlc/requirements/REQ-${storyId}.json`, {
+          schema_version: "requirement:v1",
+          id: `REQ-${storyId}`,
+          title: `Requirement ${storyId}`,
+        }],
+        ["json", `.sdlc/stories/${storyId}/story.json`, {
+          schema_version: "0.1.0",
+          id: storyId,
+          title: `Story ${storyId}`,
+          phase: "implementation",
+          status: "in_progress",
+          contract_id: `CONTRACT-${storyId}`,
+          links: { requirements: [`REQ-${storyId}`], decisions: [], tests: [] },
+        }],
+        ["json", `.sdlc/contracts/CONTRACT-${storyId}.json`, {
+          schema_version: "0.1.0",
+          id: `CONTRACT-${storyId}`,
+          story_id: storyId,
+          status: "approved",
+        }],
+        ["jsonl", `.sdlc/traces/${storyId}.jsonl`, [{
+          id: `IMP-${storyId}`,
+          story_id: storyId,
+          type: "implementation",
+          summary: `Implemented ${storyId}`,
+          request: { summary: `Deliver ${storyId}` },
+        }]],
+      ]),
+    ];
+    for (const [format, relativePath, value] of reverse ? [...records].reverse() : records) {
+      if (format === "jsonl") await writeJsonLines(root, relativePath, value);
+      else await writeJson(root, relativePath, value);
+    }
+  };
+  const firstRoot = await createProject(t);
+  const secondRoot = await createProject(t);
+  await populate(firstRoot, false);
+  await populate(secondRoot, true);
+  const options = { clock: () => FIXED_TIME, limits: { maxCollectionItems: 3 } };
+  const first = await buildObservatoryViewModel(firstRoot, options);
+  const second = await buildObservatoryViewModel(secondRoot, options);
+
+  assert.deepEqual(first.dossiers, second.dossiers);
+  const nestedItems = first.dossiers.reduce(
+    (total, dossier) => total + Object.values(dossier.lanes)
+      .reduce((laneTotal, lane) => laneTotal + lane.items.length, 0),
+    0,
+  );
+  assert.equal(nestedItems, 3);
+  assert.equal(
+    first.diagnostics.some((diagnostic) => diagnostic.code === "dossier_nested_items_truncated"),
+    true,
+  );
+  assert.equal(
+    first.dossiers.some((dossier) => Object.values(dossier.lanes)
+      .some((lane) => lane.status === "malformed")),
+    true,
+  );
+});
+
 test("projects content-free IntentABI evidence and links it only through an explicit story trace", async (t) => {
   const root = await createProject(t);
   await writeJson(root, ".sdlc/project.json", {
@@ -561,6 +870,36 @@ test("redacts explicitly stored private reasoning from normalized and source vie
   assert.equal(source.entries[1].data["private-reasoning"], "[redacted]");
   assert.equal(source.entries[1].data.narrative.explanation, "[redacted]");
   assert.equal(JSON.stringify(source).includes("MODEL_SECRET"), false);
+});
+
+test("bounds private-reasoning traversal iteratively and fails closed on extreme nesting", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "deep-reasoning-scan",
+    project_name: "Deep Reasoning Scan",
+  });
+  const depth = 12_000;
+  const nested = `${'{"next":'.repeat(depth)}{"safe":true}${"}".repeat(depth)}`;
+  await writeText(
+    root,
+    ".sdlc/decisions/DEEP.json",
+    `{"id":"DEC-DEEP","summary":"A safe bounded summary.","payload":${nested}}\n`,
+  );
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+  const decision = model.decisions.find((item) => item.id === "DEC-DEEP");
+  assert.ok(decision);
+  assert.equal(decision.explanation.text, "A safe bounded summary.");
+  assert.equal(decision.narrative, null);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "private_reasoning_scan_limited"),
+    true,
+  );
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "private_reasoning_redacted"),
+    true,
+  );
 });
 
 test("malformed structured sources fail closed without returning private bytes", async (t) => {

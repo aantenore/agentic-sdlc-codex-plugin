@@ -1,4 +1,5 @@
 import {
+  DOSSIER_LANES,
   PHASES,
   filterIterations,
   firstSummaryItem,
@@ -53,7 +54,7 @@ function sourceButtonFor(item, label = "Source records") {
     "button",
     {
       className: "source-button",
-      attrs: { type: "button" },
+      attrs: { type: "button", "aria-label": `${label}: ${item.title ?? item.id ?? target.path}` },
       dataset: { action: "open-raw", rawHref: target.href, rawPath: target.path },
     },
     [icon("source"), node("span", { text: label })],
@@ -286,14 +287,25 @@ function lineagePanel(model, state) {
     const row = node("tr", { dataset: { current: Boolean(iteration.currentPhase) } });
     row.append(
       node("th", { className: "iteration-heading", attrs: { scope: "row" } }, [
-        document.createTextNode(iteration.title),
-        node("span", { text: iteration.timestamp ? formatTimestamp(iteration.timestamp) : iteration.id }),
+        node("button", {
+          className: "iteration-select-button",
+          attrs: {
+            type: "button",
+            "aria-pressed": String(state.selectedIterationId === iteration.id),
+          },
+          dataset: { action: "select-iteration", iterationId: iteration.id },
+        }, [
+          node("strong", { text: iteration.title }),
+          node("span", { text: iteration.timestamp ? formatTimestamp(iteration.timestamp) : iteration.id }),
+        ]),
       ]),
     );
     for (const phase of iteration.phases) {
       const selectionId = recordSelectionKey(phaseSelectionItem(iteration, phase));
       const associatedSelection =
-        state.selectedItem?.phase === phase.phase && iteration.currentPhase === phase.phase;
+        state.selectedIterationId === iteration.id
+        && state.selectedItem?.phase === phase.phase
+        && iteration.currentPhase === phase.phase;
       row.append(
         node("td", {}, [
           node(
@@ -341,6 +353,259 @@ function lineagePanel(model, state) {
       node("span", { className: "legend-item" }, [provenanceBadge("inferred")]),
     ]),
   );
+  return panel;
+}
+
+function dossierLaneItems(dossier, laneKey) {
+  const laneItems = dossier.lanes[laneKey]?.items ?? [];
+  if (laneKey !== "verified") return laneItems.map((item) => ({ item, sourceLane: laneKey }));
+  return [
+    ...laneItems.map((item) => ({ item, sourceLane: "verified" })),
+    ...(dossier.lanes.release?.items ?? []).map((item) => ({ item, sourceLane: "release" })),
+  ];
+}
+
+function dossierLaneState(dossier, laneKey, items) {
+  const lane = dossier.lanes[laneKey];
+  if (laneKey !== "verified") return lane;
+  const releaseLane = dossier.lanes.release;
+  if (items.length) {
+    return {
+      status: "recorded",
+      provenance:
+        lane.provenance === "recorded" || releaseLane.provenance === "recorded"
+          ? "recorded"
+          : lane.provenance,
+    };
+  }
+  return lane.status !== "missing" ? lane : releaseLane;
+}
+
+function linkageLabel(item) {
+  if (item.linkage?.status !== "linked") return "Link metadata missing";
+  if (!item.linkage.via.length) return "Link method not recorded";
+  return `Linked by ${item.linkage.via.map(sentenceCase).join(", ").toLowerCase()}`;
+}
+
+function dossierNarrative(item, laneKey) {
+  const narrative = narrativeFor(item);
+  if (laneKey !== "decided" && !narrative.rationale && !narrative.generatedExplanation) return null;
+  return node("div", { className: "dossier-narrative" }, [
+    node("div", {
+      className: "dossier-narrative-part",
+      dataset: { state: narrative.rationale ? "recorded" : "missing" },
+    }, [
+      node("span", { text: "Recorded rationale" }),
+      node("p", { text: narrative.rationale || "Not recorded." }),
+    ]),
+    node("div", {
+      className: "dossier-narrative-part",
+      dataset: { state: narrative.generatedExplanation ? "generated" : "missing" },
+    }, [
+      node("span", {
+        text: narrative.generatedExplanation
+          ? `Generated explanation · ${sentenceCase(narrative.explanationLabel || "source recorded")}`
+          : "Generated explanation",
+      }),
+      node("p", { text: narrative.generatedExplanation || "Not recorded." }),
+    ]),
+  ]);
+}
+
+function dossierItem(item, sourceLane, laneKey, state, iterationId) {
+  const selectionId = recordSelectionKey(item);
+  const sourceControl = sourceButtonFor(item, "Open raw source");
+  const itemKind = sourceLane === "release" || item.type === "release"
+    ? "Release evidence"
+    : sentenceCase(item.type);
+  return node("article", {
+    className: "dossier-item",
+    dataset: { sourceLane, provenance: item.provenance },
+  }, [
+    node("button", {
+      className: "dossier-item-select",
+      attrs: {
+        type: "button",
+        "aria-pressed": String(selectionId === state.selectedId),
+        "aria-label": `Inspect ${item.title}`,
+      },
+      dataset: {
+        action: "select-record",
+        selectId: selectionId,
+        iterationId,
+      },
+    }, [
+      node("span", { className: "dossier-item-title", text: item.title }),
+      node("span", { className: "dossier-item-summary", text: item.summary }),
+    ]),
+    dossierNarrative(item, laneKey),
+    node("footer", { className: "dossier-item-footer" }, [
+      node("span", { className: "dossier-item-kind", text: itemKind }),
+      statusText(item.status),
+      provenanceBadge(item.provenance),
+      node("span", { className: "dossier-linkage", text: linkageLabel(item) }),
+      sourceControl,
+    ]),
+  ]);
+}
+
+function dossierMissingLane(laneState) {
+  return node("div", { className: "dossier-missing", attrs: { role: "status" } }, [
+    node("strong", { text: "No linked evidence" }),
+    node("p", { text: "No explicitly linked canonical record was provided for this lane." }),
+    provenanceBadge(laneState?.provenance ?? "missing"),
+  ]);
+}
+
+function dossierLane(dossier, definition, state, iterationId, index) {
+  const items = dossierLaneItems(dossier, definition.key);
+  const laneState = dossierLaneState(dossier, definition.key, items);
+  return node("section", {
+    className: "dossier-lane",
+    attrs: { "aria-labelledby": `dossier-lane-${definition.key}` },
+    dataset: { state: items.length ? laneState.status : "missing" },
+  }, [
+    node("header", { className: "dossier-lane-header" }, [
+      node("span", { className: "dossier-step", text: String(index + 1), attrs: { "aria-hidden": "true" } }),
+      node("div", {}, [
+        node("h3", { text: definition.label, attrs: { id: `dossier-lane-${definition.key}` } }),
+        node("span", { text: items.length ? `${items.length} linked ${items.length === 1 ? "record" : "records"}` : "Evidence missing" }),
+      ]),
+      provenanceBadge(items.length ? laneState.provenance : "missing"),
+    ]),
+    node("div", { className: "dossier-lane-body" }, items.length
+      ? items.map(({ item, sourceLane }) => dossierItem(item, sourceLane, definition.key, state, iterationId))
+      : [dossierMissingLane(laneState)]),
+  ]);
+}
+
+function unlinkedLineageDisclosure(items, state) {
+  if (!items.length) return null;
+  return node("details", { className: "unlinked-lineage" }, [
+    node("summary", {}, [
+      node("strong", { text: "Unlinked project evidence" }),
+      node("span", { text: `${items.length} ${items.length === 1 ? "record" : "records"}` }),
+    ]),
+    node("p", {
+      text: "These canonical records are visible, but no explicit story link assigns them to an iteration dossier.",
+    }),
+    node("div", { className: "unlinked-lineage-list" }, items.map((item) =>
+      dossierItem(item, "unlinked", "unlinked", state, null),
+    )),
+  ]);
+}
+
+function selectedDossierIteration(model, state) {
+  const requested = state.selectedIterationId || state.filters.iteration;
+  return model.iterations.find((iteration) => iteration.id === requested)
+    || model.iterations.find((iteration) =>
+      iteration.currentPhase && iteration.dossier?.status === "partial")
+    || model.iterations.find((iteration) => iteration.currentPhase && iteration.dossier)
+    || model.iterations.find((iteration) => iteration.dossier)
+    || model.iterations[0]
+    || null;
+}
+
+function dossierPanel(model, state) {
+  const selectedIteration = selectedDossierIteration(model, state);
+  const iterationValues = model.iterations.map((iteration) => ({
+    value: iteration.id,
+    label: iteration.title,
+  }));
+  const actions = iterationValues.length
+    ? [selectControl(
+      "Dossier iteration",
+      "dossier",
+      iterationValues,
+      selectedIteration?.id ?? "",
+    )]
+    : [];
+  const panel = node("section", {
+    className: "section-panel dossier-panel",
+    attrs: { "aria-labelledby": "dossier-heading" },
+  }, [
+    sectionHeading(
+      "Iteration dossier",
+      "The recorded path from request to verification; links are never inferred in the browser",
+      actions,
+    ),
+  ]);
+  panel.querySelector("h2").id = "dossier-heading";
+
+  if (!selectedIteration) {
+    panel.append(emptyInline("No recorded iteration is available for a lineage dossier."));
+    const unlinked = unlinkedLineageDisclosure(model.unlinkedLineage, state);
+    if (unlinked) panel.append(unlinked);
+    return panel;
+  }
+
+  const dossier = selectedIteration.dossier;
+  const dossierMeta = node("header", { className: "dossier-meta", attrs: { "aria-live": "polite" } }, [
+    node("div", {}, [
+      node("span", { className: "dossier-label", text: "Selected iteration" }),
+      node("h3", { text: selectedIteration.title }),
+      node("p", { text: dossier?.summary || selectedIteration.summary }),
+    ]),
+    node("div", { className: "dossier-meta-actions" }, [
+      statusText(dossier?.status ?? "missing"),
+      provenanceBadge(dossier?.provenance ?? "missing"),
+      dossier ? sourceButtonFor({ ...dossier, title: selectedIteration.title }, "Open dossier source") : null,
+    ]),
+  ]);
+  panel.append(dossierMeta);
+
+  if (!dossier) {
+    panel.append(node("div", { className: "dossier-unavailable", attrs: { role: "status" } }, [
+      node("strong", { text: "Dossier not recorded" }),
+      node("p", { text: "This iteration has no proof-bound dossier. Project-level or unlinked evidence is not assigned here." }),
+      provenanceBadge("missing"),
+    ]));
+    const unlinked = unlinkedLineageDisclosure(model.unlinkedLineage, state);
+    if (unlinked) panel.append(unlinked);
+    return panel;
+  }
+
+  if (!dossier.schemaSupported) {
+    panel.append(node("div", { className: "diagnostic", attrs: { role: "alert" }, dataset: { severity: "warning" } }, [
+      icon("alert"),
+      node("div", { className: "diagnostic-copy" }, [
+        node("strong", { text: "Unsupported dossier schema: " }),
+        document.createTextNode(dossier.schemaVersion || "not recorded"),
+      ]),
+    ]));
+    const unlinked = unlinkedLineageDisclosure(model.unlinkedLineage, state);
+    if (unlinked) panel.append(unlinked);
+    return panel;
+  }
+
+  panel.append(
+    node("div", {
+      className: "dossier-flow-scroll",
+      attrs: { tabindex: "0", "aria-label": `Five-lane dossier for ${selectedIteration.title}` },
+    }, [
+      node("div", { className: "dossier-flow" }, DOSSIER_LANES.map((definition, index) =>
+        dossierLane(dossier, definition, state, selectedIteration.id, index),
+      )),
+    ]),
+  );
+
+  const unlinked = unlinkedLineageDisclosure(model.unlinkedLineage, state);
+  if (unlinked) panel.append(unlinked);
+
+  if (dossier.diagnostics.length) {
+    panel.append(node("details", { className: "dossier-diagnostics" }, [
+      node("summary", { text: `Dossier diagnostics · ${dossier.diagnostics.length}` }),
+      node("div", { className: "diagnostics-list" }, dossier.diagnostics.map((diagnostic) =>
+        node("div", { className: "diagnostic", dataset: { severity: diagnostic.severity } }, [
+          icon("alert"),
+          node("div", { className: "diagnostic-copy" }, [
+            node("strong", { text: `${diagnostic.code}: ` }),
+            document.createTextNode(diagnostic.message),
+          ]),
+        ]),
+      )),
+    ]));
+  }
   return panel;
 }
 
@@ -570,6 +835,7 @@ function intentEvidencePanel(model, state) {
 
 function overview(model, state) {
   return node("div", { className: "view-stack" }, [
+    dossierPanel(model, state),
     lineagePanel(model, state),
     node("div", { className: "overview-grid" }, [
       recordsPanel("Contract evolution", "Versions, approvals, and status", model.contracts, state, { limit: 6 }),
@@ -583,7 +849,10 @@ export function renderPrimary(container, model, state) {
   let content;
   switch (state.view) {
     case "timeline":
-      content = lineagePanel(model, state);
+      content = node("div", { className: "view-stack" }, [
+        dossierPanel(model, state),
+        lineagePanel(model, state),
+      ]);
       break;
     case "contracts":
       content = recordsPanel(

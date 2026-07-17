@@ -8,12 +8,15 @@ import {
   accessTokenFromHash,
 } from "../../ui/change-observatory/api.js";
 import {
+  DOSSIER_LANES,
+  DOSSIER_SCHEMA,
   PHASES,
   VIEW_MODEL_SCHEMA,
   filterIterations,
   groupChangesByIntent,
   isCanonicalEvidencePath,
   narrativeFor,
+  normalizeDossier,
   normalizeViewModel,
   rawHrefForPath,
   recordSelectionKey,
@@ -117,6 +120,73 @@ function semanticObservation(overrides = {}) {
   };
 }
 
+function iterationDossier(overrides = {}) {
+  const linkedItem = (id, type, title, extra = {}) => ({
+    id,
+    type,
+    title,
+    summary: `${title} summary.`,
+    status: "recorded",
+    provenance: "recorded",
+    storyId: "ITERATION-FIXTURE",
+    sourceRefs: [{ path: `.sdlc/evidence/${id}.json` }],
+    linkage: {
+      status: "linked",
+      storyId: "ITERATION-FIXTURE",
+      via: ["story_id"],
+      sourceRefs: [{ path: `.sdlc/evidence/${id}.json` }],
+    },
+    ...extra,
+  });
+
+  return {
+    schemaVersion: DOSSIER_SCHEMA,
+    storyId: "ITERATION-FIXTURE",
+    iterationId: "ITERATION-FIXTURE",
+    status: "partial",
+    provenance: "recorded",
+    sourceRefs: [{ path: ".sdlc/stories/ITERATION-FIXTURE/story.json" }],
+    links: { requirementIds: ["REQ-FIXTURE"], contractIds: ["CONTRACT-FIXTURE"] },
+    lanes: {
+      asked: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [linkedItem("REQ-FIXTURE", "requirement", "Recorded request")],
+      },
+      decided: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [linkedItem("DEC-FIXTURE", "decision", "Recorded decision", {
+          narrative: {
+            rationaleSummary: "Recorded rationale stays authoritative.",
+            generatedExplanation: "Generated explanation stays visibly separate.",
+            explanationSource: "codex-generated",
+            provenance: "recorded",
+          },
+        })],
+      },
+      contract: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [linkedItem("CONTRACT-FIXTURE", "contract", "Governing contract")],
+      },
+      done: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [linkedItem("CHANGE-FIXTURE", "implementation", "Implemented change")],
+      },
+      verified: { status: "missing", provenance: "missing", items: [] },
+      release: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [linkedItem("RELEASE-FIXTURE", "release", "Product release")],
+      },
+    },
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
 test("normalizes the versioned view model and makes absent phases explicit", () => {
   const model = normalizeViewModel(viewModel());
 
@@ -128,6 +198,253 @@ test("normalizes the versioned view model and makes absent phases explicit", () 
   assert.equal(model.iterations[0].phases[5].status, "missing");
   assert.deepEqual(model.changes, []);
   assert.deepEqual(model.semanticObservations, []);
+});
+
+test("normalizes an inline proof-bound dossier without collapsing rationale into explanation", () => {
+  const payload = viewModel();
+  payload.iterations[0].dossier = iterationDossier();
+  const model = normalizeViewModel(payload);
+
+  assert.deepEqual(DOSSIER_LANES.map((lane) => lane.label), [
+    "Asked",
+    "Decided",
+    "Contract",
+    "Done",
+    "Verified",
+  ]);
+  assert.equal(model.iterations[0].dossier.schemaSupported, true);
+  assert.equal(model.dossiers.length, 1);
+  assert.equal(model.iterations[0].dossier.status, "partial");
+  assert.equal(model.iterations[0].dossier.lanes.verified.status, "missing");
+  assert.equal(model.iterations[0].dossier.lanes.release.items[0].type, "release");
+
+  const decision = model.iterations[0].dossier.lanes.decided.items[0];
+  const narrative = narrativeFor(decision);
+  assert.equal(narrative.rationale, "Recorded rationale stays authoritative.");
+  assert.equal(narrative.generatedExplanation, "Generated explanation stays visibly separate.");
+  assert.notEqual(narrative.rationale, narrative.generatedExplanation);
+  assert.equal(narrative.explanationLabel, "codex-generated");
+  assert.equal(decision.linkage.status, "linked");
+  assert.deepEqual(decision.linkage.via, ["story_id"]);
+});
+
+test("attaches top-level dossiers only through an exact explicit story ID", () => {
+  const payload = viewModel({
+    dossiers: [
+      iterationDossier(),
+      iterationDossier({ storyId: "ST-UNLINKED", iterationId: "ST-UNLINKED" }),
+    ],
+    unlinked: [{
+      id: "PROJECT-ONLY",
+      type: "decision",
+      title: "Project-level record",
+      provenance: "recorded",
+      sourceRefs: [{ path: ".sdlc/decisions/PROJECT-ONLY.json" }],
+    }],
+  });
+  const model = normalizeViewModel(payload);
+
+  assert.equal(model.iterations[0].dossier.storyId, "ITERATION-FIXTURE");
+  assert.equal(model.dossiers.length, 2);
+  assert.equal(model.dossiers[1].storyId, "ST-UNLINKED");
+  assert.equal(model.unlinkedLineage.length, 1);
+  assert.equal(model.unlinkedLineage[0].id, "PROJECT-ONLY");
+});
+
+test("rejects ST-B dossier and item ownership when rendering iteration ST-A", () => {
+  const iterationA = { ...viewModel().iterations[0], id: "ST-A", title: "Story A" };
+  const foreignDossier = iterationDossier({
+    storyId: "ST-B",
+    iterationId: "ST-B",
+    sourceRefs: [{ path: ".sdlc/stories/ST-B/story.json" }],
+  });
+
+  const topLevel = normalizeViewModel(viewModel({
+    iterations: [iterationA],
+    dossiers: [foreignDossier],
+  }));
+  assert.equal(topLevel.iterations[0].dossier, null);
+  assert.ok(topLevel.diagnostics.some((entry) => entry.code === "dossier_iteration_not_found"));
+
+  const inline = normalizeViewModel(viewModel({
+    iterations: [{ ...iterationA, dossier: foreignDossier }],
+  }));
+  assert.equal(inline.iterations[0].dossier, null);
+  assert.ok(inline.diagnostics.some(
+    (entry) => entry.code === "dossier_iteration_ownership_mismatch",
+  ));
+
+  const crossStoryItem = {
+    id: "REQ-ST-B",
+    type: "requirement",
+    title: "Story B request",
+    provenance: "recorded",
+    storyId: "ST-B",
+    sourceRefs: [{ path: ".sdlc/requirements/REQ-ST-B.json" }],
+    linkage: {
+      status: "linked",
+      storyId: "ST-B",
+      via: ["story_id"],
+      sourceRefs: [{ path: ".sdlc/requirements/REQ-ST-B.json", pointer: "/story_id" }],
+    },
+  };
+  const ownedDossier = iterationDossier({
+    storyId: "ST-A",
+    iterationId: "ST-A",
+    lanes: {
+      asked: { status: "recorded", provenance: "recorded", items: [crossStoryItem] },
+    },
+  });
+  const itemMismatch = normalizeViewModel(viewModel({
+    iterations: [{ ...iterationA, dossier: ownedDossier }],
+  }));
+  assert.equal(itemMismatch.iterations[0].dossier.lanes.asked.status, "malformed");
+  assert.equal(itemMismatch.iterations[0].dossier.lanes.asked.provenance, "malformed");
+  assert.deepEqual(itemMismatch.iterations[0].dossier.lanes.asked.items, []);
+  assert.equal(itemMismatch.iterations[0].dossier.status, "malformed");
+  assert.ok(itemMismatch.iterations[0].dossier.diagnostics.some(
+    (entry) => entry.code === "dossier_item_ownership_mismatch",
+  ));
+});
+
+test("derives coherent lane and dossier states from accepted canonical items", () => {
+  const fixture = iterationDossier();
+  const ownedItem = fixture.lanes.asked.items[0];
+
+  const recordedEmpty = normalizeDossier(iterationDossier({
+    status: "complete",
+    lanes: {
+      asked: { status: "recorded", provenance: "recorded", items: [] },
+    },
+  }));
+  assert.equal(recordedEmpty.lanes.asked.status, "malformed");
+  assert.equal(recordedEmpty.lanes.asked.provenance, "malformed");
+  assert.equal(recordedEmpty.status, "malformed");
+  assert.ok(recordedEmpty.diagnostics.some(
+    (entry) => entry.code === "dossier_lane_state_inconsistent",
+  ));
+
+  const missingWithItems = normalizeDossier(iterationDossier({
+    status: "complete",
+    lanes: {
+      asked: { status: "missing", provenance: "missing", items: [ownedItem] },
+    },
+  }));
+  assert.equal(missingWithItems.lanes.asked.status, "malformed");
+  assert.equal(missingWithItems.lanes.asked.provenance, "malformed");
+  assert.equal(missingWithItems.status, "malformed");
+
+  const releaseDoesNotComplete = normalizeDossier(iterationDossier({ status: "complete" }));
+  assert.equal(releaseDoesNotComplete.lanes.release.status, "recorded");
+  assert.equal(releaseDoesNotComplete.lanes.verified.status, "missing");
+  assert.equal(releaseDoesNotComplete.status, "partial");
+
+  const completeFixture = iterationDossier();
+  const fullyRecorded = normalizeDossier({
+    ...completeFixture,
+    status: "partial",
+    lanes: {
+      ...completeFixture.lanes,
+      verified: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [completeFixture.lanes.release.items[0]],
+      },
+    },
+  });
+  assert.equal(fullyRecorded.status, "complete");
+  assert.deepEqual(
+    DOSSIER_LANES.map(({ key }) => fullyRecorded.lanes[key].status),
+    ["recorded", "recorded", "recorded", "recorded", "recorded"],
+  );
+});
+
+test("keeps a top-level recorded rationale object separate from generated explanation", () => {
+  const dossier = normalizeDossier(iterationDossier({
+    lanes: {
+      decided: {
+        status: "recorded",
+        provenance: "recorded",
+        items: [{
+          id: "DEC-SEPARATE",
+          type: "decision",
+          title: "Separate narrative fields",
+          provenance: "recorded",
+          storyId: "ITERATION-FIXTURE",
+          sourceRefs: [{ path: ".sdlc/decisions/DEC-SEPARATE.json" }],
+          linkage: {
+            status: "linked",
+            storyId: "ITERATION-FIXTURE",
+            via: ["story_id"],
+            sourceRefs: [{ path: ".sdlc/decisions/DEC-SEPARATE.json", pointer: "/story_id" }],
+          },
+          rationale: {
+            text: "This is the recorded rationale.",
+            provenance: "recorded",
+            sourceRefs: [{ path: ".sdlc/decisions/DEC-SEPARATE.json", pointer: "/narrative/rationale_summary" }],
+          },
+          explanation: {
+            text: "This is the generated explanation.",
+            authoring: "codex-generated",
+            provenance: "recorded",
+          },
+        }],
+      },
+    },
+  }));
+  const narrative = narrativeFor(dossier.lanes.decided.items[0]);
+
+  assert.equal(narrative.rationale, "This is the recorded rationale.");
+  assert.equal(narrative.generatedExplanation, "This is the generated explanation.");
+  assert.notEqual(narrative.rationale, narrative.generatedExplanation);
+});
+
+test("dossier normalization is fail-closed for provenance, linkage, and raw sources", () => {
+  const dossier = normalizeDossier(iterationDossier({
+    schemaVersion: "change-observatory:iteration-dossier:future",
+    lanes: {
+      asked: {
+        items: [
+          {
+            id: "REQ-UNSAFE",
+            title: "Unsafe source",
+            rawHref: "https://example.com/secret",
+            provenance: "claimed",
+            storyId: "ITERATION-FIXTURE",
+            linkage: {
+              status: "linked",
+              storyId: "ITERATION-FIXTURE",
+              via: ["story_id"],
+            },
+            sourceRefs: [{ path: ".sdlc/requirements/REQ-UNSAFE.json" }],
+          },
+          {
+            id: "REQ-CROSS-STORY",
+            title: "Cross-story source",
+            storyId: "ST-OTHER",
+            linkage: { status: "linked", storyId: "ST-OTHER", via: ["story_id"] },
+            sourceRefs: [{ path: ".sdlc/requirements/REQ-CROSS-STORY.json" }],
+          },
+        ],
+      },
+    },
+  }));
+
+  assert.equal(dossier.schemaSupported, false);
+  assert.equal(dossier.lanes.asked.provenance, "malformed");
+  assert.equal(dossier.lanes.asked.items.length, 1);
+  assert.equal(dossier.lanes.asked.items[0].rawHref, null);
+  assert.deepEqual(dossier.lanes.asked.items[0].linkage, {
+    status: "linked",
+    storyId: "ITERATION-FIXTURE",
+    via: ["story_id"],
+    sourceRefs: [],
+  });
+  assert.equal(dossier.diagnostics.at(-1).code, "dossier_item_ownership_mismatch");
+  for (const lane of ["decided", "contract", "done", "verified", "release"]) {
+    assert.equal(dossier.lanes[lane].status, "missing");
+    assert.deepEqual(dossier.lanes[lane].items, []);
+  }
 });
 
 test("projects valid IntentABI evidence onto the closed content-free UI contract", () => {
@@ -451,11 +768,12 @@ test("API client loads and formats a canonical raw source", async () => {
 });
 
 test("shipped UI is build-free, self-contained, accessible, and gradient-free", async () => {
-  const [html, css, app, components] = await Promise.all([
+  const [html, css, app, components, model] = await Promise.all([
     readFile(new URL("index.html", UI_ROOT), "utf8"),
     readFile(new URL("styles.css", UI_ROOT), "utf8"),
     readFile(new URL("app.js", UI_ROOT), "utf8"),
     readFile(new URL("components.js", UI_ROOT), "utf8"),
+    readFile(new URL("model.js", UI_ROOT), "utf8"),
   ]);
 
   assert.match(html, /<script type="module" src="\.\/app\.js"><\/script>/);
@@ -463,6 +781,8 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(html, /class="skip-link"/);
   assert.match(html, /aria-label="Change Observatory"/);
   assert.match(html, /aria-live="polite"/);
+  assert.match(html, /id="raw-drawer"[^>]*aria-labelledby="raw-heading"/);
+  assert.match(html, /data-action="toggle-raw"[^>]*aria-expanded="false"[^>]*aria-controls="raw-content"/);
   assert.doesNotMatch(html, /role="listitem"[^>]*data-view|role="list"[^>]*nav-primary/);
   for (const label of [
     "Overview",
@@ -483,10 +803,25 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(css, /max-width:\s*430px/);
   assert.match(components, /Plain-language explanation/);
+  for (const lane of ["Asked", "Decided", "Contract", "Done", "Verified"]) {
+    assert.match(model, new RegExp(`label: "${lane}"`));
+  }
+  assert.match(components, /Recorded rationale/);
+  assert.match(components, /Generated explanation/);
+  assert.match(components, /Dossier iteration/);
+  assert.match(components, /select-iteration/);
+  assert.match(components, /laneKey !== "verified"/);
+  assert.match(components, /Open raw source/);
+  assert.match(components, /Release evidence/);
+  assert.match(components, /Unlinked project evidence/);
+  assert.doesNotMatch(components, /free.text|timestamp.*join|filename.*join/i);
   assert.match(components, /Alternatives rejected/);
   assert.match(components, /No plain-language explanation was recorded/);
   assert.match(components, /MAC present · not verified/);
   assert.doesNotMatch(components, /intent equivalence|cache hit|token savings/i);
   assert.match(app, /\/api\/v1\/observatory|ObservatoryApi/);
+  assert.match(app, /selectedIterationId/);
+  assert.match(app, /case "select-iteration"/);
+  assert.match(app, /filter === "dossier"/);
   assert.doesNotMatch(app, /fixture|demo|mock/i);
 });

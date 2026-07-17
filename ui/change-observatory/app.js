@@ -55,6 +55,7 @@ const state = {
   model: null,
   view: viewFromHash(),
   filters: { iteration: "", phase: "" },
+  selectedIterationId: null,
   selectedId: null,
   selectedItem: null,
   records: new Map(),
@@ -84,6 +85,7 @@ function indexRecords(model) {
     model.decisions,
     model.changes,
     model.semanticObservations,
+    model.unlinkedLineage,
     model.verification,
   ];
   collections.flat().forEach((item) => {
@@ -95,8 +97,28 @@ function indexRecords(model) {
       const item = phaseSelectionItem(iteration, phase);
       records.set(recordSelectionKey(item), item);
     }
+    if (iteration.dossier) {
+      for (const lane of Object.values(iteration.dossier.lanes)) {
+        for (const item of lane.items) {
+          const key = recordSelectionKey(item);
+          if (key) records.set(key, item);
+        }
+      }
+    }
   }
   state.records = records;
+}
+
+function preferredIterationId(model, previousId = null) {
+  if (previousId && model.iterations.some((iteration) => iteration.id === previousId)) {
+    return previousId;
+  }
+  return model.iterations.find((iteration) =>
+    iteration.currentPhase && iteration.dossier?.status === "partial")?.id
+    || model.iterations.find((iteration) => iteration.currentPhase && iteration.dossier)?.id
+    || model.iterations.find((iteration) => iteration.dossier)?.id
+    || model.iterations[0]?.id
+    || null;
 }
 
 function preferredSelection(model) {
@@ -144,6 +166,10 @@ async function loadModel({ preserveSelection = false } = {}) {
     if (controller.signal.aborted) return;
     state.model = model;
     indexRecords(model);
+    state.selectedIterationId = preferredIterationId(
+      model,
+      preserveSelection ? state.selectedIterationId : null,
+    );
 
     if (preserveSelection && state.selectedId && state.records.has(state.selectedId)) {
       state.selectedItem = state.records.get(state.selectedId);
@@ -163,6 +189,7 @@ async function loadModel({ preserveSelection = false } = {}) {
     state.model = null;
     state.selectedItem = null;
     state.selectedId = null;
+    state.selectedIterationId = null;
     renderFatalError(elements.primary, error);
     renderInspector(elements.inspector, null);
     elements.diagnostics.hidden = true;
@@ -189,7 +216,14 @@ function selectRecord(id) {
   render();
 }
 
+function selectIteration(iterationId) {
+  if (!state.model?.iterations.some((iteration) => iteration.id === iterationId)) return;
+  state.selectedIterationId = iterationId;
+  render();
+}
+
 function selectPhase(iterationId, phase) {
+  state.selectedIterationId = iterationId;
   selectRecord(recordSelectionKey({
     id: phaseSelectionId(iterationId, phase),
     type: "phase-state",
@@ -253,7 +287,13 @@ function handleClick(event) {
       setNavigationOpen(!elements.navigation.classList.contains("is-open"));
       break;
     case "select-record":
+      if (actionElement.dataset.iterationId) {
+        state.selectedIterationId = actionElement.dataset.iterationId;
+      }
       selectRecord(actionElement.dataset.selectId);
+      break;
+    case "select-iteration":
+      selectIteration(actionElement.dataset.iterationId);
       break;
     case "select-phase":
       selectPhase(actionElement.dataset.iterationId, actionElement.dataset.phase);
@@ -275,8 +315,15 @@ function handleClick(event) {
 
 function handleChange(event) {
   const filter = event.target.dataset.filter;
+  if (filter === "dossier") {
+    selectIteration(event.target.value);
+    return;
+  }
   if (!filter || !Object.hasOwn(state.filters, filter)) return;
   state.filters[filter] = event.target.value;
+  if (filter === "iteration" && event.target.value) {
+    state.selectedIterationId = event.target.value;
+  }
   render();
 }
 
