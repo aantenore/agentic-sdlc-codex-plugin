@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile-task-start-receipt.schema.json",
+  "title": "Profile-bound task start compatibility receipt",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "story_id",
+    "phase",
+    "route",
+    "contract_id",
+    "contract_approval_hash",
+    "delivery_profile_ref",
+    "autonomy_decision_ref",
+    "delivery_start_receipt_ref",
+    "autonomy_level",
+    "start_basis",
+    "status",
+    "authorization_ref",
+    "authorization_use_ref",
+    "authority_assurance",
+    "confirmed_by",
+    "confirmed_at",
+    "audit"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "profile_task_start_receipt" },
+    "schema_version": { "const": "profile-task-start-receipt:v1" },
+    "story_id": { "type": ["string", "null"] },
+    "phase": { "type": ["string", "null"] },
+    "route": { "type": "string", "minLength": 1 },
+    "contract_id": { "type": ["string", "null"] },
+    "contract_approval_hash": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+    "delivery_profile_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
+    "autonomy_decision_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
+    "delivery_start_receipt_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
+    "autonomy_level": { "enum": ["supervised", "checkpointed", "bounded-autonomous"] },
+    "start_basis": { "enum": ["explicit-confirmation", "checkpointed-profile", "bounded-autonomous-profile"] },
+    "status": { "const": "confirmed" },
+    "authorization_ref": { "type": ["string", "null"] },
+    "authorization_use_ref": { "type": ["string", "null"] },
+    "authority_assurance": { "type": "object" },
+    "confirmed_by": { "$ref": "common.schema.json#/$defs/actor" },
+    "confirmed_at": { "type": "string", "format": "date-time" },
+    "audit": { "$ref": "common.schema.json#/$defs/audit" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "path_hashed_id_ref": {
+      "type": "object",
+      "required": ["id", "path", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

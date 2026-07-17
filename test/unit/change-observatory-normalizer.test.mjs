@@ -418,6 +418,159 @@ test("builds proof-bound dossiers without cross-story, shared, or ambiguous line
   }
 });
 
+test("projects autonomy records and links them only through explicit dossier references", async (t) => {
+  const root = await createProject(t);
+  const hash = (character) => character.repeat(64);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "autonomy-lineage",
+    project_name: "Autonomy Lineage",
+  });
+  await writeJson(root, ".sdlc/requirements/REQ-A.json", {
+    schema_version: "requirement:v2",
+    id: "REQ-A",
+    title: "Deliver A",
+    autonomy_profile_id: "AUT-REQ-A",
+  });
+  await writeJson(root, ".sdlc/stories/ST-A/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-A",
+    title: "Story A",
+    phase: "implementation",
+    status: "in_progress",
+    contract_id: "CONTRACT-A",
+    links: { requirements: ["REQ-A"], decisions: [], tests: [] },
+  });
+  await writeJson(root, ".sdlc/stories/ST-B/story.json", {
+    schema_version: "0.1.0",
+    id: "ST-B",
+    title: "Story B",
+    phase: "implementation",
+    status: "in_progress",
+    links: { requirements: [], decisions: [], tests: [] },
+  });
+  await writeJson(root, ".sdlc/contracts/CONTRACT-A.json", {
+    schema_version: "0.1.0",
+    id: "CONTRACT-A",
+    story_id: "ST-A",
+    phase: "implementation",
+    status: "approved",
+    requirement_execution_profile_refs: [{ id: "AUT-REQ-A", hash: hash("a") }],
+    delivery_execution_profile_id: "AUT-PR-A",
+  });
+  await writeJson(root, ".sdlc/contracts/CONTRACT-CROSS-A.json", {
+    schema_version: "0.1.0",
+    id: "CONTRACT-CROSS-A",
+    story_id: "ST-A",
+    phase: "implementation",
+    status: "approved",
+    delivery_execution_profile_id: "AUT-PR-B",
+  });
+  await writeJson(root, ".sdlc/autonomy/requirements/AUT-REQ-A.json", {
+    kind: "requirement_execution_profile",
+    schema_version: "requirement-execution-profile:v1",
+    id: "AUT-REQ-A",
+    status: "active",
+    requirement_ref: { id: "REQ-A", version: 1, hash: hash("b") },
+    autonomy_ceiling: "checkpointed",
+    created_at: "2026-07-16T08:00:00Z",
+  });
+  await writeJson(root, ".sdlc/custom-policy/requirements/AUT-REQ-ORPHAN.json", {
+    kind: "requirement_execution_profile",
+    schema_version: "requirement-execution-profile:v1",
+    id: "AUT-REQ-ORPHAN",
+    status: "active",
+    requirement_ref: { id: "REQ-ORPHAN", version: 1, hash: hash("c") },
+    autonomy_ceiling: "bounded-autonomous",
+  });
+  for (const [storyId, deliveryId, profileId, level] of [
+    ["ST-A", "PR-A", "AUT-PR-A", "checkpointed"],
+    ["ST-B", "PR-B", "AUT-PR-B", "bounded-autonomous"],
+  ]) {
+    await writeJson(root, `.sdlc/autonomy/deliveries/${profileId}.json`, {
+      kind: "delivery_execution_profile",
+      schema_version: "delivery-execution-profile:v1",
+      id: profileId,
+      status: "active",
+      delivery_id: deliveryId,
+      delivery_kind: "pull_request",
+      requested_level: level,
+      story_refs: [{ id: storyId, hash: hash("d") }],
+      contract_refs: [{ id: storyId === "ST-A" ? "CONTRACT-A" : "CONTRACT-B", hash: hash("e") }],
+      profile_hash: hash(storyId === "ST-A" ? "f" : "1"),
+      created_at: "2026-07-16T08:10:00Z",
+    });
+  }
+  for (const [deliveryId, profileId, decisionId, level, status] of [
+    ["PR-A", "AUT-PR-A", "AUT-DEC-A", "checkpointed", "checkpoint_required"],
+    ["PR-B", "AUT-PR-B", "AUT-DEC-B", "bounded-autonomous", "ready"],
+  ]) {
+    await writeJson(root, `.sdlc/autonomy/decisions/${decisionId}.json`, {
+      kind: "autonomy_decision",
+      schema_version: "autonomy-decision:v1",
+      id: decisionId,
+      delivery: {
+        id: deliveryId,
+        kind: "pull_request",
+        profile_id: profileId,
+        profile_hash: profileId === "AUT-PR-A" ? hash("f") : hash("1"),
+      },
+      phase: "implementation",
+      requested_level: level,
+      effective_level: level,
+      execution_status: status,
+      reason_codes: profileId === "AUT-PR-A" ? ["authority.audit_only_cap"] : [],
+      evaluated_at: "2026-07-16T08:20:00Z",
+    });
+  }
+  await writeJson(root, ".sdlc/stories/ST-A/task-start.json", {
+    id: "START-A",
+    story_id: "ST-A",
+    phase: "implementation",
+    status: "confirmed",
+    delivery_profile_ref: { id: "AUT-PR-A", hash: hash("f") },
+    autonomy_decision_ref: { id: "AUT-DEC-A", hash: hash("2") },
+  });
+
+  const model = await buildObservatoryViewModel(root, { clock: () => FIXED_TIME });
+  const dossierA = model.dossiers.find((dossier) => dossier.storyId === "ST-A");
+  const dossierB = model.dossiers.find((dossier) => dossier.storyId === "ST-B");
+  const decidedA = dossierA.lanes.decided.items.map((item) => item.id);
+  const decidedB = dossierB.lanes.decided.items.map((item) => item.id);
+
+  assert.equal(decidedA.includes("AUT-REQ-A"), true);
+  assert.equal(decidedA.includes("AUT-PR-A"), true);
+  assert.equal(decidedA.includes("AUT-DEC-A"), true);
+  assert.equal(decidedA.includes("AUT-PR-B"), false);
+  assert.equal(decidedA.includes("AUT-DEC-B"), false);
+  assert.equal(decidedB.includes("AUT-PR-B"), true);
+  assert.equal(decidedB.includes("AUT-DEC-B"), true);
+  assert.equal(decidedB.includes("AUT-REQ-A"), false);
+
+  const requirementProfile = model.decisions.find((item) => item.id === "AUT-REQ-A");
+  assert.equal(requirementProfile.type, "requirement-execution-profile");
+  assert.equal(requirementProfile.title, "Autonomy ceiling for REQ-A");
+  assert.equal(requirementProfile.summary, "Maximum checkpointed autonomy for requirement REQ-A.");
+  const deliveryProfile = model.decisions.find((item) => item.id === "AUT-PR-A");
+  assert.equal(deliveryProfile.title, "Autonomy for pull request PR-A");
+  assert.equal(deliveryProfile.summary, "Selected checkpointed autonomy for pull request PR-A.");
+  const autonomyDecision = model.decisions.find((item) => item.id === "AUT-DEC-A");
+  assert.equal(autonomyDecision.status, "checkpoint_required");
+  assert.equal(
+    autonomyDecision.summary,
+    "requested checkpointed; effective checkpointed; status checkpoint_required; reasons: authority.audit_only_cap.",
+  );
+  assert.equal(
+    model.records.find((record) => record.id === "AUT-REQ-ORPHAN").kind,
+    "requirement-execution-profile",
+  );
+  assert.equal(model.unlinked.some((item) => item.id === "AUT-REQ-ORPHAN"), true);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => diagnostic.code === "dossier_cross_story_link_blocked"),
+    true,
+  );
+});
+
 test("fails closed when canonical story IDs are duplicated", async (t) => {
   const root = await createProject(t);
   await writeJson(root, ".sdlc/project.json", {

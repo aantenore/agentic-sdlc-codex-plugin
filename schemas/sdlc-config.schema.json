@@ -14,6 +14,7 @@
     "budget_policy",
     "approval_policy",
     "authority_policy",
+    "autonomy_policy",
     "verification_policy",
     "release_evidence_policy"
   ],
@@ -101,6 +102,9 @@
       ],
       "additionalProperties": true
     },
+    "autonomy_policy": {
+      "$ref": "#/$defs/autonomy_policy"
+    },
     "verification_policy": {
       "$ref": "#/$defs/verification_policy"
     },
@@ -109,6 +113,91 @@
     }
   },
   "$defs": {
+    "autonomy_policy": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "mode",
+        "storage_root",
+        "requirement_profile_schema",
+        "delivery_profile_schema",
+        "decision_schema",
+        "allowed_levels",
+        "default_requirement_ceiling",
+        "legacy_default",
+        "fail_closed_on_unknown",
+        "require_explicit_delivery_selection",
+        "bounded_autonomous_requires_host_verified",
+        "delivery_kinds",
+        "presets",
+        "exception_triggers"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "enum": ["off", "observe", "enforce_new_only", "enforce_all"] },
+        "principle": { "type": "string", "minLength": 1 },
+        "storage_root": { "type": "string", "minLength": 1 },
+        "requirement_profile_schema": { "const": "schemas/requirement-execution-profile.schema.json" },
+        "delivery_profile_schema": { "const": "schemas/delivery-execution-profile.schema.json" },
+        "decision_schema": { "const": "schemas/autonomy-decision.schema.json" },
+        "allowed_levels": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/autonomy_level" }
+        },
+        "default_requirement_ceiling": { "$ref": "#/$defs/autonomy_level" },
+        "legacy_default": { "const": "supervised" },
+        "fail_closed_on_unknown": { "type": "boolean" },
+        "require_explicit_delivery_selection": { "type": "boolean" },
+        "bounded_autonomous_requires_host_verified": { "type": "boolean" },
+        "delivery_kinds": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["pull_request", "local_release"] }
+        },
+        "presets": {
+          "type": "object",
+          "required": ["supervised", "checkpointed", "bounded-autonomous"],
+          "properties": {
+            "supervised": { "$ref": "#/$defs/autonomy_preset" },
+            "checkpointed": { "$ref": "#/$defs/autonomy_preset" },
+            "bounded-autonomous": { "$ref": "#/$defs/autonomy_preset" }
+          },
+          "additionalProperties": false
+        },
+        "exception_triggers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "pull_request": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "local_release": { "type": "object", "additionalProperties": { "type": "boolean" } }
+      },
+      "additionalProperties": true
+    },
+    "autonomy_level": {
+      "enum": ["supervised", "checkpointed", "bounded-autonomous"]
+    },
+    "autonomy_preset": {
+      "type": "object",
+      "required": ["automatic_phases", "checkpoints"],
+      "properties": {
+        "automatic_phases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["discovery", "analysis", "design", "implementation", "validation", "release"] }
+        },
+        "checkpoints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
     "context_optimization_policy": {
       "type": "object",
       "required": ["enabled", "mode", "fallback", "storage_root", "observation_schema", "provider", "telemetry", "budget_trigger_statuses"],

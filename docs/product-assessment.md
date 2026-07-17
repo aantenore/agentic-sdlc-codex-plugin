@@ -24,7 +24,7 @@ This assessment evaluates the product experience for requests equivalent to:
 
 > Contextualize this existing project and prepare an initial technical or functional assessment in my requested format.
 
-The bounded happy path is read-only repository and KB analysis, already-installed local capabilities, one agreed project artifact, canonical SDLC bookkeeping, format-specific verification, and a concise chat summary. Implementation work, deployment, production inspection, secret-bearing systems, and unapproved external research are outside that path.
+The bounded happy path is read-only repository and KB analysis, already-installed local capabilities, one agreed project artifact, canonical SDLC bookkeeping, format-specific verification, and a concise chat summary. If the assessment also produces a pull request or local release, checkpoint 2 must include the explicit autonomy selection for that exact delivery profile. Implementation work outside that profile, remote deployment, production inspection, secret-bearing systems, and unapproved external research are outside the path.
 
 Evidence considered includes the existing Agentic SDLC skill and interaction documentation, CLI routing and approval behavior, project configuration, output-contract schemas, package boundaries, and regression tests. Repository evidence can show implemented behavior; it cannot prove unstored historical decisions or the semantic correctness of every future assessment.
 
@@ -45,7 +45,7 @@ Evidence considered includes the existing Agentic SDLC skill and interaction doc
 | Internal artifacts become user-facing checkpoints | A normal assessment can feel like configuring the SDLC engine instead of requesting an outcome | Collapse the journey into inferred context and one combined work proposal |
 | Baseline approval can be misunderstood as broader consent | A short confirmation may appear to authorize format, tools, contract, or execution | State and enforce that baseline approval applies only to baseline context |
 | Template, capability, contract, start, and budget decisions are fragmented | Users repeat approvals for one conceptual task | Hash scope, sources, sections, format, tools, writes, contract, start, and budget into one proposal |
-| Broader autonomy is easy to overstate or misattribute | An agent can appear to self-declare human authority or silently widen it | Require a host/CI approval receipt, proposal-bound authorization, exact subject hashes, and validity-at-use receipts |
+| Broader autonomy is easy to overstate or misattribute | An agent can appear to self-declare human authority, exceed a requirement ceiling, or reuse a prior PR choice | Require requirement and per-delivery profiles, host/CI approval, exact subject hashes, no cross-delivery reuse, and validity-at-use receipts |
 | File format is presentation advice rather than a canonical contract | A `.md` file can be delivered when the user asked for Word or Excel | Store format, extension, media type, delivery mode, and generator capability; reject mismatches |
 | Structural verification is easy to overclaim | A valid container can appear semantically and visually verified | Separate generator attestation, container, content, render, and optional independent verification |
 | Execution has no explicit resource boundary | The agent may consume disproportionate time/tokens or stop before verification | Approve one concrete budget tranche with warnings, completion reserve, stop policy, usage receipt, and versioned amendments |
@@ -122,7 +122,7 @@ These are product boundaries rather than incomplete happy-path behavior:
 | Blocking | Exact approval scope | A short approval covers only displayed proposal elements; unseen or changed artifacts remain unapproved | Negative approval tests |
 | Blocking | Host authority | Direct human/CI approval has a host/CI receipt; an agent flag cannot impersonate authority | Provenance tests |
 | Blocking | Authorization history | Each automated use stores an authorization snapshot valid at use time; later close/revoke preserves valid history | Lifecycle and strict-gate tests |
-| Blocking | Delegated autonomy | Broader autonomy is preserved exactly and later covered approvals use `actor_type: agent` with `approval_source: automation` | Approval provenance tests |
+| Blocking | Delegated autonomy | The requirement ceiling and current delivery choice are preserved exactly; later covered approvals remain inside that delivery and use `actor_type: agent` with `approval_source: automation` | Approval provenance and no-cross-delivery-reuse tests |
 | Blocking | Local capability bookkeeping | Already-installed local read-only tools do not add a separate checkpoint when policy permits; installs/external/secrets/production/out-of-scope writes do | Happy-path and escalation tests |
 | Blocking | Canonical formats | All eight formats store format, extension, media type, delivery mode, and generator; aliases normalize deterministically | Schema and CLI tests |
 | Blocking | Extension enforcement | Linking an artifact whose extension contradicts the approved format fails consistently | Negative CLI test for every format family |
@@ -146,7 +146,7 @@ These are product boundaries rather than incomplete happy-path behavior:
 5. An approved baseline followed by "ok" does not approve capabilities, format, contract, budget, or start.
 6. Already-installed local read-only capability records are handled as policy-backed automation without a third checkpoint.
 7. A missing generator skill, external evidence source, secret-bearing endpoint, production target, or new write location produces an explicit decision before use.
-8. A user-declared autonomy scope is copied into automation approval evidence without adding installs or unrelated work.
+8. A user-declared autonomy scope is copied into automation approval evidence only for the same delivery, without adding installs, merge/deploy, or unrelated work; a later PR or local release asks again.
 9. The same assessment preset produces coherent Markdown, Word, and Excel outputs with all mandatory sections represented.
 10. A budget reaches 70% and 90% with non-blocking warnings, preserves verification reserve, and requires a versioned amendment before an unapproved overrun.
 11. Revoking the authorization after completion blocks future use without invalidating historical validity-at-use receipts.
@@ -154,4 +154,4 @@ These are product boundaries rather than incomplete happy-path behavior:
 
 ## Product Decision
 
-Ship the self-service assessment claim only when every blocking criterion has durable release evidence. Describe the boundary precisely: repository and local-tool assessments may run after the two displayed decisions; external systems, installations, secrets, production access, destructive operations, new write paths, material proposal changes, and unapproved budget extensions require an explicit exception decision.
+Ship the self-service assessment claim only when every blocking criterion has durable release evidence. Describe the boundary precisely: repository and local-tool assessments may run after the two displayed decisions; if one pull request or local release is included, its autonomy choice is part of the second decision and applies only to that delivery. A new delivery, protected-branch merge, remote deployment, external system, installation, secret, production access, destructive operation, new write path, material proposal change, or unapproved budget extension requires an explicit decision.

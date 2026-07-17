@@ -15,6 +15,7 @@ Target project
         -> assessments
         -> budgets
         -> contracts
+        -> autonomy
         -> authorizations
         -> authorization-uses
         -> receipts
@@ -50,6 +51,7 @@ flowchart TB
     KB[".sdlc source of truth"]
     Baseline["Project baseline"]
     Assessments["Assessment proposals and workflows"]
+    Autonomy["Requirement and delivery autonomy profiles"]
     Receipts["Approval, use, generation, verification, and budget receipts"]
     Capabilities["Capability discovery"]
     OutputRegistry["Output contracts registry"]
@@ -68,6 +70,7 @@ flowchart TB
   CLI --> KB
   CLI --> Baseline
   CLI --> Assessments
+  CLI --> Autonomy
   CLI --> Receipts
   CLI --> Capabilities
   CLI --> OutputRegistry
@@ -79,6 +82,7 @@ flowchart TB
   KB --> Cache
   Baseline --> Cache
   Assessments --> Cache
+  Autonomy --> Cache
   Receipts --> Cache
   Capabilities --> Cache
   KB --> Indexes
@@ -160,6 +164,40 @@ flowchart LR
 
 Budget policy is data-driven. Project configuration supplies metric templates, maxima, warning thresholds, completion reserve, and stop/extension rules. A hard limit is valid only for exactly metered usage. Amendments reference the approved base budget and proposal hashes; they never mutate the base tranche or widen scope.
 
+## Autonomy Control Plane
+
+Autonomy is represented by separate, composable records rather than a global trust score:
+
+- `requirement:v2` is the immutable, revisioned business requirement;
+- `requirement-execution-profile:v1` is its approved maximum autonomy envelope;
+- `delivery-execution-profile:v1` is the user's explicit selection for one `pull_request` or `local_release`;
+- `autonomy-decision:v1` is the deterministic explanation of the effective result.
+
+```mermaid
+flowchart LR
+  Host["Host and project policy"] --> Eval["Autonomy evaluator"]
+  Req["requirement:v2"] --> ReqProfile["Requirement profile ceiling"]
+  ReqProfile --> Eval
+  Delivery["One PR or local release profile"] --> Eval
+  Contract["Contract and phase override"] --> Eval
+  Capability["Capability and environment"] --> Eval
+  Budget["Budget state"] --> Eval
+  Eval --> Decision["Effective level + reason codes"]
+  Decision --> ExactAuth["Exact per-delivery authorization"]
+```
+
+The evaluator computes the most restrictive result across host, project, requirement, delivery, contract, capability, environment, and budget. A downstream layer can only narrow authority. Multiple linked requirements use the lowest ceiling. Missing, unknown, stale, expired, revoked, or materially drifted inputs fail closed.
+
+The three levels are `supervised`, `checkpointed`, and `bounded-autonomous`. `audit_only` authority is capped at `checkpointed`, including for local targets. Effective `bounded-autonomous` requires an external host/CI Ed25519 receipt for the exact delivery-profile approval subject, `authority_policy.mode: host_verified`, its public key in `trusted_host_keys`, and that receipt at approval time. The CLI validates but cannot self-issue trusted authority. Previous delivery history may support a recommendation but is not an input that can increase authority.
+
+Delivery profiles are exact and terminal. One profile binds exactly one story and its one approved contract; an agreed aggregation story/contract is required when several changes must ship together. A pull-request profile binds repository, base branch, head branch, canonical actions, explicit write paths, material scope, and requirement profile hashes. A local-release profile binds a local target root, allowed writes/actions, shell-free JSON-argv smoke tests, and rollback while keeping external, production, and destructive access false. Neither profile may be reused for another delivery. Protected-branch merge and remote or production deployment are explicit exceptions.
+
+Delivery binding is intentionally one-way to avoid circular hashes: reserve the planned profile ID in the final requirement-bound story contract, approve that contract, then bind the matching delivery profile to the immutable requirement-profile, story, and contract hashes. The ID is not a profile hash or approval. Task start supplies the profile to the evaluator; the approved contract is not rewritten to point back to it.
+
+Task-start automation comes from the effective level's configured `automatic_phases`, not from a hardcoded progression or successful-run count. `supervised` always confirms. The stock `checkpointed` preset starts analysis, design, implementation, and validation automatically but retains release checkpoints.
+
+Delivery actions form a receipt chain: immutable start → exact action authorization → external/host execution → outcome plus evidence → terminal close. An authorization receipt is policy, not an executor. A checkpoint under `host_verified` additionally requires an external Ed25519 receipt whose action is `autonomy.delivery.action.<canonical-action>` and whose subject binds the exact profile, delivery, runtime target, and action details; `audit_only` records the explicit approval without claiming verified authority. Passing `release.local` completion runs the exact approved smoke argv in a supported read-only/no-network sandbox and automatically closes `released`; passing `pull_request.merge` completion closes `merged`. The CLI validates local Git identity, branches, SHA transitions, paths, and evidence hashes, but currently relies on a host/CI/provider for durable proof that a remote push or merge actually occurred.
+
 ## Intent Routing Layer
 
 The routing layer separates language understanding from deterministic SDLC control. Codex or another LLM normalizes the user conversation into the canonical intent schema; the CLI consumes only that JSON plus project-local `.sdlc/` state.
@@ -191,10 +229,12 @@ Every SDLC phase is governed by a contract. A contract defines:
 - allowed tools;
 - required knowledge base writes;
 - human approval gate;
+- requirement execution profile and delivery execution profile references;
+- any per-phase autonomy override, which may only narrow the effective level;
 - Codex execution policy for model and reasoning inheritance or override;
 - operational metrics.
 
-This keeps agent work bounded and reviewable.
+This keeps agent work bounded and reviewable. The contract does not grant autonomy by itself; it participates in the restrictive intersection evaluated for the current delivery.
 
 Story-specific contracts can also declare `output_contract_refs`. In strict mode, each declared output ref must be satisfied by a linked artifact in `.sdlc/output-contracts/registry.json`. Contract approvals store a stable hash of the approved contract content; changing the contract after approval requires a new approval.
 
@@ -218,7 +258,7 @@ flowchart LR
 
 ## Approval Governance
 
-The approval model separates operational authorization from formal SDLC approval. A user saying "implement and push" does not automatically approve a contract, output template, baseline, capability recommendation, dependency graph, duplicate-output decision, or assessment proposal.
+The approval model separates operational authorization from formal SDLC approval. A user saying "implement and push" does not automatically approve a contract, output template, baseline, requirement ceiling, delivery autonomy selection, capability recommendation, dependency graph, duplicate-output decision, or assessment proposal.
 
 Formal approvals store:
 
@@ -228,7 +268,7 @@ Formal approvals store:
 - approved content hash;
 - Git and Codex run metadata.
 
-For new assessment workflows, a human actor flag plus summary is insufficient by itself. A host/CI receipt binds the exact question, immutable subject hash, response, actor, host message, and timestamp. The derived content authorization enumerates exact actions, subject IDs/hashes, artifact types, validity, and use policy. Each mutation writes a snapshot receipt evaluated at the use timestamp; closing or revoking the grant blocks future use without rewriting history. `bootstrap` remains provisional and does not satisfy strict gates by default.
+For new assessment and autonomy workflows, a human actor flag plus summary is insufficient by itself. A host/CI receipt binds the exact question, immutable subject hash, response, actor, host message, and timestamp. The derived content authorization enumerates exact actions, subject IDs/hashes, delivery identity, artifact types, validity, and use policy. Each mutation writes a snapshot receipt evaluated at the use timestamp; closing or revoking the grant blocks future use without rewriting history. `bootstrap` remains provisional and does not satisfy strict gates by default.
 
 ```mermaid
 flowchart LR
@@ -380,9 +420,9 @@ For phase-by-phase examples, see [Agent Interactions](agent-interactions.md).
 
 ## Gate Model
 
-Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, invalid statuses or expiry dates, unapproved or changed output templates, unjustified duplicate outputs, stale cache warnings, and test/release evidence gaps. Use `gate check --out <path>` to persist JSON or Markdown reports under `.sdlc/reports/`.
+Gate checks are mechanical validations over `.sdlc/` artifacts. They do not replace human judgment, but they catch missing contracts, missing acceptance criteria, incomplete traceability, stale claims, invalid statuses or expiry dates, missing or drifted requirement/delivery profiles, delivery levels above their ceiling, authorization reuse across deliveries, unapproved or changed output templates, unjustified duplicate outputs, stale cache warnings, and test/release evidence gaps. Use `gate check --out <path>` to persist JSON or Markdown reports under `.sdlc/reports/`.
 
-Canonical KB and trace paths always use `/` separators so the same records remain stable across Linux, macOS, and Windows. IDs reject names that cannot be represented portably, including Windows device names and trailing periods. Assessment gates validate the baseline/proposal hashes, requirement/story lineage, exact authorization-use receipts, generator receipt, required verification dimensions, execution budget/usage/amendments, and release manifest rather than trusting IDs or a single `passed` flag.
+Canonical KB and trace paths always use `/` separators so the same records remain stable across Linux, macOS, and Windows. IDs reject names that cannot be represented portably, including Windows device names and trailing periods. Assessment gates validate the baseline/proposal hashes, requirement revision and ceiling, current delivery profile, story/contract lineage, exact authorization-use receipts, generator receipt, required verification dimensions, execution budget/usage/amendments, local smoke/rollback evidence when applicable, and release manifest rather than trusting IDs or a single `passed` flag.
 
 Release tags run the complete Linux, macOS, and Windows matrix for every supported Node line before the package job can publish. The package regression test creates a real tarball, installs it into a clean prefix, and runs the installed CLI doctor so source-tree success cannot hide a missing packaged resource.
 
@@ -392,22 +432,27 @@ flowchart TB
   Gate --> Stories["Story readiness"]
   Gate --> Traces["Attributed traces"]
   Gate --> OutputLinks["Output links"]
+  Gate --> Autonomy["Requirement ceiling + current delivery"]
   Gate --> CachePolicy["Cache policy"]
 
   OutputLinks --> Templates["Approved templates"]
   OutputLinks --> DeltaBase["Delta has base artifact"]
   OutputLinks --> DuplicatePolicy["Duplicates have approved decision"]
   CachePolicy --> NoDerivedSource["Cache and indexes are not canonical"]
+  Autonomy --> NoReuse["No level expansion or cross-delivery reuse"]
 
   Templates --> Result["Pass or fail"]
   DeltaBase --> Result
   DuplicatePolicy --> Result
   NoDerivedSource --> Result
+  NoReuse --> Result
 ```
 
 ## Extension Points
 
 The CLI accepts a custom template directory through `--template-dir`. Teams can replace the SDLC phase configuration without changing the plugin code.
+
+`autonomy_policy` is also project-local configuration: rollout mode, allowed levels, legacy ceiling, host-verification requirement, delivery kinds, preset checkpoints, and exception triggers are data rather than product-specific branches. The evaluator remains generic and consumes the configured policies plus hash-bound records.
 
 The schemas can be used by CI, pre-merge checks, or future MCP tools.
 

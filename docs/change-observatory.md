@@ -38,6 +38,8 @@ agentic-sdlc observe \
   Done, and Verified;
 - what changed, grouped by recorded intent where available;
 - decisions, approvals, rationale summaries, alternatives, and evidence;
+- requirement autonomy ceilings, the explicit level selected for the current one-story/one-contract pull request or local release, and the effective decision with reason codes;
+- immutable delivery start/close state and exact action authorization/completion receipts, without treating an authorization as proof that the action ran;
 - contract evolution and implementation/validation/release state;
 - tests, gates, handoffs, sync events, and missing or malformed lineage;
 - content-free IntentABI Codex shadow observations, when explicitly linked to a story trace;
@@ -52,11 +54,12 @@ the causal lineage of one iteration. Each recorded story therefore has an
 additive dossier that groups its evidence into five lanes:
 
 1. **Asked** — the story, explicitly linked requirements, and recorded request;
-2. **Decided** — decisions, approvals, assumptions, risks, and their stored
+2. **Decided** — requirement execution ceiling, current delivery profile,
+   effective autonomy decision, approvals, assumptions, risks, and their stored
    rationale or alternatives;
 3. **Contract** — the exact story contract and any contract-bound approval;
-4. **Done** — implementation and sync evidence recorded for the story;
-5. **Verified** — tests, gates, completed steps, and release evidence.
+4. **Done** — implementation, delivery-action completion, and sync evidence recorded for the story;
+5. **Verified** — tests, gates, completed steps, local smoke receipts, remote host/provider evidence when present, and release evidence.
 
 A lane membership is allowed only when canonical evidence records an explicit
 `story_id`, `requirement_id`, `related` identifier, contract identifier, or
@@ -64,6 +67,11 @@ evidence path that resolves to the story. Time proximity, filename similarity,
 display titles, and free-text semantics are never lineage signals. The server
 computes the dossier once; the browser only validates and renders that bounded
 projection and does not attempt a second semantic join.
+
+An autonomy record belongs to a story dossier only through its explicit story,
+contract, requirement-profile, or delivery-profile reference. The Observatory
+must not infer that a choice for one PR also applies to another PR or local
+release.
 
 An empty lane is shown as `missing`, not inferred from another story or from the
 Git history. Records that cannot be bound explicitly stay visible in the global

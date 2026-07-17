@@ -5,6 +5,9 @@ Agentic SDLC supports parallel work through story-scoped ownership and append-on
 ## Rules
 
 - One story should have one active claim at a time.
+- Every worker that acts on a delivery must be covered by that delivery's current profile and effective autonomy decision; a profile for another PR, local release, or story is not authority.
+- A delivery profile binds exactly one story/approved-contract pair and allows at most one concurrent delivery run. Several agents may perform bounded internal subtasks inside that orchestrated run, but they do not create additional delivery lanes or concurrent story claims from the same profile.
+- Independent story lanes require their own delivery profiles and targets. If several changes must ultimately appear in one PR, first agree one aggregation story/contract and track subordinate work as bounded tasks/traces inside that single delivery unit.
 - Each claim should name the agent, branch, and optional expiry.
 - Implementation work should happen on a story branch such as `feature/ST-001`.
 - Agents should append trace events instead of rewriting shared history.
@@ -21,30 +24,33 @@ Agentic SDLC supports parallel work through story-scoped ownership and append-on
 
 ## Multiple Codex Chats
 
-1. Run `orchestrate status --json`.
-2. Pick an `available` story lane.
-3. Claim it with `story claim --thread-id <codex-thread-id>`.
-4. Work only on that story branch and story KB files.
-5. Resolve required outputs with `output resolve`; link artifacts with `output link`.
-6. Append decision, implementation, test, sync, and handoff traces.
-7. Record completed lanes with `story complete-step`.
-8. Prepare cross-lane or cross-machine handoffs with `story prepare-handoff --release-claim`.
-9. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
-10. Release the claim when done or handed off.
+1. Confirm the approved requirement ceiling and the explicit profile for this exact pull request or local release and its one story/contract pair.
+2. Run `orchestrate status --json`.
+3. Pick an `available` story lane whose approved contract reserves its own profile ID and whose current profile binds that contract hash.
+4. Claim it with `story claim --thread-id <codex-thread-id>`.
+5. Work only on that story branch and story KB files.
+6. Resolve required outputs with `output resolve`; link artifacts with `output link`.
+7. Append autonomy-decision, implementation, test, sync, and handoff traces.
+8. Record completed lanes with `story complete-step`.
+9. Prepare cross-lane or cross-machine handoffs with `story prepare-handoff --release-claim`.
+10. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
+11. Release the claim when done or handed off.
 
 ```mermaid
 flowchart TB
   Orchestrator["Parent orchestrator"] --> Status["orchestrate status"]
   Status --> StoryA["Story ST-001 available"]
   Status --> StoryB["Story ST-002 available"]
-  StoryA --> ClaimA["Chat A claim"]
-  StoryB --> ClaimB["Chat B claim"]
+  StoryA --> ProfileA["Delivery profile A"]
+  StoryB --> ProfileB["Delivery profile B"]
+  ProfileA --> ClaimA["Chat A claim"]
+  ProfileB --> ClaimB["Chat B claim"]
   ClaimA --> BranchA["feature/ST-001"]
   ClaimB --> BranchB["feature/ST-002"]
   BranchA --> EvidenceA["Trace and output links"]
   BranchB --> EvidenceB["Trace and output links"]
-EvidenceA --> GateA["Story gate ST-001"]
-EvidenceB --> GateB["Story gate ST-002"]
+  EvidenceA --> GateA["Story gate ST-001"]
+  EvidenceB --> GateB["Story gate ST-002"]
   GateA --> Merge["Project review"]
   GateB --> Merge
 ```
@@ -59,6 +65,8 @@ A parent chat can coordinate several worker chats without editing their story fi
 4. Require each worker to write attributed trace and sync evidence.
 5. Resolve conflicts by splitting stories, releasing/reclaiming claims after coordination, or using phase locks.
 6. Run project-wide `gate check --scope all --strict --out .sdlc/reports/project-gate-report.json` before release.
+
+The parent may distribute story work only across separately governed delivery lanes, or distribute internal subtasks inside one aggregation-story run without inventing extra story authority. It cannot raise a worker above the most restrictive host, project, requirement, delivery, contract, capability, environment, or budget boundary. Protected-branch merge and remote/production deployment remain explicit decisions outside ordinary worker coordination.
 
 ## Conflict Handling
 

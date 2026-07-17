@@ -5,8 +5,8 @@ This page is the documentation map. Start with the goal that matches what you wa
 ## Start here
 
 - [Project overview](../README.md) — what the plugin does, installation, the normal two-checkpoint experience, and maintainer commands.
-- [How it works](how-it-works.md) — the end-to-end lifecycle from project context to an approved proposal, execution, verification, and release evidence.
-- [Limits and metering](limits-and-metering.md) — how to grant broad autonomy while constraining actions, files, capabilities, time, steps, tokens, calls, cost, and custom metrics.
+- [How it works](how-it-works.md) — the end-to-end lifecycle from project context and `requirement:v2` agreement through per-delivery autonomy, execution, verification, and release evidence.
+- [Limits and metering](limits-and-metering.md) — how requirement ceilings and explicit pull-request or local-release choices constrain actions, files, capabilities, time, steps, tokens, calls, cost, and custom metrics.
 - [Change Observatory](change-observatory.md) — open and interpret the bundled visual request/change/decision lineage.
 - [Token efficiency](token-efficiency.md) — reduce derived JSON and shell-output context without changing canonical evidence.
 
@@ -16,7 +16,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 |---|---|---|
 | Understand the normal user journey | [How it works](how-it-works.md) | What happens at each checkpoint and which records are created |
 | Run or explain an assessment | [Assessment interactions](agent-interactions.md) | What Codex asks, what the user must answer, and concrete examples |
-| Decide between broad autonomy and strict limits | [Limits and metering](limits-and-metering.md) | What “blank cheque” means, what remains out of scope, and how limits stop work |
+| Choose autonomy for a requirement, pull request, or local release | [Limits and metering](limits-and-metering.md) | Requirement ceiling, per-delivery selection, local rollback, exception boundaries, and resource limits |
 | Measure local Codex usage with CodeBurn | [Limits and metering](limits-and-metering.md#codeburn-advisory-metering) | The complete `start` and `record` workflow, option meanings, and metric mappings |
 | Integrate the CodeBurn library adapter | [CodeBurn adapter reference](codeburn-metering.md) | Snapshot and delta contracts, integrity rules, and library APIs |
 | Reduce token-heavy tool output | [Token efficiency](token-efficiency.md) | Compact JSON defaults, RTK setup, bypass rules, and measurement |

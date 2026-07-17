@@ -13,6 +13,7 @@ The sample records below use neutral placeholders. The structure is generic and 
     assessments/
     budgets/
     contracts/
+    autonomy/
     authorizations/
     authorization-uses/
     receipts/
@@ -59,6 +60,7 @@ flowchart TB
   Source --> Assessments["assessments"]
   Source --> Budgets["budgets"]
   Source --> Contracts["contracts"]
+  Source --> Autonomy["requirement and delivery autonomy"]
   Source --> AuthorizationUses["authorization uses"]
   Source --> Receipts["receipts"]
   Source --> Capabilities["capability-discovery"]
@@ -80,6 +82,7 @@ flowchart TB
   Assessments --> Cache
   Budgets --> Cache
   Contracts --> Cache
+  Autonomy --> Cache
   AuthorizationUses --> Cache
   Receipts --> Cache
   Capabilities --> Cache
@@ -281,7 +284,7 @@ Every generated contract is bound to the current project and records contextuali
     "summary": "Analyze the MVP around the approved business workflow.",
     "context_sources": [
       {
-        "path": ".sdlc/requirements/REQ-001.md",
+        "path": ".sdlc/requirements/REQ-001.json",
         "sha256": "content-hash",
         "size_bytes": 1200,
         "excerpt": "Problem statement and constraints..."
@@ -474,18 +477,55 @@ flowchart LR
 
 ## `requirements/`
 
-Requirements and analysis artifacts.
+Requirements and analysis artifacts. New governed requirements use `requirement:v2`: the logical requirement is revisioned, hash-bound, explicitly approved, and linked to one requirement execution profile.
 
 Examples:
 
 ```text
 .sdlc/requirements/REQ-001.md
+.sdlc/requirements/REQ-001.json
+.sdlc/requirements/lifecycle/REQ-SUP-<unique-suffix>.json
 .sdlc/requirements/non-functional-requirements.md
 .sdlc/requirements/functional-analysis.md
 .sdlc/requirements/integration-map.md
 ```
 
-Agents should link stories and tests back to requirement IDs when possible.
+The v2 record contains outcome, acceptance criteria, non-goals, constraints, non-functional requirements, integrations, source hashes, revision lineage, approvals, and `autonomy_profile_id`. Use `proposed → approved → active → satisfied` for normal progression. A material change creates a new revision and a hash-bound supersession event rather than rewriting approved history.
+
+Agents must link stories, contracts, tests, output links, autonomy profiles, and release evidence back to the exact requirement ID, revision, and content hash. A legacy `requirement:v1` remains readable but receives a `supervised` autonomy ceiling by policy.
+
+## `autonomy/`
+
+Canonical policy records for requirement ceilings and individual delivery units.
+
+Examples:
+
+```text
+.sdlc/autonomy/requirements/AUT-REQ-001-R1.json
+.sdlc/autonomy/deliveries/AUT-PR-184.json
+.sdlc/autonomy/deliveries/AUT-LOCAL-REL-009.json
+.sdlc/autonomy/decisions/AUT-DECISION-PR-184.json
+.sdlc/autonomy/executions/AUT-PR-184/start.json
+.sdlc/autonomy/executions/AUT-PR-184/close.json
+.sdlc/autonomy/actions/AUT-ACT-....json
+```
+
+`requirement-execution-profile:v1` binds one immutable requirement revision and stores its maximum level, optional phase levels, material scope hash, tools, capabilities, environments, write paths, forbidden actions, checkpoints, exception actions, budget reference, validity, and authority assurance. It is a ceiling, not an executable authorization.
+
+`delivery-execution-profile:v1` stores the explicit selection for exactly one delivery and exactly one story/approved-contract pair. When several changes need to ship together, first model an agreed aggregation story/contract instead of treating a profile as an unrelated multi-story bundle:
+
+- `pull_request` binds repository, base branch, head branch, canonical actions, explicit write paths, one story/contract hash pair, and whether merge is allowed;
+- `local_release` binds the local root, actions, write paths, smoke tests, and required rollback while denying external, production, and destructive access.
+
+Both kinds bind the applicable requirement profile hashes and material scope. Their use policy is exact-delivery, non-reusable, one concurrent run, receipt-backed, and closed on terminal state. A new pull request or local release always needs a new selection, even when it implements the same requirement.
+
+Delivery binding is one-way: reserve the planned profile ID in the final requirement-bound story contract, approve that contract, then bind the matching delivery profile to the immutable requirement-profile, story, and contract hashes. The ID is not a profile hash or approval. Task start records the profile; do not mutate an approved contract to point back to it.
+
+`autonomy-decision:v1` records the requested and effective levels, source constraints, reason codes, material drift, checkpoint/approval state, and decision hash. The effective level is the most restrictive of host, project, requirement, delivery, contract, capability, environment, and budget. `audit_only` is capped at `checkpointed`, including for local release; `bounded-autonomous` requires a trusted external host/CI Ed25519 receipt under `host_verified` policy. Protected-branch merge and remote or production deployment are explicit exceptions.
+
+`executions/<profile>/start.json` and `close.json` are the immutable single-run lifecycle. Action receipts under `actions/` record the canonical action, exact runtime target/details, effective decision, any checkpoint approval, evidence hashes, and single-use authorization linkage. They implement authorize → external/tool execution → complete. Passing `pull_request.merge` or `release.local` completion creates the corresponding `merged` or `released` close receipt automatically; other valid terminal states require a separately approved close.
+
+Local smoke commands are JSON argv arrays, never shell strings. Their completion receipt records target, command, cwd, sandbox, exit status, outcome, and output hashes from a supported read-only/no-network sandbox. Remote push/merge evidence is different: the CLI records a live remote pre-state and queries the exact Git remote or GitHub PR at completion. The hash-bound observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence as well.
 
 ## `stories/`
 
@@ -680,7 +720,7 @@ Use `sync` traces for push, pull, merge, rebase, branch, and PR events so parall
 
 ## `releases/`
 
-Release notes, rollout plans, observability signals, and feedback loops.
+Release notes, rollout plans, observability signals, and feedback loops. A local release is a delivery target, not shorthand for unrestricted machine access.
 
 Examples:
 
@@ -692,6 +732,8 @@ Examples:
 ```
 
 A `release-manifest:v1` inventories source revision, proposal/requirement/story hashes, delivered artifacts, authorization-use receipts, execution usage, verification receipts, gates, and rollback instructions. It is release evidence, distinct from the compact KB manifest below.
+
+For `local_release`, the manifest and traces must identify the delivery profile, exact local target, allowed writes/actions, successful smoke-test evidence, and rollback procedure. For `pull_request`, readiness evidence does not imply merge to `main` or another protected branch.
 
 ## `manifests/`
 
@@ -817,9 +859,11 @@ Gate, audit, or quality reports. Reports are durable review evidence and should 
 
 ## Merge Strategy
 
-Review `.sdlc/` changes with code changes. A pull request should show both:
+Review `.sdlc/` changes with code changes. A pull request should show:
 
 - the implementation diff;
-- the contract, story, decision, trace, and test evidence that explain the implementation.
+- the requirement revision and execution ceiling;
+- the delivery profile containing the autonomy level selected specifically for that PR;
+- the contract, story, autonomy decision, authorization receipt, trace, and test evidence that explain the implementation.
 
-This keeps agent work auditable after the chat session is gone.
+This keeps agent work auditable after the chat session is gone. Never copy a delivery profile from a previous PR as authority for a new one. Merge to a protected branch remains a separate explicit decision unless that exact merge action and target were authoritatively approved.

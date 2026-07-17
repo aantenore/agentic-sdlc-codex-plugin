@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "requirement.schema.json",
-  "title": "Agentic SDLC Requirement v1",
+  "title": "Agentic SDLC Requirement",
   "type": "object",
   "required": [
     "id",
@@ -25,7 +25,18 @@
       "const": "requirement"
     },
     "schema_version": {
-      "const": "requirement:v1"
+      "enum": [
+        "requirement:v1",
+        "requirement:v2"
+      ]
+    },
+    "logical_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
     },
     "title": {
       "type": "string",
@@ -48,6 +59,38 @@
     "acceptance_criteria": {
       "type": "array",
       "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "non_functional_requirements": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "integrations": {
+      "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "string",
         "minLength": 1
@@ -94,6 +137,27 @@
       },
       "additionalProperties": false
     },
+    "previous_revision_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/hashed_requirement_ref"
+        }
+      ]
+    },
+    "autonomy_profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
     "approval_ref": {
       "type": "string",
       "minLength": 1
@@ -108,6 +172,64 @@
     },
     "audit": {
       "$ref": "common.schema.json#/$defs/audit"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "requirement:v2"
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "required": [
+          "logical_id",
+          "revision",
+          "source_hashes",
+          "non_goals",
+          "constraints",
+          "non_functional_requirements",
+          "integrations",
+          "previous_revision_ref",
+          "autonomy_profile_id",
+          "approvals"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "hashed_requirement_ref": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "content_hash",
+        "revision"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

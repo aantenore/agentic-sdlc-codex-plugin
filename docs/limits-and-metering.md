@@ -1,10 +1,10 @@
 # Limits, autonomy, and metering
 
-Yes: you can give an agent broad autonomy and still constrain it from several directions. The important qualification is that autonomy is broad **inside one approved proposal**, not a permanent global blank cheque.
+Yes: you can give an agent broad autonomy and still constrain it from several directions. The important qualification is that autonomy has two explicit scopes: an approved requirement execution profile sets the maximum, and a separate delivery execution profile selects the level for one pull request or local release. Neither is a permanent global blank cheque.
 
 In simple terms:
 
-> permitted work = approved proposal ∩ exact authorization ∩ capability boundaries ∩ remaining budget
+> effective autonomy = host/project cap ∩ requirement ceiling ∩ delivery selection ∩ contract ∩ capability ∩ environment ∩ remaining budget
 
 If any part does not allow an operation, the operation is not authorized. A larger budget does not expand scope, and a broader scope does not increase the budget.
 
@@ -14,12 +14,14 @@ See [How it works](how-it-works.md) for the complete lifecycle, [the documentati
 
 A user may say, for example:
 
-> Complete this assessment autonomously. You may inspect and update anything listed in the proposal, create the stated deliverable, run local tests, and push the result. Do not use production, secrets, new external services, destructive operations, or additional spend. Stop if the approved budget is insufficient.
+> For pull request PR-184, use bounded autonomy. You may inspect and update the displayed paths, implement, run local tests, commit, push, and update that PR. Do not merge the protected branch, deploy, use production, secrets, new external services, destructive operations, or additional spend. Stop if the approved budget is insufficient. Do not apply this choice to another PR.
 
 That grants high day-to-day autonomy, but it still has an envelope:
 
-| Control | What is fixed by the approved proposal |
+| Control | What is fixed by the approved requirement and delivery envelope |
 |---|---|
+| Requirement ceiling | The highest autonomy level allowed for this immutable `requirement:v2` revision |
+| Delivery selection | The explicit level and target for exactly one `pull_request` or `local_release` |
 | Outcome | The objective, acceptance criteria, and requested deliverable |
 | Scope | Included and excluded subjects, depth, and delivery mode |
 | Writes | The explicit write set: action, subject, path, and artifact type |
@@ -29,26 +31,42 @@ That grants high day-to-day autonomy, but it still has an envelope:
 | Resources | Time, steps, tokens, calls, cost, and custom metrics |
 | Lifetime | Proposal hash, authorization validity window, use count, and terminal workflow state |
 
-The current guided assessment command prepares proposals with `external_access: false` and `production_access: false`. It does not expose switches that silently turn those fields on. Installs, secrets, production access, destructive actions, out-of-scope writes, material proposal changes, and budget extensions are exception boundaries that require an explicit decision.
+The current guided assessment command prepares proposals with `external_access: false` and `production_access: false`. It does not expose switches that silently turn those fields on. Installs, secrets, production access, destructive actions, out-of-scope writes, material requirement or delivery changes, protected-branch merge, remote deployment, and budget extensions are exception boundaries that require an explicit decision.
 
 Read and write boundaries are also separate. Approved baseline sources and the proposal scope define what may be treated as input evidence. Each durable write must match a `write_set` entry containing its action, subject, project-relative path, and artifact type. Capability permission answers “which tool may do it”; path permission answers “where it may do it.” Both must allow the operation. The host filesystem sandbox remains an additional lower-level boundary.
 
 ```mermaid
 flowchart TD
-    U["User approves proposal hash"] --> P["Immutable proposal"]
-    P --> W["Exact write set and deliverable"]
-    P --> C["Tools, external, and production boundaries"]
-    P --> B["Execution budget"]
-    W --> A["Proposal-bound authorization"]
-    C --> A
-    B --> A
-    A --> R["Run autonomously inside the envelope"]
-    R -->|"new path, tool, access, scope, or budget"| E["Stop at an explicit exception"]
+    U["User approves requirement ceiling"] --> R["Requirement execution profile"]
+    R --> D["User selects level for one delivery"]
+    D --> T{"Delivery kind"}
+    T -->|"pull_request"| PR["Repository, base, head, allowed actions"]
+    T -->|"local_release"| LR["Local root, writes, smoke tests, rollback"]
+    PR --> E["Most restrictive effective level"]
+    LR --> E
+    H["Host/project, contract, capability,<br/>environment, and budget"] --> E
+    E --> A["Exact per-delivery authorization"]
+    A --> X["New PR, scope drift, merge, deploy,<br/>new path, tool, access, or budget"]
+    X --> Q["Stop at an explicit decision"]
 ```
+
+The three configured levels are:
+
+- `supervised`: task start and every state-changing action stop for the configured human checkpoints;
+- `checkpointed`: only phases listed in `autonomy_policy.presets.checkpointed.automatic_phases` start automatically; the stock configuration includes analysis, design, implementation, and validation, while release actions remain checkpoints;
+- `bounded-autonomous`: configured phases and allowed delivery actions can proceed without routine prompts, subject to explicit checkpoint actions and every narrower boundary, but only under `host_verified` authority or trusted CI attestation.
+
+In `audit_only` mode, attribution is recorded but not independently proven. The effective level is therefore capped at `checkpointed`, including for a local-only target; the CLI must narrow or block rather than treating declared human identity as verified authority. Effective `bounded-autonomous` has an external prerequisite: configure `authority_policy.mode: host_verified`, register the trusted host/CI Ed25519 public key in `authority_policy.trusted_host_keys`, and pass that host's receipt for the exact profile-approval subject through `--host-receipt-file`. The CLI validates the signature and subject; it cannot issue the trusted receipt to itself.
+
+Rollout is configuration-driven through `autonomy_policy.mode`: `off`, `observe`, `enforce_new_only`, or `enforce_all`. The default `enforce_new_only` governs new v2/profile records without rewriting approved history. Legacy requirements and unknown inputs remain `supervised` and fail closed; observe mode may report the decision but must not pretend it granted executable autonomy.
+
+Delivery binding is one-way: reserve the planned profile ID in the requirement-bound story contract, approve that contract, then bind the matching delivery profile to its immutable hash together with the requirement-profile and story hashes. The ID is not a profile hash or approval. Task start supplies the profile and rejects drift; the contract is not rewritten to point back to it. One profile is one delivery lane with exactly one story and its one approved contract. If several changes must ship together, use an agreed aggregation story/contract instead of treating the profile as an unrelated multi-story bundle.
 
 ## Exact action × subject permissions
 
 An authorization does not store one independent list of actions and another independent list of subjects and then combine every action with every subject. That would create accidental permissions.
+
+A requirement execution profile and delivery execution profile are policy inputs, not executable credentials. After the evaluator proves that the delivery is a subset of every upstream boundary, the CLI derives exact action-subject uses for that one delivery. The delivery use policy is non-reusable across deliveries, single-run, receipt-backed, and terminally closed.
 
 Instead, each allowed use is one exact pair:
 
@@ -57,6 +75,8 @@ Instead, each allowed use is one exact pair:
 | `contract.approve` | `contract-ST-001-analysis` | Approve this contract only |
 | `task.start.confirm` | `ST-001` | Start this story only |
 | `output.link` | `ST-001` plus its proposal-bound artifact context | Link the approved output only |
+| `pull_request.update` | `PR-184` plus repository/base/head hashes | Update this pull request only |
+| `release.local` | `LOCAL-REL-009` plus target and action hashes | Release to this local target only |
 
 The canonical assessment authorization stores the action, a hash of the complete subject, and a hash of the pair. Every accepted use creates an immutable validity-at-use receipt. The default use policy is `per-action-subject-once`, replay of the same pair is denied, and the authorization closes when the workflow becomes terminal.
 
@@ -73,6 +93,22 @@ flowchart LR
 ```
 
 Wildcards are disabled by the default policy. When more than one action and more than one subject are involved, use explicit pairs so there is no ambiguous Cartesian product.
+
+An authorization consumed for PR-184 cannot authorize PR-185, even if both implement the same requirement and use the same branches or files. A new delivery ID always requires a new explicit autonomy selection and a new exact authorization.
+
+### Delivery action receipts do not execute actions
+
+For governed delivery work, policy and execution remain separate:
+
+1. Ask `autonomy delivery action` to authorize one exact canonical action. A configured checkpoint returns `checkpoint_required` until the displayed subject is explicitly confirmed. Under `host_verified`, confirmation also requires an external Ed25519 `--host-receipt-file` for action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject; under `audit_only`, the explicit approval remains unverified attribution.
+2. Have the host, Git client, CI, or local tooling perform exactly the operation recorded in the authorization receipt.
+3. Complete the same action with `--outcome passed|failed` and immutable `--evidence`. Completion consumes that authorization and rejects a changed runtime boundary or replay.
+
+The PR catalog is `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, and `pull_request.merge`. The local catalog is `build.local`, `test.run`, and `release.local`. Commit authorization binds repeatable exact `--scope-path` values and completion verifies the one-commit parent/file transition. Push binds the matching remote, source SHA, destination ref, and non-force/non-delete semantics; every base-to-head commit must already have exactly one passing commit completion receipt, and all configured URLs for that remote must identify the approved repository. Merge binds the exact PR URL.
+
+Passing completion of `pull_request.merge` or `release.local` automatically writes the terminal `merged` or `released` receipt. Other allowed outcomes use an explicitly approved manual close. Local completion repeats the exact approved shell-free JSON argv smoke tests and rollback, runs the smoke tests in a supported read-only/no-network sandbox, and stores structured output hashes.
+
+The CLI validates local Git identity, branches, SHA transitions, paths, receipt lineage, and evidence hashes. Push/merge authorization records a live remote pre-state; completion queries the exact Git remote or GitHub PR and requires the expected post-state after authorization. This is a live authenticated observation, not a provider-signed offline attestation, so preserve durable host/CI/provider evidence and do not present a generic evidence file as signed proof.
 
 ### Delegated authorization example
 
@@ -615,13 +651,17 @@ A scope, capability, authority, or metering-trust change requires a newly prepar
 
 ## Practical policy recipes
 
-### Broad repository-local autonomy
+### One pull request with bounded autonomy
 
-Use a proposal with a precise but broad included scope, enumerate all planned writes, allow the required local tools, keep external and production access false, and use estimated soft token/cost limits. The agent may proceed without repeated confirmations but must stop for any new boundary.
+Approve a requirement ceiling first. Then create one delivery profile with kind `pull_request`, exactly one story/approved contract pair, repository, base branch, head branch, canonical allowed actions, explicit project-relative write paths, tools, and limits. Select `bounded-autonomous` only after an external trusted host/CI has signed the exact profile-approval subject and that receipt is supplied under `host_verified` policy. The agent may proceed without routine confirmations inside that PR but must stop for a new PR, protected-branch merge, deployment, or any changed boundary.
 
 Example approval wording:
 
-> I approve proposal ASSESS-001 exactly as displayed. Complete the entire repository-local tranche autonomously, including tests and the listed deliverable. Do not install anything, access production or secrets, use new external services, write outside the proposal, or extend the budget.
+> For PR-184, I select bounded-autonomous exactly as displayed. Implement, test, commit, push, and update that PR. Do not merge `main`, deploy, install anything, access production or secrets, use new external services, write outside the displayed paths, extend the budget, or reuse this choice for another PR.
+
+### One local release
+
+Use delivery kind `local_release` and record the exact local target root, canonical allowed actions and write paths, at least one shell-free JSON-argv smoke test such as `["npm","run","smoke:local"]`, and a required rollback procedure. External access, production access, and destructive actions remain false. Writes outside the workspace and machine-global changes require a checkpoint even when the selected level is `bounded-autonomous`. Under `audit_only`, that requested level still evaluates as `checkpointed`; local execution is not an exception to authority assurance.
 
 ### One hour and 60 steps, enforced
 
@@ -646,13 +686,19 @@ Put the hard cost metric behind a trusted pre-call gateway or runtime adapter th
 
 ## Approval checklist
 
-Before approving a proposal, verify that it answers all of these questions:
+Before approving a requirement profile, delivery profile, or combined proposal, verify that it answers all of these questions:
 
+- Which immutable `requirement:v2` revision and requirement execution profile set the ceiling?
+- Is this choice for one named pull request or one named local release?
+- Is the requested level no broader than host, project, requirement, contract, capability, environment, and budget constraints?
+- For a pull request, are repository, base branch, head branch, actions, and merge exclusion explicit?
+- For a local release, are target root, write paths, actions, smoke tests, and rollback explicit?
+- Is it clear that the choice cannot be reused for another delivery?
 - What exact outcome and deliverable am I approving?
 - Which files may be read and which exact paths may be written?
 - Which action-subject pairs will be authorized?
 - Which tools and capability bindings may be used?
-- Are external access, production, installs, secrets, and destructive actions explicitly allowed or denied?
+- Are external access, production, installs, secrets, destructive actions, protected-branch merge, and remote deployment explicitly allowed or denied?
 - Which metrics have soft limits, hard limits, warnings, and a completion reserve?
 - Which metrics are exact, estimated, or unavailable?
 - For every hard metric, which trusted adapter, Ed25519 key, cumulative coverage, and enforcement point make it real?
@@ -660,4 +706,4 @@ Before approving a proposal, verify that it answers all of these questions:
 - Is RTK telemetry clearly zero-credit and subordinate to the budget decision?
 - Is cost an estimate, provider-reported Costs data, or final invoice truth?
 
-If any answer is unclear, revise the proposal before approval. Approval binds the proposal hash; a material revision creates a different hash and needs a new decision.
+If any answer is unclear, revise the proposal before approval. Approval binds the requirement and delivery hashes; a material revision creates different hashes and needs a new decision. History may support a recommendation, but the number of previous successful deliveries never increases authority.

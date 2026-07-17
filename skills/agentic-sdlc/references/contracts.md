@@ -18,6 +18,9 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `allowed_tools`: Tool classes allowed for the phase.
 - `kb_writes`: Knowledge base sections that must be updated.
 - `human_gate`: Whether human approval is required.
+- `requirement_execution_profile_refs`: Exact approved requirement ceiling references, including immutable hashes.
+- `delivery_execution_profile_id`: For delivery work, the stable ID reserved for the one current pull-request or local-release profile. It is an identifier only, not a profile hash or reusable cross-delivery grant.
+- `autonomy_phase_level`: Optional phase-specific level. It may narrow, never widen, the delivery selection.
 - `execution_policy`: Codex runtime policy for model and reasoning inheritance or override.
 - `capability_policy`: Skills, MCPs, tools, and approval-required actions agreed for the step.
 - `capability_bindings`: Concrete project-local targets and permissions for required MCP/tool usage.
@@ -71,6 +74,25 @@ Approved contracts, approved templates, and linked artifacts carry hashes. If th
 
 Formal approval records should include `approval_source`, approver attribution, summary or evidence, and approved content hash. `explicit-user` means the user confirmed that specific artifact; it is not implied by permission to implement. `bootstrap` is reserved for migration/provisional records and does not satisfy strict gates unless the project explicitly allows it.
 
+## Autonomy Policy
+
+The business requirement and the autonomy policy are related but separate:
+
+- `requirement:v2` captures the agreed outcome, boundaries, acceptance criteria, non-goals, NFRs, integrations, and revision lineage;
+- `requirement-execution-profile:v1` sets the maximum autonomy for that immutable requirement revision;
+- `delivery-execution-profile:v1` records the explicit choice for one `pull_request` or `local_release`;
+- the contract can only narrow that delivery level for its phase.
+
+Delivery binding is deliberately one-way. Reserve a stable `delivery_execution_profile_id` in the final contract, approve that contract, then create and approve the matching delivery profile against the immutable requirement-profile, story, and contract hashes. The contract does not hash-bind the delivery profile and is not rewritten after profile approval, which avoids a circular hash dependency.
+
+The effective level is the most restrictive of host, project, requirement, delivery, contract, capability, environment, and budget. If a contract links multiple requirements, use the lowest ceiling. Missing, stale, expired, revoked, unknown, or materially drifted profile input blocks execution or falls back to the configured supervised legacy path; it never widens authority.
+
+The levels are `supervised`, `checkpointed`, and `bounded-autonomous`. `bounded-autonomous` requires an external trusted host/CI Ed25519 receipt for the exact approval subject under `host_verified` policy; `audit_only` is capped at `checkpointed`, including for local release. Prior executions may justify a recommendation but cannot promote the level. Task start is automatic only for phases listed in the effective level's configured `automatic_phases`; `supervised` always confirms.
+
+For `pull_request`, bind repository, base branch, head branch, explicit write paths, and exact canonical actions. For `local_release`, bind the local root, actions, write paths, shell-free JSON-argv smoke tests, and required rollback. Each delivery profile contains exactly one story and its one approved contract; aggregate multi-story shipping through an agreed aggregation story/contract. Delivery profiles are exact-delivery, non-reusable, single-concurrent-run, receipt-backed, and terminally closed. Protected-branch merge and remote or production deployment remain explicit exceptions.
+
+Execution actions are two-receipt operations: authorize the exact action/runtime/details, let the host or tool execute it, then complete with outcome and immutable evidence. The authorization receipt is not an executor. A checkpoint in `host_verified` mode requires an external Ed25519 receipt for `autonomy.delivery.action.<canonical-action>` bound to the exact action subject; `audit_only` records explicit approval without verified authority. Passing `release.local` or `pull_request.merge` completion creates the success close automatically. Push/merge also use live remote pre/post observations; retain durable host/CI/provider evidence because those observations are not provider-signed offline attestations.
+
 ## Template Source
 
 The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template directory through:
@@ -90,6 +112,13 @@ Reject or revise a contract when:
 - outputs are not testable;
 - validation criteria are subjective only;
 - allowed tools are too broad for the risk level;
+- requirement execution profile references are absent, stale, revoked, or do not match the requirement revision;
+- delivery work does not reserve a stable `delivery_execution_profile_id` before contract approval;
+- at task start, the matching delivery profile is absent, stale, reused, or does not bind this story and approved contract;
+- requested, phase, or effective autonomy exceeds any host, project, requirement, delivery, capability, environment, or budget boundary;
+- the evaluator reports effective `bounded-autonomous` under `audit_only` authority;
+- a pull-request profile silently includes protected-branch merge or remote deployment;
+- a local-release profile lacks an exact target, allowed writes/actions, smoke tests, or rollback;
 - required capabilities have no binding and no open question;
 - referenced capability recommendations are stale, unapproved, or missing install approval;
 - execution policy overrides are present without rationale or user/project backing;

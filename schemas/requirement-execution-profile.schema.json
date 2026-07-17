@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "requirement-execution-profile.schema.json",
+  "title": "Agentic SDLC Requirement Execution Profile v1",
+  "description": "Approved maximum autonomy envelope bound to one immutable requirement revision. It is a policy ceiling, not an executable authorization.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "status",
+    "requirement_ref",
+    "autonomy_ceiling",
+    "phase_levels",
+    "material_scope",
+    "material_scope_hash",
+    "constraints",
+    "checkpoints",
+    "exception_actions",
+    "authority_assurance",
+    "approval_ref",
+    "valid_from",
+    "expires_at",
+    "created_at",
+    "updated_at",
+    "extensions",
+    "profile_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "requirement_execution_profile" },
+    "schema_version": { "const": "requirement-execution-profile:v1" },
+    "version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["proposed", "active", "revoked"] },
+    "requirement_ref": { "$ref": "#/$defs/versioned_hashed_ref" },
+    "autonomy_ceiling": { "$ref": "#/$defs/autonomy_level" },
+    "phase_levels": { "$ref": "#/$defs/phase_levels" },
+    "material_scope": { "type": "object", "minProperties": 1 },
+    "material_scope_hash": { "$ref": "#/$defs/sha256" },
+    "constraints": { "$ref": "#/$defs/constraints" },
+    "checkpoints": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+    },
+    "exception_actions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+    },
+    "authority_assurance": { "$ref": "#/$defs/authority_assurance" },
+    "approval_ref": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/hashed_ref" }
+      ]
+    },
+    "valid_from": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "extensions": { "type": "object" },
+    "profile_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "active" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": { "approval_ref": { "$ref": "#/$defs/hashed_ref" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "autonomy_ceiling": { "const": "supervised" } },
+        "required": ["autonomy_ceiling"]
+      },
+      "then": {
+        "properties": {
+          "phase_levels": { "$ref": "#/$defs/supervised_phase_levels" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "autonomy_ceiling": { "const": "checkpointed" } },
+        "required": ["autonomy_ceiling"]
+      },
+      "then": {
+        "properties": {
+          "phase_levels": { "$ref": "#/$defs/checkpointed_phase_levels" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "autonomy_level": { "enum": ["supervised", "checkpointed", "bounded-autonomous"] },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"], "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "versioned_hashed_ref": {
+      "type": "object",
+      "required": ["id", "version", "hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "path": { "type": ["string", "null"], "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "phase_levels": {
+      "type": "object",
+      "properties": {
+        "discovery": { "$ref": "#/$defs/autonomy_level" },
+        "analysis": { "$ref": "#/$defs/autonomy_level" },
+        "design": { "$ref": "#/$defs/autonomy_level" },
+        "implementation": { "$ref": "#/$defs/autonomy_level" },
+        "validation": { "$ref": "#/$defs/autonomy_level" },
+        "release": { "$ref": "#/$defs/autonomy_level" }
+      },
+      "additionalProperties": false
+    },
+    "supervised_phase_levels": {
+      "type": "object",
+      "properties": {
+        "discovery": { "const": "supervised" },
+        "analysis": { "const": "supervised" },
+        "design": { "const": "supervised" },
+        "implementation": { "const": "supervised" },
+        "validation": { "const": "supervised" },
+        "release": { "const": "supervised" }
+      },
+      "additionalProperties": false
+    },
+    "checkpointed_phase_levels": {
+      "type": "object",
+      "properties": {
+        "discovery": { "enum": ["supervised", "checkpointed"] },
+        "analysis": { "enum": ["supervised", "checkpointed"] },
+        "design": { "enum": ["supervised", "checkpointed"] },
+        "implementation": { "enum": ["supervised", "checkpointed"] },
+        "validation": { "enum": ["supervised", "checkpointed"] },
+        "release": { "enum": ["supervised", "checkpointed"] }
+      },
+      "additionalProperties": false
+    },
+    "constraints": {
+      "type": "object",
+      "required": [
+        "allowed_tools",
+        "allowed_capabilities",
+        "allowed_environments",
+        "allowed_write_paths",
+        "forbidden_actions",
+        "budget_ref"
+      ],
+      "properties": {
+        "allowed_tools": { "$ref": "#/$defs/string_list" },
+        "allowed_capabilities": { "$ref": "#/$defs/string_list" },
+        "allowed_environments": { "$ref": "#/$defs/string_list" },
+        "allowed_write_paths": { "$ref": "#/$defs/string_list" },
+        "forbidden_actions": { "$ref": "#/$defs/string_list" },
+        "budget_ref": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/hashed_ref" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "string_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "authority_assurance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["mode", "source", "verified", "receipt_ref"],
+          "properties": {
+            "mode": { "const": "audit_only" },
+            "source": { "const": "declared_cli_attribution" },
+            "verified": { "const": false },
+            "receipt_ref": { "type": "null" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["mode", "source", "verified", "receipt_ref"],
+          "properties": {
+            "mode": { "const": "host_verified" },
+            "source": { "enum": ["host_approval_receipt", "ci_attestation"] },
+            "verified": { "const": true },
+            "receipt_ref": { "$ref": "#/$defs/hashed_ref" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}
