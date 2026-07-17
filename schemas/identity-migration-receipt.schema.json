@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "identity-migration-receipt.schema.json",
+  "title": "Identity Migration Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "status",
+    "plan_hash",
+    "source_identity_digest",
+    "target_identity_digest",
+    "target_identity",
+    "reason",
+    "source_occurrences_before",
+    "source_occurrences_after",
+    "changed_files",
+    "hash_rewrites",
+    "derived_artifacts",
+    "transaction",
+    "created_at",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^MIG-IDENTITY-[a-f0-9]{12}-[a-f0-9]{12}$" },
+    "kind": { "const": "identity_migration_receipt" },
+    "schema_version": { "const": "identity-migration-receipt:v1" },
+    "status": { "const": "applied" },
+    "plan_hash": { "$ref": "#/$defs/sha256" },
+    "source_identity_digest": { "$ref": "#/$defs/sha256" },
+    "target_identity_digest": { "$ref": "#/$defs/sha256" },
+    "target_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["email_digest"],
+      "properties": {
+        "email_digest": { "$ref": "#/$defs/sha256" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "reason": { "type": "string", "minLength": 1 },
+    "source_occurrences_before": { "type": "integer", "minimum": 1 },
+    "source_occurrences_after": { "const": 0 },
+    "changed_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "before_sha256", "after_sha256", "before_mode", "after_mode", "identity_replacements"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^\\.sdlc/" },
+          "before_sha256": { "$ref": "#/$defs/sha256" },
+          "after_sha256": { "$ref": "#/$defs/sha256" },
+          "before_mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+          "after_mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+          "identity_replacements": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "hash_rewrites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "id", "before_hash", "after_hash"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "approval",
+              "authorization",
+              "authorization_scope",
+              "authorization_subject",
+              "authorization_use",
+              "receipt",
+              "revocation"
+            ]
+          },
+          "id": { "type": ["string", "null"] },
+          "before_hash": { "$ref": "#/$defs/sha256" },
+          "after_hash": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "derived_artifacts": {
+      "description": "Conservative post-write obligations. Runtime apply results may report rebuilt only after the configured rebuild completes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cache", "indexes"],
+      "properties": {
+        "cache": { "const": "rebuild_required" },
+        "indexes": { "const": "rebuild_required" }
+      }
+    },
+    "transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "rollback_on_post_validation_failure"],
+      "properties": {
+        "strategy": { "const": "journaled-shadow-tree-directory-swap" },
+        "rollback_on_post_validation_failure": { "const": true }
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

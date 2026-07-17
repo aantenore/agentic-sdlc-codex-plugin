@@ -743,6 +743,17 @@ node bin/agentic-sdlc.mjs migration active --root <target-project> --release-man
 
 Only missing configuration defaults are written during migration. Immutable records in the selected manifest are schema- and hash-validated, not rewritten. Older release evidence uses `retention: retain-in-place`, so `physical_files_moved` remains zero.
 
+Identity correction is intentionally a different migration class because it must rewrite attribution embedded in historical canonical records. Preview it with a declarative mapping, then apply the same command explicitly:
+
+```bash
+node bin/agentic-sdlc.mjs migration identity --root <target-project> \
+  --identity-map-json '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}'
+node bin/agentic-sdlc.mjs migration identity --root <target-project> \
+  --identity-map-json '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}' --apply --plan-hash <preview-plan-hash>
+```
+
+The planner updates structured JSON/JSONL values only; schema- and hash-validates legacy/canonical authorization, action-subject bindings, revocations, every prior migration receipt, and supported byte references; and propagates approval, subject, use, scope, authorization, revocation, receipt, and matching file-reference hashes to convergence. Unsupported or stale supported lineage fails closed. Signed and attested envelopes are immutable boundaries: any direct or transitive impact requires authoritative reissuance. The preview plan hash binds every canonical input and planned rewrite. Apply uses exact preview-hash verification, a fully initialized exclusive lock with no automatic stale reclaim, complete-input preconditions, a same-filesystem shadow tree, derived cache/index rebuild inside that shadow, full post-state/source-identity/receipt validation, and a journaled directory swap. A caught failure restores the complete rollback snapshot. After an interrupted process, authenticated recovery requires the verified lock's nonce and plan hash; it rolls back pre-commit state or finalizes a committed tree, while all other CLI commands remain blocked. `.sdlc/migrations/identity/` holds a digest-only `identity-migration-receipt:v1`; it records the plan hash, changed paths, and old/new hashes without retaining the corrected source identity in clear text.
+
 ## `traces/compactions/`
 
 Non-destructive summaries of raw trace history. Use them when a story trace becomes too long for efficient agent context.

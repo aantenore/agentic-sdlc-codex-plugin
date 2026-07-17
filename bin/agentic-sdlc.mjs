@@ -72,6 +72,14 @@ import {
 } from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
+import {
+  IdentityMigrationError,
+  applyIdentityMigration,
+  planIdentityMigration,
+  publicIdentityMigrationPlan,
+  recoverIdentityMigration,
+  validateIdentityMigrationReceipt,
+} from "../lib/identity-migration.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -185,6 +193,7 @@ const BOOLEAN_OPTIONS = new Set([
   "no-open",
   "preserve-status",
   "release-claim",
+  "recover",
   "replace-story-contract",
   "revise-contract",
   "strict",
@@ -253,6 +262,7 @@ const KNOWN_OPTIONS = new Set([
   "execution-note",
   "expires-at",
   "from",
+  "from-email",
   "format",
   "git-event",
   "handoff-id",
@@ -262,6 +272,8 @@ const KNOWN_OPTIONS = new Set([
   "input",
   "intent-file",
   "intent-json",
+  "identity-map-file",
+  "identity-map-json",
   "item",
   "kb-write",
   "kind",
@@ -289,6 +301,7 @@ const KNOWN_OPTIONS = new Set([
   "pr-url",
   "preset",
   "pricing-ref",
+  "plan-hash",
   "port",
   "profile",
   "profile-file",
@@ -306,6 +319,7 @@ const KNOWN_OPTIONS = new Set([
   "question",
   "rationale",
   "reason",
+  "recovery-nonce",
   "reasoning",
   "rationale-summary",
   "receipt-file",
@@ -372,6 +386,8 @@ const KNOWN_OPTIONS = new Set([
   "type",
   "until",
   "to",
+  "to-email",
+  "to-name",
   "validation",
   "view",
 ]);
@@ -518,6 +534,21 @@ async function main() {
     }
 
     const [command, subcommand, ...rest] = parsed.positionals;
+    const resolvedRoot = path.resolve(String(parsed.options.root || process.cwd()));
+    const isIdentityRecovery = command === "migration"
+      && subcommand === "identity"
+      && parsed.options.recover === true;
+    const identityMigrationLockPath = path.join(resolvedRoot, ".sdlc-identity-migration.lock");
+    if (pathEntryExistsNoFollow(identityMigrationLockPath) && !isIdentityRecovery) {
+      fail(
+        "An identity migration transaction is active or interrupted. "
+        + "Run the authenticated identity recovery workflow before any other command.",
+      );
+    }
+    if (isIdentityRecovery) {
+      migrateIdentity({ root: resolvedRoot }, parsed.options);
+      return;
+    }
     if (command === "observe") {
       try {
         await runObserveCommand({
@@ -811,6 +842,10 @@ async function main() {
       migrateActiveReleaseScope(context, parsed.options);
       return;
     }
+    if (command === "migration" && subcommand === "identity") {
+      migrateIdentity(context, parsed.options);
+      return;
+    }
     if (command === "report" && subcommand === "activity") {
       reportActivity(context, parsed.options);
       return;
@@ -958,6 +993,16 @@ function buildContext(options) {
     config: selectedConfig,
     templateConfig,
   };
+}
+
+function pathEntryExistsNoFollow(filePath) {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function mergeMissingConfigDefaults(projectConfig, templateConfig) {
@@ -17271,6 +17316,138 @@ function migrateActiveReleaseScope(context, options) {
   ]);
 }
 
+function migrateIdentity(context, options) {
+  if (options.recover) {
+    if (
+      options.apply
+      || getOptionString(options, "identity-map-json")
+      || getOptionString(options, "identity-map-file")
+      || getOptionString(options, "from-email")
+      || getOptionString(options, "to-email")
+      || getOptionString(options, "to-name")
+      || getOptionString(options, "reason")
+    ) {
+      fail("Identity migration --recover cannot be combined with mapping, apply, or reason options.");
+    }
+    const recoveryNonce = getOptionString(options, "recovery-nonce");
+    const recoveryPlanHash = getOptionString(options, "plan-hash");
+    if (!recoveryNonce || !recoveryPlanHash) {
+      fail("Identity migration --recover requires both --recovery-nonce and --plan-hash from the verified lock.");
+    }
+    try {
+      const result = recoverIdentityMigration({
+        projectRoot: context.root,
+        recoveryNonce,
+        planHash: recoveryPlanHash,
+      });
+      output(options, result, [
+        result.status === "rolled_back"
+          ? `Recovered interrupted identity migration ${result.migration_id} by restoring the complete pre-migration tree.`
+          : result.status === "committed"
+            ? `Finalized already-validated identity migration ${result.migration_id} after interrupted cleanup.`
+            : result.status === "cleared_before_swap"
+              ? `Cleared interrupted identity migration ${result.migration_id}; the live tree was never swapped.`
+              : "No interrupted identity migration requires recovery.",
+      ]);
+      return;
+    } catch (error) {
+      if (error instanceof IdentityMigrationError) fail(error.message);
+      throw error;
+    }
+  }
+  ensureInitialized(context);
+  const inlineMapping = getOptionString(options, "identity-map-json");
+  const fileMapping = getOptionString(options, "identity-map-file");
+  const directSource = getOptionString(options, "from-email");
+  const directTarget = getOptionString(options, "to-email");
+  const directName = getOptionString(options, "to-name");
+  const expectedPlanHash = getOptionString(options, "plan-hash");
+  if ((inlineMapping || fileMapping) && (directSource || directTarget || directName)) {
+    fail("Use either --identity-map-json/--identity-map-file or direct --from-email/--to-email options, not both.");
+  }
+  let mapping;
+  if (inlineMapping || fileMapping) {
+    mapping = loadOptionalJsonInput(
+      context,
+      options,
+      "identity-map-json",
+      "identity-map-file",
+      "identity migration mapping",
+    );
+  } else {
+    if (!directSource || !directTarget) {
+      fail("Identity migration requires --from-email and --to-email, or a declarative --identity-map-json/--identity-map-file mapping.");
+    }
+    mapping = {
+      source: { email: directSource },
+      target: { email: directTarget, ...(directName ? { name: directName } : {}) },
+    };
+  }
+
+  try {
+    const plan = planIdentityMigration({
+      projectRoot: context.root,
+      mapping,
+      reason: getOptionString(options, "reason"),
+    });
+    if (options.apply && plan.status === "ready") {
+      if (!expectedPlanHash) {
+        fail(`Identity migration apply requires --plan-hash ${plan.plan_hash} from the reviewed dry run.`);
+      }
+      if (expectedPlanHash !== plan.plan_hash) {
+        fail(`Identity migration plan changed after preview; expected ${expectedPlanHash}, current ${plan.plan_hash}. Run a new dry run.`);
+      }
+    }
+    const result = options.apply
+      ? applyIdentityMigration(plan, {
+          rebuildDerived: ({ projectRoot, sdlcRoot }) => {
+            const stagedContext = { ...context, root: projectRoot, sdlcRoot };
+            const cache = buildCache(stagedContext);
+            const index = buildIndex(stagedContext);
+            cache.root = context.root;
+            index.root = context.root;
+            writeJsonFile(path.join(sdlcRoot, "cache", CACHE_FILE_NAME), cache, { force: true });
+            writeJsonFile(path.join(sdlcRoot, "indexes", "kb-index.json"), index, { force: true });
+          },
+          validateAfter: ({ projectRoot, sdlcRoot }) => {
+            const stagedContext = { ...context, root: projectRoot, sdlcRoot };
+            const receiptPath = path.join(projectRoot, plan.receipt_path);
+            const receipt = readProjectJson(stagedContext, receiptPath);
+            const receiptValidation = validateIdentityMigrationReceipt(receipt);
+            if (!receiptValidation.valid) {
+              throw new IdentityMigrationError(`Migration receipt failed validation: ${receiptValidation.errors.join("; ")}`);
+            }
+            assertRecordSchema(receipt, "identity-migration-receipt.schema.json", `Identity migration ${receipt.id}`);
+            const cacheStatus = getCacheStatus(stagedContext);
+            const indexStatus = getIndexStatus(stagedContext);
+            if (!cacheStatus.valid || !indexStatus.valid) {
+              throw new IdentityMigrationError("Derived cache or index is stale after the migration rebuild.");
+            }
+          },
+        })
+      : publicIdentityMigrationPlan(plan);
+    output(options, result, [
+      result.status === "applied"
+        ? `Applied identity migration ${result.id}.`
+        : result.status === "ready"
+          ? `Planned identity migration ${result.id}; no files were written.`
+          : result.status === "already_applied"
+            ? `Identity migration ${result.id} was already applied.`
+            : "No matching canonical identity values require migration.",
+      `Canonical source occurrences: ${result.source_occurrences_before} -> ${result.source_occurrences_after}.`,
+      `Changed canonical files: ${result.changed_files.length}; integrity hash rewrites: ${result.hash_rewrites.length}.`,
+      `Plan hash: ${result.plan_hash}.`,
+      result.receipt_path ? `Lineage receipt: ${result.receipt_path}.` : "No lineage receipt was required.",
+      result.status === "ready"
+        ? `Re-run the same command with --apply --plan-hash ${result.plan_hash} to apply this reviewed canonical snapshot.`
+        : null,
+    ].filter(Boolean));
+  } catch (error) {
+    if (error instanceof IdentityMigrationError) fail(error.message);
+    throw error;
+  }
+}
+
 function buildOutputTemplateContent(context, options, artifactType, id) {
   const from = getOptionString(options, "from");
   const body = getOptionString(options, "body");
@@ -21642,6 +21819,11 @@ Usage:
   agentic-sdlc archive closed [--before 90d] [--apply] [--out path]
   agentic-sdlc migration active --release-manifest RELEASE-ASSESS-001 [--apply]
       [--reason "why older releases are outside this active scope"]
+  agentic-sdlc migration identity
+      (--from-email old@example.invalid --to-email new@example.test [--to-name "Current User"]
+       | --identity-map-json json | --identity-map-file path)
+      [--reason "why this identity lineage must be corrected"] [--apply --plan-hash sha256]
+  agentic-sdlc migration identity --recover --recovery-nonce nonce --plan-hash sha256
   agentic-sdlc report activity [--since 3d] [--view business|dev|agent-verbose] [--out path]
   agentic-sdlc report query [--query-json json | --query-file path] [--text raw]
       [--out path] [--json]
@@ -21844,6 +22026,27 @@ Migration options:
 
   Example apply:
     agentic-sdlc migration active --release-manifest RELEASE-ASSESS-001 --apply
+
+  migration identity is a separate dry-run-first recovery workflow. It validates
+  legacy/canonical authorization, action-subject, revocation, receipt, and
+  supported file-reference lineage; rewrites structured identity values and
+  transitive hashes; rebuilds derived state; and leaves a digest-only receipt.
+  Unsupported, stale, opaque, or affected signed lineage fails closed. Apply
+  requires the reviewed preview plan hash, verifies the complete input snapshot
+  under a no-auto-reclaim lock, prepares and validates a same-filesystem shadow
+  tree, then activates it with a journaled directory swap. Caught failures roll
+  back immediately. After an interrupted process, read the verified lock and run
+  agentic-sdlc migration identity --recover --recovery-nonce <nonce>
+    --plan-hash <sha256>
+  to restore a pre-commit tree or finalize a committed one.
+  Other commands remain blocked while the lock exists. Recovery across a host
+  or power interruption depends on filesystem and platform durability.
+
+  Example dry run with a declarative mapping:
+    agentic-sdlc migration identity --identity-map-json
+      '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}'
+
+  Re-run that exact command with --apply only after reviewing the plan.
 
 Trace options:
   --outcome outcome     Explicit trace result: passed, failed, blocked, skipped,

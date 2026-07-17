@@ -303,6 +303,9 @@ node bin/agentic-sdlc.mjs trace compact --root <project> --story ST-001
 node bin/agentic-sdlc.mjs archive closed --root <project> --before 90d
 node bin/agentic-sdlc.mjs migration active --root <project> --release-manifest RELEASE-ASSESSMENT-001
 node bin/agentic-sdlc.mjs migration active --root <project> --release-manifest RELEASE-ASSESSMENT-001 --apply
+node bin/agentic-sdlc.mjs migration identity --root <project> --identity-map-json '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}'
+node bin/agentic-sdlc.mjs migration identity --root <project> --identity-map-json '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}' --apply --plan-hash <preview-plan-hash>
+node bin/agentic-sdlc.mjs migration identity --root <project> --recover --recovery-nonce <nonce-from-lock> --plan-hash <hash-from-lock>
 node bin/agentic-sdlc.mjs index rebuild --root <project>
 node bin/agentic-sdlc.mjs kb search --root <project> "business workflow"
 node bin/agentic-sdlc.mjs kb search --root <project> "business workflow" --json --full
@@ -321,6 +324,8 @@ is required; it never changes canonical evidence. Search limits are bounded to
 `manifest rebuild` creates a compact, shared KB map under `.sdlc/manifests/`. `trace compact` creates non-destructive summaries under `.sdlc/traces/compactions/`; original JSONL traces remain canonical. `archive closed` writes an archive plan for old reports and compactions and moves files only with `--apply`.
 
 `migration active` is dry-run by default. The release manifest defines the exact active scope; the command validates every referenced immutable record, upgrades only missing configuration defaults on `--apply`, and emits a logical `archive-record:v1` for evidence referenced only by older valid releases. It rewrites no approved record and moves no file.
+
+`migration identity` is also dry-run by default, but it is an explicit lineage-repair workflow rather than an active-release upgrade. It accepts direct `--from-email`/`--to-email` values or a declarative JSON mapping; schema- and hash-validates legacy/canonical authorization, action-subject bindings, revocations, all prior migration receipts, and supported byte references; and computes the transitive subject/scope/authorization/revocation/receipt/file-reference rewrites. Unsupported records, stale supported references, and any directly or transitively affected signed envelope fail closed; signed evidence must be reissued. The preview emits a plan hash bound to the complete canonical input snapshot. `--apply --plan-hash <preview-plan-hash>` rejects drift, then uses a fully initialized no-auto-reclaim project lock and complete-input preconditions to build the entire result in a same-filesystem shadow tree. It rebuilds derived state there, validates it, journals intent before each directory rename, and commits by activating the shadow. Caught failures restore the complete rollback snapshot. An interrupted process is recovered only with `--recover --recovery-nonce <nonce-from-lock> --plan-hash <hash-from-lock>`; pre-commit state rolls back and committed state only finalizes. The immutable receipt keeps rebuild as a conservative required obligation; the apply result reports `rebuilt` only after the callback completes, while the CLI validates cache and index. The receipt stores the plan hash, identity digests, and before/after hashes, never the corrected source email in clear text.
 
 ## Context Optimization Gateway
 

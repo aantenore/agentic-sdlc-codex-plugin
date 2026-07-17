@@ -113,6 +113,8 @@ node bin/agentic-sdlc.mjs report query --root <project> --query-json '<canonical
 
 Use `manifest rebuild` for a compact shared map of stories, contracts, outputs, approvals, and activity. Use `trace compact` when raw JSONL history is too long for context; compaction is additive and must keep the original source trace. Use `archive closed` as a plan-first command for old reports and compactions.
 
+Use `migration identity` only for an explicit attribution correction. Preview the mapping first; require valid legacy/canonical authorization, binding, revocation, every prior migration receipt, and supported file-reference lineage; and require zero unsupported or signed-envelope impacts. Signed evidence is reissued by its authority, never rewritten by this migration. Apply only with the exact preview `plan_hash`; any drift requires a new review. Apply builds and validates the complete result in a same-filesystem shadow tree before a journaled directory swap. If interrupted, leave the lock intact and use authenticated recovery with its nonce and plan hash; pre-commit state rolls back and committed state only finalizes. The resulting record under `.sdlc/migrations/identity/` must retain only the plan hash, source/target identity digests, and before/after lineage hashes; cache and indexes are rebuilt, not treated as canonical inputs.
+
 ## Attribution
 
 Claims, traces, handoffs, approvals, locks, and sync events should record:

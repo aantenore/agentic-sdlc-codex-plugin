@@ -6634,7 +6634,7 @@ test("personal marketplace installer can validate and configure RTK globally", (
   ]);
   assert.equal(
     readJson(path.join(home, "plugins", "agentic-sdlc-codex-plugin", ".codex-plugin", "plugin.json")).version,
-    "0.8.1",
+    readJson(path.join(repoRoot, "package.json")).version,
   );
 
   const partialFailureHome = tmpProject("personal-installer-rtk-partial-home");

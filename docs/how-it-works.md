@@ -1,4 +1,4 @@
-# How Agentic SDLC 0.8.1 Works
+# How Agentic SDLC 0.9.0 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
@@ -35,7 +35,7 @@ The installed command is `agentic-sdlc`. From a source checkout, the equivalent 
 node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
 ```
 
-All examples below use commands exposed by the `Agentic SDLC 0.8.1` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.9.0` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project
@@ -479,7 +479,20 @@ agentic-sdlc migration active \
 
 Logical active-release migration is deliberately different from `archive closed --apply`, which is the separate, plan-first workflow for physical movement of eligible closed reports or trace compactions.
 
-## 8. The Short Version
+## 8. Identity-Lineage Repair
+
+An explicit identity correction uses its own dry-run-first migration because attribution can be inside approved records and historical authorization receipts:
+
+```bash
+agentic-sdlc migration identity \
+  --identity-map-json '{"source":{"email":"old@example.invalid"},"target":{"email":"new@example.test","name":"Current User"}}'
+```
+
+The planner first validates existing approval lineage and both legacy and canonical authorization v1/v2 integrity, including exact action-subject bindings, revocations, usage receipts, all prior identity-migration receipts, schemas, and supported byte-exact file references. It updates structured identity values and propagates subject, use, scope, authorization, revocation, receipt, and matching file-reference hashes until stable. Unsupported non-JSON or opaque integrity records fail closed. Signed or attested evidence also fails closed when its content or any dependency would change; it must be reissued rather than silently re-signed. The preview writes nothing and emits a deterministic plan hash bound to every canonical input file and planned rewrite.
+
+With `--apply --plan-hash <preview-plan-hash>`, the CLI first rejects preview/apply drift, then acquires a fully initialized exclusive lock without automatic stale-lock deletion and verifies that the complete canonical input snapshot still matches the plan. It creates a same-filesystem shadow `.sdlc`, applies every canonical rewrite there, rebuilds cache and indexes there, verifies the complete post-state and source-identity absence, and records each intent/state transition in a generation-monotonic, hash-checked journal before a directory swap. Caught failures restore the byte-exact prior tree. If the process stops abruptly, read the nonce and plan hash from the verified lock and run `migration identity --recover --recovery-nonce <nonce> --plan-hash <hash>`: pre-commit states roll back, while a committed state can only be finalized. All other CLI commands are blocked until recovery completes, and a separate claim prevents concurrent recovery. The resulting `identity-migration-receipt:v1` records the plan hash, identity digests, changed paths, and old/new hashes without retaining the corrected source email in clear text. Directory `fsync` is attempted where supported; guarantees across host or power loss remain filesystem- and platform-dependent.
+
+## 9. The Short Version
 
 1. Codex inspects the repository as untrusted evidence.
 2. The user confirms the project baseline.
