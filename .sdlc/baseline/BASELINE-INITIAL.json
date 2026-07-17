@@ -1,0 +1,511 @@
+{
+  "id": "BASELINE-INITIAL",
+  "schema_version": "0.1.0",
+  "sdlc_version": "0.7.0",
+  "kind": "existing-project",
+  "status": "approved",
+  "summary": "Current Agentic SDLC 0.7.0 project context after the install-ready Change Observatory integration.",
+  "repository_snapshot": {
+    "root_name": "agentic-sdlc-codex-plugin",
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-OBSERVATORY-INTEGRATION",
+      "head_sha": "5c5b6a352a8766442c1f1eeeb036a939faa3e4fc",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "detected_stack": [
+      {
+        "name": "package-json",
+        "type": "node",
+        "source_path": "package.json"
+      },
+      {
+        "name": "npm-scripts",
+        "type": "automation",
+        "source_path": "package.json",
+        "scripts": [
+          "check",
+          "doctor",
+          "smoke",
+          "test"
+        ]
+      }
+    ],
+    "key_files": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+        "size_bytes": 523
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
+      },
+      {
+        "path": "package.json",
+        "sha256": "de0ae4ac78e8ad27e66b7e3224fbf02e4e5652755d9fbac3f1dc05771c4251ff",
+        "size_bytes": 1543
+      },
+      {
+        "path": "README.md",
+        "sha256": "adab3ca4634618bfd8be0ef3967cfd8dc1fa543aa0751fc6319c099d0a9233dd",
+        "size_bytes": 23482
+      }
+    ],
+    "package_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
+      "doctor": "node bin/agentic-sdlc.mjs doctor",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test"
+    },
+    "package_summary": {
+      "name": "agentic-sdlc-codex-plugin",
+      "description": "Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
+      "version": "0.7.0",
+      "private": false,
+      "runtime_dependencies": [],
+      "development_dependencies": []
+    },
+    "source_roots": [
+      "lib",
+      "bin"
+    ],
+    "test_roots": [
+      "test"
+    ],
+    "ci_files": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+        "size_bytes": 523
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "sha256": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+        "size_bytes": 1697
+      }
+    ]
+  },
+  "imported_documents": [
+    {
+      "type": "document",
+      "path": "README.md",
+      "sha256": "adab3ca4634618bfd8be0ef3967cfd8dc1fa543aa0751fc6319c099d0a9233dd",
+      "size_bytes": 23482,
+      "title": "Agentic SDLC Codex Plugin",
+      "headings": [
+        "Agentic SDLC Codex Plugin",
+        "Documentation Map",
+        "Quick Start",
+        "Change Observatory",
+        "How It Works",
+        "What The Two Checkpoints Mean",
+        "Autonomy And Limits Are Separate Controls",
+        "CodeBurn Versus Exact Metering",
+        "Canonical Output Formats",
+        "Generation And Layered Verification Receipts",
+        "Install",
+        "Update"
+      ],
+      "excerpt": "# Agentic SDLC Codex Plugin Agentic SDLC 0.7.0 gives Codex a guided way to understand an existing software project deliver verified work and explain its recorded lineage visually. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills templates schemas the cross-platform Node.js CLI and the build-free Change Observatory UI. ## Documentation Map - Documentation home (docs/README.md) — choose the right guide without knowing the internal record names. - How It Works (docs/how-it-works.md) — the complete two-checkpoint journey state transitions authori",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "document",
+      "path": "docs/architecture.md",
+      "sha256": "495fd6a6871926160a46eae090d42060f7c6dfbb0ac917710167a80ce0998d4d",
+      "size_bytes": 23079,
+      "title": "Architecture",
+      "headings": [
+        "Architecture",
+        "Core Design Choices",
+        "Existing Project Baseline",
+        "Assessment Control Plane",
+        "Intent Routing Layer",
+        "Contract Model",
+        "Approval Governance",
+        "Capability Discovery Layer",
+        "Work Breakdown And Dependencies",
+        "Output Consistency Layer",
+        "Change Observatory Presentation Layer",
+        "Local Optimization Layer"
+      ],
+      "excerpt": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessment proposals",
+      "trust": "untrusted_project_evidence"
+    },
+    {
+      "type": "document",
+      "path": "docs/how-it-works.md",
+      "sha256": "60b8484f682bcb6133c70738d1e16d651b8304926373d946f9961061a699440d",
+      "size_bytes": 23530,
+      "title": "How Agentic SDLC 0.7.0 Works",
+      "headings": [
+        "How Agentic SDLC 0.7.0 Works",
+        "1. The Mental Model",
+        "2. Canonical State Versus Derived State",
+        "3. The Two-Checkpoint Assessment",
+        "Checkpoint 1: confirm project context",
+        "Checkpoint 2: approve one complete tranche",
+        "4. Exact Authorization: Action × Subject",
+        "5. Execution, Verification, Recovery, and Release",
+        "Apply is exact and idempotent",
+        "Execution is measured as one tree",
+        "Output verification is layered",
+        "Completion is a release transaction"
+      ],
+      "excerpt": "# How Agentic SDLC 0.7.0 Works Agentic SDLC turns a natural-language request into a bounded reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`. The core rule is simple **Codex may reason broadly but it may write only what the approved proposal and its exact authorization allow.** For the adjacent details see Limits and Metering (limits-and-metering.md) Agent Interactions (agent-interactions.md) and the deeper Architecture (architecture.md). ## 1. The Mental Model ```mermaid flowchart LR U User <-->| request corrections exact approvals | C Codex R Project files<br/>untrusted evidence -->| inspect and summarize | C C -->| structured commands and files | C",
+      "trust": "untrusted_project_evidence"
+    }
+  ],
+  "inferred_context": {
+    "product_signal": "Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.",
+    "document_map": [
+      {
+        "path": "README.md",
+        "title": "Agentic SDLC Codex Plugin",
+        "headings": [
+          "Agentic SDLC Codex Plugin",
+          "Documentation Map",
+          "Quick Start",
+          "Change Observatory",
+          "How It Works",
+          "What The Two Checkpoints Mean",
+          "Autonomy And Limits Are Separate Controls",
+          "CodeBurn Versus Exact Metering",
+          "Canonical Output Formats",
+          "Generation And Layered Verification Receipts",
+          "Install",
+          "Update"
+        ],
+        "summary": "# Agentic SDLC Codex Plugin Agentic SDLC 0.7.0 gives Codex a guided way to understand an existing software project deliver verified work and explain its recorded lineage visually. The normal experience is intentionally simple Codex explains what it inferred proposes the work in plain language creates the requested real file verifies it and returns an auditable result. Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills templates schemas the cross-platform Node.js CLI and the build-free Change Observatory UI. ## Documentation Map - Documentation home (docs/README.md) — choose the right guide without knowing the internal record names. - How It Works (docs/how-it-works.md) — the complete two-checkpoint journey state transitions authori"
+      },
+      {
+        "path": "docs/architecture.md",
+        "title": "Architecture",
+        "headings": [
+          "Architecture",
+          "Core Design Choices",
+          "Existing Project Baseline",
+          "Assessment Control Plane",
+          "Intent Routing Layer",
+          "Contract Model",
+          "Approval Governance",
+          "Capability Discovery Layer",
+          "Work Breakdown And Dependencies",
+          "Output Consistency Layer",
+          "Change Observatory Presentation Layer",
+          "Local Optimization Layer"
+        ],
+        "summary": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessment proposals"
+      },
+      {
+        "path": "docs/how-it-works.md",
+        "title": "How Agentic SDLC 0.7.0 Works",
+        "headings": [
+          "How Agentic SDLC 0.7.0 Works",
+          "1. The Mental Model",
+          "2. Canonical State Versus Derived State",
+          "3. The Two-Checkpoint Assessment",
+          "Checkpoint 1: confirm project context",
+          "Checkpoint 2: approve one complete tranche",
+          "4. Exact Authorization: Action × Subject",
+          "5. Execution, Verification, Recovery, and Release",
+          "Apply is exact and idempotent",
+          "Execution is measured as one tree",
+          "Output verification is layered",
+          "Completion is a release transaction"
+        ],
+        "summary": "# How Agentic SDLC 0.7.0 Works Agentic SDLC turns a natural-language request into a bounded reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`. The core rule is simple **Codex may reason broadly but it may write only what the approved proposal and its exact authorization allow.** For the adjacent details see Limits and Metering (limits-and-metering.md) Agent Interactions (agent-interactions.md) and the deeper Architecture (architecture.md). ## 1. The Mental Model ```mermaid flowchart LR U User <-->| request corrections exact approvals | C Codex R Project files<br/>untrusted evidence -->| inspect and summarize | C C -->| structured commands and files | C"
+      }
+    ],
+    "architecture_signals": [
+      {
+        "path": "docs/architecture.md",
+        "headings": [
+          "Architecture",
+          "Core Design Choices",
+          "Existing Project Baseline",
+          "Assessment Control Plane",
+          "Intent Routing Layer",
+          "Contract Model",
+          "Approval Governance",
+          "Capability Discovery Layer",
+          "Work Breakdown And Dependencies",
+          "Output Consistency Layer",
+          "Change Observatory Presentation Layer",
+          "Local Optimization Layer"
+        ],
+        "summary": "# Architecture Agentic SDLC separates the reusable method from project-specific knowledge. ```text Codex plugin -> skill instructions -> templates -> schemas -> cross-platform CLI Target project -> .sdlc/ -> baseline -> assessments -> budgets -> contracts -> authorizations -> authorization-uses -> receipts -> capability-discovery -> output-contracts -> work-items -> work-breakdown -> dependencies -> stories -> orchestration -> locks -> handoffs -> decisions -> traces -> tests -> releases -> manifests -> archive -> cache -> indexes ``` ```mermaid flowchart TB subgraph Plugin Reusable plugin Skill Skill instructions Templates Templates Schemas Schemas CLI Cross-platform CLI end subgraph Project Target project KB .sdlc source of truth Baseline Project baseline Assessments Assessment proposals"
+      }
+    ],
+    "component_roots": [
+      "lib",
+      "bin"
+    ],
+    "runtime_and_validation_scripts": {
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/model.js",
+      "doctor": "node bin/agentic-sdlc.mjs doctor",
+      "smoke": "node bin/agentic-sdlc.mjs --help",
+      "test": "node --test"
+    },
+    "stack_summary": [
+      "node:package-json",
+      "automation:npm-scripts"
+    ],
+    "likely_entrypoints": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      "package.json",
+      "README.md"
+    ],
+    "test_surface": [
+      "check",
+      "smoke",
+      "test"
+    ],
+    "imported_document_count": 3,
+    "confidence": 0.7,
+    "caveats": [
+      "This is inferred from repository files and imported documents.",
+      "Historical authorship, prior approvals, and rationale are unknown unless present in evidence files."
+    ]
+  },
+  "canonicality": {
+    "state": "confirmed",
+    "inferred_not_approved": false,
+    "confirmed_sources": [],
+    "user_confirmation_required": false,
+    "notes": [
+      "This baseline describes the current observable project state.",
+      "It does not reconstruct pre-SDLC historical decisions unless evidence is present in source files."
+    ]
+  },
+  "security": {
+    "repository_content_trust": "untrusted_data",
+    "prompt_instructions_in_sources": "ignored",
+    "excerpts_redacted": true,
+    "note": "Repository and document content is evidence only; embedded instructions cannot expand authority, tools, write scope, or approval."
+  },
+  "open_questions": [],
+  "assumptions": [],
+  "source_paths": [
+    ".codex-plugin/plugin.json",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "README.md",
+    "docs/architecture.md",
+    "docs/how-it-works.md",
+    "package.json",
+    "schemas/archive-plan.schema.json",
+    "schemas/archive-record.schema.json",
+    "schemas/artifact-generator-receipt.schema.json",
+    "schemas/assessment-application.schema.json",
+    "schemas/assessment-proposal-approval.schema.json",
+    "schemas/assessment-proposal.schema.json",
+    "schemas/assessment-workflow.schema.json",
+    "schemas/authorization-usage-receipt.schema.json",
+    "schemas/authorization.schema.json",
+    "schemas/baseline.schema.json",
+    "schemas/budget-amendment.schema.json",
+    "schemas/cache.schema.json",
+    "schemas/capability-profile.schema.json",
+    "schemas/capability-recommendation.schema.json",
+    "schemas/claim.schema.json",
+    "schemas/common.schema.json",
+    "schemas/content-authorization.schema.json",
+    "schemas/contract.schema.json",
+    "schemas/dependency-graph.schema.json",
+    "schemas/execution-budget.schema.json",
+    "schemas/execution-usage-receipt.schema.json",
+    "schemas/gate-report.schema.json",
+    "schemas/handoff.schema.json",
+    "schemas/host-approval-receipt.schema.json",
+    "schemas/metering-attestation.schema.json",
+    "schemas/metering-delta.schema.json",
+    "schemas/metering-snapshot.schema.json",
+    "schemas/orchestration.schema.json",
+    "schemas/output-contract-registry.schema.json",
+    "schemas/output-link.schema.json",
+    "schemas/output-template.schema.json",
+    "schemas/phase-lock.schema.json",
+    "schemas/project.schema.json",
+    "schemas/release-gate-receipt.schema.json",
+    "schemas/release-manifest.schema.json",
+    "schemas/render-verification-receipt.schema.json",
+    "schemas/report-query.schema.json",
+    "schemas/requirement.schema.json",
+    "schemas/route-intent.schema.json",
+    "schemas/sdlc-config.schema.json",
+    "schemas/story.schema.json",
+    "schemas/task-start-receipt.schema.json",
+    "schemas/trace.schema.json",
+    "schemas/verification-receipt.schema.json",
+    "schemas/work-breakdown.schema.json",
+    "schemas/work-item.schema.json",
+    "test/fixtures/codeburn/report-v0.9.15.json"
+  ],
+  "source_hashes": {
+    ".codex-plugin/plugin.json": "9d25f2655e398868de3f7ddf7684badc05ba2333869feb0f574a8db3a10b3f79",
+    ".github/workflows/ci.yml": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
+    ".github/workflows/release.yml": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
+    "README.md": "adab3ca4634618bfd8be0ef3967cfd8dc1fa543aa0751fc6319c099d0a9233dd",
+    "docs/architecture.md": "495fd6a6871926160a46eae090d42060f7c6dfbb0ac917710167a80ce0998d4d",
+    "docs/how-it-works.md": "60b8484f682bcb6133c70738d1e16d651b8304926373d946f9961061a699440d",
+    "package.json": "de0ae4ac78e8ad27e66b7e3224fbf02e4e5652755d9fbac3f1dc05771c4251ff",
+    "schemas/archive-plan.schema.json": "ad0d241be38d7d3a5a5d87d10a1a857bc43c902711d001b9f2eb902f91da9810",
+    "schemas/archive-record.schema.json": "727b80a76c19b311ef743144da0ca4e36df218db8e414854d6d466f3c7532551",
+    "schemas/artifact-generator-receipt.schema.json": "00df927806c66e0403e3d3b60aa73199f62a01424622826282339e6b20bfff07",
+    "schemas/assessment-application.schema.json": "f4764f6d13dce7b2da7f25589666e9de00c27f3642a53ea22ef697fe7b9112fd",
+    "schemas/assessment-proposal-approval.schema.json": "7020f58a7fb9c8dc30bc2b3f223e21e49811bb9c03e693a554315e1f3f0232bd",
+    "schemas/assessment-proposal.schema.json": "323061164aa6995ed7e60a9c0d6f5b5b4301070afb7c5424adedb5a8f06960c6",
+    "schemas/assessment-workflow.schema.json": "10f689950791aed5f25ed4080ca47c746997887ccc4bfba8cb6a31c41857eb65",
+    "schemas/authorization-usage-receipt.schema.json": "1b7b6559e21c8576f963a9d12f1f62d5ca3c5e88fadfa1c09020c363570d8db2",
+    "schemas/authorization.schema.json": "695c48cb421e02fdc93a4ef7f60e00a1ebe6626d5b9b0b969b939875f4bd4feb",
+    "schemas/baseline.schema.json": "d7eb36e7defdd0f1ed35591719ace7d1d6881f8f546e88edadaae11322060f61",
+    "schemas/budget-amendment.schema.json": "c3fc16a4a4bf20a0e0cf49ff7ab116022216f1b1f310d5f564fc0d93bd975f03",
+    "schemas/cache.schema.json": "0bc6744e2a29588c666fa39f6c2a376657e4046b96750c08a2b13fcab25c397a",
+    "schemas/capability-profile.schema.json": "edb97b3e35d4e274a5d319743439e5f7bf4c4258ba15db73a0d951e367c829a5",
+    "schemas/capability-recommendation.schema.json": "7bf04a459cd8f6e247756214ec9a1b0ed7d25071b5242e7a228ce4d0f573105b",
+    "schemas/claim.schema.json": "d80cdf38c3122939f6b9e6725d538bc35293a535dbef76bc20994d7bcbc0a53c",
+    "schemas/common.schema.json": "bff48153f4326057efc54faec95ac7e1e2ac384d78d6a5aedc4751ebeaf6698c",
+    "schemas/content-authorization.schema.json": "357651fe7a8f145b9c4e3883aeaea6195d43f956f6f534ea04e68b89705fb3ec",
+    "schemas/contract.schema.json": "bf52d81856829fb827e6929527df7b6b228209161a366065716be5c118b55210",
+    "schemas/dependency-graph.schema.json": "5c9971044ad1f9dbf4f3f5fd8f88dbdde5f424f553715145571ab1e0e1721f07",
+    "schemas/execution-budget.schema.json": "169f5baeb43e02222f9dfce59526a446b8049c0623231238e61e5c38c992472d",
+    "schemas/execution-usage-receipt.schema.json": "bb7fc0cf545d67fb31c0346eea204fb984ccecda54be1ee0ef6ceeabd8c36cad",
+    "schemas/gate-report.schema.json": "f75af2a03948cd903538280e26c31c3a7c7744c1532285b3b5a2472127a51b05",
+    "schemas/handoff.schema.json": "0068bccc24e872872f0e985dbf1e6d528f78fc72d850c15e026e09df76cb6b67",
+    "schemas/host-approval-receipt.schema.json": "3232cb6ba19b3529e514bc5777508c6350b255d6e5ae4af5ca28e6acee7709c6",
+    "schemas/metering-attestation.schema.json": "5e216270684dcbea3024adf82152d5dd317c3169a49b7311c7eda1919a211374",
+    "schemas/metering-delta.schema.json": "895109bc4fe4ffd24422f758ec7d78901dbbf018664359e81f033dc435f16d6f",
+    "schemas/metering-snapshot.schema.json": "ce1508658fcac4d7d92858628bc8b5085d25d13750ed579dc0eb0702d720df1b",
+    "schemas/orchestration.schema.json": "017077abe22f5e1cfdaaf835c6955caa1b982060a91b52b96075a053d8f32524",
+    "schemas/output-contract-registry.schema.json": "930bee4b42892b532dd729d2536230ed616d9fcceb748802c702e72d1f416c95",
+    "schemas/output-link.schema.json": "40efd3bf3520fb3094fe76fe4b0369ce52c23142bedc8366f672516a1a170afc",
+    "schemas/output-template.schema.json": "5b00565935a42cc3ee711dcfb12295f74c0f105ec31caef9e3b076e5fc41086a",
+    "schemas/phase-lock.schema.json": "8ca5db794675652ac62511a4907ed7c8079a81cf7bfbbafa55264eebb1e0ae94",
+    "schemas/project.schema.json": "b5db98126989714b5ed0669a80a31c314396d2827bdbfa1b6294eeaa94e73ae3",
+    "schemas/release-gate-receipt.schema.json": "16f118c044a2a8151aa4d376fff5e4ab85298c91c3a1262f66e9be038ed2cda9",
+    "schemas/release-manifest.schema.json": "2cc0adcdf9cd170059cecdfda64fbb7550642698e7334143b698b525c5bc6de1",
+    "schemas/render-verification-receipt.schema.json": "88397acaf0f04899dbe08bf81fce8882a88a2d332f4988f91e7287d503a617e3",
+    "schemas/report-query.schema.json": "690b257447be88300624eb984b3930e614c2abeb199d29fd83dc1b84921f2742",
+    "schemas/requirement.schema.json": "a84398adc213d84dfb0afd3c914c9a3e66c1e4f1a8def03c5519494850a2b60f",
+    "schemas/route-intent.schema.json": "14c8dbe68c4178bd7609d3c362153734ac9d0a733c96f41795220a2431c39b94",
+    "schemas/sdlc-config.schema.json": "27fb04119d08e1dd18e7964c30677c45b0b21dc63d875548561d9c693d5ce2c0",
+    "schemas/story.schema.json": "2d610e10e1d93c151643eb1365f4e7f712fe51219c42ba8f502fa4030bfaa395",
+    "schemas/task-start-receipt.schema.json": "860ccb82b42e940712211ae522d3d6fe8e61ca0be30c2f4f72618435f4ed9e12",
+    "schemas/trace.schema.json": "5cc6778b8cb3c51dbd1ad04257bfba4f02bff88c2bbc393b66bb784558a230c0",
+    "schemas/verification-receipt.schema.json": "d90c5d30ba577d07ee80e18850d421db6aa920bf94e715c78ec891a17c9ec756",
+    "schemas/work-breakdown.schema.json": "faa3760946081c9dc6f5836c3ee497f4f90dbfc1fc653ec965aecc567cc110dc",
+    "schemas/work-item.schema.json": "75faac923432c3b3a1bbb044099ae0d7ff4c74c0cbfbfab3e26f78fd92d26a16",
+    "test/fixtures/codeburn/report-v0.9.15.json": "f0b6df15fffae48604bad2caf9889e9d38a8b594aeb3872c5c8db8fe431e58f5"
+  },
+  "approvals": [
+    {
+      "id": "APR-20260716100250-4612be",
+      "baseline_id": "BASELINE-INITIAL",
+      "status": "approved",
+      "summary": "Approved only the refreshed Agentic SDLC 0.7.0 project context under Antonio's Change Observatory delegation.",
+      "scope": {
+        "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
+        "subject_id": "BASELINE-INITIAL",
+        "subject_label": "baseline BASELINE-INITIAL",
+        "delegated_approval": true,
+        "applies_to_declared_approval_level": true,
+        "must_stay_within_declared_scope": true,
+        "requires_summary_or_evidence_of_delegation": true,
+        "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
+        "ask_user_if_scope_changes": true,
+        "authorization_ref": "AUTH-OBSERVATORY-BASELINE-V1",
+        "approval_level": "Refresh and approve only BASELINE-INITIAL after the approved Change Observatory integration; no other artifact, install, deployment, secret, external access, destructive action, or public release.",
+        "allowed_actions": [
+          "baseline.approve"
+        ],
+        "subject_scope": "project-baseline"
+      },
+      "evidence": [],
+      "approval_source": "automation",
+      "authorization_ref": "AUTH-OBSERVATORY-BASELINE-V1",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-OBSERVATORY-BASELINE-V1/AUSE-AUTH-OBSERVATORY-BASELINE-V1-20260716100250725-f6d6a9.json",
+      "authorization_action": "baseline.approve",
+      "explicit_user_confirmation": false,
+      "provisional": false,
+      "approved_content_hash": "c5ac092bcf3a8d88e5fa642bd0fee0dec79f6015d3942b42916a4b748095135b",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "approved_by": {
+        "id": "codex-integration",
+        "type": "agent",
+        "name": "Codex Integration",
+        "email": null,
+        "source": "cli"
+      },
+      "git": {
+        "is_git_repo": true,
+        "branch": "codex/ST-OBSERVATORY-INTEGRATION",
+        "head_sha": "5c5b6a352a8766442c1f1eeeb036a939faa3e4fc",
+        "is_dirty": true,
+        "user": {
+          "name": "Antonio Antenore",
+          "email": "ant_ant95@hotmail.it"
+        },
+        "remotes": [
+          "origin"
+        ]
+      },
+      "run": {
+        "run_id": null,
+        "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+        "session_id": null,
+        "tool": "agentic-sdlc-cli",
+        "version": "0.7.0"
+      },
+      "created_at": "2026-07-16T10:02:50.728Z"
+    }
+  ],
+  "created_at": "2026-07-16T10:02:07.676Z",
+  "updated_at": "2026-07-16T10:02:50.728Z",
+  "audit": {
+    "proposed_by": {
+      "id": "codex-integration",
+      "type": "agent",
+      "name": "Codex Integration",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-OBSERVATORY-INTEGRATION",
+      "head_sha": "5c5b6a352a8766442c1f1eeeb036a939faa3e4fc",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f64de-b310-70d1-bc3a-c7e6f3f8da55",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.7.0"
+    },
+    "approved_by": {
+      "id": "codex-integration",
+      "type": "agent",
+      "name": "Codex Integration",
+      "email": null,
+      "source": "cli"
+    }
+  }
+}
