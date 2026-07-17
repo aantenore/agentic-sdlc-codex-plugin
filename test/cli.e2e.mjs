@@ -6265,7 +6265,10 @@ test("parallel story contract creation is serialized per story", async () => {
   const rejected = results.filter((result) => result.status !== 0);
   assert.equal(successful.length, 1, results.map((result) => `${result.status}: ${result.stderr}`).join("\n"));
   assert.equal(rejected.length, ids.length - 1);
-  assert.ok(rejected.every((result) => /already references contract/.test(result.stderr)));
+  assert.ok(
+    rejected.every((result) => /already references contract/.test(result.stderr)),
+    rejected.map((result) => `${result.status}: ${result.stdout}\n${result.stderr}`).join("\n"),
+  );
 
   const linkedStory = readJson(path.join(project, ".sdlc", "stories", "ST-RACE", "story.json"));
   const contractsRoot = path.join(project, ".sdlc", "contracts");

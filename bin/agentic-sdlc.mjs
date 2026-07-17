@@ -14449,10 +14449,51 @@ function createContract(context, options) {
     fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
   }
   const storyId = options.story ? normalizeId(String(options.story)) : null;
-  const requirementContext = storyRequirementExecutionContext(context, storyId);
   const deliveryProfileId = getOptionString(options, "delivery-profile")
     ? normalizeId(getOptionString(options, "delivery-profile"))
     : null;
+  const id = normalizeId(
+    options.id || (storyId ? `contract-${storyId}-${phase}` : `contract-${phase}-${shortDate()}`),
+  );
+  const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
+  let releaseDeliveryProfileLock = () => {};
+  let releaseStoryLock = () => {};
+  let releaseContractLock;
+  try {
+    if (deliveryProfileId) {
+      releaseDeliveryProfileLock = acquireFileLock(
+        path.join(context.sdlcRoot, "contracts", `.delivery-profile-${shortHash(deliveryProfileId)}.lock`),
+      );
+    }
+    if (storyId) {
+      releaseStoryLock = acquireFileLock(
+        path.join(context.sdlcRoot, "contracts", `.story-${shortHash(storyId)}.lock`),
+      );
+    }
+    releaseContractLock = acquireFileLock(`${contractPath}.lock`);
+    return createContractLocked(context, options, {
+      phase,
+      storyId,
+      deliveryProfileId,
+      id,
+      contractPath,
+    });
+  } finally {
+    releaseContractLock?.();
+    releaseStoryLock();
+    releaseDeliveryProfileLock();
+  }
+}
+
+function createContractLocked(context, options, settings) {
+  const {
+    phase,
+    storyId,
+    deliveryProfileId,
+    id,
+    contractPath,
+  } = settings;
+  const requirementContext = storyRequirementExecutionContext(context, storyId);
   if (
     requirementContext.has_v2_requirements
     && ["implementation", "validation", "release"].includes(phase)
@@ -14468,9 +14509,6 @@ function createContract(context, options) {
   if (levelRank[autonomyLevel] > levelRank[requirementContext.autonomy_ceiling]) {
     fail(`Contract autonomy ${autonomyLevel} exceeds requirement ceiling ${requirementContext.autonomy_ceiling}.`);
   }
-  const id = normalizeId(
-    options.id || (storyId ? `contract-${storyId}-${phase}` : `contract-${phase}-${shortDate()}`),
-  );
   const recommendationContext = loadCapabilityRecommendationsForContract(context, options);
   const explicitCapabilityPolicy = loadCapabilityPolicy(context, options);
   const explicitCapabilityBindings = loadCapabilityBindings(context, options);
@@ -14515,32 +14553,10 @@ function createContract(context, options) {
   });
   validateContractReadinessForCreate(context, contract, options);
   validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
-  const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
-  let linkedStory;
-  let releaseDeliveryProfileLock = () => {};
-  let releaseStoryLock = () => {};
-  let releaseContractLock;
-  try {
-    if (deliveryProfileId) {
-      releaseDeliveryProfileLock = acquireFileLock(
-        path.join(context.sdlcRoot, "contracts", `.delivery-profile-${shortHash(deliveryProfileId)}.lock`),
-      );
-    }
-    if (storyId) {
-      releaseStoryLock = acquireFileLock(
-        path.join(context.sdlcRoot, "contracts", `.story-${shortHash(storyId)}.lock`),
-      );
-    }
-    releaseContractLock = acquireFileLock(`${contractPath}.lock`);
-    assertDeliveryProfileReservationUnique(context, deliveryProfileId, id);
-    const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
-    writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
-    linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
-  } finally {
-    releaseContractLock?.();
-    releaseStoryLock();
-    releaseDeliveryProfileLock();
-  }
+  assertDeliveryProfileReservationUnique(context, deliveryProfileId, id);
+  const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
+  writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
+  const linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
   output(
     options,
     { status: "created", contract_path: contractPath, contract, story_link: linkedStory },
@@ -25583,24 +25599,45 @@ function acquireFileLock(lockPath) {
     created_at: now(),
   };
   const deadline = Date.now() + INTERNAL_LOCK_WAIT_MS;
+  let descriptor;
   while (true) {
     try {
-      const fd = fs.openSync(lockPath, "wx");
-      fs.writeFileSync(fd, JSON.stringify(metadata));
-      fs.closeSync(fd);
+      descriptor = fs.openSync(lockPath, "wx");
       break;
     } catch (error) {
-      if (!error || error.code !== "EEXIST") {
+      const existingLock = error?.code === "EEXIST";
+      const transientWindowsContention = process.platform === "win32"
+        && ["EPERM", "EACCES", "EBUSY"].includes(error?.code);
+      if (!existingLock && !transientWindowsContention) {
         throw error;
       }
-      if (reclaimStaleInternalLock(lockPath)) {
+      if (existingLock && reclaimStaleInternalLock(lockPath)) {
         continue;
       }
       if (Date.now() >= deadline) {
+        if (transientWindowsContention) {
+          fail(`Cannot acquire internal lock after transient Windows file-system contention: ${lockPath}`);
+        }
         fail(`Resource is locked by another SDLC operation: ${lockPath}`);
       }
       sleepSync(25);
     }
+  }
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(metadata));
+    fs.closeSync(descriptor);
+  } catch (error) {
+    try {
+      fs.closeSync(descriptor);
+    } catch {
+      // Preserve the original metadata-write or close error.
+    }
+    try {
+      fs.rmSync(lockPath, { force: true });
+    } catch {
+      // A partially initialized lock remaining on disk is safer than hiding the failure.
+    }
+    throw error;
   }
   return () => {
     try {

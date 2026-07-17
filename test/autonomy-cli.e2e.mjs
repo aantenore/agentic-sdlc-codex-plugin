@@ -89,12 +89,18 @@ function createNativeProviderShim(fakeBin, command) {
   const executable = path.join(fakeBin, process.platform === "win32" ? `${command}.exe` : command);
   if (!fs.existsSync(executable)) {
     const nodeExecutable = fs.realpathSync.native(process.execPath);
-    try {
-      fs.linkSync(nodeExecutable, executable);
-    } catch {
+    if (process.platform === "win32") {
+      // A hard link still points at the node.exe image mapped by this test
+      // runner, so Windows may refuse to unlink it during the after hook.
       fs.copyFileSync(nodeExecutable, executable);
+    } else {
+      try {
+        fs.linkSync(nodeExecutable, executable);
+      } catch {
+        fs.copyFileSync(nodeExecutable, executable);
+      }
+      fs.chmodSync(executable, 0o755);
     }
-    if (process.platform !== "win32") fs.chmodSync(executable, 0o755);
   }
   return executable;
 }
