@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -37,7 +38,48 @@ test("canonical revisions track source bytes but ignore derived cache and index 
   );
 });
 
-test("ordered directory snapshots reject add, remove, or rename races", async (t) => {
+test("structured stat signatures preserve canonical revision bytes for ASCII and Unicode paths", async (t) => {
+  const fixture = await createCacheFixture(t);
+  assert.equal(
+    await computeCanonicalRevision(fixture.projectRoot),
+    "ad048030affb2833a823d71ea862079464232cd1818d5b1733fd291c2db5bda8",
+  );
+
+  const unicodeDirectory = path.join(fixture.projectRoot, ".sdlc", "data-東京-🚆");
+  await fs.mkdir(unicodeDirectory);
+  await fs.writeFile(
+    path.join(unicodeDirectory, "record-β.json"),
+    `${JSON.stringify({ city: "東京", emoji: "🚆" })}\n`,
+    "utf8",
+  );
+
+  const unicodeRevision = await computeCanonicalRevision(fixture.projectRoot);
+  assert.equal(
+    unicodeRevision,
+    "c128246375ffe5d88650e18ba79fa38fd2c008587c6e5e09820a46de57bba2ef",
+  );
+  assert.equal(await computeCanonicalRevision(fixture.projectRoot), unicodeRevision);
+});
+
+test("compact directory snapshots preserve the observable digest and canonical revision", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const initial = await computeCanonicalRevision(fixture.projectRoot);
+  const observed = [];
+  const instrumented = await computeCanonicalRevision(fixture.projectRoot, {
+    onDirectorySnapshot(snapshot) {
+      observed.push(snapshot);
+    },
+  });
+
+  assert.equal(instrumented, initial);
+  assert.deepEqual(observed, [{
+    path: ".sdlc",
+    snapshot: "760c5adfbcd9c4a00c1079a9a52d9e5eed72200ec8eb11b05ed6ba72ee375a68",
+  }]);
+  assert.equal(Object.isFrozen(observed[0]), true);
+});
+
+test("ordered directory snapshots reject add, remove, rename, or type-change races", async (t) => {
   const scenarios = [
     {
       name: "add",
@@ -60,6 +102,15 @@ test("ordered directory snapshots reject add, remove, or rename races", async (t
           path.join(knowledgeBase, "race-target.json"),
           path.join(knowledgeBase, "renamed-during-scan.json"),
         );
+      },
+    },
+    {
+      name: "type-change",
+      prepare: true,
+      async mutate(knowledgeBase) {
+        const target = path.join(knowledgeBase, "race-target.json");
+        await fs.rm(target);
+        await fs.mkdir(target);
       },
     },
   ];
@@ -176,6 +227,93 @@ test("warm reads validate the retained snapshot without rebuilding", async (t) =
   assert.ok(events.some((event) => event.event === "start" && event.kind === "directory"));
 });
 
+test("same-size canonical mutations invalidate a cached model", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const recordPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
+  const before = await fs.stat(recordPath, { bigint: true });
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel() {
+      builds += 1;
+      return readProjectRecord(fixture.projectRoot);
+    },
+  });
+  const initial = await cache.get();
+
+  await writeProjectRecord(fixture.projectRoot, { version: 2 });
+  await fs.utimes(recordPath, new Date(), new Date(Date.now() + 60_000));
+  const after = await fs.stat(recordPath, { bigint: true });
+  assert.equal(after.size, before.size);
+  assert.notEqual(after.mtimeNs, before.mtimeNs);
+
+  const refreshed = await cache.get();
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed, initial);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(JSON.parse(refreshed.body.toString("utf8")).version, 2);
+});
+
+test("metadata-only drift refreshes signatures without changing content revision", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const recordPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  const initial = await cache.get();
+  const initialRevision = await computeCanonicalRevision(fixture.projectRoot);
+  const before = await fs.stat(recordPath, { bigint: true });
+
+  await fs.utimes(recordPath, new Date(), new Date(Date.now() + 60_000));
+  const after = await fs.stat(recordPath, { bigint: true });
+  assert.notEqual(after.mtimeNs, before.mtimeNs);
+  assert.equal(await computeCanonicalRevision(fixture.projectRoot), initialRevision);
+
+  assert.equal(await cache.get(), initial);
+  assert.equal(await cache.get(), initial);
+  assert.equal(builds, 1);
+});
+
+test("unchanged signatures reuse previous digests without reading file bodies", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const recordPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  const initial = await cache.get();
+
+  const sampleHandle = await fs.open(recordPath, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(sampleHandle);
+  await sampleHandle.close();
+  const nativeRead = fileHandlePrototype.read;
+  let bodyReads = 0;
+  fileHandlePrototype.read = function countedRead(...args) {
+    bodyReads += 1;
+    return nativeRead.apply(this, args);
+  };
+  try {
+    const derivedDirectory = path.join(fixture.projectRoot, ".sdlc", "cache");
+    await fs.mkdir(derivedDirectory);
+    await fs.writeFile(path.join(derivedDirectory, "derived.json"), "{}\n", "utf8");
+    assert.equal(await cache.get(), initial);
+  } finally {
+    fileHandlePrototype.read = nativeRead;
+  }
+
+  assert.equal(bodyReads, 0);
+  assert.equal(builds, 1);
+});
+
 test("fast validation invalidates add, remove, rename, content, and symlink changes", async (t) => {
   const scenarios = [
     {
@@ -265,6 +403,218 @@ test("fast validation invalidates add, remove, rename, content, and symlink chan
   });
 });
 
+test("warm validation without a hook does not freeze instrumentation events", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ ok: true }),
+  });
+  const cold = await cache.get();
+
+  const nativeFreeze = Object.freeze;
+  let freezes = 0;
+  Object.freeze = (value) => {
+    freezes += 1;
+    return nativeFreeze(value);
+  };
+  try {
+    assert.equal(await cache.get(), cold);
+  } finally {
+    Object.freeze = nativeFreeze;
+  }
+
+  assert.equal(freezes, 0);
+});
+
+test("warm validation compares retained directory entries without hashing them again", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ ok: true }),
+  });
+  const cold = await cache.get();
+
+  const nativeCreateHash = crypto.createHash;
+  let hashes = 0;
+  crypto.createHash = function countedCreateHash(...args) {
+    hashes += 1;
+    return nativeCreateHash.apply(this, args);
+  };
+  try {
+    assert.equal(await cache.get(), cold);
+  } finally {
+    crypto.createHash = nativeCreateHash;
+  }
+
+  assert.equal(hashes, 0);
+});
+
+test("direct snapshot budget charges two retained cells per entry and one per directory", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const cellsDirectory = path.join(fixture.projectRoot, ".sdlc", "cells");
+  await fs.mkdir(cellsDirectory);
+  await fs.writeFile(path.join(cellsDirectory, "one.bin"), "x\n", "utf8");
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    limits: { maxFiles: 2 },
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  const cold = await cache.get();
+
+  async function countWarmHashes() {
+    const nativeCreateHash = crypto.createHash;
+    let hashes = 0;
+    crypto.createHash = function countedCreateHash(...args) {
+      hashes += 1;
+      return nativeCreateHash.apply(this, args);
+    };
+    try {
+      assert.equal(await cache.get(), cold);
+    } finally {
+      crypto.createHash = nativeCreateHash;
+    }
+    return hashes;
+  }
+
+  assert.equal(await countWarmHashes(), 0);
+  await fs.writeFile(path.join(cellsDirectory, "two.bin"), "x\n", "utf8");
+  assert.equal(await cache.get(), cold);
+  assert.equal(builds, 1);
+  assert.equal(await countWarmHashes(), 1);
+});
+
+test("wide and long-name directories use bounded digest snapshots and still invalidate", async (t) => {
+  const scenarios = [
+    {
+      name: "add",
+      mutate(fixture) {
+        return fs.writeFile(path.join(fixture.wideDirectory, "added.json"), "{}\n", "utf8");
+      },
+    },
+    {
+      name: "remove",
+      mutate(fixture) {
+        return fs.rm(path.join(fixture.wideDirectory, "target.json"));
+      },
+    },
+    {
+      name: "type-change",
+      async mutate(fixture) {
+        const target = path.join(fixture.wideDirectory, "target.json");
+        await fs.rm(target);
+        await fs.mkdir(target);
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (scenarioTest) => {
+      const fixture = await createDigestFallbackFixture(scenarioTest);
+      let builds = 0;
+      const cache = createObservatoryModelCache({
+        projectRoot: fixture.projectRoot,
+        limits: { maxFiles: 4 },
+        buildModel() {
+          builds += 1;
+          return { builds };
+        },
+      });
+      const cold = await cache.get();
+
+      const nativeCreateHash = crypto.createHash;
+      let hashes = 0;
+      crypto.createHash = function countedCreateHash(...args) {
+        hashes += 1;
+        return nativeCreateHash.apply(this, args);
+      };
+      try {
+        assert.equal(await cache.get(), cold);
+      } finally {
+        crypto.createHash = nativeCreateHash;
+      }
+      assert.equal(hashes, 2);
+
+      await scenario.mutate(fixture);
+      const refreshed = await cache.get();
+      assert.equal(builds, 2);
+      assert.notEqual(refreshed.etag, cold.etag);
+    });
+  }
+});
+
+test("bounded digest snapshots preserve callback bytes and reject scan races", async (t) => {
+  const fixture = await createDigestFallbackFixture(t);
+  const baseline = await computeCanonicalRevision(fixture.projectRoot, {
+    limits: { maxFiles: 4 },
+  });
+  let wideSnapshot = null;
+  const instrumented = await computeCanonicalRevision(fixture.projectRoot, {
+    limits: { maxFiles: 4 },
+    onDirectorySnapshot(snapshot) {
+      if (snapshot.path === ".sdlc/wide") wideSnapshot = snapshot.snapshot;
+    },
+  });
+
+  assert.equal(instrumented, baseline);
+  assert.equal(
+    wideSnapshot,
+    "43707edd94fc4bf2382ab65ac287a90c623a20e73b1ea1ba3e68c2bce5da3800",
+  );
+
+  let mutated = false;
+  await assert.rejects(
+    () => computeCanonicalRevision(fixture.projectRoot, {
+      limits: { maxFiles: 4 },
+      async onDirectorySnapshot(snapshot) {
+        if (snapshot.path !== ".sdlc/wide" || mutated) return;
+        mutated = true;
+        await fs.writeFile(path.join(fixture.wideDirectory, "raced.json"), "{}\n", "utf8");
+      },
+    }),
+    (error) => error?.code === "canonical_revision_changed" && error?.statusCode === 409,
+  );
+  assert.equal(mutated, true);
+});
+
+test("async validation rescans after an entry disappears during a pooled check", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const racePath = path.join(fixture.projectRoot, ".sdlc", "race.json");
+  await fs.writeFile(racePath, "{}\n", "utf8");
+  const events = [];
+  let mutated = false;
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+    async onFastPathCheck(event) {
+      const isRaceTarget = path.basename(event.path) === path.basename(racePath);
+      if (isRaceTarget) events.push(event.event);
+      if (isRaceTarget && event.event === "start" && !mutated) {
+        mutated = true;
+        await fs.rm(racePath);
+      }
+    },
+  });
+
+  const initial = await cache.get();
+  const refreshed = await cache.get();
+
+  assert.equal(mutated, true);
+  assert.deepEqual(events, ["start", "end"]);
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed, initial);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(await cache.get(), refreshed);
+  assert.equal(builds, 2);
+});
+
 test("fast validation enforces bounded concurrency", async (t) => {
   const fixture = await createCacheFixture(t);
   for (let index = 0; index < 12; index += 1) {
@@ -278,7 +628,9 @@ test("fast validation enforces bounded concurrency", async (t) => {
   let active = 0;
   let maximum = 0;
   let starts = 0;
+  let ends = 0;
   let builds = 0;
+  const eventsByPath = new Map();
   const cache = createObservatoryModelCache({
     projectRoot: fixture.projectRoot,
     validationConcurrency: 3,
@@ -287,12 +639,17 @@ test("fast validation enforces bounded concurrency", async (t) => {
       return { builds };
     },
     async onFastPathCheck(event) {
+      assert.equal(Object.isFrozen(event), true);
+      const sequence = eventsByPath.get(event.path) ?? [];
+      sequence.push(event.event);
+      eventsByPath.set(event.path, sequence);
       if (event.event === "start") {
         active += 1;
         starts += 1;
         maximum = Math.max(maximum, active);
         await new Promise((resolve) => setTimeout(resolve, 2));
       } else {
+        ends += 1;
         active -= 1;
       }
     },
@@ -303,8 +660,12 @@ test("fast validation enforces bounded concurrency", async (t) => {
   assert.equal(warm, cold);
   assert.equal(builds, 1);
   assert.ok(starts > 3);
+  assert.equal(ends, starts);
   assert.equal(maximum, 3);
   assert.equal(active, 0);
+  for (const sequence of eventsByPath.values()) {
+    assert.deepEqual(sequence, ["start", "end"]);
+  }
 });
 
 test("model cache is single-flight, reuses serialized bytes, and invalidates by revision", async (t) => {
@@ -418,6 +779,28 @@ async function createCacheFixture(t) {
   await fs.mkdir(path.join(projectRoot, ".sdlc"), { recursive: true });
   await writeProjectRecord(projectRoot, { version: 1 });
   return { projectRoot };
+}
+
+async function createDigestFallbackFixture(t) {
+  const fixture = await createCacheFixture(t);
+  const longNameDirectory = path.join(fixture.projectRoot, ".sdlc", "long");
+  const wideDirectory = path.join(fixture.projectRoot, ".sdlc", "wide");
+  await fs.mkdir(longNameDirectory);
+  await fs.mkdir(wideDirectory);
+  for (let index = 0; index < 5; index += 1) {
+    const longName = `${"x".repeat(220)}-${String(index).padStart(2, "0")}.bin`;
+    await fs.writeFile(path.join(longNameDirectory, longName), "x\n", "utf8");
+  }
+  for (let index = 0; index < 7; index += 1) {
+    await fs.writeFile(
+      path.join(wideDirectory, `entry-${String(index).padStart(2, "0")}.bin`),
+      "x\n",
+      "utf8",
+    );
+  }
+  await fs.writeFile(path.join(longNameDirectory, "target.json"), "{}\n", "utf8");
+  await fs.writeFile(path.join(wideDirectory, "target.json"), "{}\n", "utf8");
+  return { ...fixture, longNameDirectory, wideDirectory };
 }
 
 function writeProjectRecord(projectRoot, data) {
