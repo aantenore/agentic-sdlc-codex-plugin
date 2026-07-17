@@ -656,6 +656,11 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
     const failAndStop = (error) => {
       if (!terminalError) terminalError = error instanceof Error ? error : new Error(String(error));
       protocolState = "terminal";
+      // The first terminal protocol event owns the outcome. Disarm the
+      // primary deadline before teardown so a slow process-tree close cannot
+      // relabel an IPC failure or disconnect as a worker timeout.
+      clearTimeout(timeout);
+      timeout = null;
       stopping ??= terminateChildAndWait(child).catch((terminationError) => {
         terminalError = new Error(
           `${terminalError.message}; process-tree termination failed: ${terminationError.message}`,

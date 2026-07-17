@@ -1010,13 +1010,16 @@ test("parent rejects Observatory completion before ready/load/snapshot", async (
 });
 
 test("parent applies a secondary exit deadline after valid Observatory completion", {
-  timeout: 10_000,
+  timeout: 30_000,
 }, async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-observatory-complete-stay-"));
   const fakeWorker = path.join(temporary, "complete-and-stay.mjs");
-  writeFakeObservatoryServerWorker(fakeWorker, { mode: "complete-and-stay" });
+  const eventTimestampPath = path.join(temporary, "completion-sent-at.txt");
+  writeFakeObservatoryServerWorker(fakeWorker, {
+    mode: "complete-and-stay",
+    eventTimestampPath,
+  });
   try {
-    const startedAt = Date.now();
     await assert.rejects(
       runEnterprisePerformanceBenchmark({
         parentDirectory: temporary,
@@ -1027,7 +1030,11 @@ test("parent applies a secondary exit deadline after valid Observatory completio
       }),
       /did not exit after snapshot completion/u,
     );
-    assert.ok(Date.now() - startedAt < 5_000, "completed worker waited for primary timeout");
+    assertEventRejectedWithin(
+      eventTimestampPath,
+      5_000,
+      "completed worker waited for the primary timeout",
+    );
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -1151,27 +1158,35 @@ test("worker timeout kills descendants that keep inherited output handles open",
 });
 
 test("parent treats a live Observatory worker IPC disconnect as immediately terminal", {
-  timeout: 10_000,
+  timeout: 30_000,
 }, async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-observatory-disconnect-"));
   const fakeWorker = path.join(temporary, "disconnect-and-wait.mjs");
+  const eventTimestampPath = path.join(temporary, "disconnect-at.txt");
   fs.writeFileSync(fakeWorker, [
+    `import { spawn } from "node:child_process";`,
+    `import fs from "node:fs";`,
+    ...delayedInheritedOutputHolderLines(1_500),
+    `fs.writeFileSync(${JSON.stringify(eventTimestampPath)}, String(Date.now()), "utf8");`,
     `process.disconnect();`,
     `setInterval(() => {}, 1_000);`,
   ].join("\n"));
   try {
-    const startedAt = Date.now();
     await assert.rejects(
       runEnterprisePerformanceBenchmark({
         parentDirectory: temporary,
         scale: SMALL_SCALE,
         warmIterations: 2,
         observatoryWorkerScriptPath: fakeWorker,
-        observatoryWorkerTimeoutMs: 10_000,
+        observatoryWorkerTimeoutMs: 1_000,
       }),
       /disconnected before snapshot completion/u,
     );
-    assert.ok(Date.now() - startedAt < 5_000, "IPC disconnect waited for the primary timeout");
+    assertEventRejectedWithin(
+      eventTimestampPath,
+      5_000,
+      "IPC disconnect waited for the primary timeout",
+    );
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -1179,11 +1194,16 @@ test("parent treats a live Observatory worker IPC disconnect as immediately term
 });
 
 test("parent treats an Observatory IPC error message as immediately terminal", {
-  timeout: 10_000,
+  timeout: 30_000,
 }, async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-observatory-ipc-error-"));
   const fakeWorker = path.join(temporary, "error-and-wait.mjs");
+  const eventTimestampPath = path.join(temporary, "ipc-error-sent-at.txt");
   fs.writeFileSync(fakeWorker, [
+    `import { spawn } from "node:child_process";`,
+    `import fs from "node:fs";`,
+    ...delayedInheritedOutputHolderLines(1_500),
+    `fs.writeFileSync(${JSON.stringify(eventTimestampPath)}, String(Date.now()), "utf8");`,
     `process.send({`,
     `  schema_version: "enterprise-performance-observatory-worker:v1",`,
     `  type: "error", ok: false, workload: "observatory",`,
@@ -1191,18 +1211,21 @@ test("parent treats an Observatory IPC error message as immediately terminal", {
     `}, () => setInterval(() => {}, 1_000));`,
   ].join("\n"));
   try {
-    const startedAt = Date.now();
     await assert.rejects(
       runEnterprisePerformanceBenchmark({
         parentDirectory: temporary,
         scale: SMALL_SCALE,
         warmIterations: 2,
         observatoryWorkerScriptPath: fakeWorker,
-        observatoryWorkerTimeoutMs: 10_000,
+        observatoryWorkerTimeoutMs: 1_000,
       }),
       /Observatory server worker failed: deterministic IPC failure/u,
     );
-    assert.ok(Date.now() - startedAt < 5_000, "IPC error waited for the primary timeout");
+    assertEventRejectedWithin(
+      eventTimestampPath,
+      5_000,
+      "IPC error waited for the primary timeout",
+    );
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -1292,7 +1315,7 @@ function sha256FileHex(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-function writeFakeObservatoryServerWorker(filePath, { mode }) {
+function writeFakeObservatoryServerWorker(filePath, { mode, eventTimestampPath = null }) {
   const normalizerUrl = JSON.stringify(pathToFileURL(
     path.join(REPOSITORY_ROOT, "lib/change-observatory/normalizer.mjs"),
   ).href);
@@ -1303,6 +1326,7 @@ function writeFakeObservatoryServerWorker(filePath, { mode }) {
     `import { buildObservatoryViewModel } from ${normalizerUrl};`,
     `const schema = "enterprise-performance-observatory-worker:v1";`,
     `const mode = ${JSON.stringify(mode)};`,
+    `const eventTimestampPath = ${JSON.stringify(eventTimestampPath)};`,
     `const fixtureRootIndex = process.argv.indexOf("--fixture-root");`,
     `const manifestIndex = process.argv.indexOf("--fixture-manifest");`,
     `const limitsIndex = process.argv.indexOf("--limits-json");`,
@@ -1372,6 +1396,9 @@ function writeFakeObservatoryServerWorker(filePath, { mode }) {
     `  if (message?.type !== "snapshot-and-close") return;`,
     `  await new Promise((resolve) => server.close(resolve));`,
     `  const usage = process.memoryUsage();`,
+    `  if (mode === "complete-and-stay" && eventTimestampPath) {`,
+    `    fs.writeFileSync(eventTimestampPath, String(Date.now()), "utf8");`,
+    `  }`,
     `  process.send({`,
     `    ...metadata(), type: "complete",`,
     `    command_id: mode === "wrong-command" ? "wrong-command" : message.command_id,`,
@@ -1390,6 +1417,27 @@ function writeFakeObservatoryServerWorker(filePath, { mode }) {
     `  });`,
     `});`,
   ].join("\n"));
+}
+
+function assertEventRejectedWithin(eventTimestampPath, maximumElapsedMs, message) {
+  const eventTimestamp = Number(fs.readFileSync(eventTimestampPath, "utf8"));
+  assert.ok(Number.isSafeInteger(eventTimestamp), "worker event timestamp must be an integer");
+  const elapsedMs = Date.now() - eventTimestamp;
+  assert.ok(elapsedMs >= 0, "worker event timestamp cannot be in the future");
+  assert.ok(elapsedMs <= maximumElapsedMs, `${message}: ${elapsedMs}ms`);
+}
+
+function delayedInheritedOutputHolderLines(delayMs) {
+  return [
+    `const outputHolder = spawn(process.execPath, [`,
+    `  "-e", ${JSON.stringify(`setTimeout(() => {}, ${delayMs});`)},`,
+    `], {`,
+    `  detached: true,`,
+    `  stdio: ["ignore", "inherit", "inherit"],`,
+    `  windowsHide: true,`,
+    `});`,
+    `outputHolder.unref();`,
+  ];
 }
 
 function canonicalWorkerEnvelope(memory) {
