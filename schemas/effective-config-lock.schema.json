@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "effective-config-lock.schema.json",
+  "title": "Agentic SDLC Effective Configuration Lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "config_path",
+    "config_hash",
+    "effective_config_hash",
+    "defaults_profile",
+    "inherited_paths",
+    "created_at",
+    "hash_algorithm",
+    "lock_hash"
+  ],
+  "properties": {
+    "kind": { "const": "effective_config_lock" },
+    "schema_version": { "const": "effective-config-lock:v1" },
+    "config_path": { "$ref": "#/$defs/sdlc_path" },
+    "config_hash": { "$ref": "#/$defs/sha256" },
+    "effective_config_hash": { "$ref": "#/$defs/sha256" },
+    "defaults_profile": { "$ref": "#/$defs/defaults_profile" },
+    "inherited_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/json_pointer" }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "lock_hash": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sdlc_path": { "type": "string", "pattern": "^\\.sdlc/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$" },
+    "json_pointer": { "type": "string", "pattern": "^/(?:[^~]|~[01])+$" },
+    "defaults_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

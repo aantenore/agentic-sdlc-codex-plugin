@@ -99,6 +99,15 @@ import {
   recoverIdentityMigration,
   validateIdentityMigrationReceipt,
 } from "../lib/identity-migration.mjs";
+import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
+import { computeStableHash } from "../lib/canonical.mjs";
+import {
+  buildConfigMigrationApplyData,
+  buildEffectiveConfigLock,
+  prepareConfigMigration,
+  resolveEffectiveConfig,
+  verifyConfigMigrationPlan,
+} from "../lib/effective-config.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -107,6 +116,8 @@ const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
+const PROJECT_CONFIG_LOCK_FILE_NAME = "config.lock.json";
+const LEGACY_CONFIG_PROFILE_ID = "sdlc-config-v1@0.11.0";
 const INTERNAL_LOCK_WAIT_MS = 5000;
 const INTERNAL_LOCK_STALE_MS = 30000;
 const INTERNAL_LOCK_REMOTE_STALE_MS = 300000;
@@ -621,6 +632,14 @@ async function main() {
     }
     const context = buildContext(parsed.options);
 
+    if (command === "config" && subcommand === "status") {
+      showConfigStatus(context, parsed.options);
+      return;
+    }
+    if (command === "config" && subcommand === "migrate") {
+      migrateProjectConfig(context, parsed.options);
+      return;
+    }
     if (command === "init") {
       initProject(context, parsed.options);
       return;
@@ -629,6 +648,7 @@ async function main() {
       await runDoctor(context, parsed.options);
       return;
     }
+    assertConfigAllowsCommand(context, command, subcommand, rest, parsed.options);
     if (command === "optimization" && subcommand === "status") {
       await showOptimizationStatus(context, parsed.options);
       return;
@@ -1078,19 +1098,111 @@ function buildContext(options) {
   const templateDir = path.resolve(String(options["template-dir"] || DEFAULT_TEMPLATE_DIR));
   const templateConfig = validateSdlcConfig(readJson(path.join(templateDir, "sdlc-config.json")));
   const projectConfigPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
+  const configLockPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_LOCK_FILE_NAME);
   if (fs.existsSync(projectConfigPath)) {
     resolveProjectFilePath({ root }, projectConfigPath, { mustExist: true, fileOnly: true });
     assertNoSymlinkPathSegments(projectConfigPath);
   }
-  const selectedConfig = fs.existsSync(projectConfigPath)
-    ? validateSdlcConfig(mergeMissingConfigDefaults(readProjectJson({ root }, projectConfigPath), templateConfig))
-    : templateConfig;
+  if (fs.existsSync(configLockPath)) {
+    resolveProjectFilePath({ root }, configLockPath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(configLockPath);
+  }
+  const templateDefaultsProfile = {
+    id: `${templateConfig.config_schema_version}@plugin-${VERSION}`,
+    sha256: computeStableHash(templateConfig),
+  };
+  const projectConfigExists = fs.existsSync(projectConfigPath);
+  const rawProjectConfig = projectConfigExists ? readProjectJson({ root }, projectConfigPath) : null;
+  const projectConfigLock = fs.existsSync(configLockPath) ? readProjectJson({ root }, configLockPath) : null;
+  const legacyConfig = projectConfigExists && !projectConfigLock
+    ? validateSdlcConfig(
+        readJson(path.join(DEFAULT_TEMPLATE_DIR, "config-compat", "sdlc-config-v1-0.11.0.json")),
+      )
+    : null;
+  const legacyDefaultsProfile = legacyConfig
+    ? {
+        id: LEGACY_CONFIG_PROFILE_ID,
+        sha256: computeStableHash(legacyConfig),
+      }
+    : null;
+  let configResolutionError = null;
+  let configState;
+  if (projectConfigExists) {
+    try {
+      configState = resolveEffectiveConfig({
+        project_config: rawProjectConfig,
+        ...(legacyConfig ? { legacy_defaults: legacyConfig, defaults_profile: legacyDefaultsProfile } : {}),
+        lock: projectConfigLock,
+        config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      });
+    } catch (error) {
+      configResolutionError = error.message;
+      configState = {
+        status: "invalid",
+        migration_required: true,
+        mutation_allowed: false,
+        raw_config: rawProjectConfig,
+        effective_config: rawProjectConfig,
+        raw_config_hash: computeStableHash(rawProjectConfig),
+        effective_config_hash: computeStableHash(rawProjectConfig),
+        defaults_profile: null,
+        inherited_paths: [],
+        lock_verification: null,
+      };
+    }
+  } else {
+    configState = {
+        status: "uninitialized",
+        migration_required: false,
+        mutation_allowed: true,
+        raw_config: null,
+        effective_config: templateConfig,
+        raw_config_hash: null,
+        effective_config_hash: computeStableHash(templateConfig),
+        defaults_profile: templateDefaultsProfile,
+        inherited_paths: [],
+        lock_verification: null,
+      };
+  }
+  let configValidationError = null;
+  let selectedConfig;
+  try {
+    selectedConfig = validateSdlcConfig(configState.effective_config);
+  } catch (error) {
+    configValidationError = [configResolutionError, error.message].filter(Boolean).join("; ");
+    const fallbackConfig = rawProjectConfig
+      ? mergeMissingConfigDefaults(rawProjectConfig, legacyConfig || templateConfig)
+      : templateConfig;
+    try {
+      selectedConfig = validateSdlcConfig(fallbackConfig);
+    } catch {
+      selectedConfig = templateConfig;
+    }
+    configState = {
+      ...configState,
+      status: "invalid",
+      migration_required: true,
+      mutation_allowed: false,
+    };
+  }
+  if (!configValidationError && configResolutionError) {
+    configValidationError = configResolutionError;
+  }
   return {
     root,
     sdlcRoot: path.join(root, SDLC_DIR),
     templateDir,
     config: selectedConfig,
     templateConfig,
+    legacyConfig,
+    projectConfigPath,
+    configLockPath,
+    rawProjectConfig,
+    projectConfigLock,
+    configState,
+    configValidationError,
+    legacyDefaultsProfile,
+    templateDefaultsProfile,
   };
 }
 
@@ -1125,6 +1237,337 @@ function mergeMissingConfigDefaults(projectConfig, templateConfig) {
     return result;
   };
   return merge(projectConfig, templateConfig);
+}
+
+function configStatusGuidance(context) {
+  const status = context.configState?.status || "invalid";
+  if (status === "locked") {
+    return {
+      outcome: "Configuration is pinned and safe to use.",
+      impact: "Plugin updates cannot silently change this project's effective policy.",
+      next_action: "No action is required.",
+    };
+  }
+  if (status === "legacy_compat") {
+    return {
+      outcome: "The project is safely using its previous compatible behavior.",
+      impact: "Current behavior is preserved from the frozen compatibility profile, but the project does not have a stored configuration lock yet.",
+      next_action: "Run `agentic-sdlc config migrate` to preview the lock adoption. The preview changes no files.",
+    };
+  }
+  if (status === "drifted") {
+    return {
+      outcome: "Configuration changed after the last approved lock; governed writes are paused.",
+      impact: "The CLI will not guess whether that policy change was intentional.",
+      next_action: "Run `agentic-sdlc config migrate` to review the exact change, then apply only the displayed plan hash.",
+    };
+  }
+  if (status === "uninitialized") {
+    return {
+      outcome: "This project has not been initialized for Agentic SDLC yet.",
+      impact: "No project policy is active and no project files were changed.",
+      next_action: "Run `agentic-sdlc init` to create a complete, pinned configuration.",
+    };
+  }
+  return {
+    outcome: "The configuration lock cannot be trusted; governed writes are blocked.",
+    impact: "No policy-dependent change is allowed while the project configuration is invalid.",
+    next_action: "Inspect the technical detail below, or restore the last valid config and lock before continuing.",
+  };
+}
+
+function showConfigStatus(context, options) {
+  const guidance = configStatusGuidance(context);
+  const verificationErrors = context.configState?.lock_verification?.errors || [];
+  const payload = {
+    status: context.configState.status,
+    outcome: guidance.outcome,
+    impact: guidance.impact,
+    next_action: guidance.next_action,
+    mutation_allowed: context.configState.mutation_allowed,
+    migration_required: context.configState.migration_required,
+    config_path: context.projectConfigPath
+      ? toProjectPath(context, context.projectConfigPath)
+      : `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+    lock_path: context.configLockPath
+      ? toProjectPath(context, context.configLockPath)
+      : `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+    effective_config_hash: context.configState.effective_config_hash,
+    defaults_profile: context.configState.defaults_profile,
+    inherited_paths: context.configState.inherited_paths || [],
+    validation_error: context.configValidationError,
+    lock_errors: verificationErrors,
+  };
+  output(options, payload, [
+    guidance.outcome,
+    `Impact: ${guidance.impact}`,
+    `Next: ${guidance.next_action}`,
+    "",
+    "Details:",
+    `- Status: ${context.configState.status}`,
+    `- Effective config: ${context.configState.effective_config_hash || "not created"}`,
+    `- Defaults profile: ${context.configState.defaults_profile?.id || "not selected"}`,
+    ...(context.configValidationError ? [`- Config validation: ${context.configValidationError}`] : []),
+    ...verificationErrors.map((issue) => `- Lock check: ${issue.message}`),
+  ]);
+}
+
+function prepareProjectConfigMigration(context, projectConfig, projectLock) {
+  try {
+    return prepareConfigMigration({
+      project_config: projectConfig,
+      legacy_defaults: context.templateConfig,
+      defaults_profile: context.templateDefaultsProfile,
+      lock: projectLock,
+      config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      lock_path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      fail([
+        "A safe configuration migration plan could not be created; no files were changed.",
+        "Impact: governed writes remain blocked because the current lock is structurally invalid.",
+        `Next: inspect or restore ${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}, then run the preview again.`,
+        `Technical detail: ${error.message}`,
+      ].join("\n"));
+    }
+    throw error;
+  }
+}
+
+function configMigrationChangeSummary(plan) {
+  if (plan.mode === "already_locked") {
+    return "The current configuration and lock already match; applying this plan will make no changes.";
+  }
+  if (plan.mode === "reconcile_drift") {
+    return "Applying this plan will accept the current materialized configuration and replace its stale lock.";
+  }
+  if (plan.changes.length === 0) {
+    return "Applying this plan will keep the current configuration and create its first lock.";
+  }
+  return `Applying this plan will materialize ${plan.changes.length} reviewed configuration change(s) and create a matching lock.`;
+}
+
+function migrateProjectConfig(context, options) {
+  if (!context.rawProjectConfig) {
+    fail([
+      "There is no project configuration to migrate; no files were changed.",
+      "Impact: this project remains uninitialized.",
+      "Next: run `agentic-sdlc init` instead.",
+    ].join("\n"));
+  }
+
+  if (!options.apply) {
+    const plan = prepareProjectConfigMigration(
+      context,
+      context.rawProjectConfig,
+      context.projectConfigLock,
+    );
+    const verification = verifyConfigMigrationPlan(plan);
+    if (!verification.valid) {
+      fail(`Configuration migration plan failed its integrity check: ${verification.errors.join(", ")}`);
+    }
+    const impact = configMigrationChangeSummary(plan);
+    output(options, {
+      status: "planned",
+      files_changed: 0,
+      impact,
+      next_action: plan.status === "already_applied"
+        ? "No action is required."
+        : `Review the changes, then apply plan ${plan.plan_hash}.`,
+      plan,
+    }, [
+      "Configuration migration preview is ready; no files were changed.",
+      `Impact: ${impact}`,
+      plan.status === "already_applied"
+        ? "Next: no action is required."
+        : `Next: review the changes, then run \`agentic-sdlc config migrate --apply --plan-hash ${plan.plan_hash}\`.`,
+      "",
+      "Details:",
+      `- Plan: ${plan.plan_hash}`,
+      `- Mode: ${plan.mode}`,
+      `- Reviewed changes: ${plan.changes.length}`,
+      ...plan.changes.map((change) => `- ${change.operation} ${change.path || "/"}`),
+    ]);
+    return;
+  }
+
+  const expectedPlanHash = getOptionString(options, "plan-hash");
+  if (!expectedPlanHash) {
+    fail([
+      "The configuration was not changed because an exact reviewed plan is required.",
+      "Impact: the existing config and lock remain untouched.",
+      "Next: run `agentic-sdlc config migrate`, review the preview, then rerun with `--apply --plan-hash <displayed-hash>`.",
+    ].join("\n"));
+  }
+
+  const transactionRelease = acquireFileLock(path.join(context.sdlcRoot, "locks", "config-migration.lock"));
+  let configBefore;
+  let lockBefore = null;
+  let lockExisted = false;
+  let receiptPath = null;
+  let receiptWritten = false;
+  let application;
+  let plan;
+  let traceWarning = null;
+  try {
+    configBefore = readProjectText(context, context.projectConfigPath);
+    const currentConfig = JSON.parse(configBefore);
+    lockExisted = fs.existsSync(context.configLockPath);
+    if (lockExisted) {
+      lockBefore = readProjectText(context, context.configLockPath);
+    }
+    const currentLock = lockExisted ? JSON.parse(lockBefore) : null;
+    plan = prepareProjectConfigMigration(context, currentConfig, currentLock);
+    try {
+      application = buildConfigMigrationApplyData({
+        plan,
+        current_project_config: currentConfig,
+        current_lock: currentLock,
+        expected_plan_hash: expectedPlanHash,
+        applied_at: now(),
+        audit: buildAttribution(context, options, "config.migrate"),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) {
+        fail([
+          "The configuration was not changed because the reviewed plan no longer matches.",
+          "Impact: the existing config and lock remain untouched.",
+          "Next: run `agentic-sdlc config migrate` again and review the new plan.",
+          `Technical detail: ${error.message}`,
+        ].join("\n"));
+      }
+      throw error;
+    }
+
+    assertRecordSchema(application.lock, "effective-config-lock.schema.json", "Effective config lock");
+    if (application.receipt) {
+      assertRecordSchema(application.receipt, "config-migration-receipt.schema.json", "Config migration receipt");
+    }
+    if (application.status !== "already_applied") {
+      writeJsonFile(context.projectConfigPath, application.config, { force: true });
+      writeJsonFile(context.configLockPath, application.lock, { force: true });
+      receiptPath = path.join(
+        context.sdlcRoot,
+        "migrations",
+        "config",
+        `${application.receipt.id}.json`,
+      );
+      writeJsonFile(receiptPath, application.receipt, { atomicCreate: true });
+      receiptWritten = true;
+    }
+  } catch (error) {
+    if (application?.status !== "already_applied" && configBefore !== undefined) {
+      try {
+        writeTextFile(context.projectConfigPath, configBefore, { force: true });
+        if (lockExisted) {
+          writeTextFile(context.configLockPath, lockBefore, { force: true });
+        } else if (fs.existsSync(context.configLockPath)) {
+          fs.rmSync(context.configLockPath, { force: true });
+        }
+        if (receiptWritten && receiptPath && fs.existsSync(receiptPath)) {
+          fs.rmSync(receiptPath, { force: true });
+        }
+      } catch (rollbackError) {
+        fail(`Configuration migration failed and rollback also failed: ${rollbackError.message}`);
+      }
+    }
+    throw error;
+  } finally {
+    transactionRelease();
+  }
+
+  if (application.status !== "already_applied") {
+    context.config = application.config;
+    try {
+      appendTraceEvent(context, null, {
+        type: "decision",
+        outcome: "passed",
+        summary: "Pinned the reviewed effective project configuration",
+        action: "config.migrate",
+        actor: buildActor(options, context.root),
+        evidence: [
+          `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+          `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+          toProjectPath(context, receiptPath),
+        ],
+        related: [application.receipt.id],
+      });
+    } catch (error) {
+      traceWarning = `The migration was committed, but its optional trace could not be appended: ${error.message}`;
+    }
+  }
+
+  output(options, {
+    status: application.status === "already_applied" ? "already_applied" : "applied",
+    plan_hash: plan.plan_hash,
+    config_hash: application.lock.config_hash,
+    lock_hash: application.lock.lock_hash,
+    receipt: application.receipt
+      ? { id: application.receipt.id, path: toProjectPath(context, receiptPath), hash: application.receipt.receipt_hash }
+      : null,
+    trace_warning: traceWarning,
+  }, [
+    application.status === "already_applied"
+      ? "Configuration is already pinned; no files were changed."
+      : "The reviewed configuration was pinned successfully.",
+    application.status === "already_applied"
+      ? "Impact: plugin updates still cannot change this project's policy silently."
+      : "Impact: future plugin updates cannot change this project's effective policy silently.",
+    "Next: continue with the governed project command you intended to run.",
+    "",
+    "Details:",
+    `- Plan: ${plan.plan_hash}`,
+    `- Config hash: ${application.lock.config_hash}`,
+    `- Lock hash: ${application.lock.lock_hash}`,
+    ...(application.receipt ? [`- Receipt: ${toProjectPath(context, receiptPath)}`] : []),
+    ...(traceWarning ? [`- Warning: ${traceWarning}`] : []),
+  ]);
+}
+
+function commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options) {
+  if (command === "status" || command === "doctor") return true;
+  if (command === "optimization" && subcommand === "status") return true;
+  if (command === "baseline" && subcommand === "status") return true;
+  if (command === "assessment" && (
+    subcommand === "status"
+    || (subcommand === "proposal" && rest[0] === "status")
+  )) return true;
+  if (command === "budget" && subcommand === "status") return true;
+  if (command === "requirement" && subcommand === "status") return true;
+  if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") return true;
+  if (command === "autonomy" && subcommand === "delivery" && ["status", "explain"].includes(rest[0])) return true;
+  if (command === "story" && subcommand === "deps") return true;
+  if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") return true;
+  if (command === "breakdown" && subcommand === "status") return true;
+  if (command === "dependency" && subcommand === "status") return true;
+  if (command === "capability" && subcommand === "status") return true;
+  if (command === "capability" && subcommand === "profile" && rest[0] === "status") return true;
+  if (command === "approval" && subcommand === "requests") return true;
+  if (command === "authorization" && subcommand === "status") return true;
+  if (command === "cache" && subcommand === "status") return true;
+  if (command === "output" && ["resolve", "status"].includes(subcommand)) return true;
+  if (command === "route" && (!subcommand || subcommand === "decide")) return true;
+  if (command === "kb" && subcommand === "search") return true;
+  if (command === "orchestrate" && ["status", "plan"].includes(subcommand)) return true;
+  if (command === "gate" && subcommand === "check" && !options.out) return true;
+  if (command === "report" && ["activity", "query"].includes(subcommand) && !options.out) return true;
+  if (command === "migration" && subcommand === "active" && !options.apply) return true;
+  return false;
+}
+
+function assertConfigAllowsCommand(context, command, subcommand, rest, options) {
+  if (!context.configState || context.configState.mutation_allowed !== false) return;
+  if (commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options)) return;
+  const status = context.configState.status;
+  fail([
+    `This command was not run because the project configuration is ${status}.`,
+    "Impact: no governed project files were changed.",
+    status === "drifted"
+      ? "Next: run `agentic-sdlc config migrate`, review the exact plan, and apply its hash before retrying."
+      : `Next: inspect ${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}, or restore the last valid config and lock before retrying.`,
+    `Technical detail: blocked command ${[command, subcommand, ...rest].filter(Boolean).join(" ")}.`,
+  ].join("\n"));
 }
 
 function validateSdlcConfig(config) {
@@ -3735,6 +4178,17 @@ async function runDoctor(context, options) {
     add("plugin-metadata", "failed", error.message);
   }
 
+  const configGuidance = configStatusGuidance(context);
+  add(
+    "effective-config",
+    context.configState.status === "locked"
+      ? "passed"
+      : ["drifted", "invalid"].includes(context.configState.status)
+        ? "failed"
+        : "not_applicable",
+    `${configGuidance.outcome} ${configGuidance.next_action}`,
+  );
+
   for (const [id, relativePath] of [
     ["core-skill", "skills/agentic-sdlc/SKILL.md"],
     ["assessment-skill", "skills/agentic-sdlc-assessment/SKILL.md"],
@@ -4428,7 +4882,29 @@ function initializeProject(context, options) {
   for (const directory of context.config.kb_directories) {
     ensureDir(path.join(context.sdlcRoot, directory));
   }
-  writeJsonFile(path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME), config, { force });
+  const configPath = path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME);
+  const configLockPath = path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME);
+  const configLock = buildEffectiveConfigLock({
+    effective_config: config,
+    config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+    defaults_profile: context.templateDefaultsProfile,
+    inherited_paths: [],
+    created_at: now(),
+  });
+  assertRecordSchema(configLock, "effective-config-lock.schema.json", "Effective config lock");
+  writeJsonFile(configPath, config, { force });
+  writeJsonFile(configLockPath, configLock, { force });
+  context.projectConfigPath = configPath;
+  context.configLockPath = configLockPath;
+  context.rawProjectConfig = config;
+  context.projectConfigLock = configLock;
+  context.configState = resolveEffectiveConfig({
+    project_config: config,
+    legacy_defaults: context.legacyConfig || context.templateConfig,
+    defaults_profile: context.legacyDefaultsProfile || context.templateDefaultsProfile,
+    lock: configLock,
+    config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+  });
 
   const projectPath = path.join(context.sdlcRoot, "project.json");
   const project = {
@@ -4497,11 +4973,16 @@ function initializeProject(context, options) {
       root: context.root,
       sdlc_root: context.sdlcRoot,
       project,
+      config_lock: {
+        path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+        hash: configLock.lock_hash,
+      },
       contracts_created: createdContracts,
     },
     messages: [
       `Initialized Agentic SDLC at ${path.relative(context.root, context.sdlcRoot) || SDLC_DIR}`,
       `Project: ${projectName} (${projectId})`,
+      "Configuration pinned: plugin updates cannot silently change this project's policy.",
       `Phase contracts available: ${context.config.phase_order.join(", ")}`,
     ],
   };
@@ -4581,9 +5062,13 @@ function createBaselineProposal(context, options) {
   const requestedDocuments = normalizeRawListOption(options.document);
   const documentPaths = requestedDocuments.length > 0 ? requestedDocuments : discoverExistingProjectDocuments(context);
   const documents = documentPaths.map((rawPath) => buildBaselineDocumentEvidence(context, rawPath));
-  const extraSources = normalizeBaselineSourcePaths(context, normalizeRawListOption(options.source));
   const detectedStack = detectProjectStack(context);
   const repoSnapshot = buildRepositorySnapshot(context, detectedStack);
+  const extraSources = normalizeBaselineSourcePaths(context, [
+    ...(repoSnapshot.source_roots || []),
+    ...(repoSnapshot.test_roots || []),
+    ...normalizeRawListOption(options.source),
+  ]);
   const sourcePaths = Array.from(
     new Set([
       ...documents.map((item) => item.path),
@@ -4772,22 +5257,34 @@ function showBaselineStatus(context, options) {
   }
   const status = baselines.map((baseline) => {
     const staleSources = validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true });
+    const approvalFresh = isApprovedRecordFresh(baseline);
+    const sourceFresh = staleSources.length === 0;
+    const approved = baseline.status === "approved" && approvalFresh && sourceFresh;
     return {
       id: baseline.id,
       status: baseline.status,
+      effective_status: approved ? "approved" : baseline.status === "approved" ? "needs_refresh" : baseline.status,
       kind: baseline.kind,
       source_paths: baseline.source_paths || [],
-      stale: staleSources.length > 0,
+      stale: !sourceFresh,
       stale_sources: staleSources,
       open_questions: Array.isArray(baseline.open_questions) ? baseline.open_questions.length : 0,
-      approved: baseline.status === "approved" && isApprovedRecordFresh(baseline),
+      approved,
+      next_action: sourceFresh
+        ? null
+        : `Refresh the project snapshot before starting new work from ${baseline.id}.`,
     };
   });
   output(
     options,
     { baselines: status },
     status.length
-      ? status.map((item) => `${item.id}: ${item.status}${item.stale ? " (stale)" : ""}, open questions ${item.open_questions}`)
+      ? status.flatMap((item) => item.stale
+        ? [
+            `${item.id}: the saved project snapshot no longer matches the current files.`,
+            `Next: refresh the snapshot before using it to start new work. Technical status: ${item.effective_status}.`,
+          ]
+        : [`${item.id}: ready to use; open questions ${item.open_questions}.`])
       : ["No baselines found."],
   );
 }
@@ -13152,6 +13649,15 @@ function collectBaselineApprovalRequests(context, storyId = null) {
   return selectActiveBaselines(context, storyId)
     .filter((baseline) => {
       const approved = String(baseline.status || "").toLowerCase() === "approved";
+      const confirmedPreChangeSnapshot = Boolean(
+        approved
+        && storyId
+        && baselineWasBoundToConfirmedStoryStart(context, storyId, baseline)
+        && isApprovedRecordFresh(baseline),
+      );
+      if (confirmedPreChangeSnapshot) {
+        return false;
+      }
       const stale =
         validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true }).length > 0 ||
         (approved && !isApprovedRecordFresh(baseline));
@@ -16898,22 +17404,22 @@ function buildBaselineDocumentEvidence(context, rawPath) {
 }
 
 function normalizeBaselineSourcePaths(context, rawPaths) {
-  const result = [];
   for (const rawPath of rawPaths) {
     const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true });
     assertNotDerivedArtifact(context, resolved, "Baseline source");
-    const stat = fs.statSync(resolved);
-    if (stat.isDirectory()) {
-      for (const filePath of walkFiles(resolved)) {
-        if (shouldIndexFile(context, filePath) && !isDerivedArtifactPath(context, filePath)) {
-          result.push(toProjectPath(context, filePath));
-        }
-      }
-    } else if (stat.isFile()) {
-      result.push(toProjectPath(context, resolved));
-    }
   }
-  return Array.from(new Set(result)).sort();
+  const discovery = discoverBaselineSourcePaths({
+    projectRoot: context.root,
+    requestedPaths: rawPaths,
+    policy: context.config.baseline_policy,
+  });
+  if (discovery.truncated) {
+    fail(
+      `Baseline source discovery reached its ${discovery.policy.max_discovered_files}-file limit. `
+      + "Narrow --source or raise baseline_policy.max_discovered_files explicitly; no silent partial baseline was created.",
+    );
+  }
+  return discovery.paths;
 }
 
 function buildRepositorySnapshot(context, detectedStack = detectProjectStack(context)) {
@@ -20768,8 +21274,8 @@ function prepareActiveReleaseMigration(context, options, manifestInput) {
   ].map((entry) => [`${entry.id || ""}:${entry.path}`, entry])).values());
   const configPath = path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME);
   const rawConfig = readProjectJson(context, configPath);
-  const migratedConfig = validateSdlcConfig(mergeMissingConfigDefaults(rawConfig, context.templateConfig));
-  const configUpdateRequired = stableJson(rawConfig) !== stableJson(migratedConfig);
+  const migratedConfig = rawConfig;
+  const configUpdateRequired = context.configState.status !== "locked";
   const attribution = buildAttribution(context, options, "migration.active");
   const explicitReason = getOptionString(options, "reason");
   const reason = explicitReason || `Retain evidence from releases older than ${manifest.id} while excluding it from the exact active release scope.`;
@@ -20818,8 +21324,11 @@ function migrateActiveReleaseScope(context, options) {
     try {
       plan = prepareActiveReleaseMigration(context, options, manifestInput);
       if (plan.configUpdateRequired) {
-        writeJsonFile(plan.configPath, plan.migratedConfig, { force: true });
-        configWritten = true;
+        fail([
+          "The release migration was not applied because the project configuration is not pinned.",
+          "Impact: no release, archive, or configuration files were changed.",
+          "Next: run `agentic-sdlc config migrate`, review and apply its exact plan hash, then retry this release migration.",
+        ].join("\n"));
       }
       if (plan.preparedArchive.record && !plan.preparedArchive.idempotent) {
         writeJsonFile(plan.preparedArchive.filePath, plan.preparedArchive.record);
@@ -20894,7 +21403,9 @@ function migrateActiveReleaseScope(context, options) {
   output(options, payload, [
     `${options.apply ? "Applied" : "Planned"} active-only migration for ${manifest.id}.`,
     `Active immutable records validated: ${activeRecordCount}; rewritten: 0.`,
-    `Configuration defaults ${configUpdateRequired ? (options.apply ? "were upgraded" : "need an upgrade") : "are already current"}.`,
+    configUpdateRequired
+      ? "Configuration must be reviewed and pinned separately before this migration can be applied."
+      : "Configuration is already pinned; this migration will not modify it.",
     historical.artifacts.length > 0
       ? `${historical.artifacts.length} artifacts from ${historical.historical_release_count} older release(s) ${options.apply ? "are" : "will be"} logically archived; every file stays in place.`
       : "No older released evidence needs a logical archive record.",
@@ -20904,7 +21415,9 @@ function migrateActiveReleaseScope(context, options) {
     ...(traceWarning ? [`Warning: ${traceWarning}`] : []),
     options.apply
       ? "Effect: current release lineage remains canonical; historical evidence remains readable but is excluded from this release gate."
-      : `Example to apply exactly this plan: agentic-sdlc migration active --release-manifest ${manifest.id} --apply`,
+      : configUpdateRequired
+        ? "Next: run `agentic-sdlc config migrate`, review its plan, and apply that exact hash first."
+        : `Example to apply exactly this plan: agentic-sdlc migration active --release-manifest ${manifest.id} --apply`,
   ]);
 }
 
@@ -23273,12 +23786,21 @@ function validateBaselines(context, report, storyId = null) {
     const label = `baseline ${baseline.id || "unknown"}`;
     const baselineStatus = String(baseline.status || "").toLowerCase();
     const active = activeIds.has(baseline.id);
+    const snapshotBoundAtStart = Boolean(
+      storyId && active && baselineWasBoundToConfirmedStoryStart(context, storyId, baseline),
+    );
     if (!baseline.id || !baseline.schema_version || !baseline.status || !baseline.kind) {
       report.errors.push(`${label} is missing id, schema_version, status, or kind`);
     }
     for (const issue of validateBaselineSourceHashes(context, baseline, label, { collectOnly: true })) {
-      const severity = active && ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
-      report[severity].push(issue);
+      if (snapshotBoundAtStart) {
+        report.warnings.push(
+          `${label} is the approved pre-change snapshot for ${storyId}; current files changed after the confirmed task start. Technical detail: ${issue}`,
+        );
+      } else {
+        const severity = active && ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
+        report[severity].push(issue);
+      }
     }
     if (report.strict && active && baselineStatus && baselineStatus !== "approved") {
       report.errors.push(
@@ -23300,6 +23822,35 @@ function validateBaselines(context, report, storyId = null) {
     }
     report.checked.push(label);
   }
+}
+
+function baselineWasBoundToConfirmedStoryStart(context, storyId, baseline) {
+  const story = readStory(context, storyId);
+  if (!story?.contract_id) return false;
+  const contract = readContractById(context, story.contract_id, { missingOk: true });
+  if (!contract) return false;
+  const baselinePath = path.posix.join(SDLC_DIR, "baseline", `${baseline.id}.json`);
+  const contextSource = (contract.contextualization?.context_sources || []).find(
+    (source) => String(source?.path || source || "").replace(/\\/gu, "/") === baselinePath,
+  );
+  if (!contextSource?.sha256) return false;
+  const absoluteBaselinePath = resolveProjectFilePath(context, baselinePath, { mustExist: true, fileOnly: true });
+  if (hashFile(absoluteBaselinePath) !== contextSource.sha256) return false;
+  const receiptPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+  if (!fs.existsSync(receiptPath)) return false;
+  const receipt = readProjectJson(context, receiptPath);
+  const approval = latestApprovedRecordApproval(baseline);
+  const approvalTime = Date.parse(approval?.created_at || approval?.approved_at || "");
+  const startTime = Date.parse(receipt.confirmed_at || "");
+  return (
+    receipt.status === "confirmed"
+    && receipt.story_id === storyId
+    && receipt.contract_id === contract.id
+    && receipt.contract_approval_hash === latestContractApproval(contract)?.approved_content_hash
+    && Number.isFinite(approvalTime)
+    && Number.isFinite(startTime)
+    && startTime >= approvalTime
+  );
 }
 
 function validateDependencyProposals(context, report, storyId = null) {
@@ -26064,6 +26615,9 @@ function printHelp() {
 Usage:
   agentic-sdlc observe [--root path] [--host 127.0.0.1] [--port 0] [--no-open] [--json]
   agentic-sdlc doctor [--root path] [--json]
+  agentic-sdlc config status [--root path] [--json]
+  agentic-sdlc config migrate [--root path] [--json]
+      [--apply --plan-hash sha256]
   agentic-sdlc optimization status [--root path] [--proposal ASSESS-001] [--json]
   agentic-sdlc optimization capture --proposal ASSESS-001 [--phase manual] [--json]
   agentic-sdlc optimization run --root path --command-json '["npm","test"]'

@@ -121,6 +121,7 @@ function createFakeCodeBurn(project, report) {
     arguments: [runnerPath],
   };
   writeJson(configPath, config);
+  pinProjectConfig(project);
   return {
     reportPath,
   };
@@ -160,6 +161,7 @@ function createFakeRtk(project, summary = {}) {
     arguments: [runnerPath],
   };
   writeJson(configPath, config);
+  pinProjectConfig(project);
   return { invocationPath, reportPath, runnerPath };
 }
 
@@ -193,6 +195,30 @@ function createPathRtk(toolRoot, invocationPath) {
 
 function initProject(project, extra = []) {
   mustRun(["init", "--root", project, "--project-name", "E2E", "--force", ...extra]);
+}
+
+function pinProjectConfig(project) {
+  const preview = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ]).stdout);
+  const applied = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    preview.plan.plan_hash,
+    "--actor-type",
+    "system",
+    "--json",
+  ]).stdout);
+  assert.ok(["applied", "already_applied"].includes(applied.status));
+  return applied;
 }
 
 function humanApproval(summary = "Approved in test") {
@@ -347,6 +373,7 @@ function ensureTrustedMeteringFixture(project, {
     trusted_sources: trustedSources,
   };
   writeJson(configPath, config);
+  pinProjectConfig(project);
   return { ...keyPair, keyId: trustedKey.key_id };
 }
 
@@ -703,6 +730,93 @@ test("--version is not shadowed by help and boolean --json does not consume quer
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.query, "workflow");
   assert.ok(payload.results.length > 0);
+});
+
+test("effective configuration is human-readable, reviewable, hash-bound, and fail-closed", () => {
+  const project = tmpProject("effective-config-cli");
+
+  const uninitializedHuman = mustRun(["config", "status", "--root", project]).stdout;
+  assert.match(uninitializedHuman, /^This project has not been initialized/m);
+  assert.match(uninitializedHuman, /Impact:/);
+  assert.match(uninitializedHuman, /Next:/);
+
+  initProject(project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const lockPath = path.join(project, ".sdlc", "config.lock.json");
+  assert.equal(fs.existsSync(lockPath), true);
+  const locked = JSON.parse(mustRun(["config", "status", "--root", project, "--json"]).stdout);
+  assert.equal(locked.status, "locked");
+  assert.equal(locked.mutation_allowed, true);
+  assert.equal(locked.migration_required, false);
+
+  fs.rmSync(lockPath);
+  const legacyConfig = readJson(configPath);
+  delete legacyConfig.baseline_policy;
+  writeJson(configPath, legacyConfig);
+  const configBeforePreview = fs.readFileSync(configPath, "utf8");
+  const legacyHuman = mustRun(["config", "status", "--root", project]).stdout;
+  assert.match(legacyHuman, /^The project is safely using its previous compatible behavior/m);
+  assert.match(legacyHuman, /preview.*changes no files/i);
+
+  const firstPreview = JSON.parse(mustRun([
+    "config", "migrate", "--root", project, "--json",
+  ]).stdout);
+  assert.equal(firstPreview.status, "planned");
+  assert.equal(firstPreview.files_changed, 0);
+  assert.equal(firstPreview.plan.mode, "materialize_legacy_defaults");
+  assert.ok(firstPreview.plan.changes.some((change) => change.path === "/baseline_policy"));
+  assert.equal(fs.readFileSync(configPath, "utf8"), configBeforePreview);
+  assert.equal(fs.existsSync(lockPath), false);
+
+  legacyConfig.schema_version = "0.1.0-reviewed";
+  writeJson(configPath, legacyConfig);
+  const staleApply = mustFail([
+    "config", "migrate", "--root", project, "--apply", "--plan-hash", firstPreview.plan.plan_hash,
+  ], /reviewed plan no longer matches/i);
+  assert.match(`${staleApply.stdout}\n${staleApply.stderr}`, /existing config and lock remain untouched/i);
+  assert.equal(readJson(configPath).schema_version, "0.1.0-reviewed");
+  assert.equal(fs.existsSync(lockPath), false);
+
+  const reviewedPreview = JSON.parse(mustRun([
+    "config", "migrate", "--root", project, "--json",
+  ]).stdout);
+  const applied = JSON.parse(mustRun([
+    "config", "migrate", "--root", project,
+    "--apply", "--plan-hash", reviewedPreview.plan.plan_hash,
+    "--actor-type", "human", "--json",
+  ]).stdout);
+  assert.equal(applied.status, "applied");
+  assert.equal(fs.existsSync(lockPath), true);
+  assert.equal(readJson(configPath).baseline_policy.max_discovered_files, 5000);
+  assert.equal(fs.existsSync(path.join(project, applied.receipt.path)), true);
+  assert.equal(JSON.parse(mustRun(["config", "status", "--root", project, "--json"]).stdout).status, "locked");
+
+  const driftedConfig = readJson(configPath);
+  driftedConfig.claim_policy.default_ttl_seconds = 120;
+  writeJson(configPath, driftedConfig);
+  const driftedHuman = mustRun(["config", "status", "--root", project]).stdout;
+  assert.match(driftedHuman, /^Configuration changed after the last approved lock/m);
+  mustFail([
+    "story", "create", "--root", project, "--id", "ST-BLOCKED",
+    "--title", "Blocked by config drift", "--acceptance", "No write occurs",
+  ], /no governed project files were changed/i);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-BLOCKED")), false);
+
+  const driftPreview = JSON.parse(mustRun(["config", "migrate", "--root", project, "--json"]).stdout);
+  assert.equal(driftPreview.plan.mode, "reconcile_drift");
+  mustFail([
+    "config", "migrate", "--root", project, "--apply", "--plan-hash", "0".repeat(64),
+  ], /reviewed plan no longer matches/i);
+  pinProjectConfig(project);
+
+  const validLock = readJson(lockPath);
+  writeJson(lockPath, { ...validLock, kind: "untrusted_lock" });
+  const invalid = JSON.parse(mustRun(["config", "status", "--root", project, "--json"]).stdout);
+  assert.equal(invalid.status, "invalid");
+  assert.equal(invalid.mutation_allowed, false);
+  mustFail(["cache", "rebuild", "--root", project], /configuration is invalid/i);
+  mustFail(["config", "migrate", "--root", project], /no files were changed.*structurally invalid/is);
+  writeJson(lockPath, validLock);
 });
 
 test("RTK optimization gateway validates telemetry, routes safe commands, and bypasses exact output", () => {
@@ -1133,9 +1247,13 @@ test("claim TTL is config-driven and legacy unbounded claims become stale", () =
   const config = readJson(configPath);
   config.claim_policy.default_ttl_seconds = 0;
   writeJson(configPath, config);
-  mustFail(["status", "--root", project], /default_ttl_seconds must be a positive integer or null/);
+  mustFail(
+    ["story", "claim", "--root", project, "--id", "ST-TTL", "--agent", "codex"],
+    /configuration is invalid|governed writes are blocked/i,
+  );
   config.claim_policy.default_ttl_seconds = 90;
   writeJson(configPath, config);
+  pinProjectConfig(project);
 
   const claimed = JSON.parse(mustRun([
     "story",
@@ -2556,6 +2674,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     public_key: hostPublicKey.export({ type: "spki", format: "pem" }).toString(),
   }];
   writeJson(hostVerifiedConfigPath, hostVerifiedConfig);
+  pinProjectConfig(project);
   mustFail([
     "budget",
     "amend",
@@ -2728,6 +2847,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(replayedHostAmendment.amendment.host_approval_receipt_ref.id, signedHostReceipt.id);
   hostVerifiedConfig.authority_policy.mode = "audit_only";
   writeJson(hostVerifiedConfigPath, hostVerifiedConfig);
+  pinProjectConfig(project);
 
   const amendmentRecoveryPaths = {
     application: path.join(project, ".sdlc", "assessments", "applications", "ASSESS-E2E.json"),
@@ -3060,7 +3180,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   writeJson(manifestPath, originalManifest);
 });
 
-test("active migration upgrades config and logically archives an older release without moving evidence", () => {
+test("config migration is reviewed separately before active release history is archived", () => {
   const project = tmpProject("active-migration");
   initProject(project);
 
@@ -3131,6 +3251,39 @@ test("active migration upgrades config and logically archives an older release w
   assert.equal(fs.readFileSync(configPath, "utf8"), configBeforeDryRun, "dry-run changed project config");
   assert.equal(fs.existsSync(path.join(project, planned.logical_archive.path)), false, "dry-run wrote an archive record");
 
+  mustFail([
+    "migration",
+    "active",
+    "--root",
+    project,
+    "--release-manifest",
+    activeRelease.release_manifest.id,
+    "--apply",
+  ], /config migrate.*exact plan/i);
+  const configPreview = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ]).stdout);
+  assert.equal(configPreview.status, "planned");
+  assert.equal(configPreview.files_changed, 0);
+  assert.equal(configPreview.plan.mode, "reconcile_drift");
+  const configApplied = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    configPreview.plan.plan_hash,
+    "--actor-type",
+    "human",
+    "--json",
+  ]).stdout);
+  assert.equal(configApplied.status, "applied");
+
   const applied = JSON.parse(mustRun([
     "migration",
     "active",
@@ -3146,11 +3299,11 @@ test("active migration upgrades config and logically archives an older release w
     "--json",
   ]).stdout);
   assert.equal(applied.status, "applied");
-  assert.equal(applied.config_updated, true);
+  assert.equal(applied.config_updated, false);
   assert.equal(applied.logical_archive.written, true);
   assert.equal(applied.logical_archive.idempotent, false);
   assert.equal(applied.physical_files_moved, 0);
-  assert.equal(readJson(configPath).claim_policy.default_ttl_seconds, 86400);
+  assert.equal(readJson(configPath).claim_policy.default_ttl_seconds, undefined);
 
   const archivePath = path.join(project, applied.logical_archive.path);
   const archiveRecord = readJson(archivePath);
@@ -3193,8 +3346,10 @@ test("active migration upgrades config and logically archives an older release w
 
 test("onboard existing project initializes KB and proposes approvable baseline", () => {
   const project = tmpProject("onboard-existing");
+  fs.mkdirSync(path.join(project, "lib"), { recursive: true });
   fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }, null, 2));
   fs.writeFileSync(path.join(project, "README.md"), "# Legacy App\nCurrent project description.\n");
+  fs.writeFileSync(path.join(project, "lib", "implementation.mjs"), "export const ready = true;\n");
 
   const onboard = JSON.parse(mustRun([
     "onboard",
@@ -3224,6 +3379,7 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json")), true);
   assert.ok(onboard.baseline.imported_documents.some((document) => document.path === "README.md"));
   assert.ok(onboard.baseline.repository_snapshot.detected_stack.some((item) => item.name === "package-json"));
+  assert.ok(onboard.baseline.source_paths.includes("lib/implementation.mjs"));
 
   mustRun([
     "output",
@@ -3266,6 +3422,9 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   fs.appendFileSync(path.join(project, "README.md"), "\nChanged after baseline.\n");
   const status = JSON.parse(mustRun(["baseline", "status", "--root", project, "--id", "BASELINE-INITIAL", "--json"]).stdout);
   assert.equal(status.baselines[0].stale, true);
+  assert.equal(status.baselines[0].approved, false);
+  assert.equal(status.baselines[0].effective_status, "needs_refresh");
+  assert.match(status.baselines[0].next_action, /Refresh the project snapshot/u);
 
   mustRun(["cache", "rebuild", "--root", project]);
   const cache = readJson(path.join(project, ".sdlc", "cache", "kb-cache.json"));

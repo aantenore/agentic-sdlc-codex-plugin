@@ -41,47 +41,6 @@
     ".yaml",
     ".yml"
   ],
-  "baseline_policy": {
-    "source_extensions": [
-      ".cjs",
-      ".css",
-      ".go",
-      ".html",
-      ".java",
-      ".js",
-      ".jsx",
-      ".json",
-      ".jsonl",
-      ".kt",
-      ".md",
-      ".mjs",
-      ".py",
-      ".rs",
-      ".scss",
-      ".sh",
-      ".swift",
-      ".toml",
-      ".ts",
-      ".tsx",
-      ".txt",
-      ".xml",
-      ".yaml",
-      ".yml"
-    ],
-    "excluded_directories": [
-      ".git",
-      ".next",
-      ".sdlc",
-      ".turbo",
-      "build",
-      "coverage",
-      "dist",
-      "node_modules",
-      "vendor"
-    ],
-    "max_discovered_files": 5000,
-    "max_file_bytes": 5242880
-  },
   "phase_order": [
     "discovery",
     "analysis",
