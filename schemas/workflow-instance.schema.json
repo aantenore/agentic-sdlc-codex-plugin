@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-instance.schema.json",
+  "title": "Immutable workflow instance header",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "id", "definition_ref", "overlay_ref", "effective_hash", "initial_state",
+    "created_at", "actor", "metadata", "hash_algorithm", "instance_hash"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_instance" },
+    "schema_version": { "const": "workflow-instance:v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "definition_ref": { "$ref": "workflow-overlay.schema.json#/properties/definition_ref" },
+    "overlay_ref": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "workflow-overlay.schema.json#/$defs/overlay_ref" }
+      ]
+    },
+    "effective_hash": { "$ref": "#/$defs/hash" },
+    "initial_state": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "actor": { "$ref": "workflow-definition.schema.json#/$defs/actor" },
+    "metadata": { "type": "object" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "instance_hash": { "$ref": "#/$defs/hash" }
+  },
+  "$defs": { "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+  "additionalProperties": false
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-checkpoint.schema.json",
+  "title": "Workflow stream checkpoint",
+  "type": "object",
+  "required": ["sequence", "last_event_hash", "state"],
+  "properties": {
+    "sequence": { "type": "integer", "minimum": 0 },
+    "last_event_hash": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      ]
+    },
+    "state": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

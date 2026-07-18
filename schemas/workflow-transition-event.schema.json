@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-transition-event.schema.json",
+  "title": "Append-only workflow transition event",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "instance_id", "instance_hash", "effective_hash", "sequence", "previous_hash",
+    "transition_id", "from", "to", "timestamp", "actor", "idempotency_key", "context_hash", "guard_results",
+    "hash_algorithm", "event_hash"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_transition_event" },
+    "schema_version": { "const": "workflow-transition-event:v1" },
+    "instance_id": { "type": "string", "minLength": 1 },
+    "instance_hash": { "$ref": "#/$defs/hash" },
+    "effective_hash": { "$ref": "#/$defs/hash" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "previous_hash": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }] },
+    "transition_id": { "type": "string", "minLength": 1 },
+    "from": { "type": "string", "minLength": 1 },
+    "to": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "actor": { "$ref": "workflow-definition.schema.json#/$defs/actor" },
+    "idempotency_key": { "type": "string", "minLength": 1 },
+    "context_hash": { "$ref": "#/$defs/hash" },
+    "guard_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["guard_id", "allowed", "reason"],
+        "properties": {
+          "guard_id": { "type": "string", "minLength": 1 },
+          "allowed": { "type": "boolean" },
+          "reason": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "event_hash": { "$ref": "#/$defs/hash" }
+  },
+  "$defs": { "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+  "additionalProperties": false
+}

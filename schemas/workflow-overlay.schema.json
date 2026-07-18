@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-overlay.schema.json",
+  "title": "Governed workflow overlay",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "id", "version", "status", "definition_ref", "label", "description",
+    "metadata", "state_overrides", "transition_overrides", "created_at", "approval", "overlay_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_overlay" },
+    "schema_version": { "const": "workflow-overlay:v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9._-]*$" },
+    "status": { "enum": ["proposed", "approved"] },
+    "definition_ref": {
+      "type": "object",
+      "required": ["id", "version", "definition_hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9._-]*$" },
+        "definition_hash": { "$ref": "#/$defs/hash" }
+      },
+      "additionalProperties": false
+    },
+    "label": { "type": ["string", "null"] },
+    "description": { "type": ["string", "null"] },
+    "metadata": { "type": "object" },
+    "state_overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["state_id", "label", "metadata"],
+        "properties": {
+          "state_id": { "type": "string", "minLength": 1 },
+          "label": { "type": ["string", "null"] },
+          "metadata": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "transition_overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["transition_id", "label", "metadata", "guard_parameters"],
+        "properties": {
+          "transition_id": { "type": "string", "minLength": 1 },
+          "label": { "type": ["string", "null"] },
+          "metadata": { "type": "object" },
+          "guard_parameters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["guard_id", "parameters"],
+              "properties": {
+                "guard_id": { "type": "string", "minLength": 1 },
+                "parameters": { "type": "object" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "approval": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "workflow-definition.schema.json#/$defs/approval" }
+      ]
+    },
+    "overlay_hash": { "$ref": "#/$defs/hash" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "overlay_ref": {
+      "type": "object",
+      "required": ["id", "version", "overlay_hash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9._-]*$" },
+        "overlay_hash": { "$ref": "#/$defs/hash" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "approved" } } },
+      "then": { "properties": { "approval": { "$ref": "workflow-definition.schema.json#/$defs/approval" } } },
+      "else": { "properties": { "approval": { "type": "null" } } }
+    }
+  ],
+  "additionalProperties": false
+}

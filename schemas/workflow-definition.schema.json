@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-definition.schema.json",
+  "title": "Versioned workflow definition",
+  "type": "object",
+  "required": [
+    "kind", "schema_version", "id", "version", "status", "label", "description", "initial_state",
+    "states", "transitions", "phase_order", "normal_checkpoints", "metadata", "created_at", "approval",
+    "definition_hash", "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_definition" },
+    "schema_version": { "const": "workflow-definition:v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "version": { "$ref": "#/$defs/version" },
+    "status": { "enum": ["proposed", "approved"] },
+    "label": { "type": "string", "minLength": 1 },
+    "description": { "type": ["string", "null"] },
+    "initial_state": { "type": "string", "minLength": 1 },
+    "states": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "terminal", "metadata"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
+          "terminal": { "type": "boolean" },
+          "metadata": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    },
+    "phase_order": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "normal_checkpoints": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "metadata": { "type": "object" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "approval": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/approval" }] },
+    "definition_hash": { "$ref": "#/$defs/hash" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9._-]*$" },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "actor": {
+      "type": "object",
+      "required": ["id", "type", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "name": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": "object",
+      "required": ["id", "approved_at", "approved_by", "approval_source", "summary", "evidence", "authorization_ref", "authorization_use_ref"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "approved_by": { "$ref": "#/$defs/actor" },
+        "approval_source": { "type": "string", "minLength": 1 },
+        "summary": { "type": ["string", "null"] },
+        "evidence": { "type": "array" },
+        "authorization_ref": { "type": ["string", "null"] },
+        "authorization_use_ref": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "guard": {
+      "type": "object",
+      "required": ["id", "parameters"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "parameters": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "transition": {
+      "type": "object",
+      "required": ["id", "from", "to", "label", "guards", "metadata"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "guards": { "type": "array", "items": { "$ref": "#/$defs/guard" } },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "approved" } } },
+      "then": { "properties": { "approval": { "$ref": "#/$defs/approval" } } },
+      "else": { "properties": { "approval": { "type": "null" } } }
+    }
+  ],
+  "additionalProperties": false
+}
