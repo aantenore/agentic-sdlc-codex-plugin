@@ -10,6 +10,9 @@ import {
   buildObservatoryViewModel,
   startObservatoryServer,
 } from "../../lib/change-observatory/index.mjs";
+import { verifySupportBundleDigest } from "../../lib/observability/support-bundle.mjs";
+
+const CORRELATION_PATTERN = /^corr-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 
 test("serves health, view model, raw records, static assets, and HEAD over loopback", async (t) => {
   const fixture = await createServerFixture(t);
@@ -59,6 +62,177 @@ test("serves health, view model, raw records, static assets, and HEAD over loopb
   assert.equal(denied.statusCode, 401);
   assert.equal(denied.json.error.code, "access_denied");
   assert.match(denied.headers["www-authenticate"], /^Bearer /);
+});
+
+test("liveness is shallow while readiness reports model failure and later recovery", async (t) => {
+  const fixture = await createServerFixture(t);
+  const canary = "CANARY-READY-FAILURE-MUST-NOT-LEAK";
+  let available = false;
+  let builds = 0;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    async buildViewModel(...args) {
+      builds += 1;
+      if (!available) throw new Error(`${canary} at ${fixture.projectRoot}`);
+      return buildObservatoryViewModel(...args);
+    },
+  });
+  t.after(() => running.close());
+
+  const notReady = await request(running, "/api/v1/ready");
+  assert.equal(notReady.statusCode, 503);
+  assert.equal(notReady.json.status, "not_ready");
+  assert.match(notReady.json.correlationId, CORRELATION_PATTERN);
+  assert.doesNotMatch(notReady.body, new RegExp(`${canary}|${escapeRegExp(fixture.projectRoot)}`, "u"));
+  assert.equal(builds, 1);
+
+  const live = await request(running, "/api/v1/live", { authenticated: false });
+  assert.equal(live.statusCode, 200);
+  assert.equal(live.json.status, "ok");
+  assert.match(live.headers["x-correlation-id"], CORRELATION_PATTERN);
+  assert.equal(builds, 1);
+
+  available = true;
+  const recovered = await request(running, "/api/v1/ready");
+  assert.equal(recovered.statusCode, 200);
+  assert.equal(recovered.json.status, "ready");
+  assert.equal(builds, 2);
+});
+
+test("operational endpoints require bearer authentication for GET and HEAD", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  for (const endpoint of [
+    "/api/v1/ready",
+    "/api/v1/metrics",
+    "/api/v1/slo",
+    "/api/v1/support-bundle",
+  ]) {
+    const denied = await request(running, endpoint, { authenticated: false });
+    assert.equal(denied.statusCode, 401, endpoint);
+    assert.equal(denied.json.error.code, "access_denied", endpoint);
+    assert.match(denied.headers["x-correlation-id"], CORRELATION_PATTERN, endpoint);
+
+    const head = await request(running, endpoint, { method: "HEAD" });
+    assert.equal(head.statusCode, 200, endpoint);
+    assert.equal(head.body, "", endpoint);
+    assert.ok(Number(head.headers["content-length"]) > 0, endpoint);
+    assert.match(head.headers["x-correlation-id"], CORRELATION_PATTERN, endpoint);
+  }
+});
+
+test("returns or generates a safe correlation ID and uses the stable error envelope", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  const supplied = "corr-123e4567-e89b-12d3-a456-426614174099";
+  const valid = await request(running, "/api/v1/live", {
+    authenticated: false,
+    headers: { "X-Correlation-ID": supplied.toUpperCase() },
+  });
+  assert.equal(valid.statusCode, 200);
+  assert.equal(valid.headers["x-correlation-id"], supplied);
+  assert.equal(valid.json.correlationId, supplied);
+
+  const invalid = await request(running, "/api/v1/live", {
+    authenticated: false,
+    headers: { "X-Correlation-ID": "owner@example.com CANARY-CORRELATION" },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.match(invalid.headers["x-correlation-id"], CORRELATION_PATTERN);
+  assert.equal(invalid.json.schemaVersion, "change-observatory:error:v1");
+  assert.equal(invalid.json.status, "error");
+  assert.equal(invalid.json.error.code, "invalid_correlation_id");
+  assert.equal(invalid.json.error.retryable, false);
+  assert.equal(invalid.json.correlationId, invalid.headers["x-correlation-id"]);
+  assert.doesNotMatch(invalid.body, /owner@example\.com|CANARY-CORRELATION/u);
+});
+
+test("metrics capture cache builds, hits, and conditional 304 responses", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  const first = await request(running, "/api/v1/observatory");
+  assert.equal(first.statusCode, 200);
+  const cached = await request(running, "/api/v1/observatory", {
+    headers: { "If-None-Match": first.headers.etag },
+  });
+  assert.equal(cached.statusCode, 304);
+
+  const metrics = await request(running, "/api/v1/metrics");
+  assert.equal(metrics.statusCode, 200);
+  assert.equal(metrics.json.externalSinks, "disabled");
+  assert.equal(metrics.json.cardinality, "closed");
+  assert.equal(metricSeriesValue(metrics.json, "observatory_http_requests_total", {
+    route: "model",
+    status_class: "2xx",
+  }), 1);
+  assert.equal(metricSeriesValue(metrics.json, "observatory_http_requests_total", {
+    route: "model",
+    status_class: "3xx",
+  }), 1);
+  assert.equal(metricSeriesValue(metrics.json, "observatory_model_cache_events_total", {
+    event: "build_start",
+  }), 1);
+  assert.equal(metricSeriesValue(metrics.json, "observatory_model_cache_events_total", {
+    event: "build_success",
+  }), 1);
+  assert.equal(metricSeriesValue(metrics.json, "observatory_model_cache_events_total", {
+    event: "fast_hit",
+  }), 1);
+});
+
+test("support bundle excludes project, token, and evidence canaries and has a verifiable digest", async (t) => {
+  const fixture = await createServerFixture(t);
+  const evidenceCanary = "CANARY-EVIDENCE-MUST-NOT-LEAK";
+  await fs.writeFile(
+    path.join(fixture.projectRoot, ".sdlc", "canary.json"),
+    `${JSON.stringify({ token: evidenceCanary })}\n`,
+    "utf8",
+  );
+  const accessToken = "CANARY_ACCESS_TOKEN_1234567890abcd";
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    accessToken,
+  });
+  t.after(() => running.close());
+
+  await request(running, "/api/v1/ready");
+  const response = await request(running, "/api/v1/support-bundle");
+  assert.equal(response.statusCode, 200);
+  assert.equal(verifySupportBundleDigest(response.json), true);
+  assert.equal(response.json.integrity.assurance, "content_integrity_only_not_authenticity");
+  assert.deepEqual(response.json.included_sections, [
+    "limits",
+    "metrics",
+    "readiness",
+    "recent_requests",
+    "slo",
+    "versions",
+  ]);
+  assert.doesNotMatch(
+    response.body,
+    new RegExp([
+      evidenceCanary,
+      accessToken,
+      escapeRegExp(fixture.projectRoot),
+    ].join("|"), "u"),
+  );
 });
 
 test("carries a validated locale to the browser without exposing the access token in the query", async (t) => {
@@ -369,6 +543,16 @@ test("GET, HEAD, and rejected writes do not mutate canonical project evidence", 
 
   await request(running, "/api/v1/observatory");
   await request(running, `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`);
+  for (const endpoint of [
+    "/api/v1/live",
+    "/api/v1/ready",
+    "/api/v1/metrics",
+    "/api/v1/slo",
+    "/api/v1/support-bundle",
+  ]) {
+    await request(running, endpoint);
+    await request(running, endpoint, { method: "HEAD" });
+  }
   await request(running, "/", { method: "HEAD" });
   await request(running, "/api/v1/observatory", { method: "POST" });
 
@@ -497,4 +681,17 @@ async function snapshotTree(root) {
   }
   await walk(root);
   return files;
+}
+
+function metricSeriesValue(payload, name, labels) {
+  const metric = payload.snapshot.metrics.find((candidate) => candidate.name === name);
+  assert.ok(metric, `missing metric ${name}`);
+  const expected = JSON.stringify(labels);
+  const series = metric.series.find((candidate) => JSON.stringify(candidate.labels) === expected);
+  assert.ok(series, `missing series ${name} ${expected}`);
+  return series.value;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

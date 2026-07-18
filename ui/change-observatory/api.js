@@ -13,6 +13,8 @@ export class ObservatoryApiError extends Error {
 }
 
 export class ObservatoryApi {
+  #viewModelCache = null;
+
   constructor({ endpoint = DEFAULT_ENDPOINT, fetchImpl = globalThis.fetch, accessToken = null } = {}) {
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
@@ -23,10 +25,27 @@ export class ObservatoryApi {
   }
 
   async load({ signal } = {}) {
+    const cached = this.#viewModelCache;
     const response = await this.#request(this.endpoint, {
       signal,
-      headers: { Accept: "application/json" },
-    });
+      headers: {
+        Accept: "application/json",
+        ...(cached ? { "If-None-Match": cached.etag } : {}),
+      },
+    }, { allowNotModified: true });
+
+    if (response.status === 304) {
+      if (!cached) {
+        throw new ObservatoryApiError(
+          "The observatory API returned HTTP 304 before a view model was cached.",
+          {
+            status: response.status,
+            code: "NOT_MODIFIED_WITHOUT_CACHE",
+          },
+        );
+      }
+      return cached.model;
+    }
 
     let payload;
     try {
@@ -40,7 +59,10 @@ export class ObservatoryApi {
     }
 
     try {
-      return normalizeViewModel(payload);
+      const model = normalizeViewModel(payload);
+      const etag = normalizeEtag(response.headers.get("etag"));
+      this.#viewModelCache = etag ? { etag, model } : null;
+      return model;
     } catch (error) {
       throw new ObservatoryApiError(error.message, {
         status: response.status,
@@ -78,7 +100,7 @@ export class ObservatoryApi {
     return bounded;
   }
 
-  async #request(url, options) {
+  async #request(url, options, { allowNotModified = false } = {}) {
     let response;
     try {
       response = await this.fetchImpl(url, {
@@ -99,7 +121,7 @@ export class ObservatoryApi {
       });
     }
 
-    if (!response.ok) {
+    if (!response.ok && !(allowNotModified && response.status === 304)) {
       throw new ObservatoryApiError(`The observatory API returned HTTP ${response.status}.`, {
         status: response.status,
         code: "API_RESPONSE_ERROR",
@@ -119,4 +141,9 @@ function normalizeAccessToken(value) {
   if (value === null || value === undefined || value === "") return null;
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(value)) return null;
   return value;
+}
+
+function normalizeEtag(value) {
+  if (typeof value !== "string") return null;
+  return value.trim() || null;
 }

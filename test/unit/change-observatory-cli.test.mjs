@@ -88,6 +88,94 @@ test("run command suppresses the opener with --no-open and emits one ready event
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("run command waits for warm readiness and publishes operational URLs with correlation", async () => {
+  const output = createMemoryStream();
+  let releaseWarmReadiness;
+  const warmGate = new Promise((resolve) => {
+    releaseWarmReadiness = resolve;
+  });
+  let warmCalls = 0;
+  let closeCalls = 0;
+  const correlationId = "corr-123e4567-e89b-12d3-a456-426614174099";
+
+  const launch = runObserveCommand({
+    projectRoot: ".",
+    openBrowser: false,
+    json: true,
+  }, {
+    registerSignals: false,
+    stdout: output,
+    async serverFactory() {
+      return {
+        url: "http://127.0.0.1:43127/",
+        accessUrl: "http://127.0.0.1:43127/#access_token=secret",
+        healthUrl: "http://127.0.0.1:43127/api/v1/health",
+        liveUrl: "http://127.0.0.1:43127/api/v1/live",
+        readyUrl: "http://127.0.0.1:43127/api/v1/ready",
+        modelUrl: "http://127.0.0.1:43127/api/v1/observatory",
+        metricsUrl: "http://127.0.0.1:43127/api/v1/metrics",
+        sloUrl: "http://127.0.0.1:43127/api/v1/slo",
+        supportBundleUrl: "http://127.0.0.1:43127/api/v1/support-bundle",
+        address: { host: "127.0.0.1", port: 43127 },
+        async warmReadiness() {
+          warmCalls += 1;
+          await warmGate;
+          return { status: "ready", correlationId };
+        },
+        async close() {
+          closeCalls += 1;
+        },
+      };
+    },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(warmCalls, 1);
+  assert.equal(output.value, "");
+  releaseWarmReadiness();
+  const running = await launch;
+
+  const event = JSON.parse(output.value.trim());
+  assert.equal(event.event, "observatory.ready");
+  assert.equal(event.readiness, "ready");
+  assert.equal(event.correlation_id, correlationId);
+  assert.equal(event.live_url, "http://127.0.0.1:43127/api/v1/live");
+  assert.equal(event.ready_url, "http://127.0.0.1:43127/api/v1/ready");
+  assert.equal(event.metrics_url, "http://127.0.0.1:43127/api/v1/metrics");
+  assert.equal(event.slo_url, "http://127.0.0.1:43127/api/v1/slo");
+  assert.equal(event.support_bundle_url, "http://127.0.0.1:43127/api/v1/support-bundle");
+  await running.close();
+  assert.equal(closeCalls, 1);
+});
+
+test("run command closes the server and emits no ready event when warm readiness fails", async () => {
+  const output = createMemoryStream();
+  let closeCalls = 0;
+  await assert.rejects(
+    () => runObserveCommand({ projectRoot: ".", openBrowser: false, json: true }, {
+      registerSignals: false,
+      stdout: output,
+      async serverFactory() {
+        return {
+          ...(await successfulServer()),
+          async warmReadiness() {
+            return {
+              status: "not_ready",
+              correlationId: "corr-123e4567-e89b-12d3-a456-426614174099",
+            };
+          },
+          async close() {
+            closeCalls += 1;
+          },
+        };
+      },
+    }),
+    (error) => error?.code === "observatory_not_ready" && error?.retryable === true,
+  );
+  assert.equal(closeCalls, 1);
+  assert.equal(output.value, "");
+});
+
 test("human launch events explain outcome and protections before optional technical details", () => {
   for (const locale of ["en", "it"]) {
     const output = createMemoryStream();
