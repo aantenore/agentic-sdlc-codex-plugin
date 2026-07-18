@@ -90,10 +90,12 @@ import {
   validateContextOptimizationLineage,
 } from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
+import { createObservatoryConfiguration } from "../lib/change-observatory/configuration.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 import {
+  recoverTraceIntegrity,
   sealTraceEvent,
-  verifyTraceIntegrity,
+  withTraceIntegritySnapshot,
 } from "../lib/trace-integrity.mjs";
 import {
   createOperationContext,
@@ -103,6 +105,7 @@ import {
   createOperationalRedactionPolicy,
   redactText,
   redactValue,
+  redactValueWithMetadata,
 } from "../lib/observability/redaction.mjs";
 import {
   buildRequirementProposal,
@@ -167,6 +170,7 @@ const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
+const MAX_CLI_ERROR_CONFIG_BYTES = 2 * 1024 * 1024;
 const PROJECT_CONFIG_LOCK_FILE_NAME = "config.lock.json";
 const LEGACY_CONFIG_PROFILE_ID = "sdlc-config-v1@0.11.0";
 const INTERNAL_LOCK_WAIT_MS = 5000;
@@ -1137,13 +1141,18 @@ async function main() {
     fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
   } catch (error) {
     const jsonRequested = parsed.options?.json === true || rawJsonRequested;
+    const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
+    const errorRedactionPolicy = errorRedaction.policy;
     if (error instanceof UnknownCommandError) {
       if (jsonRequested) {
-        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options, errorRedaction), null, 2));
         process.exitCode = 1;
         return;
       }
-      console.error(`${redactText(error.message, OPERATIONAL_REDACTION_POLICY)}\nCorrelation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`);
+      const safeMessage = errorRedaction.withholdDetails
+        ? "Project privacy configuration is invalid or unsafe; command details were withheld."
+        : redactText(error.message, errorRedactionPolicy);
+      console.error(`${safeMessage}\nCorrelation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`);
       process.exitCode = 1;
       return;
     }
@@ -1174,15 +1183,22 @@ async function main() {
             details: "Technical details (optional)",
           };
       if (jsonRequested) {
-        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options, errorRedaction), null, 2));
         process.exitCode = 1;
         return;
       }
       const normalized = normalizeOperationalError(
-        expected
+        errorRedaction.withholdDetails
+          ? {
+              code: "observability_configuration_invalid",
+              message: "Project privacy configuration is invalid or unsafe; command details were withheld.",
+              statusCode: 400,
+              retryable: false,
+            }
+          : expected
           ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
           : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
-        { context: CLI_OPERATION_CONTEXT, redactionPolicy: OPERATIONAL_REDACTION_POLICY },
+        { context: CLI_OPERATION_CONTEXT, redactionPolicy: errorRedactionPolicy },
       );
       console.error([
         `${labels.outcome}: ${italian ? "Il comando non è stato completato." : "The command could not be completed."}`,
@@ -2436,13 +2452,16 @@ function startWorkflowInstance(context, options) {
         actor: attribution.actor,
         ...(summary ? { metadata: { summary } } : {}),
       }));
-      const startTrace = buildWorkflowStartTraceRecord(
+      const startTrace = prepareGovernedTraceEvent(
         context,
-        instance,
-        definition,
-        overlayEntry,
-        attribution,
-        [instancePath, eventsPath, checkpointPath],
+        buildWorkflowStartTraceRecord(
+          context,
+          instance,
+          definition,
+          overlayEntry,
+          attribution,
+          [instancePath, eventsPath, checkpointPath],
+        ),
       );
       checkpoint = callWorkflowDomain("Unable to create the workflow integrity checkpoint", () =>
         createWorkflowCheckpoint({
@@ -2598,8 +2617,18 @@ function extendWorkflowTraceChain(previousTraceChainHash, traceEvent) {
   }
   return computeStableHash({
     previous_trace_chain_hash: previousTraceChainHash,
-    trace_event: traceEvent,
+    trace_event: workflowTraceIntent(traceEvent),
   });
+}
+
+function workflowTraceIntent(traceEvent) {
+  if (!traceEvent || typeof traceEvent !== "object" || Array.isArray(traceEvent)) return traceEvent;
+  const { _trace_integrity: _integrityEnvelope, ...intent } = traceEvent;
+  return intent;
+}
+
+function workflowTraceIntentMatches(storedEvent, expectedIntent) {
+  return stableJson(workflowTraceIntent(storedEvent)) === stableJson(workflowTraceIntent(expectedIntent));
 }
 
 function workflowStartRequestHash(request) {
@@ -2894,6 +2923,7 @@ function completeWorkflowStartTransactionLocked(context, journal) {
     fail("Simulated workflow start trace interruption before append.");
   }
   ensureWorkflowTraceRecordLocked(
+    context,
     path.join(context.sdlcRoot, "traces", "project.jsonl"),
     journal.trace_event,
     journal.trace_anchor,
@@ -3098,7 +3128,7 @@ function inspectWorkflowTraceIntent(context, traceEvent) {
       .map((line) => JSON.parse(line))
       .filter((entry) => entry.id === traceEvent.id);
     if (matches.length === 0) return { valid: true, exists: false, tracePath, errors: [] };
-    if (matches.length !== 1 || stableJson(matches[0]) !== stableJson(traceEvent)) {
+    if (matches.length !== 1 || !workflowTraceIntentMatches(matches[0], traceEvent)) {
       return { valid: false, exists: true, tracePath, errors: [`Trace id ${traceEvent.id} is duplicated or has different content.`] };
     }
     return { valid: true, exists: true, tracePath, errors: [] };
@@ -3171,7 +3201,11 @@ function recoverPendingWorkflowTransition(context, instanceId, instance, effecti
     if (!eventState.exists && eventState.suffix_bytes > 0 && !eventState.repairable) {
       return { ...pending, valid: false, errors: ["Workflow event history advanced outside the pending transition."] };
     }
-    const traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    let traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    if (!traceState.valid) {
+      recoverWorkflowTraceIntegrityAtAnchorLocked(context, tracePath, journal.trace_anchor);
+      traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    }
     if (!traceState.valid) return { ...pending, valid: false, errors: traceState.errors };
     const base = workflowJsonLinesAtAnchor(eventsPath, journal.event_anchor, "Workflow event history");
     if (!base.valid) return { ...pending, valid: false, errors: base.errors };
@@ -3209,7 +3243,7 @@ function recoverPendingWorkflowTransition(context, instanceId, instance, effecti
     ensureWorkflowEventRecordLocked(eventsPath, journal.event, journal.event_anchor);
     if (!currentIsTarget) writeWorkflowJsonDurably(checkpointPath, journal.checkpoint, { force: true });
     else syncWorkflowFile(checkpointPath);
-    ensureWorkflowTraceRecordLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    ensureWorkflowTraceRecordLocked(context, tracePath, journal.trace_event, journal.trace_anchor);
     removeWorkflowFileDurably(pending.pendingPath);
     return {
       ...pending,
@@ -3238,13 +3272,16 @@ function persistWorkflowTransitionTransaction(
   const eventsPath = workflowEventsPath(context, instanceId);
   const checkpointPath = workflowCheckpointPath(context, instanceId);
   const pendingPath = workflowPendingTransitionPath(context, instanceId);
-  const traceEvent = buildWorkflowTransitionTraceRecord(
+  const traceEvent = prepareGovernedTraceEvent(
     context,
-    instanceId,
-    transition.event.to,
-    transition.event,
-    attribution,
-    summary,
+    buildWorkflowTransitionTraceRecord(
+      context,
+      instanceId,
+      transition.event.to,
+      transition.event,
+      attribution,
+      summary,
+    ),
   );
   const nextCheckpoint = callWorkflowDomain("Unable to update the workflow integrity checkpoint", () =>
     createWorkflowCheckpoint({
@@ -3285,7 +3322,7 @@ function persistWorkflowTransitionTransaction(
     maybeInterruptWorkflowTransitionForTest("after-event-before-checkpoint");
     writeWorkflowJsonDurably(checkpointPath, nextCheckpoint, { force: true });
     maybeInterruptWorkflowTransitionForTest("after-checkpoint-before-trace");
-    ensureWorkflowTraceRecordLocked(tracePath, traceEvent, journal.trace_anchor);
+    ensureWorkflowTraceRecordLocked(context, tracePath, traceEvent, journal.trace_anchor);
     maybeInterruptWorkflowTransitionForTest("after-trace-before-journal-clear");
     removeWorkflowFileDurably(pendingPath);
     return { checkpoint: nextCheckpoint, trace_event: traceEvent };
@@ -3408,10 +3445,21 @@ function inspectWorkflowTraceCoverageLocked(context, instanceId, instance, event
   }
   let traces;
   try {
-    traces = readProjectText(context, tracePath)
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    const snapshot = withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+    if (!snapshot.integrity.valid) {
+      return {
+        valid: false,
+        tracePath,
+        errors: snapshot.integrity.errors.map((entry) =>
+          `Workflow instance ${instanceId} project audit trace failed integrity verification (${entry.code || "invalid"}).`),
+      };
+    }
+    traces = snapshot.records
+      .filter((entry) => entry.valid === true)
+      .map((entry) => entry.event);
   } catch (error) {
     return {
       valid: false,
@@ -3743,7 +3791,14 @@ function workflowTraceAnchor(filePath) {
   };
 }
 
-function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey, recordLabel) {
+function workflowJsonLineRecordStateLocked(
+  filePath,
+  value,
+  anchor,
+  identityKey,
+  recordLabel,
+  { recordsMatch = (stored, expected) => stableJson(stored) === stableJson(expected) } = {},
+) {
   const anchorErrors = workflowTraceAnchorErrors(anchor);
   if (anchorErrors.length > 0) return { valid: false, exists: false, repairable: false, errors: anchorErrors };
   const bytes = workflowTraceBytes(filePath);
@@ -3767,7 +3822,7 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
   const suffix = bytes.subarray(anchor.size_bytes);
   if (parsed) {
     const matches = parsed.filter((entry) => entry?.[identityKey] === value?.[identityKey]);
-    if (matches.length > 1 || (matches.length === 1 && stableJson(matches[0]) !== stableJson(value))) {
+    if (matches.length > 1 || (matches.length === 1 && !recordsMatch(matches[0], value))) {
       return {
         valid: false,
         exists: matches.length > 0,
@@ -3778,6 +3833,7 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
     return {
       valid: true,
       exists: matches.length === 1,
+      stored_record: matches.length === 1 ? matches[0] : null,
       repairable: false,
       suffix_bytes: suffix.length,
       expected_line_bytes: expectedLine.length,
@@ -3802,7 +3858,14 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
 }
 
 function workflowTraceRecordStateLocked(filePath, value, anchor) {
-  return workflowJsonLineRecordStateLocked(filePath, value, anchor, "id", "Workflow trace");
+  return workflowJsonLineRecordStateLocked(
+    filePath,
+    value,
+    anchor,
+    "id",
+    "Workflow trace",
+    { recordsMatch: workflowTraceIntentMatches },
+  );
 }
 
 function workflowEventRecordStateLocked(filePath, value, anchor) {
@@ -3837,12 +3900,6 @@ function appendWorkflowJsonLineUnlocked(filePath, value) {
     );
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
-    if (
-      process.env.NODE_ENV === "test"
-      && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE === "after-append-before-sync"
-    ) {
-      fail("Simulated workflow start trace interruption after append.");
-    }
     fs.fsyncSync(descriptor);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
@@ -3850,21 +3907,104 @@ function appendWorkflowJsonLineUnlocked(filePath, value) {
   syncWorkflowDirectory(path.dirname(filePath));
 }
 
-function ensureWorkflowTraceRecordLocked(filePath, value, anchor) {
+function recoverWorkflowTraceIntegrityAtAnchorLocked(context, filePath, anchor) {
+  const anchored = workflowJsonLinesAtAnchor(filePath, anchor, "Workflow trace");
+  if (!anchored.valid) fail(anchored.errors.join("; "));
+  try {
+    recoverTraceIntegrity(traceIntegrityOptions(context, filePath));
+  } catch (error) {
+    // A pre-integrity interrupted workflow may have left the exact partial
+    // intent described by its journal. That one legacy case is repaired below;
+    // every other integrity failure remains fail-closed.
+    if (error?.code !== "legacy_prefix_incomplete") {
+      failTraceIntegrityWrite(error);
+    }
+  }
+  const recoveredAnchor = workflowJsonLinesAtAnchor(filePath, anchor, "Workflow trace");
+  if (!recoveredAnchor.valid) fail(recoveredAnchor.errors.join("; "));
+}
+
+function ensureWorkflowTraceRecordLocked(context, filePath, value, anchor) {
+  let repairedLegacyRawAppend = false;
+  const beforeRecovery = workflowTraceRecordStateLocked(filePath, value, anchor);
+  if (
+    beforeRecovery.valid
+    && beforeRecovery.exists
+    && beforeRecovery.stored_record?._trace_integrity === undefined
+  ) {
+    if (!beforeRecovery.exact_suffix) {
+      fail(`Legacy workflow trace ${value.id} is not the exact transaction suffix; later audit records must be preserved.`);
+    }
+    const legacySnapshot = workflowTraceIntegritySnapshotLocked(context, filePath);
+    if (legacySnapshot.integrity.valid && legacySnapshot.integrity.initialized) {
+      syncWorkflowFile(filePath);
+      return {
+        repaired: false,
+        appended: false,
+        legacy: true,
+        event: beforeRecovery.stored_record,
+      };
+    }
+    const safeUncommittedRawSuffix = (
+      legacySnapshot.integrity.valid
+      && legacySnapshot.integrity.initialized === false
+    ) || (
+      legacySnapshot.integrity.valid === false
+      && legacySnapshot.integrity.errors.length > 0
+      && legacySnapshot.integrity.errors.every((entry) => entry.code === "checkpoint_drift")
+    );
+    if (!safeUncommittedRawSuffix) {
+      fail(`Legacy workflow trace ${value.id} is not a safely recoverable uncommitted suffix.`);
+    }
+    truncateWorkflowFileDurably(filePath, anchor.size_bytes);
+    repairedLegacyRawAppend = true;
+  }
+  recoverWorkflowTraceIntegrityAtAnchorLocked(context, filePath, anchor);
   let state = workflowTraceRecordStateLocked(filePath, value, anchor);
   if (!state.valid) fail(state.errors.join("; "));
   if (state.exists) {
+    const storedEvent = assertWorkflowStoredTraceIntegrityLocked(context, filePath, value);
     syncWorkflowFile(filePath);
-    return { repaired: false, appended: false };
+    return { repaired: repairedLegacyRawAppend, appended: false, event: storedEvent };
   }
-  const repaired = state.repairable;
+  const repaired = repairedLegacyRawAppend || state.repairable;
   if (repaired) truncateWorkflowFileDurably(filePath, anchor.size_bytes);
-  appendWorkflowJsonLineUnlocked(filePath, value);
+  const storedEvent = sealPreparedTraceEventLocked(context, filePath, value);
   state = workflowTraceRecordStateLocked(filePath, value, anchor);
-  if (!state.valid || !state.exists) {
+  if (!state.valid || !state.exists || !workflowTraceIntentMatches(storedEvent, value)) {
     fail(state.errors[0] || `Workflow trace ${value.id} was not committed exactly once.`);
   }
-  return { repaired, appended: true };
+  const verifiedEvent = assertWorkflowStoredTraceIntegrityLocked(context, filePath, value);
+  return { repaired, appended: true, event: verifiedEvent };
+}
+
+function assertWorkflowStoredTraceIntegrityLocked(context, tracePath, expectedIntent) {
+  const snapshot = workflowTraceIntegritySnapshotLocked(context, tracePath);
+  if (!snapshot.integrity.valid) {
+    fail(`Workflow trace integrity verification failed: ${snapshot.integrity.errors.map((entry) => entry.code).join(", ") || "invalid trace"}`);
+  }
+  const matches = snapshot.records
+    .filter((entry) => entry.valid === true && entry.event?.id === expectedIntent?.id)
+    .map((entry) => entry.event);
+  if (
+    matches.length !== 1
+    || !workflowTraceIntentMatches(matches[0], expectedIntent)
+    || matches[0]?._trace_integrity?.schema_version !== "trace-integrity-event:v1"
+  ) {
+    fail(`Workflow trace ${expectedIntent?.id || "unknown"} is missing, duplicated, unsealed, or has different content.`);
+  }
+  return matches[0];
+}
+
+function workflowTraceIntegritySnapshotLocked(context, tracePath) {
+  try {
+    return withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+  } catch (error) {
+    failTraceIntegrityWrite(error);
+  }
 }
 
 function ensureWorkflowEventRecordLocked(filePath, value, anchor) {
@@ -4129,7 +4269,11 @@ function rawBooleanOptionRequested(argv, optionName) {
 
 class UserError extends Error {}
 
-function buildCliErrorPayload(error, options = {}) {
+function buildCliErrorPayload(
+  error,
+  options = {},
+  errorRedaction = resolveCliErrorRedactionPolicy(options),
+) {
   const italian = (() => {
     try {
       return humanGuidanceLocale(options) === "it";
@@ -4138,31 +4282,48 @@ function buildCliErrorPayload(error, options = {}) {
     }
   })();
   const unknown = error instanceof UnknownCommandError;
+  const errorRedactionPolicy = errorRedaction.policy;
+  const describeUnknown = unknown && !errorRedaction.withholdDetails;
   const expected = unknown || error instanceof UserError || error instanceof CliPresetError;
   const normalized = normalizeOperationalError(
-    expected
+    errorRedaction.withholdDetails
+      ? {
+          code: "observability_configuration_invalid",
+          message: "Project privacy configuration is invalid or unsafe; command details were withheld.",
+          statusCode: 400,
+          retryable: false,
+        }
+      : expected
       ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
       : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
-    { context: CLI_OPERATION_CONTEXT, redactionPolicy: OPERATIONAL_REDACTION_POLICY },
+    { context: CLI_OPERATION_CONTEXT, redactionPolicy: errorRedactionPolicy },
   );
-  const code = unknown
+  const code = errorRedaction.withholdDetails
+    ? "OBSERVABILITY_CONFIGURATION_INVALID"
+    : unknown
     ? error.code
     : error instanceof CliPresetError
       ? "CLI_PRESET_ERROR"
       : error instanceof UserError
         ? "USER_ERROR"
-        : "INTERNAL_ERROR";
-  const message = unknown
-    ? redactText(`Unknown command: ${error.path || "(empty)"}`, OPERATIONAL_REDACTION_POLICY)
+      : "INTERNAL_ERROR";
+  const redactedUnknownPath = describeUnknown
+    ? redactText(error.path || "", errorRedactionPolicy)
+    : unknown ? "[REDACTED]" : "";
+  const redactedUnknownSuggestions = describeUnknown
+    ? (error.suggestions || []).map((value) => redactText(value, errorRedactionPolicy))
+    : [];
+  const message = describeUnknown
+    ? redactText(`Unknown command: ${error.path || "(empty)"}`, errorRedactionPolicy)
     : normalized.error.message;
-  const guidance = unknown
+  const guidance = describeUnknown
     ? {
         result: italian ? "Non ho trovato l’azione richiesta." : "The requested action was not found.",
         impact: italian ? "Nessun progetto è stato aperto o modificato." : "No project was opened or changed.",
         required_decision: italian ? "Scegli se correggere la formulazione oppure usare l’aiuto principale." : "Choose whether to correct the wording or use the main help.",
         protection_boundary: italian ? "File locali, repository remoti, rilasci e produzione restano invariati." : "Local files, remote repositories, releases, and production remain unchanged.",
         next_action: italian ? "Controlla la scrittura e riprova con una delle azioni suggerite." : "Check the spelling and try one of the suggested actions.",
-        details: { path: error.path || "", suggestions: error.suggestions || [] },
+        details: { path: redactedUnknownPath, suggestions: redactedUnknownSuggestions },
       }
     : {
         result: italian ? "Il comando non è stato completato." : "The command could not be completed.",
@@ -4181,12 +4342,53 @@ function buildCliErrorPayload(error, options = {}) {
       message,
       retryable: normalized.error.retryable,
       ...(unknown ? {
-        path: redactText(error.path || "", OPERATIONAL_REDACTION_POLICY),
-        suggestions: (error.suggestions || []).map((value) => redactText(value, OPERATIONAL_REDACTION_POLICY)),
+        path: redactedUnknownPath,
+        suggestions: redactedUnknownSuggestions,
       } : {}),
     },
     human_guidance: guidance,
   };
+}
+
+function resolveCliErrorRedactionPolicy(options) {
+  let configPath;
+  try {
+    const root = path.resolve(String(options.root || process.cwd()));
+    configPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
+    let entry;
+    try {
+      entry = fs.lstatSync(configPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+      // Missing is optional only when no parent segment is a symlink. A
+      // symlinked knowledge-base path could hide a configured privacy policy.
+      assertNoSymlinkPathSegments(configPath);
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, false);
+    }
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+    }
+    resolveProjectFilePath({ root }, configPath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(configPath);
+    const config = readProjectJsonBounded(
+      { root },
+      configPath,
+      MAX_CLI_ERROR_CONFIG_BYTES,
+    );
+    if (config === null || typeof config !== "object" || Array.isArray(config)) {
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+    }
+    return cliErrorRedactionResolution(
+      createObservatoryConfiguration(config.observability ?? {}).redactionPolicy,
+      false,
+    );
+  } catch {
+    return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+  }
+}
+
+function cliErrorRedactionResolution(policy, withholdDetails) {
+  return Object.freeze({ policy, withholdDetails });
 }
 
 function parseArgs(argv) {
@@ -28178,6 +28380,17 @@ function hashBuffer(buffer) {
 }
 
 function sealGovernedTraceEvent(context, tracePath, event) {
+  const preparedEvent = prepareGovernedTraceEvent(context, event);
+  const releaseLegacyTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    return sealPreparedTraceEventLocked(context, tracePath, preparedEvent);
+  } finally {
+    releaseLegacyTraceLock();
+  }
+}
+
+function prepareGovernedTraceEvent(context, event) {
   const redactionPolicy = buildTraceRedactionPolicy(context);
   const evidenceRefs = buildTraceEvidenceRefs(context, event, redactionPolicy);
   const redacted = redactValue({
@@ -28187,33 +28400,99 @@ function sealGovernedTraceEvent(context, tracePath, event) {
   if (!redacted || typeof redacted !== "object" || Array.isArray(redacted)) {
     fail("Trace redaction reached its safety limit; no event was persisted.");
   }
+  return redacted;
+}
+
+function sealPreparedTraceEventLocked(context, tracePath, preparedEvent) {
   try {
-    return sealTraceEvent({ tracePath, event: redacted }).event;
+    return sealTraceEvent({
+      ...traceIntegrityOptions(context, tracePath),
+      event: preparedEvent,
+      hooks: workflowTraceSealTestHooks(preparedEvent),
+    }).event;
   } catch (error) {
-    const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
-      ? error.code
-      : "trace_integrity_failed";
-    fail(`Trace integrity blocked the write (${code}). Run the integrity check before retrying.`);
+    failTraceIntegrityWrite(error);
+  }
+}
+
+function traceIntegrityOptions(context, tracePath) {
+  return { boundaryRoot: context.sdlcRoot, tracePath };
+}
+
+function workflowTraceSealTestHooks(event) {
+  if (
+    process.env.NODE_ENV !== "test"
+    || event?.action !== "workflow.instance.start"
+    || process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE !== "after-append-before-sync"
+  ) {
+    return {};
+  }
+  return {
+    after_append_write() {
+      fail("Simulated workflow start trace interruption after append.");
+    },
+  };
+}
+
+function failTraceIntegrityWrite(error) {
+  const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
+    ? error.code
+    : "trace_integrity_failed";
+  fail(`Trace integrity blocked the write (${code}). Run the integrity check before retrying.`);
+}
+
+function assertNoPendingWorkflowTraceTransaction(context, tracePath) {
+  const projectTracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  if (path.resolve(tracePath) !== path.resolve(projectTracePath)) return;
+  const pending = [];
+  const startsRoot = workflowInstanceStartTransactionsRoot(context);
+  for (const entry of safeReadDir(startsRoot)) {
+    if (entry.endsWith(".json") && fs.existsSync(path.join(startsRoot, entry))) {
+      pending.push(`start:${entry.slice(0, -5)}`);
+    }
+  }
+  const instancesRoot = workflowInstancesRoot(context);
+  for (const entry of safeReadDir(instancesRoot)) {
+    if (entry.startsWith(".")) continue;
+    const pendingPath = path.join(instancesRoot, entry, "pending-transition.json");
+    if (fs.existsSync(pendingPath)) pending.push(`transition:${entry}`);
+  }
+  if (pending.length > 0) {
+    fail(`Project trace has a pending workflow transaction (${pending.sort().join(", ")}); recover it before appending another audit event.`);
   }
 }
 
 function buildTraceRedactionPolicy(context) {
   const configured = context.config.observability?.redaction;
-  const secretPatterns = normalizeTraceDetectorPatterns(configured?.secret_patterns, "configured_secret");
-  const piiPatterns = normalizeTraceDetectorPatterns(configured?.pii_patterns, "configured_pii");
+  const secretPatterns = normalizeTraceDetectorPatterns(configured?.secret_patterns, "secret_patterns", "configured_secret");
+  const piiPatterns = normalizeTraceDetectorPatterns(configured?.pii_patterns, "pii_patterns", "configured_pii");
+  const identifierAllowPatterns = normalizeTraceDetectorPatterns(
+    configured?.identifier_allow_patterns,
+    "identifier_allow_patterns",
+    "configured_identifier",
+  );
+  const sensitiveKeys = configured?.sensitive_keys;
+  if (sensitiveKeys !== undefined && (
+    !Array.isArray(sensitiveKeys)
+    || sensitiveKeys.some((value) => typeof value !== "string" || value.trim() === "")
+  )) {
+    fail("observability.redaction.sensitive_keys must be an array of non-empty strings");
+  }
   try {
     return createOperationalRedactionPolicy({
       secretPatterns,
       piiPatterns,
+      identifierAllowPatterns,
+      ...(sensitiveKeys === undefined ? {} : { sensitiveKeys }),
     });
   } catch {
     fail("The configured observability redaction policy is invalid.");
   }
 }
 
-function normalizeTraceDetectorPatterns(value, prefix) {
+function normalizeTraceDetectorPatterns(value, fieldName, prefix) {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) fail(`observability.redaction.${prefix === "configured_secret" ? "secret_patterns" : "pii_patterns"} must be an array`);
+  if (!Array.isArray(value)) fail(`observability.redaction.${fieldName} must be an array`);
   return value.map((entry, index) => {
     if (typeof entry === "string") return { name: `${prefix}_${index + 1}`, pattern: entry };
     if (entry && typeof entry === "object" && !Array.isArray(entry)) return entry;
@@ -28246,27 +28525,47 @@ function buildTraceEvidenceRefs(context, event, policy) {
 }
 
 function redactedEvidenceRepresentation(filePath, policy) {
-  const stats = fs.statSync(filePath);
   const maximumBytes = 16 * 1024 * 1024;
-  if (stats.size > maximumBytes) {
-    fail("Trace evidence exceeds the 16 MiB integrity snapshot limit.");
-  }
   assertNoSymlinkPathSegments(filePath);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
-  const source = readFileFromStableParent(filePath, parentIdentity);
+  const source = readFileFromStableParent(filePath, parentIdentity, {
+    maxBytes: maximumBytes,
+    tooLargeMessage: "Trace evidence exceeds the 16 MiB integrity snapshot limit.",
+  });
   const extension = path.extname(filePath).toLowerCase();
   try {
     if (extension === ".json") {
-      return `${JSON.stringify(redactValue(JSON.parse(source), policy))}\n`;
+      const parsed = JSON.parse(source);
+      if (
+        parsed?.kind === "trace_evidence_manifest"
+        || parsed?.schema_version === "trace-evidence-manifest:v1"
+      ) {
+        assertRecordSchema(
+          parsed,
+          "trace-evidence-manifest.schema.json",
+          "Trace evidence manifest",
+        );
+      }
+      const presented = redactValueWithMetadata(parsed, policy);
+      if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+      return `${JSON.stringify(presented.value)}\n`;
     }
     if (extension === ".jsonl") {
       const lines = source.split(/\r?\n/u);
-      return lines.map((line) => line.trim() ? JSON.stringify(redactValue(JSON.parse(line), policy)) : "").join("\n");
+      return lines.map((line) => {
+        if (!line.trim()) return "";
+        const presented = redactValueWithMetadata(JSON.parse(line), policy);
+        if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+        return JSON.stringify(presented.value);
+      }).join("\n");
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof UserError) throw error;
     // Malformed text remains bounded and is redacted as text without persisting raw bytes.
   }
-  return redactText(source, policy);
+  const presented = redactValueWithMetadata(source, policy);
+  if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+  return presented.value;
 }
 
 function shouldVerifyTraceEvidence(event, projectPath) {
@@ -28487,7 +28786,13 @@ function gateCheck(context, options) {
       }
     }
     for (const reference of manifest.contracts || []) report.checked.push(`contract ${reference.id}`);
-    for (const reference of manifest.stories || []) report.checked.push(`story ${reference.id}`);
+    for (const reference of manifest.stories || []) {
+      report.checked.push(`story ${reference.id}`);
+      validateTraces(context, report, reference.id, {
+        required: storyTraceIsExpected(context, reference.id),
+      });
+    }
+    validateTraces(context, report, null, { projectOnly: true });
     for (const artifact of manifest.artifacts || []) report.checked.push(`artifact ${artifact.id}`);
     report.warnings.push("Historical records outside this release manifest are logically archived out of the active release scope and were not used to decide this gate.");
   } else {
@@ -31042,99 +31347,182 @@ function validateExecutionPolicySelection(selection, name, valueKey, label, repo
   }
 }
 
-function validateTraces(context, report, storyId = null) {
+function validateTraces(context, report, storyId = null, options = {}) {
   const tracesRoot = path.join(context.sdlcRoot, "traces");
-  const files = storyId
-    ? [path.join(tracesRoot, `${storyId}.jsonl`)].filter((filePath) => fs.existsSync(filePath))
-    : walkFiles(tracesRoot).filter((filePath) => filePath.endsWith(".jsonl"));
+  const candidates = new Map();
+  const addCandidate = (filePath, required = false) => {
+    const resolved = path.resolve(filePath);
+    candidates.set(resolved, Boolean(candidates.get(resolved)) || required);
+  };
+  if (storyId) {
+    addCandidate(
+      path.join(tracesRoot, `${storyId}.jsonl`),
+      options.required === true || storyTraceIsExpected(context, storyId),
+    );
+  } else if (options.projectOnly) {
+    const projectTrace = path.join(tracesRoot, "project.jsonl");
+    const projectCheckpoint = traceIntegrityCheckpointPath(projectTrace);
+    if (fs.existsSync(projectTrace) || fs.existsSync(projectCheckpoint)) {
+      addCandidate(projectTrace);
+    }
+  } else {
+    for (const filePath of walkFiles(tracesRoot).filter((candidate) => candidate.endsWith(".jsonl"))) {
+      addCandidate(filePath);
+    }
+    const integrityRoot = path.join(tracesRoot, ".integrity");
+    for (const checkpointPath of walkFiles(integrityRoot).filter((candidate) => candidate.endsWith(".jsonl.checkpoint.json"))) {
+      const traceName = path.basename(checkpointPath, ".checkpoint.json");
+      addCandidate(path.join(tracesRoot, traceName));
+    }
+    const storiesRoot = path.join(context.sdlcRoot, "stories");
+    for (const candidateStoryId of safeReadDir(storiesRoot)) {
+      if (storyTraceIsExpected(context, candidateStoryId)) {
+        addCandidate(path.join(tracesRoot, `${candidateStoryId}.jsonl`), true);
+      }
+    }
+  }
+  const files = [...candidates.keys()].sort();
   const requireActor = context.config.trace_policy?.require_actor !== false;
   for (const filePath of files) {
     const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
-    try {
-      const integrity = verifyTraceIntegrity({ tracePath: filePath });
-      if (!integrity.valid) {
-        const entries = Array.isArray(integrity.errors) ? integrity.errors : [];
-        if (entries.length === 0) {
-          report.errors.push(`${label} failed local integrity verification`);
-        }
-        for (const entry of entries) {
-          report.errors.push(`${label} integrity ${entry.code || "invalid"} at ${entry.scope || "trace"}`);
-        }
+    const traceExists = fs.existsSync(filePath);
+    const checkpointExists = fs.existsSync(traceIntegrityCheckpointPath(filePath));
+    if (!traceExists && !checkpointExists) {
+      if (candidates.get(filePath)) {
+        report.errors.push(`${label} is missing for a story whose governed work has started`);
       }
-      if (integrity.initialized) report.checked.push(`${label} local integrity checkpoint`);
+      continue;
+    }
+    let snapshotPresent = traceExists;
+    try {
+      withTraceIntegritySnapshot({
+        boundaryRoot: context.sdlcRoot,
+        tracePath: filePath,
+        hooks: traceGateSnapshotTestHooks(filePath),
+      }, ({ integrity, records, present }) => {
+        snapshotPresent = present;
+        if (!integrity.valid) {
+          const entries = Array.isArray(integrity.errors) ? integrity.errors : [];
+          if (entries.length === 0) {
+            report.errors.push(`${label} failed local integrity verification`);
+          }
+          for (const entry of entries) {
+            report.errors.push(`${label} integrity ${entry.code || "invalid"} at ${entry.scope || "trace"}`);
+          }
+        }
+        if (integrity.initialized) report.checked.push(`${label} local integrity checkpoint`);
+        if (present) {
+          validateTraceSnapshotRecords(context, report, filePath, label, records, requireActor);
+        }
+      });
     } catch (error) {
       const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
         ? error.code
         : "verification_failed";
       report.errors.push(`${label} local integrity verification failed (${code})`);
     }
-    const fileName = path.basename(filePath, ".jsonl");
-    const expectedStoryId = fileName === "project" ? null : fileName;
-    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-    const latestOutcomeEvents = new Map();
-    lines.forEach((line, index) => {
-      if (!line.trim()) {
-        return;
-      }
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        report.errors.push(`${label}:${index + 1} is not valid JSON`);
-        return;
-      }
-      if (!TRACE_TYPES.has(event.type)) {
-        report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
-      }
-      if ((event.story_id || null) !== expectedStoryId) {
-        report.errors.push(`${label}:${index + 1} story_id must match ${expectedStoryId || "project trace"}`);
-      }
-      if (event.story_id && !readStory(context, event.story_id)) {
-        report.errors.push(`${label}:${index + 1} references missing story ${event.story_id}`);
-      }
-      if (!event.summary || typeof event.summary !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing summary`);
-      }
-      if (!event.created_at || typeof event.created_at !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing created_at`);
-      }
-      if (requireActor && !hasTraceActor(event)) {
-        report.errors.push(`${label}:${index + 1} is missing actor attribution`);
-      }
-      if (event.requested_by !== undefined && event.requested_by !== null && !hasActorAttribution(event.requested_by)) {
-        report.errors.push(`${label}:${index + 1} has invalid requested_by attribution`);
-      }
-      if (event.authorized_by !== undefined && event.authorized_by !== null && !hasActorAttribution(event.authorized_by)) {
-        report.errors.push(`${label}:${index + 1} has invalid authorized_by attribution`);
-      }
-      if (!event.action || typeof event.action !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing action`);
-      }
-      if (!event.git || typeof event.git !== "object") {
-        report.errors.push(`${label}:${index + 1} is missing git metadata`);
-      }
-      if (!event.run || typeof event.run !== "object") {
-        report.errors.push(`${label}:${index + 1} is missing run metadata`);
-      }
-      validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
-      if (report.strict && event._trace_integrity) {
-        validateTraceEvidenceRefs(context, report, event, `${label}:${index + 1}`);
-      }
-      if (report.strict && ["test", "release"].includes(event.type)) {
-        validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
-        latestOutcomeEvents.set(event.type, { event, line: index + 1 });
-      }
-    });
-    for (const [type, latest] of latestOutcomeEvents) {
-      const acceptableOutcomes = type === "test" ? ["passed"] : ["ready", "passed"];
-      if (!acceptableOutcomes.includes(latest.event.outcome)) {
-        report.errors.push(
-          `${label}:${latest.line} latest ${type} trace outcome must be ${acceptableOutcomes.join(" or ")}, found '${latest.event.outcome || "missing"}'`,
-        );
-      }
-    }
+    if (!snapshotPresent) continue;
     report.checked.push(label);
   }
+}
+
+function validateTraceSnapshotRecords(context, report, filePath, label, records, requireActor) {
+  const fileName = path.basename(filePath, ".jsonl");
+  const expectedStoryId = fileName === "project" ? null : fileName;
+  const latestOutcomeEvents = new Map();
+  for (const record of records) {
+    const index = record.line - 1;
+    if (!record.valid) {
+      report.errors.push(`${label}:${record.line} is not valid JSON`);
+      continue;
+    }
+    const event = record.event;
+    if (!TRACE_TYPES.has(event.type)) {
+      report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
+    }
+    if ((event.story_id || null) !== expectedStoryId) {
+      report.errors.push(`${label}:${index + 1} story_id must match ${expectedStoryId || "project trace"}`);
+    }
+    if (event.story_id && !readStory(context, event.story_id)) {
+      report.errors.push(`${label}:${index + 1} references missing story ${event.story_id}`);
+    }
+    if (!event.summary || typeof event.summary !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing summary`);
+    }
+    if (!event.created_at || typeof event.created_at !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing created_at`);
+    }
+    if (requireActor && !hasTraceActor(event)) {
+      report.errors.push(`${label}:${index + 1} is missing actor attribution`);
+    }
+    if (event.requested_by !== undefined && event.requested_by !== null && !hasActorAttribution(event.requested_by)) {
+      report.errors.push(`${label}:${index + 1} has invalid requested_by attribution`);
+    }
+    if (event.authorized_by !== undefined && event.authorized_by !== null && !hasActorAttribution(event.authorized_by)) {
+      report.errors.push(`${label}:${index + 1} has invalid authorized_by attribution`);
+    }
+    if (!event.action || typeof event.action !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing action`);
+    }
+    if (!event.git || typeof event.git !== "object") {
+      report.errors.push(`${label}:${index + 1} is missing git metadata`);
+    }
+    if (!event.run || typeof event.run !== "object") {
+      report.errors.push(`${label}:${index + 1} is missing run metadata`);
+    }
+    validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
+    if (report.strict && event._trace_integrity) {
+      validateTraceEvidenceRefs(context, report, event, `${label}:${index + 1}`);
+    }
+    if (report.strict && ["test", "release"].includes(event.type)) {
+      validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
+      latestOutcomeEvents.set(event.type, { event, line: index + 1 });
+    }
+  }
+  for (const [type, latest] of latestOutcomeEvents) {
+    const acceptableOutcomes = type === "test" ? ["passed"] : ["ready", "passed"];
+    if (!acceptableOutcomes.includes(latest.event.outcome)) {
+      report.errors.push(
+        `${label}:${latest.line} latest ${type} trace outcome must be ${acceptableOutcomes.join(" or ")}, found '${latest.event.outcome || "missing"}'`,
+      );
+    }
+  }
+}
+
+function traceGateSnapshotTestHooks(filePath) {
+  if (process.env.NODE_ENV !== "test") return {};
+  const traceName = path.basename(filePath);
+  const requested = process.env.AGENTIC_SDLC_TEST_TRACE_GATE_SWAP;
+  const targetPath = requested === traceName
+    ? filePath
+    : requested === `${traceName}.checkpoint`
+      ? traceIntegrityCheckpointPath(filePath)
+      : null;
+  if (!targetPath) return {};
+  return {
+    after_snapshot_verified() {
+      const bytes = fs.readFileSync(targetPath);
+      if (process.platform === "win32") {
+        fs.appendFileSync(targetPath, " ");
+        return;
+      }
+      const replacement = `${targetPath}.test-semantic-swap`;
+      fs.writeFileSync(replacement, bytes);
+      fs.renameSync(replacement, targetPath);
+    },
+  };
+}
+
+function traceIntegrityCheckpointPath(tracePath) {
+  return path.join(
+    path.dirname(tracePath),
+    ".integrity",
+    `${path.basename(tracePath)}.checkpoint.json`,
+  );
+}
+
+function storyTraceIsExpected(context, storyId) {
+  return fs.existsSync(path.join(context.sdlcRoot, "stories", storyId, "task-start.json"));
 }
 
 function validateProtectedAutonomyTrace(context, report, event, label) {
@@ -31750,6 +32138,25 @@ function readProjectJson(context, filePath) {
   }
 }
 
+function readProjectJsonBounded(context, filePath, maxBytes) {
+  try {
+    resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(filePath);
+    const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+    const realRoot = fs.realpathSync.native(context.root);
+    if (!isInsidePath(realRoot, parentIdentity.realpath)) {
+      fail(`Project file parent resolves outside the target project root: ${filePath}`);
+    }
+    return JSON.parse(readFileFromStableParent(filePath, parentIdentity, {
+      maxBytes,
+      tooLargeMessage: "Project privacy configuration exceeds its safe read limit.",
+    }));
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    fail(`Unable to read bounded JSON project file: ${error.message}`);
+  }
+}
+
 function readProjectText(context, filePath) {
   resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
   assertNoSymlinkPathSegments(filePath);
@@ -31882,19 +32289,54 @@ function verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity) {
   if (pathStat.isSymbolicLink() || pathStat.dev !== descriptorStat.dev || pathStat.ino !== descriptorStat.ino) {
     fail(`File changed while opening it: ${filePath}`);
   }
+  return descriptorStat;
 }
 
-function readFileFromStableParent(filePath, parentIdentity) {
+function readFileFromStableParent(filePath, parentIdentity, options = {}) {
   let descriptor;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (options.maxBytes === undefined) return fs.readFileSync(descriptor, "utf8");
+    const maxBytes = options.maxBytes;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail("Stable read maxBytes must be a positive safe integer.");
+    if (before.size > maxBytes) fail(options.tooLargeMessage || "Project file exceeds its safe read limit.");
+    const chunks = [];
+    let total = 0;
+    let position = 0;
+    while (total <= maxBytes) {
+      const remaining = maxBytes + 1 - total;
+      if (remaining <= 0) break;
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, position);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+      position += bytesRead;
+    }
+    if (total > maxBytes) fail(options.tooLargeMessage || "Project file exceeds its safe read limit.");
+    const after = fs.fstatSync(descriptor);
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
-    return fs.readFileSync(descriptor, "utf8");
+    if (
+      !sameStableFileIdentity(before, after)
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || total !== after.size
+    ) {
+      fail(`File changed while reading it: ${filePath}`);
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
   } finally {
     if (descriptor !== undefined) {
       fs.closeSync(descriptor);
     }
   }
+}
+
+function sameStableFileIdentity(left, right) {
+  if (Number(left.ino) === 0 || Number(right.ino) === 0) return true;
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function writeFileToStableParent(filePath, content, parentIdentity) {

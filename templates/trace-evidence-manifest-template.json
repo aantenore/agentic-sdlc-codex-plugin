@@ -1,0 +1,27 @@
+{
+  "kind": "trace_evidence_manifest",
+  "schema_version": "trace-evidence-manifest:v1",
+  "version": 1,
+  "id": "EVIDENCE-MANIFEST-001",
+  "artifact": {
+    "location": {
+      "kind": "project_path",
+      "path": ".sdlc/stories/ST-001/evidence/large-report.json"
+    },
+    "media_type": "application/json",
+    "size_bytes": 123456789,
+    "digest": {
+      "algorithm": "sha256",
+      "value": "replace-with-the-producer-supplied-sha256-digest",
+      "source": "producer_supplied",
+      "verified_by_agentic_sdlc": false
+    }
+  },
+  "content_handling": {
+    "mode": "manifest_only",
+    "manifest_redaction_required": true,
+    "raw_content_read_by_agentic_sdlc": false,
+    "raw_content_hashed_by_agentic_sdlc": false
+  },
+  "created_at": "<iso-8601>"
+}

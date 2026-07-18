@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trace-evidence-manifest.schema.json",
+  "title": "Agentic SDLC Trace Evidence Manifest v1",
+  "description": "Small canonical, redaction-safe reference to a large or sensitive evidence artifact. Agentic SDLC fingerprints this manifest and does not claim to have read or hashed the referenced artifact bytes.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "artifact",
+    "content_handling",
+    "created_at"
+  ],
+  "properties": {
+    "kind": { "const": "trace_evidence_manifest" },
+    "schema_version": { "const": "trace-evidence-manifest:v1" },
+    "version": { "const": 1 },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "content_handling": { "$ref": "#/$defs/content_handling" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "project_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))(?!.*//)(?!.*\\\\)(?!.*[\\u0000-\\u001f])[^\\u0000-\\u001f]+$"
+    },
+    "safe_https_uri": {
+      "type": "string",
+      "minLength": 9,
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https://[^\\s/?#@]+(?::[0-9]{1,5})?(?:/[^\\s?#]*)?$"
+    },
+    "location": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "const": "project_path" },
+            "path": { "$ref": "#/$defs/project_path" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "uri"],
+          "properties": {
+            "kind": { "const": "external_uri" },
+            "uri": { "$ref": "#/$defs/safe_https_uri" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "digest": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value",
+        "source",
+        "verified_by_agentic_sdlc"
+      ],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "value": { "$ref": "#/$defs/sha256" },
+        "source": {
+          "enum": [
+            "producer_supplied",
+            "independent_verifier_supplied"
+          ]
+        },
+        "verified_by_agentic_sdlc": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "location",
+        "media_type",
+        "size_bytes",
+        "digest"
+      ],
+      "properties": {
+        "location": { "$ref": "#/$defs/location" },
+        "media_type": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "digest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "content_handling": {
+      "type": "object",
+      "required": [
+        "mode",
+        "manifest_redaction_required",
+        "raw_content_read_by_agentic_sdlc",
+        "raw_content_hashed_by_agentic_sdlc"
+      ],
+      "properties": {
+        "mode": { "const": "manifest_only" },
+        "manifest_redaction_required": { "const": true },
+        "raw_content_read_by_agentic_sdlc": { "const": false },
+        "raw_content_hashed_by_agentic_sdlc": { "const": false }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

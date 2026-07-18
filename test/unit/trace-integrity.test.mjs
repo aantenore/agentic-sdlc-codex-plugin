@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   TraceIntegrityError,
   recoverTraceIntegrity,
   sealTraceEvent,
   verifyTraceIntegrity,
+  withTraceIntegritySnapshot,
 } from "../../lib/trace-integrity.mjs";
 
 function fixture(t, { legacy = true } = {}) {
@@ -23,7 +26,12 @@ function fixture(t, { legacy = true } = {}) {
 }
 
 function options(paths, extra = {}) {
-  return { tracePath: paths.tracePath, checkpointPath: paths.checkpointPath, ...extra };
+  return {
+    boundaryRoot: paths.root,
+    tracePath: paths.tracePath,
+    checkpointPath: paths.checkpointPath,
+    ...extra,
+  };
 }
 
 function jsonLines(tracePath) {
@@ -90,6 +98,235 @@ test("reports an intact legacy-only trace as unsealed rather than authenticated"
   assert.equal(report.checkpoint.status, "missing");
   assert.equal(report.authenticity_claimed, false);
   assert.equal(fs.existsSync(path.dirname(paths.checkpointPath)), false);
+});
+
+test("fails closed when a trace is swapped between integrity and semantic snapshot stages", (t) => {
+  const paths = fixture(t, { legacy: false });
+  sealTraceEvent(options(paths, { event: { type: "command", id: "one" } }));
+  let semanticInspectionRan = false;
+
+  assert.throws(
+    () => withTraceIntegritySnapshot(options(paths, {
+      hooks: {
+        after_snapshot_verified() {
+          if (process.platform === "win32") {
+            fs.appendFileSync(paths.tracePath, " ");
+            return;
+          }
+          const replacement = `${paths.tracePath}.replacement`;
+          fs.copyFileSync(paths.tracePath, replacement);
+          fs.renameSync(replacement, paths.tracePath);
+        },
+      },
+    }), ({ integrity, records, present }) => {
+      semanticInspectionRan = true;
+      assert.equal(integrity.valid, true);
+      assert.equal(present, true);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].event.id, "one");
+    }),
+    (error) => error instanceof TraceIntegrityError
+      && ["file_replaced", "trace_changed_during_read", "trace_snapshot_changed"].includes(error.code),
+  );
+  assert.equal(semanticInspectionRan, true);
+});
+
+test("bounds trace snapshot reads before integrity or semantic inspection", (t) => {
+  const paths = fixture(t, { legacy: false });
+  fs.writeFileSync(paths.tracePath, `${"x".repeat(32)}\n`);
+  let semanticInspectionRan = false;
+  assert.throws(
+    () => withTraceIntegritySnapshot(options(paths, {
+      maxVerificationTraceBytes: 16,
+    }), () => {
+      semanticInspectionRan = true;
+    }),
+    (error) => error instanceof TraceIntegrityError && error.code === "trace_too_large",
+  );
+  assert.equal(semanticInspectionRan, false);
+});
+
+test("applies the trace read bound to direct verification, recovery, and sealing", (t) => {
+  const paths = fixture(t, { legacy: false });
+  fs.writeFileSync(paths.tracePath, `${JSON.stringify({ legacy: "x".repeat(64) })}\n`);
+  const limited = options(paths, { maxVerificationTraceBytes: 16 });
+
+  for (const operation of [
+    () => verifyTraceIntegrity(limited),
+    () => recoverTraceIntegrity(limited),
+    () => sealTraceEvent({ ...limited, event: { type: "must-not-append" } }),
+  ]) {
+    assert.throws(
+      operation,
+      (error) => error instanceof TraceIntegrityError && error.code === "trace_too_large",
+    );
+  }
+});
+
+test("bounds checkpoint, backup, and lock reads", (t) => {
+  const checkpointPaths = fixture(t, { legacy: false });
+  sealTraceEvent(options(checkpointPaths, { event: { type: "first" } }));
+  for (const operation of [
+    () => verifyTraceIntegrity(options(checkpointPaths, { maxCheckpointBytes: 16 })),
+    () => recoverTraceIntegrity(options(checkpointPaths, { maxCheckpointBytes: 16 })),
+    () => sealTraceEvent(options(checkpointPaths, {
+      maxCheckpointBytes: 16,
+      event: { type: "second" },
+    })),
+  ]) {
+    assert.throws(
+      operation,
+      (error) => error instanceof TraceIntegrityError && error.code === "checkpoint_too_large",
+    );
+  }
+
+  const backupPaths = fixture(t, { legacy: false });
+  sealTraceEvent(options(backupPaths, { event: { type: "first" } }));
+  fs.renameSync(backupPaths.checkpointPath, `${backupPaths.checkpointPath}.previous`);
+  assert.throws(
+    () => verifyTraceIntegrity(options(backupPaths, { maxCheckpointBytes: 16 })),
+    (error) => error instanceof TraceIntegrityError && error.code === "checkpoint_backup_too_large",
+  );
+
+  const lockPaths = fixture(t, { legacy: false });
+  fs.mkdirSync(path.dirname(lockPaths.checkpointPath), { recursive: true });
+  fs.writeFileSync(`${lockPaths.checkpointPath}.lock`, "x".repeat(32));
+  assert.throws(
+    () => sealTraceEvent(options(lockPaths, {
+      maxLockBytes: 16,
+      lockTimeoutMs: 0,
+      event: { type: "blocked" },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "lock_too_large",
+  );
+});
+
+test("preflights generated lock and checkpoint caps before creating durable files", (t) => {
+  const lockPaths = fixture(t, { legacy: false });
+  assert.throws(
+    () => sealTraceEvent(options(lockPaths, {
+      maxLockBytes: 16,
+      event: { type: "must-not-create-lock" },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "lock_too_large",
+  );
+  assert.equal(fs.existsSync(lockPaths.tracePath), false);
+  assert.equal(fs.existsSync(lockPaths.checkpointPath), false);
+  assert.equal(fs.existsSync(`${lockPaths.checkpointPath}.lock`), false);
+
+  const checkpointPaths = fixture(t, { legacy: false });
+  assert.throws(
+    () => sealTraceEvent(options(checkpointPaths, {
+      maxCheckpointBytes: 16,
+      event: { type: "must-not-create-checkpoint" },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "checkpoint_too_large",
+  );
+  assert.equal(fs.existsSync(checkpointPaths.tracePath), false);
+  assert.equal(fs.existsSync(checkpointPaths.checkpointPath), false);
+  assert.equal(fs.existsSync(`${checkpointPaths.checkpointPath}.lock`), false);
+  assert.equal(
+    fs.readdirSync(path.dirname(checkpointPaths.checkpointPath)).some((name) => name.endsWith(".tmp")),
+    false,
+  );
+});
+
+test("preflights the next checkpoint before appending a trace event", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const fixedNow = () => new Date("2026-07-18T12:00:00.000Z");
+  sealTraceEvent(options(paths, {
+    event: { type: "first" },
+    dependencies: { now: fixedNow },
+  }));
+  const beforeTrace = fs.readFileSync(paths.tracePath);
+  const beforeCheckpoint = fs.readFileSync(paths.checkpointPath);
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      maxCheckpointBytes: beforeCheckpoint.length,
+      event: { type: "second", payload: "x".repeat(8_192) },
+      dependencies: { now: fixedNow },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "checkpoint_too_large",
+  );
+  assert.deepEqual(fs.readFileSync(paths.tracePath), beforeTrace);
+  assert.deepEqual(fs.readFileSync(paths.checkpointPath), beforeCheckpoint);
+  assert.equal(fs.existsSync(`${paths.checkpointPath}.lock`), false);
+});
+
+test("preserves a primary snapshot failure when cleanup also detects a changed boundary", (t) => {
+  if (process.platform === "win32") return;
+  const paths = sealedFixture(t);
+  const integrityDirectory = path.dirname(paths.checkpointPath);
+  const movedDirectory = `${integrityDirectory}.primary-error`;
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trace-integrity-cleanup-error-"));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true, maxRetries: 3 }));
+
+  assert.throws(
+    () => verifyTraceIntegrity(options(paths, {
+      hooks: {
+        after_snapshot_directory_capture() {
+          fs.renameSync(integrityDirectory, movedDirectory);
+          fs.symlinkSync(outside, integrityDirectory, "dir");
+          throw new Error("primary snapshot failure");
+        },
+      },
+    })),
+    (error) => error.message === "primary snapshot failure"
+      && Array.isArray(error.cleanup_errors)
+      && error.cleanup_errors.some((entry) => entry?.code === "directory_boundary_changed"),
+  );
+});
+
+test("fails closed when the verified checkpoint is swapped before semantic inspection completes", (t) => {
+  const paths = fixture(t, { legacy: false });
+  sealTraceEvent(options(paths, { event: { type: "command", id: "one" } }));
+  let semanticInspectionRan = false;
+
+  assert.throws(
+    () => withTraceIntegritySnapshot(options(paths, {
+      hooks: {
+        after_snapshot_verified() {
+          if (process.platform === "win32") {
+            fs.appendFileSync(paths.checkpointPath, " ");
+            return;
+          }
+          const replacement = `${paths.checkpointPath}.replacement`;
+          fs.copyFileSync(paths.checkpointPath, replacement);
+          fs.renameSync(replacement, paths.checkpointPath);
+        },
+      },
+    }), ({ integrity, records }) => {
+      semanticInspectionRan = true;
+      assert.equal(integrity.valid, true);
+      assert.equal(records[0].event.id, "one");
+    }),
+    (error) => error instanceof TraceIntegrityError
+      && ["file_replaced", "checkpoint_changed_during_read", "checkpoint_snapshot_changed"].includes(error.code),
+  );
+  assert.equal(semanticInspectionRan, true);
+});
+
+test("pins every parent directory for the complete verification snapshot", (t) => {
+  if (process.platform === "win32") return;
+  const paths = fixture(t, { legacy: false });
+  sealTraceEvent(options(paths, { event: { type: "command", id: "one" } }));
+  const integrityDirectory = path.dirname(paths.checkpointPath);
+  const movedDirectory = `${integrityDirectory}.original`;
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trace-integrity-parent-swap-"));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true, maxRetries: 3 }));
+
+  assert.throws(
+    () => verifyTraceIntegrity(options(paths, {
+      hooks: {
+        after_snapshot_directory_capture() {
+          fs.renameSync(integrityDirectory, movedDirectory);
+          fs.symlinkSync(outside, integrityDirectory, "dir");
+        },
+      },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "directory_boundary_changed",
+  );
 });
 
 test("detects modification of the immutable legacy prefix", (t) => {
@@ -241,6 +478,37 @@ test("adopts a complete fsynced event after a crash before checkpoint commit", (
   assert.equal(verifyTraceIntegrity(options(paths)).valid, true);
 });
 
+test("canonical event hashes cover own __proto__ data, including recovery tails", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const first = JSON.parse('{"type":"first","__proto__":{"value":"one"}}');
+  const sealed = sealTraceEvent(options(paths, { event: first }));
+  assert.equal(Object.hasOwn(sealed.event, "__proto__"), true);
+  assert.equal(sealed.event.__proto__.value, "one");
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      event: JSON.parse('{"type":"tail","__proto__":{"value":"one"}}'),
+      hooks: {
+        after_append_fsync() {
+          throw new Error("simulated crash with proto tail");
+        },
+      },
+    })),
+    /simulated crash with proto tail/u,
+  );
+  const before = fs.readFileSync(paths.tracePath, "utf8");
+  const tampered = before.replace(
+    '"type":"tail","__proto__":{"value":"one"}',
+    '"type":"tail","__proto__":{"value":"two"}',
+  );
+  assert.notEqual(tampered, before);
+  fs.writeFileSync(paths.tracePath, tampered);
+  assert.throws(
+    () => recoverTraceIntegrity(options(paths)),
+    (error) => error instanceof TraceIntegrityError && error.code === "unexpected_complete_tail",
+  );
+});
+
 test("truncates only an incomplete append and retains the last durable checkpoint", (t) => {
   const paths = fixture(t, { legacy: false });
   sealTraceEvent(options(paths, { event: { type: "first" } }));
@@ -283,6 +551,128 @@ test("refuses an incomplete legacy prefix rather than modifying it", (t) => {
   assert.equal(fs.readFileSync(paths.tracePath, "utf8"), '{"legacy":true}');
 });
 
+test("removes its owned lock when lock write or durability fails", async (t) => {
+  const scenarios = [
+    {
+      name: "write",
+      dependencies(failure) {
+        return {
+          writeSync() {
+            throw failure;
+          },
+        };
+      },
+    },
+    {
+      name: "file fsync",
+      dependencies(failure) {
+        let calls = 0;
+        return {
+          fsyncSync(descriptor) {
+            calls += 1;
+            if (calls === 1) throw failure;
+            return fs.fsyncSync(descriptor);
+          },
+        };
+      },
+    },
+    {
+      name: "directory fsync",
+      dependencies(failure) {
+        let calls = 0;
+        return {
+          fsyncSync(descriptor) {
+            calls += 1;
+            if (calls === 2) throw failure;
+            return fs.fsyncSync(descriptor);
+          },
+        };
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, (scenarioTest) => {
+      const paths = fixture(scenarioTest, { legacy: false });
+      const lockPath = `${paths.checkpointPath}.lock`;
+      const failure = new Error(`simulated lock ${scenario.name} failure`);
+      failure.code = "EIO";
+
+      assert.throws(
+        () => sealTraceEvent(options(paths, {
+          event: { type: "must-not-append" },
+          dependencies: scenario.dependencies(failure),
+        })),
+        (error) => error === failure,
+      );
+      assert.equal(fs.existsSync(lockPath), false);
+
+      const retry = sealTraceEvent(options(paths, { event: { type: "retry" } }));
+      assert.equal(retry.event._trace_integrity.sequence, 1);
+      assert.equal(fs.existsSync(lockPath), false);
+    });
+  }
+});
+
+test("does not delete a replacement installed after creating its lock", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const lockPath = `${paths.checkpointPath}.lock`;
+  const displacedPath = `${lockPath}.displaced`;
+  const replacement = `${JSON.stringify({ pid: process.pid, token: "replacement" })}\n`;
+  const failure = new Error("simulated write failure after lock replacement");
+  failure.code = "EIO";
+  let replaced = false;
+
+  const writeSync = (descriptor) => {
+    if (!replaced) {
+      replaced = true;
+      fs.closeSync(descriptor);
+      fs.renameSync(lockPath, displacedPath);
+      fs.writeFileSync(lockPath, replacement, { mode: 0o600 });
+    }
+    throw failure;
+  };
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      event: { type: "must-not-append" },
+      dependencies: { writeSync },
+    })),
+    (error) => error === failure,
+  );
+  assert.equal(replaced, true);
+  assert.equal(fs.readFileSync(lockPath, "utf8"), replacement);
+  assert.equal(fs.existsSync(displacedPath), true);
+});
+
+test("preserves a lock acquisition failure when owned-lock cleanup also fails", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const lockPath = `${paths.checkpointPath}.lock`;
+  const primary = new Error("simulated lock write failure");
+  primary.code = "EIO";
+  const cleanup = new Error("simulated lock cleanup failure");
+  cleanup.code = "EACCES";
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      event: { type: "must-not-append" },
+      dependencies: {
+        writeSync() {
+          throw primary;
+        },
+        unlinkSync() {
+          throw cleanup;
+        },
+      },
+    })),
+    (error) => error === primary
+      && Array.isArray(error.cleanup_errors)
+      && error.cleanup_errors.length === 1
+      && error.cleanup_errors[0] === cleanup,
+  );
+  assert.equal(fs.existsSync(lockPath), true);
+});
+
 test("serializes writers with an owned lock and reclaims a proven dead owner", (t) => {
   const paths = fixture(t, { legacy: false });
   fs.mkdirSync(path.dirname(paths.checkpointPath), { recursive: true });
@@ -305,6 +695,82 @@ test("serializes writers with an owned lock and reclaims a proven dead owner", (
   assert.equal(fs.existsSync(lockPath), false);
 });
 
+test("retries when a live lock disappears or changes during its bounded read", (t) => {
+  const paths = fixture(t, { legacy: false });
+  fs.mkdirSync(path.dirname(paths.checkpointPath), { recursive: true });
+  const lockPath = `${paths.checkpointPath}.lock`;
+  fs.writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, token: "live" })}\n`);
+  let injected = false;
+  const readSync = (descriptor, buffer, offset, length, position) => {
+    if (!injected) {
+      injected = true;
+      fs.appendFileSync(lockPath, "changed-during-read");
+      fs.unlinkSync(lockPath);
+    }
+    return fs.readSync(descriptor, buffer, offset, length, position);
+  };
+
+  const result = sealTraceEvent(options(paths, {
+    event: { type: "after-transient-lock" },
+    dependencies: { readSync },
+  }));
+  assert.equal(injected, true);
+  assert.equal(result.event._trace_integrity.sequence, 1);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("serializes concurrent subprocess writers into one complete hash chain", async (t) => {
+  const paths = fixture(t, { legacy: false });
+  const writerCount = 8;
+  const moduleUrl = pathToFileURL(path.resolve("lib/trace-integrity.mjs")).href;
+  const source = [
+    `import { sealTraceEvent } from ${JSON.stringify(moduleUrl)};`,
+    "sealTraceEvent({",
+    "  boundaryRoot: process.env.TRACE_BOUNDARY_ROOT,",
+    "  tracePath: process.env.TRACE_FILE,",
+    "  checkpointPath: process.env.TRACE_CHECKPOINT,",
+    "  event: { type: 'concurrent-writer', writer: process.env.TRACE_WRITER },",
+    "  lockTimeoutMs: 15000,",
+    "});",
+  ].join("\n");
+
+  const results = await Promise.all(Array.from({ length: writerCount }, (_, index) => new Promise((resolve) => {
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
+      env: {
+        ...process.env,
+        TRACE_BOUNDARY_ROOT: paths.root,
+        TRACE_FILE: paths.tracePath,
+        TRACE_CHECKPOINT: paths.checkpointPath,
+        TRACE_WRITER: String(index + 1),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("exit", (code, signal) => resolve({ code, signal, stderr }));
+  })));
+
+  for (const result of results) {
+    assert.equal(result.code, 0, result.stderr || `writer exited via ${result.signal}`);
+  }
+  const report = verifyTraceIntegrity(options(paths));
+  assert.equal(report.valid, true);
+  assert.equal(report.new_writes.count, writerCount);
+  const records = jsonLines(paths.tracePath);
+  assert.deepEqual(
+    records.map((record) => record._trace_integrity.sequence),
+    Array.from({ length: writerCount }, (_, index) => index + 1),
+  );
+  const integrityDirectory = path.dirname(paths.checkpointPath);
+  assert.equal(fs.existsSync(`${paths.checkpointPath}.lock`), false);
+  assert.equal(fs.existsSync(`${paths.checkpointPath}.previous`), false);
+  assert.equal(
+    fs.readdirSync(integrityDirectory).some((name) => name.endsWith(".tmp")),
+    false,
+  );
+});
+
 test("rejects a symbolic-link trace at the no-follow append boundary", (t) => {
   if (process.platform === "win32") return;
   const paths = fixture(t, { legacy: false });
@@ -318,14 +784,79 @@ test("rejects a symbolic-link trace at the no-follow append boundary", (t) => {
   );
 });
 
+test("rejects symbolic-link parent directories and paths outside the trusted boundary", (t) => {
+  if (process.platform === "win32") return;
+  const paths = fixture(t, { legacy: false });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trace-integrity-outside-"));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true, maxRetries: 3 }));
+
+  const traceDirectory = path.join(paths.root, "traces");
+  fs.symlinkSync(outside, traceDirectory, "dir");
+  const escapedTrace = path.join(traceDirectory, "project.jsonl");
+  assert.throws(
+    () => sealTraceEvent({
+      boundaryRoot: paths.root,
+      tracePath: escapedTrace,
+      checkpointPath: paths.checkpointPath,
+      event: { type: "first" },
+    }),
+    (error) => error instanceof TraceIntegrityError && error.code === "symlink_forbidden",
+  );
+  assert.equal(fs.existsSync(path.join(outside, "project.jsonl")), false);
+
+  fs.unlinkSync(traceDirectory);
+  const checkpointDirectory = path.dirname(paths.checkpointPath);
+  fs.symlinkSync(outside, checkpointDirectory, "dir");
+  assert.throws(
+    () => sealTraceEvent(options(paths, { event: { type: "first" } })),
+    (error) => error instanceof TraceIntegrityError && error.code === "symlink_forbidden",
+  );
+  assert.equal(fs.readdirSync(outside).length, 0);
+
+  assert.throws(
+    () => sealTraceEvent({
+      boundaryRoot: paths.root,
+      tracePath: path.join(outside, "escaped.jsonl"),
+      event: { type: "first" },
+    }),
+    (error) => error instanceof TraceIntegrityError && error.code === "path_outside_boundary",
+  );
+});
+
+test("rejects aliases and file-directory nesting across trace integrity paths", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const aliases = [
+    { checkpointPath: paths.tracePath },
+    { lockPath: paths.tracePath },
+    { lockPath: `${paths.checkpointPath}.previous` },
+    {
+      tracePath: paths.checkpointPath,
+      checkpointPath: path.join(paths.checkpointPath, "nested.json"),
+    },
+  ];
+  for (const override of aliases) {
+    assert.throws(
+      () => sealTraceEvent(options(paths, { ...override, event: { type: "first" } })),
+      (error) => error instanceof TraceIntegrityError
+        && ["invalid_path", "path_alias_forbidden"].includes(error.code),
+    );
+  }
+  assert.equal(fs.existsSync(paths.tracePath), false);
+  assert.equal(fs.existsSync(paths.checkpointPath), false);
+});
+
 test("uses the deterministic Windows checkpoint replacement fallback", (t) => {
   const paths = fixture(t, { legacy: false });
   sealTraceEvent(options(paths, { event: { type: "first" } }));
+  const canonicalCheckpointPath = path.join(
+    fs.realpathSync(path.dirname(paths.checkpointPath)),
+    path.basename(paths.checkpointPath),
+  );
   let fallbackTriggered = false;
   const renameSync = (source, destination) => {
-    const replacingCheckpoint = destination === paths.checkpointPath
+    const replacingCheckpoint = destination === canonicalCheckpointPath
       && path.basename(source).endsWith(".tmp")
-      && fs.existsSync(paths.checkpointPath);
+      && fs.existsSync(canonicalCheckpointPath);
     if (replacingCheckpoint && !fallbackTriggered) {
       fallbackTriggered = true;
       const error = new Error("simulated Windows replacement denial");

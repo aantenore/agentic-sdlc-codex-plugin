@@ -382,6 +382,68 @@ and warning, soft-limit, completion-reserve, hard-limit, and metering-violation
 policy remains sovereign. See [Token Efficiency](token-efficiency.md) for the
 full gateway and evidence model.
 
+### Operational evidence is safe to inspect
+
+The user-facing rule is: diagnostics should help locate a failure without
+copying a secret into history or pretending that a local checksum proves who
+performed an action.
+
+At the start of each CLI operation, the runtime creates one correlation ID in
+the form `corr-<uuid>`. That ID follows the operation into structured output,
+safe error responses, and newly recorded trace events. Unexpected exceptions
+are normalized to a stable code, retryability, and correlation ID. Stacks,
+tokens, secret-bearing paths, and raw internal details are not returned; a safe
+project-relative path may remain when it identifies the file to correct.
+
+Before a trace event is saved, the CLI applies the operational redaction policy.
+It removes sensitive keys, known token forms, configured secret/PII patterns,
+emails, bearer credentials, credential assignments, and private-key blocks.
+Entropy alone never makes a value a secret. Exact `AUT-ACT-...` action IDs, SHA
+digests, UUIDs, correlation IDs, and other opaque audit data remain readable
+unless a known credential detector or explicit privacy rule matches them.
+Identifier allow rules cannot bypass those rules. The same policy produces a
+redacted representation of linked evidence before its size and SHA-256
+fingerprint are stored; the original secret bytes are not fingerprinted in that
+trace reference.
+
+Large SBOMs and test or release reports use a reference-only manifest instead
+of increasing those read and redaction limits. Create a small
+`trace-evidence-manifest:v1` record from
+`templates/trace-evidence-manifest-template.json`, fill in the producer- or
+independent-verifier-supplied path or HTTPS link, media type, size, and SHA-256,
+then pass the **manifest path** to `trace append --evidence`. Do not pass the
+large artifact itself. Signed URLs, URI credentials, query strings, fragments,
+raw excerpts, and absolute or parent-traversing local paths are not valid
+manifest locations.
+
+Agentic SDLC reads, redacts, and fingerprints only that bounded manifest. It
+does not silently open or hash the referenced raw artifact, and the manifest
+therefore records `verified_by_agentic_sdlc: false`. A strict gate can prove
+that the linked manifest stayed unchanged; it does not turn a declared
+producer digest into independent verification of the large artifact. Record a
+separate trusted verifier receipt when that stronger claim is required. The
+machine contract is `schemas/trace-evidence-manifest.schema.json`.
+
+The redacted event is then appended to a per-file hash chain and a local sidecar
+checkpoint. Existing unsealed history is preserved as a hashed legacy prefix;
+the first new event starts the sealed chain without rewriting that history.
+Strict gates verify the trace/checkpoint pair, and evidence references marked
+`current_content` are re-rendered with the redaction policy and compared with
+their stored redacted fingerprint.
+
+This answers “has this local trace changed unexpectedly?” It does not answer
+“who originally wrote it?” A party that can replace both trace and checkpoint
+can make another consistent pair, so the mechanism is tamper-evident local
+integrity, not a signature, authenticity proof, or tamper-proof archive.
+
+For visual operations, Change Observatory applies redaction again before
+presentation, distinguishes shallow liveness from project readiness, keeps
+fixed-label metrics in memory, evaluates SLOs only as advice, and can produce a
+redacted support bundle. The bundle digest covers canonical redacted content
+only. No metric, log, trace, or support bundle is exported to an external sink.
+See [Change Observatory](change-observatory.md) for the endpoint and
+authentication table.
+
 ### Output verification is layered
 
 Codex creates the approved artifact, and the CLI links it to the approved story, requirement, template, and proposal authorization. The link stores the artifact fingerprint and a separate verification receipt.

@@ -136,7 +136,12 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "workflow", "definition", "show", "--root", project,
     "--id", "team-delivery", "--definition-version", "1", "--json",
   ], project);
-  assert.equal(firstShow, secondShow);
+  const { correlation_id: firstCorrelationId, ...firstStableShow } = JSON.parse(firstShow);
+  const { correlation_id: secondCorrelationId, ...secondStableShow } = JSON.parse(secondShow);
+  assert.match(firstCorrelationId, /^corr-/u);
+  assert.match(secondCorrelationId, /^corr-/u);
+  assert.notEqual(firstCorrelationId, secondCorrelationId);
+  assert.deepEqual(firstStableShow, secondStableShow);
 
   const overlayProposal = mustRunJson([
     "workflow", "overlay", "propose",
