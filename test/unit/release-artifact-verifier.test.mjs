@@ -9,6 +9,8 @@ import {
   canonicalJson,
   npmCliCandidates,
   parseStrictJson,
+  proveNoTreeWrites,
+  summarizeDoctorChecks,
   verifyReleaseArtifact,
 } from "../../lib/release/artifact-verifier.mjs";
 import {
@@ -154,4 +156,63 @@ test("bounds attacker-controlled JSON nesting before native parsing", () => {
   const deeplyNested = `${"[".repeat(66)}0${"]".repeat(66)}`;
   expectCode("JSON_NESTING_LIMIT_EXCEEDED", () => parseStrictJson(Buffer.from(deeplyNested), "nested fixture"));
   expectCode("INVALID_JSON", () => parseStrictJson(Buffer.from('{"value":"\\q"}'), "malformed fixture"));
+});
+
+
+test("rejects npm lifecycle hooks hidden by the smoke test's ignore-scripts boundary", () => {
+  for (const hook of ["preinstall", "install", "postinstall", "prepare", "prepack", "postpublish"]) {
+    const packagePayload = {
+      name: "agentic-sdlc-codex-plugin",
+      version: packageVersion,
+      bin: { "agentic-sdlc": "./bin/agentic-sdlc.mjs" },
+      scripts: { [hook]: "node malicious.mjs" },
+    };
+    const entries = replaceEntry(
+      validReleaseFixtureEntries({ version: packageVersion }),
+      "package/package.json",
+      { data: `${JSON.stringify(packagePayload)}\n` },
+    );
+    withFixture(entries, (artifactPath) => expectCode("UNSAFE_LIFECYCLE_SCRIPT", () => verify(artifactPath)));
+  }
+});
+
+
+test("enforces SemVer numeric prerelease identifiers without leading zeros", () => {
+  withFixture(validReleaseFixtureEntries({ version: "1.0.0-01" }), (artifactPath) => {
+    expectCode("INVALID_PACKAGE_VERSION", () => verify(artifactPath, { expectedTag: "v1.0.0-01" }));
+  });
+  withFixture(validReleaseFixtureEntries({ version: "1.0.0-0.1-alpha" }), (artifactPath) => {
+    assert.equal(verify(artifactPath, { expectedTag: "v1.0.0-0.1-alpha" }).package.version, "1.0.0-0.1-alpha");
+  });
+});
+
+
+test("bounds and validates doctor check summaries before canonical reporting", () => {
+  assert.deepEqual(summarizeDoctorChecks([
+    { id: "z-check", status: "not_applicable" },
+    { id: "a-check", status: "passed" },
+  ]), [
+    { id: "a-check", status: "passed" },
+    { id: "z-check", status: "not_applicable" },
+  ]);
+  expectCode("DOCTOR_OUTPUT_INVALID", () => summarizeDoctorChecks([{ id: 1, status: "passed" }]));
+  expectCode("DOCTOR_OUTPUT_INVALID", () => summarizeDoctorChecks([{ id: "x".repeat(129), status: "passed" }]));
+  expectCode("DOCTOR_OUTPUT_INVALID", () => summarizeDoctorChecks([
+    { id: "duplicate", status: "passed" },
+    { id: "duplicate", status: "passed" },
+  ]));
+});
+
+
+test("read-only proof covers the entire isolated tree rather than only HOME", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "release-read-only-proof-"));
+  try {
+    writeFileSync(path.join(root, "existing.txt"), "stable\n");
+    assert.equal(proveNoTreeWrites(root, () => "unchanged"), "unchanged");
+    expectCode("READ_ONLY_OPERATION_WROTE_FILES", () => proveNoTreeWrites(root, () => {
+      writeFileSync(path.join(root, "outside-home.txt"), "mutation\n");
+    }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

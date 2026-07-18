@@ -10,8 +10,10 @@ import { buildTarGzip } from "../helpers/release-package-fixture.mjs";
 
 const DEFAULT_LIMITS = {
   maxCompressedBytes: 1024 * 1024,
+  maxComponentBytes: 255,
   maxEntries: 64,
   maxFileBytes: 64 * 1024,
+  maxPathBytes: 240,
   maxPaxBytes: 4096,
   maxTotalFileBytes: 256 * 1024,
   maxUncompressedBytes: 1024 * 1024,
@@ -68,6 +70,37 @@ test("rejects unsafe and ambiguous archive paths", () => {
       expectCode(code, () => readTarGzipArchive(archive, DEFAULT_LIMITS));
     });
   }
+});
+
+
+test("rejects archive paths that are not portable to Windows", () => {
+  const cases = [
+    ["reserved device", "package/CON", "WINDOWS_RESERVED_PATH"],
+    ["reserved device with extension", "package/nul.txt", "WINDOWS_RESERVED_PATH"],
+    ["reserved device with normalized space", "package/CON .txt", "WINDOWS_RESERVED_PATH"],
+    ["reserved numbered device", "package/Lpt9.log", "WINDOWS_RESERVED_PATH"],
+    ["reserved superscript device", "package/COM¹.log", "WINDOWS_RESERVED_PATH"],
+    ["trailing dot", "package/file.", "WINDOWS_TRAILING_DOT_OR_SPACE"],
+    ["trailing space", "package/file ", "WINDOWS_TRAILING_DOT_OR_SPACE"],
+    ["alternate stream", "package/file:stream", "WINDOWS_ILLEGAL_PATH"],
+    ["wildcard", "package/file?.txt", "WINDOWS_ILLEGAL_PATH"],
+  ];
+  for (const [name, archivePath, code] of cases) {
+    withArchive([{ path: archivePath, data: name }], (archive) => {
+      expectCode(code, () => readTarGzipArchive(archive, DEFAULT_LIMITS));
+    });
+  }
+
+  withArchive([{ path: "package/abcdefgh", data: "x" }], (archive) => {
+    expectCode("ARCHIVE_COMPONENT_LIMIT_EXCEEDED", () => readTarGzipArchive(archive, {
+      ...DEFAULT_LIMITS,
+      maxComponentBytes: 7,
+    }));
+    expectCode("ARCHIVE_PATH_LIMIT_EXCEEDED", () => readTarGzipArchive(archive, {
+      ...DEFAULT_LIMITS,
+      maxPathBytes: 12,
+    }));
+  });
 });
 
 

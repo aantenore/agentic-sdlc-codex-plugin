@@ -3,8 +3,10 @@
   "schema_version": "agentic-sdlc.release-artifact-policy.v1",
   "archive_limits": {
     "max_compressed_bytes": 16777216,
+    "max_component_bytes": 255,
     "max_entries": 4096,
     "max_file_bytes": 8388608,
+    "max_path_bytes": 240,
     "max_pax_bytes": 16384,
     "max_total_file_bytes": 67108864,
     "max_uncompressed_bytes": 83886080
@@ -45,6 +47,29 @@
     "installer": "scripts/install-personal-marketplace.py",
     "bin": {
       "agentic-sdlc": "./bin/agentic-sdlc.mjs"
-    }
+    },
+    "forbidden_lifecycle_scripts": [
+      "dependencies",
+      "install",
+      "postdependencies",
+      "postinstall",
+      "postpack",
+      "postprepare",
+      "postpublish",
+      "postuninstall",
+      "postversion",
+      "predependencies",
+      "preinstall",
+      "prepack",
+      "preprepare",
+      "prepare",
+      "prepublish",
+      "prepublishOnly",
+      "preuninstall",
+      "preversion",
+      "publish",
+      "uninstall",
+      "version"
+    ]
   }
 }

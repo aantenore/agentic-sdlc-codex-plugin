@@ -21,16 +21,20 @@
       "additionalProperties": false,
       "required": [
         "max_compressed_bytes",
+        "max_component_bytes",
         "max_entries",
         "max_file_bytes",
+        "max_path_bytes",
         "max_pax_bytes",
         "max_total_file_bytes",
         "max_uncompressed_bytes"
       ],
       "properties": {
         "max_compressed_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_component_bytes": { "$ref": "#/$defs/positiveInteger" },
         "max_entries": { "$ref": "#/$defs/positiveInteger" },
         "max_file_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_path_bytes": { "$ref": "#/$defs/positiveInteger" },
         "max_pax_bytes": { "$ref": "#/$defs/positiveInteger" },
         "max_total_file_bytes": { "$ref": "#/$defs/positiveInteger" },
         "max_uncompressed_bytes": { "$ref": "#/$defs/positiveInteger" }
@@ -47,7 +51,8 @@
         "required_files",
         "plugin_manifest",
         "installer",
-        "bin"
+        "bin",
+        "forbidden_lifecycle_scripts"
       ],
       "properties": {
         "name": {
@@ -75,6 +80,15 @@
         },
         "plugin_manifest": { "$ref": "#/$defs/safeRelativePath" },
         "installer": { "$ref": "#/$defs/safeRelativePath" },
+        "forbidden_lifecycle_scripts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9:_-]*$"
+          }
+        },
         "bin": {
           "type": "object",
           "additionalProperties": false,
