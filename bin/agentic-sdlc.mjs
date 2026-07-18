@@ -27447,8 +27447,8 @@ function migrateIdentity(context, options) {
       && governancePolicy?.mode === "enforce"
     ) {
       fail(
-        "Identity migration cannot yet run with enforced pointer-policy receipts because those receipts live inside the tree being replaced. "
-        + "No files were changed. Use a reviewed inline policy for this migration, or keep pointer governance in audit mode.",
+        "This identity change was not started because its approval records could not be kept safely while the project data is replaced. "
+        + "No files were changed. For now, use a reviewed policy embedded in the project configuration, or run the external policy in audit mode.",
       );
     }
     const plan = planIdentityMigration({
@@ -33538,14 +33538,17 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
       parentPath,
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
+    let tempIdentity = null;
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity, {
+      tempIdentity = writeFileToStableParent(tempPath, content, parentIdentity, {
         ...options,
         governanceTargetPath: filePath,
       });
       assertDirectoryIdentity(parentPath, parentIdentity);
+      assertOwnedWriterTemporary(tempPath, tempIdentity);
       try {
         assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+        assertOwnedWriterTemporary(tempPath, tempIdentity);
         fs.linkSync(tempPath, filePath);
       } catch (error) {
         if (error?.code === "EEXIST") {
@@ -33556,8 +33559,11 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
       if (options.durable) syncWorkflowDirectory(parentPath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
-        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
-        fs.rmSync(tempPath, { force: true });
+        removeOwnedWriterTemporary(
+          tempPath,
+          tempIdentity,
+          { operation: "file.write", path: filePath },
+        );
       }
     }
     return true;
@@ -33580,34 +33586,44 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
         return callback();
       });
     };
+    let tempIdentity = null;
     try {
       if (options.preparedTempPath) {
-        executePhysical({ operation: "file.write", path: tempPath }, () =>
+        tempIdentity = executePhysical({ operation: "file.write", path: tempPath }, () =>
           writeFileToStableParent(tempPath, content, parentIdentity, {
             governanceTargetPath: tempPath,
           }));
       } else {
-        writeFileToStableParent(tempPath, content, parentIdentity, {
+        tempIdentity = writeFileToStableParent(tempPath, content, parentIdentity, {
           governanceTargetPath: filePath,
         });
       }
       assertDirectoryIdentity(parentPath, parentIdentity);
+      assertOwnedWriterTemporary(tempPath, tempIdentity);
       if (options.preparedTempPath) {
         executePhysical({ operation: "path.rename.source", path: tempPath }, () =>
-          executePhysical({ operation: "path.rename.target", path: filePath }, () =>
-            fs.renameSync(tempPath, filePath)));
+          executePhysical({ operation: "path.rename.target", path: filePath }, () => {
+            assertOwnedWriterTemporary(tempPath, tempIdentity);
+            return fs.renameSync(tempPath, filePath);
+          }));
       } else {
         assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+        assertOwnedWriterTemporary(tempPath, tempIdentity);
         fs.renameSync(tempPath, filePath);
       }
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
         if (options.preparedTempPath) {
-          executePhysical({ operation: "file.remove", path: tempPath }, () =>
-            fs.rmSync(tempPath, { force: true }));
+          if (writerTemporaryMatches(tempPath, tempIdentity)) {
+            executePhysical({ operation: "file.remove", path: tempPath }, () =>
+              fs.rmSync(tempPath));
+          }
         } else {
-          assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
-          fs.rmSync(tempPath, { force: true });
+          removeOwnedWriterTemporary(
+            tempPath,
+            tempIdentity,
+            { operation: "file.write", path: filePath },
+          );
         }
       }
     }
@@ -33723,6 +33739,7 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
   let descriptor;
   let created = false;
   let complete = false;
+  let createdIdentity = null;
   try {
     assertMutationExecutionAuthorized({
       operation: "file.write",
@@ -33734,7 +33751,8 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
       0o666,
     );
     created = true;
-    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    const opened = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    createdIdentity = { dev: opened.dev, ino: opened.ino };
     assertMutationExecutionAuthorized({
       operation: "file.write",
       path: options.governanceTargetPath ?? filePath,
@@ -33742,18 +33760,44 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
     fs.writeFileSync(descriptor, content);
     if (options.durable) fs.fsyncSync(descriptor);
     complete = true;
+    return createdIdentity;
   } finally {
     if (descriptor !== undefined) {
       fs.closeSync(descriptor);
     }
     if (created && !complete && directoryIdentityMatches(path.dirname(filePath), parentIdentity)) {
-      assertMutationExecutionAuthorized({
+      removeOwnedWriterTemporary(filePath, createdIdentity, {
         operation: "file.write",
         path: options.governanceTargetPath ?? filePath,
       });
-      fs.rmSync(filePath, { force: true });
     }
   }
+}
+
+function writerTemporaryMatches(filePath, expectedIdentity) {
+  if (!expectedIdentity) return false;
+  try {
+    const entry = fs.lstatSync(filePath);
+    return !entry.isSymbolicLink()
+      && entry.isFile()
+      && entry.dev === expectedIdentity.dev
+      && entry.ino === expectedIdentity.ino;
+  } catch {
+    return false;
+  }
+}
+
+function assertOwnedWriterTemporary(filePath, expectedIdentity) {
+  if (!writerTemporaryMatches(filePath, expectedIdentity)) {
+    fail(`Temporary file ownership changed before publication: ${filePath}`);
+  }
+}
+
+function removeOwnedWriterTemporary(filePath, expectedIdentity, authorization) {
+  if (!writerTemporaryMatches(filePath, expectedIdentity)) return false;
+  assertMutationExecutionAuthorized(authorization);
+  fs.rmSync(filePath);
+  return true;
 }
 
 function appendJsonLine(filePath, value) {

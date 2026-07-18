@@ -411,7 +411,7 @@ test("identity migration rejects enforce pointer receipts before any write", (t)
     "--plan-hash", JSON.parse(preview.stdout).plan_hash,
   ]);
   assert.notEqual(rejected.status, 0, rejected.stdout);
-  assert.match(rejected.stderr, /receipts live inside the tree being replaced/u);
+  assert.match(rejected.stderr, /approval records could not be kept safely/u);
   assert.deepEqual(fs.readFileSync(projectPath), before);
   assert.equal(fs.existsSync(path.join(governanceRoot, "decisions")), false);
   assert.equal(fs.existsSync(path.join(governanceRoot, "uses")), false);

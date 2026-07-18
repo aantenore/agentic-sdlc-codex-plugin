@@ -7,6 +7,7 @@ import test from "node:test";
 import { computeStableHash } from "../../lib/canonical.mjs";
 import { createCommandSubject } from "../../lib/governance/command-subject.mjs";
 import {
+  MAX_EXACT_MUTATION_BATCH,
   MutationGovernanceError,
   appendJsonLineNoFollow,
   assertMutationExecutionAuthorized,
@@ -17,6 +18,7 @@ import {
   normalizeProjectMutationPath,
   runWithMutationGovernance,
   withGovernedMutation,
+  withGovernedMutationBatch,
 } from "../../lib/governance/mutation-guard.mjs";
 import {
   createGovernancePolicy,
@@ -539,6 +541,34 @@ test("secure JSONL append uses a no-follow append descriptor and complete record
   fs.symlinkSync(outside, linked);
   assert.throws(() => appendJsonLineNoFollow(linked, { denied: true }), /symbolic link/u);
   assert.equal(fs.readFileSync(outside, "utf8"), "");
+});
+
+test("exact mutation batches reach their enforced hard boundary without recursion", () => {
+  const root = fixture(test, "batch-boundary");
+  const exactMutations = Array.from({ length: MAX_EXACT_MUTATION_BATCH }, (_, index) => ({
+    operation: "file.write",
+    path: `batch/item-${index}.json`,
+  }));
+  const grant = createBootstrapMutationGrant({
+    root,
+    canonical_action: "init",
+    first_time: true,
+    exact_mutations: exactMutations,
+  });
+  let callbackRan = false;
+  consumeBootstrapMutationGrant(grant, () => withGovernedMutationBatch(exactMutations, () => {
+    callbackRan = true;
+    assert.equal(assertMutationExecutionAuthorized(exactMutations[0]), true);
+    assert.equal(assertMutationExecutionAuthorized(exactMutations.at(-1)), true);
+  }));
+  assert.equal(callbackRan, true);
+  assert.throws(
+    () => withGovernedMutationBatch(
+      [...exactMutations, { operation: "file.write", path: "batch/overflow.json" }],
+      () => assert.fail("oversized batch callback ran"),
+    ),
+    (error) => error.code === "MUTATION_BATCH_INVALID",
+  );
 });
 
 test("bootstrap grants are exact and limited to first init or bound recovery material", async () => {

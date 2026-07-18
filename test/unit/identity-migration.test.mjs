@@ -212,6 +212,72 @@ test("identity migration rejects a tampered execution descriptor before its firs
   );
 });
 
+test("identity migration never removes a pre-existing deterministic lock temp", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const lockTempPath = path.join(canonicalRoot, ...plan.execution_descriptor.lock_temporary_path.split("/"));
+  fs.writeFileSync(lockTempPath, "pre-existing-owner\n", { flag: "wx", mode: 0o600 });
+
+  assert.throws(() => applyIdentityMigration(plan), /Cannot acquire identity migration lock/u);
+  assert.equal(fs.readFileSync(lockTempPath, "utf8"), "pre-existing-owner\n");
+  assert.equal(fs.existsSync(path.join(canonicalRoot, plan.execution_descriptor.lock_path)), false);
+});
+
+test("identity migration preserves a replaced journal temp and never publishes it", (t) => {
+  const project = fixtureProject(t);
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const journalPath = path.join(canonicalRoot, ...plan.execution_descriptor.journal_path.split("/"));
+  const journalTempPath = path.join(
+    canonicalRoot,
+    ...plan.execution_descriptor.journal_temporary_path.split("/"),
+  );
+  let replaced = false;
+  const mutationGateway = (request, effect) => {
+    if (!replaced && request.operation === "path.rename.target" && request.path === journalPath) {
+      fs.rmSync(journalTempPath);
+      fs.writeFileSync(journalTempPath, "replacement-not-owned\n", { flag: "wx", mode: 0o600 });
+      replaced = true;
+    }
+    return effect();
+  };
+  mutationGateway.revalidate = () => true;
+
+  assert.throws(
+    () => applyIdentityMigration(plan, { mutationGateway }),
+    /temporary-file ownership changed/u,
+  );
+  assert.equal(replaced, true);
+  assert.equal(fs.readFileSync(journalTempPath, "utf8"), "replacement-not-owned\n");
+  assert.equal(fs.existsSync(journalPath), false);
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+});
+
+test("identity execution nonce changes with migrated content, not policy-only plan inputs", (t) => {
+  const project = fixtureProject(t);
+  const first = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const projectPath = path.join(project, ".sdlc", "project.json");
+  const projectRecord = readJson(projectPath);
+  projectRecord.audit.review_marker = "content-changed-after-first-preview";
+  writeJson(projectPath, projectRecord);
+  const second = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  assert.notEqual(first.execution_descriptor.nonce, second.execution_descriptor.nonce);
+});
+
 test("identity migration preserves approval and authorization lineage without retaining source identity", (t) => {
   const project = fixtureProject(t);
   const before = snapshotTree(path.join(project, ".sdlc"));
