@@ -33324,7 +33324,8 @@ function executeIdentityMutation(request, effect) {
 }
 
 executeIdentityMutation.revalidate = function revalidateIdentityMutation(request) {
-  return assertMutationExecutionAuthorized(request);
+  assertMutationExecutionAuthorized(request);
+  return true;
 };
 
 function removePathGoverned(filePath, options = {}) {

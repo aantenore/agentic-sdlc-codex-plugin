@@ -200,6 +200,79 @@ test("CLI audit pointer records policy misses without blocking legacy-compatible
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-GOV-AUDIT", "story.json")), true);
 });
 
+test("identity dual-path revalidation remains non-blocking in audit and fail-closed in enforce", (t) => {
+  const sourceEmail = "legacy-governance@example.invalid";
+  const targetEmail = "current-governance@example.test";
+
+  const auditProject = projectFixture(t, "identity-audit");
+  initialize(auditProject);
+  const auditProjectPath = path.join(auditProject, ".sdlc", "project.json");
+  const auditProjectRecord = JSON.parse(fs.readFileSync(auditProjectPath, "utf8"));
+  auditProjectRecord.owner_email = sourceEmail;
+  fs.writeFileSync(auditProjectPath, `${JSON.stringify(auditProjectRecord, null, 2)}\n`);
+  const auditGovernanceRoot = path.join(auditProject, ".sdlc", "governance");
+  fs.mkdirSync(auditGovernanceRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(auditGovernanceRoot, "policy.json"),
+    `${JSON.stringify(denyAllPolicy(), null, 2)}\n`,
+  );
+  unpinWithGovernance(auditProject, {
+    mode: "audit",
+    policy_file: ".sdlc/governance/policy.json",
+    decision_receipts_root: ".sdlc/governance/decisions",
+    use_receipts_root: ".sdlc/governance/uses",
+    revocations_root: ".sdlc/governance/revocations",
+    fail_closed: false,
+  });
+  const auditPreview = run(auditProject, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  ]);
+  assert.equal(auditPreview.status, 0, auditPreview.stderr);
+  const auditPlan = JSON.parse(auditPreview.stdout);
+  const auditApplied = run(auditProject, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+    "--apply",
+    "--plan-hash", auditPlan.plan_hash,
+  ]);
+  assert.equal(auditApplied.status, 0, auditApplied.stderr);
+  assert.equal(JSON.parse(auditApplied.stdout).status, "applied");
+  assert.equal(JSON.parse(fs.readFileSync(auditProjectPath, "utf8")).owner_email, targetEmail);
+
+  const enforceProject = projectFixture(t, "identity-enforce");
+  initialize(enforceProject);
+  const enforceProjectPath = path.join(enforceProject, ".sdlc", "project.json");
+  const enforceProjectRecord = JSON.parse(fs.readFileSync(enforceProjectPath, "utf8"));
+  enforceProjectRecord.owner_email = sourceEmail;
+  fs.writeFileSync(enforceProjectPath, `${JSON.stringify(enforceProjectRecord, null, 2)}\n`);
+  unpinWithGovernance(enforceProject, denyAllPolicy());
+  const enforcePreview = run(enforceProject, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  ]);
+  assert.equal(enforcePreview.status, 0, enforcePreview.stderr);
+  const enforcePlan = JSON.parse(enforcePreview.stdout);
+  const enforceBefore = fs.readFileSync(enforceProjectPath);
+  const enforceDenied = run(enforceProject, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+    "--apply",
+    "--plan-hash", enforcePlan.plan_hash,
+  ]);
+  assert.notEqual(enforceDenied.status, 0, enforceDenied.stdout);
+  assert.match(enforceDenied.stderr, /no approval for this exact action and file/u);
+  assert.deepEqual(fs.readFileSync(enforceProjectPath), enforceBefore);
+  assert.deepEqual(
+    fs.readdirSync(enforceProject).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
 test("CLI denies a workflow transition append before the first event byte", (t) => {
   const project = projectFixture(t, "workflow-append");
   initialize(project);
