@@ -230,11 +230,22 @@ Reusable workflow definitions, governed overlays, and event-sourced instances us
 ```text
 .sdlc/workflows/definitions/software-project/v1.json
 .sdlc/workflows/overlays/team-labels/v1.json
+.sdlc/workflows/instances/.starts/CHANGE-184.json              # only during an interrupted start
+.sdlc/workflows/instances/.staging/CHANGE-184/                 # complete same-filesystem staging before publication
 .sdlc/workflows/instances/CHANGE-184/instance.json
 .sdlc/workflows/instances/CHANGE-184/events.jsonl
+.sdlc/workflows/instances/CHANGE-184/checkpoint.json
+.sdlc/workflows/instances/CHANGE-184/pending-transition.json  # only during an interrupted transition
+.sdlc/traces/project.jsonl                                    # cross-checked workflow audit records
 ```
 
-An approved definition version is immutable. An approved overlay version may customize presentation metadata and parameters for an already allowlisted guard, but cannot rewrite identifiers, transition direction, phase order, or history. The instance header pins definition, overlay, and effective hashes. `events.jsonl` is the only normally appended file; its sequence and previous-event hashes make replay tamper-evident.
+An approved definition version is immutable. An approved overlay version may customize presentation metadata and parameters for an already allowlisted guard, but cannot rewrite identifiers, transition direction, phase order, or history. The instance header pins definition, overlay, and effective hashes. `events.jsonl` is append-only; `checkpoint.json` pins the last fully accepted sequence, state, event hash, and cumulative hash of the ordered full audit records.
+
+Instance start records one stable intent, prepares the complete empty stream and checkpoint under same-filesystem staging, publishes the directory, and clears the start journal only after its deterministic trace is durable. The exact retry resumes a terminated process without duplicating the instance. Each transition writes a hash-bound pending journal with event and trace prefix anchors, appends and synchronizes one event, atomically replaces the checkpoint, records one deterministic trace, and then clears the journal. Status and explanation never repair an interrupted transaction: they fail closed, report no trusted state, and write nothing.
+
+The primary guidance asks the operator to repeat the same transition toward the same destination; the request identifier remains in optional technical details. Only that exact retry may validate the pending journal and complete the missing event, checkpoint, or trace exactly once. A different retry remains blocked. If no valid pending journal explains the mismatch, recovery must restore all instance records from the same trusted copy; regenerating a checkpoint from an untrusted stream is intentionally not an automatic recovery path.
+
+Workflow transaction durability includes file synchronization and, where the host supports it, parent-directory synchronization for the start journal, staging publication, pending journal, event stream, checkpoint, trace append, and journal removal. Status, explanation, and transition readers also wait for the instance creation lock, so they cannot use a start while its journal remains. Runtime integrity cross-checks the event/checkpoint pair with exactly one ordered start record and one ordered transition record per event; the checkpointed cumulative hash covers every field of those audit records. This detects an isolated audit edit or trace-visible rollback, but it is still local evidence: preventing a privileged actor from consistently replacing the checkpoint and trace requires an external append-only or host-signed anchor.
 
 The four built-in definitions are software project, change request, technical assessment, and generic governed process. Existing assessment v1 records remain canonical for the two-checkpoint assessment journey. The technical-assessment definition provides the reusable process description without replacing those records.
 

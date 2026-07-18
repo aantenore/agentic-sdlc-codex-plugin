@@ -35,9 +35,19 @@ Updating a definition or overlay therefore affects only new instances. A running
 
 ## Append-only history
 
-Each transition is appended to `events.jsonl`. Events carry a sequence number, the preceding event hash, their own content hash, an actor, a timestamp, and an idempotency key. Replay validates the complete chain before calculating current status.
+Each transition is appended to `events.jsonl`. Events carry a sequence number, the preceding event hash, their own content hash, an actor, a timestamp, and an idempotency key. `checkpoint.json` records the last fully accepted sequence, state, event hash, and cumulative audit-trace hash. Replay validates the complete event chain and the ordered full content of its matching audit records against that durable checkpoint before calculating current status.
 
-The engine rejects an invalid transition, an unknown guard, a reused idempotency key with different intent, an unexpected sequence, a timestamp that moves backwards, and evidence that has been modified, reordered, duplicated, or truncated when a known checkpoint is supplied. Custom guards are names from an allowlist plus validated parameters; workflow data is never executed as JavaScript, a module import, or a shell command.
+The engine rejects an invalid transition, an unknown guard, a reused idempotency key with different intent, an unexpected sequence, a timestamp that moves backwards, and evidence that has been modified, reordered, duplicated, appended without completing its checkpoint update, or truncated. Custom guards are names from an allowlist plus validated parameters; workflow data is never executed as JavaScript, a module import, or a shell command.
+
+Start first records one stable intent, writes the instance into same-filesystem staging, validates every staged byte, and only then publishes the complete directory. The start record remains until the matching audit trace is durable. A retry with the exact same intent can therefore finish an interruption after a process termination without creating a second instance; status and transitions cannot use the instance while that start record remains.
+
+A transition holds one instance lock and records a hash-bound `pending-transition.json` before changing canonical history. The journal anchors the exact byte prefix of both the event stream and the project trace. It appends and synchronizes the event, atomically replaces the checkpoint, records one deterministic trace, and removes the pending record only after all three agree. If a crash leaves only the beginning of the one event or trace line owned by that journal, recovery may truncate and rewrite only that exact suffix. Any different or unrelated suffix stops recovery without changing it.
+
+If a crash interrupts that sequence, status and explanation remain read-only and stop safely: they do not guess a state or repair evidence. The primary message simply asks the operator to repeat the same transition toward the same destination. The optional technical details retain the exact request identifier needed to validate the pending record against the pinned instance, the old checkpoint, the event, the new checkpoint, and the trace, then complete only the missing writes exactly once. A different retry cannot take over that recovery. If the pending record itself is invalid, or the event/checkpoint mismatch has no valid pending record, recovery requires restoring the instance files from one trusted copy. Deleting or rebuilding a checkpoint merely to silence the error is never accepted.
+
+The runtime treats persistence as a commit protocol rather than a sequence of ordinary writes. It flushes each event, journal, checkpoint, and trace file through a write-capable handle and then flushes the containing directory before the next boundary. On POSIX local filesystems this includes the directory entry. Node does not provide the same directory-flush guarantee on every Windows filesystem: failure to open the directory, invalid paths, ACL failures during open, and sharing failures still stop the operation; after a directory was opened successfully, only the specific Windows errors that mean directory flushing is unsupported are accepted as a platform limitation. The file contents are flushed, but metadata durability after sudden power loss ultimately retains the guarantee of the host OS and filesystem.
+
+Runtime validation also requires one matching start trace and exactly one matching transition trace for every accepted event, in the same order. A cumulative hash in the checkpoint binds the full content of those records, including attribution, evidence, outcome, Git/run context, and summary. This detects isolated audit edits and an event/checkpoint pair restored to an older state while its later audit trace remains. These are strong local consistency checks, not a claim that local files are impossible to rewrite: an administrator able to replace the checkpoint and complete project trace consistently can also replace the local evidence of the change. Preventing that stronger coordinated rollback requires an external append-only or host-signed anchor. Network shares and filesystems without reliable hard-link, atomic-rename, locking, and flush semantics are outside the crash-durability guarantee and should use such an external evidence store.
 
 ## Storage
 
@@ -47,11 +57,16 @@ Canonical records live under the target project:
 .sdlc/workflows/
   definitions/<definition-id>/v<version>.json
   overlays/<overlay-id>/v<version>.json
+  instances/.starts/<instance-id>.json       # present only while an interrupted start awaits the exact retry
+  instances/.staging/<instance-id>/...       # same-filesystem material prepared before publication
   instances/<instance-id>/instance.json
   instances/<instance-id>/events.jsonl
+  instances/<instance-id>/checkpoint.json
+  instances/<instance-id>/pending-transition.json  # present only while an interrupted transition awaits the same retry
+.sdlc/traces/project.jsonl                    # start and transition audit records used by the cross-check
 ```
 
-Definitions and overlays are immutable after approval. Instance headers are immutable after start. Only the event stream is extended during normal execution.
+Definitions and overlays are immutable after approval. Instance headers are immutable after start. During normal execution the event stream is extended and its checkpoint is replaced under the same instance lock; neither record is accepted without the other. The pending record is a recovery journal, not a second source of current status.
 
 ## Command journey
 

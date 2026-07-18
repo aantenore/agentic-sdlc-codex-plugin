@@ -2,17 +2,65 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "workflow-checkpoint.schema.json",
   "title": "Workflow stream checkpoint",
-  "type": "object",
-  "required": ["sequence", "last_event_hash", "state"],
-  "properties": {
-    "sequence": { "type": "integer", "minimum": 0 },
-    "last_event_hash": {
+  "description": "A hash-bound durable checkpoint pins one exact workflow instance, effective definition, verified event-stream tail, and cumulative ordered audit-trace content. The legacy shape remains accepted only for backward-compatible transient replay.",
+  "oneOf": [
+    { "$ref": "#/$defs/durable_checkpoint" },
+    { "$ref": "#/$defs/legacy_transient_checkpoint" }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "nullable_hash": {
       "oneOf": [
         { "type": "null" },
-        { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        { "$ref": "#/$defs/hash" }
       ]
     },
-    "state": { "type": "string", "minLength": 1 }
-  },
-  "additionalProperties": false
+    "durable_checkpoint": {
+      "type": "object",
+      "required": [
+        "kind", "schema_version", "instance_id", "instance_hash", "effective_hash", "sequence",
+        "last_event_hash", "current_state", "updated_at", "trace_chain_hash", "checkpoint_hash", "hash_algorithm"
+      ],
+      "properties": {
+        "kind": { "const": "workflow_checkpoint" },
+        "schema_version": { "const": "workflow-checkpoint:v1" },
+        "instance_id": { "type": "string", "minLength": 1 },
+        "instance_hash": { "$ref": "#/$defs/hash" },
+        "effective_hash": { "$ref": "#/$defs/hash" },
+        "sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "last_event_hash": { "$ref": "#/$defs/nullable_hash" },
+        "current_state": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "trace_chain_hash": { "$ref": "#/$defs/hash" },
+        "checkpoint_hash": { "$ref": "#/$defs/hash" },
+        "hash_algorithm": { "const": "sha256:stable-json:v1" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "sequence": { "const": 0 } }, "required": ["sequence"] },
+          "then": { "properties": { "last_event_hash": { "type": "null" } } },
+          "else": { "properties": { "last_event_hash": { "$ref": "#/$defs/hash" } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "legacy_transient_checkpoint": {
+      "type": "object",
+      "deprecated": true,
+      "required": ["sequence", "last_event_hash", "state"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "last_event_hash": { "$ref": "#/$defs/nullable_hash" },
+        "state": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "sequence": { "const": 0 } }, "required": ["sequence"] },
+          "then": { "properties": { "last_event_hash": { "type": "null" } } },
+          "else": { "properties": { "last_event_hash": { "$ref": "#/$defs/hash" } } }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
 }

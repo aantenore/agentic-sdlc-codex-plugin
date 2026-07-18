@@ -342,6 +342,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(requirementGuidance.primary, /Every pull request or local release needs its own choice/u);
   assert.match(requirementGuidance.technical, /Requirement: REQ-AUTONOMY/u);
   assert.match(requirementGuidance.technical, /bounded-autonomous/u);
+  const requirementList = mustRun([
+    "requirement", "status",
+    "--root", project,
+    "--id", "REQ-AUTONOMY",
+  ]);
+  const requirementListGuidance = splitHumanGuidance(requirementList.stdout);
+  assert.match(requirementListGuidance.primary, /For every pull request or local release, you will choose separately/u);
+  assert.doesNotMatch(requirementListGuidance.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
+  assert.match(requirementListGuidance.technical, /Maximum technical level: bounded-autonomous/u);
   createApprovedImplementationContract(project, {
     storyId: "ST-PR-1",
     contractId: "CONTRACT-PR-1",
@@ -477,9 +486,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--root", project,
     "--intent-json", intent,
   ]);
-  assert.match(profileMissingHuman.stdout, /this pull request or local release still needs its own choice/u);
-  assert.match(profileMissingHuman.stdout, /choice is never inherited from an earlier delivery/u);
-  assert.match(profileMissingHuman.stdout, /step-by-step control \/ autonomy with checkpoints \/ full autonomy/u);
+  const profileMissingGuidance = splitHumanGuidance(profileMissingHuman.stdout);
+  assert.match(profileMissingGuidance.primary, /How independently should I work on this pull request or local release/u);
+  assert.match(profileMissingGuidance.primary, /Ask before every important step/u);
+  assert.match(profileMissingGuidance.primary, /Work independently between review moments, but pause before the sensitive steps we agree/u);
+  assert.match(profileMissingGuidance.primary, /Complete this delivery independently within the displayed limits/u);
+  assert.match(profileMissingGuidance.primary, /choice applies only to this delivery and will not be reused/u);
+  assert.doesNotMatch(profileMissingGuidance.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
+  assert.match(profileMissingGuidance.technical, /this pull request or local release still needs its own choice/u);
+  assert.match(profileMissingGuidance.technical, /choice is never inherited from an earlier delivery/u);
   const profileMissingItalian = mustRun([
     "task", "start",
     "--root", project,
@@ -490,8 +505,13 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(missingGuidanceItalian.firstLine, /^Risultato: Il lavoro non è ancora iniziato/u);
   assert.match(missingGuidanceItalian.primary, /Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa/u);
   assert.match(missingGuidanceItalian.primary, /Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare/u);
+  assert.match(missingGuidanceItalian.primary, /Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale/u);
+  assert.match(missingGuidanceItalian.primary, /Chiedimi conferma prima di ogni passaggio importante/u);
+  assert.match(missingGuidanceItalian.primary, /Procedi da solo tra un momento di revisione e l’altro/u);
+  assert.match(missingGuidanceItalian.primary, /Completa questa consegna da solo entro i limiti mostrati/u);
+  assert.doesNotMatch(missingGuidanceItalian.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
   assert.match(missingGuidanceItalian.technical, /questa pull request .* propria scelta del livello di autonomia/u);
-  assert.match(missingGuidanceItalian.technical, /Quale livello di autonomia vuoi usare/u);
+  assert.match(missingGuidanceItalian.technical, /Quanto vuoi che proceda in autonomia/u);
   assert.match(missingGuidanceItalian.technical, /autonomy_selection_required/u);
 
   const automatic = mustRunJson([

@@ -26,10 +26,12 @@ import {
   approveWorkflowOverlay,
   buildWorkflowDefinition,
   buildWorkflowOverlay,
+  createWorkflowCheckpoint,
   createWorkflowInstance,
   createWorkflowTransition,
   replayWorkflowEvents,
   validateWorkflowDefinition,
+  validateWorkflowCheckpoint,
   validateWorkflowOverlay,
 } from "../lib/workflow-engine.mjs";
 import {
@@ -1228,6 +1230,30 @@ function workflowEventsPath(context, id) {
   return path.join(workflowInstanceRoot(context, id), "events.jsonl");
 }
 
+function workflowCheckpointPath(context, id) {
+  return path.join(workflowInstanceRoot(context, id), "checkpoint.json");
+}
+
+function workflowPendingTransitionPath(context, id) {
+  return path.join(workflowInstanceRoot(context, id), "pending-transition.json");
+}
+
+function workflowInstanceCreationLockPath(context, id) {
+  return path.join(workflowInstancesRoot(context), ".locks", `${normalizeId(id)}.lock`);
+}
+
+function workflowInstanceStartTransactionsRoot(context) {
+  return path.join(workflowInstancesRoot(context), ".starts");
+}
+
+function workflowInstanceStartTransactionPath(context, id) {
+  return path.join(workflowInstanceStartTransactionsRoot(context), `${normalizeId(id)}.json`);
+}
+
+function workflowInstanceStagingRoot(context, id) {
+  return path.join(workflowInstancesRoot(context), ".staging", normalizeId(id));
+}
+
 function workflowVersionFromFileName(fileName) {
   const match = /^v(.+)\.json$/u.exec(fileName);
   return match ? match[1] : null;
@@ -1320,8 +1346,14 @@ function workflowGuidance(options, kind, settings = {}) {
       ? ["I modi di lavorare disponibili sono stati raccolti.", "Puoi confrontarli prima di scegliere quale usare.", "Non devi decidere nulla finché non vuoi avviare o approvare un nuovo modo di lavorare.", "La consultazione non modifica file, attività in corso o permessi.", "Consulta i dettagli e scegli una voce solo quando serve."]
       : ["The available ways of working have been collected.", "You can compare them before choosing which one to use.", "You do not need to decide anything until you want to start or approve a new way of working.", "This view changes no files, active work, or permissions.", "Review the details and choose an entry only when needed."],
     shown: italian
-      ? ["Il modo di lavorare richiesto è stato descritto.", "Puoi vedere passaggi e controlli prima di usarlo.", "Non devi decidere nulla con questa sola consultazione.", "La consultazione non modifica esecuzioni attive né concede nuovi permessi.", "Se il contenuto è adatto, usalo per una nuova esecuzione o approva la proposta mostrata."]
-      : ["The requested way of working has been described.", "You can review its steps and checks before using it.", "This view alone needs no decision.", "It changes no active run and grants no new permission.", "If it fits, use it for a new run or approve the displayed proposal."],
+      ? ["Il modo di lavorare richiesto è stato descritto.", "Puoi vedere passaggi, controlli e stato della versione.", "L’eventuale decisione necessaria è indicata nel riepilogo.", "La consultazione non modifica esecuzioni attive né concede nuovi permessi.", "Segui il prossimo passo indicato per lo stato mostrato."]
+      : ["The requested way of working has been described.", "You can review its steps, checks, and version status.", "Any decision required is stated in the summary.", "This view changes no active run and grants no new permission.", "Follow the next step shown for the current status."],
+    shown_proposed: italian
+      ? ["È stata descritta una proposta di modo di lavorare.", "Resta inattiva finché non viene confermata.", "Decidi se confermare i passaggi e i controlli mostrati oppure chiedere una correzione.", "La consultazione non modifica esecuzioni attive e la conferma non concede permessi di consegna.", "Approva questa versione soltanto se il riepilogo è corretto; altrimenti indica cosa cambiare."]
+      : ["A proposed way of working has been described.", "It remains inactive until it is confirmed.", "Decide whether to confirm the displayed steps and checks or request a correction.", "This view changes no active run, and confirmation grants no delivery permission.", "Approve this version only if the summary is correct; otherwise state what should change."],
+    shown_approved: italian
+      ? ["È stato descritto un modo di lavorare già confermato.", "Può essere scelto per una nuova esecuzione.", "Questa consultazione non richiede alcuna decisione.", "Non modifica esecuzioni attive e non concede nuovi permessi.", "Se è adatto, usalo quando avvii una nuova esecuzione."]
+      : ["An already confirmed way of working has been described.", "It can be selected for a new run.", "This view requires no decision.", "It changes no active run and grants no new permission.", "If it fits, select it when starting a new run."],
     proposed: italian
       ? ["È pronta una proposta di modo di lavorare.", "Resta inattiva finché non viene confermata; nessuna attività esistente cambia.", "Conferma soltanto se passaggi, controlli e limiti mostrati sono corretti, altrimenti chiedi una modifica.", "La conferma vale solo per questa versione e non autorizza lavoro, merge, rilasci o accessi esterni.", "Esamina il riepilogo e approva o correggi la proposta."]
       : ["A proposed way of working is ready for review.", "It remains inactive until confirmed, and no existing work changes.", "Confirm only if the displayed steps, checks, and limits are correct; otherwise request a change.", "Confirmation applies only to this version and does not authorize work, merges, releases, or external access.", "Review the summary, then approve or correct the proposal."],
@@ -1348,8 +1380,8 @@ function workflowGuidance(options, kind, settings = {}) {
   return { result, impact, required_decision, protection_boundary, next_action, details: settings };
 }
 
-function outputWorkflowResult(options, payload, kind, details = []) {
-  output(options, payload, humanGuidanceLines(workflowGuidance(options, kind), details, options));
+function outputWorkflowResult(options, payload, kind, details = [], summaryLines = []) {
+  output(options, payload, humanGuidanceLines(workflowGuidance(options, kind), details, options, summaryLines));
 }
 
 function callWorkflowDomain(label, callback) {
@@ -1374,6 +1406,553 @@ function workflowDefinitionSummary(definition, source = "project") {
     source,
     definition_hash: definition.definition_hash,
   };
+}
+
+function humanizeWorkflowIdentifier(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  return text
+    .split(/[-_\s]+/u)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+const WORKFLOW_ITALIAN_PRESENTATION = new Map([
+  ["software-project", "Progetto software"], ["change-request", "Richiesta di modifica"],
+  ["technical-assessment", "Valutazione tecnica"], ["generic-governed-process", "Processo governato generico"],
+  ["discovery", "Analisi iniziale"], ["analysis", "Analisi"], ["design", "Progettazione"],
+  ["implementation", "Implementazione"], ["validation", "Verifica"], ["release", "Rilascio"],
+  ["intake", "Raccolta della richiesta"], ["impact-review", "Valutazione dell’impatto"],
+  ["approval", "Approvazione"], ["closed", "Chiuso"], ["draft", "Bozza"],
+  ["review", "Revisione"], ["approved", "Approvato"], ["execution", "Esecuzione"],
+  ["verification", "Verifica"], ["completed", "Completato"],
+  ["context-pending", "Contesto da confermare"], ["proposal-pending", "Proposta da confermare"],
+  ["authorized", "Autorizzato"], ["running", "In esecuzione"], ["verifying", "In verifica"],
+  ["exception-pending", "Eccezione da decidere"], ["failed", "Non riuscito"], ["cancelled", "Annullato"],
+  ["context", "Contesto"], ["combined-proposal", "Proposta completa"],
+]);
+
+function workflowItalianPresentation(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-")
+    .replace(/\s+/gu, "-");
+  return WORKFLOW_ITALIAN_PRESENTATION.get(normalized) || null;
+}
+
+function workflowHumanDisplayIdentifier(value, key, italian) {
+  if (value === undefined || value === null || String(value).trim() === "") return "";
+  // Reuse the exact same fail-closed validation used for descriptive values,
+  // then keep the familiar unquoted label used by the process summary.
+  workflowHumanSafeValue(String(value), italian, { key });
+  if (italian) {
+    const localized = workflowItalianPresentation(value);
+    if (localized) return localized;
+  }
+  return humanizeWorkflowIdentifier(value);
+}
+
+function workflowHumanStateName(definition, stateId, italian = false) {
+  const state = (Array.isArray(definition?.states) ? definition.states : [])
+    .find((candidate) => (candidate?.id ?? candidate) === stateId);
+  if (state?.id) workflowHumanDisplayIdentifier(state.id, "state_id", italian);
+  return workflowHumanDisplayIdentifier(
+    state?.label ?? state?.name ?? state?.title ?? state?.id ?? state ?? stateId,
+    "state_label",
+    italian,
+  );
+}
+
+function workflowHumanMainSequence(definition, italian) {
+  if (Array.isArray(definition?.phase_order) && definition.phase_order.length > 0) {
+    return definition.phase_order.map((stateId) => workflowHumanStateName(definition, stateId, italian));
+  }
+  const transitions = Array.isArray(definition?.transitions) ? definition.transitions : [];
+  const stateIds = (Array.isArray(definition?.states) ? definition.states : [])
+    .map((state) => state?.id ?? state)
+    .filter(Boolean);
+  if (!definition?.initial_state || transitions.length === 0) {
+    return stateIds.map((stateId) => workflowHumanStateName(definition, stateId, italian));
+  }
+  const sequence = [definition.initial_state];
+  const visited = new Set(sequence);
+  let current = definition.initial_state;
+  while (sequence.length <= stateIds.length) {
+    const next = transitions.find((transition) => transition.from === current && !visited.has(transition.to));
+    if (!next) break;
+    sequence.push(next.to);
+    visited.add(next.to);
+    current = next.to;
+  }
+  return sequence.map((stateId) => workflowHumanStateName(definition, stateId, italian));
+}
+
+function describeWorkflowGuard(guard, italian) {
+  const parameters = guard?.parameters || {};
+  workflowHumanDisplayIdentifier(guard?.id, "guard_id", italian);
+  if (guard?.id === "always") return null;
+  if (guard?.id === "checkpoint-approved") {
+    const review = workflowHumanDisplayIdentifier(parameters.checkpoint, "checkpoint", italian);
+    return italian
+      ? `deve essere confermata la revisione ${review || "prevista"}`
+      : `the ${review || "required"} review must be confirmed`;
+  }
+  if (guard?.id === "context-equals") {
+    const subject = parameters.key
+      ? workflowHumanMetadataLabel(parameters.key, italian)
+      : (italian ? "il dato richiesto" : "the required information");
+    const expected = workflowHumanSafeValue(parameters.value, italian, { key: parameters.key || "value" });
+    return italian ? `${subject} deve essere ${expected}` : `${subject} must be ${expected}`;
+  }
+  if (guard?.id === "context-present") {
+    const subject = parameters.key
+      ? workflowHumanMetadataLabel(parameters.key, italian)
+      : (italian ? "il dato richiesto" : "the required information");
+    return italian ? `${subject} deve essere disponibile` : `${subject} must be provided`;
+  }
+  return italian ? "deve essere soddisfatta la condizione di sicurezza configurata" : "the configured safety condition must be satisfied";
+}
+
+function workflowHumanConditionSentences(definition, italian) {
+  return (Array.isArray(definition?.transitions) ? definition.transitions : []).flatMap((transition) => {
+    const conditions = (Array.isArray(transition?.guards) ? transition.guards : [])
+      .map((guard) => describeWorkflowGuard(guard, italian))
+      .filter(Boolean);
+    if (conditions.length === 0) return [];
+    const from = workflowHumanStateName(definition, transition.from, italian);
+    const to = workflowHumanStateName(definition, transition.to, italian);
+    return [italian
+      ? `Per passare da ${from} a ${to}, ${conditions.join(" e ")}`
+      : `To move from ${from} to ${to}, ${conditions.join(" and ")}`];
+  });
+}
+
+function workflowHumanAllSteps(definition, italian) {
+  return (definition?.states ?? []).map((state) => {
+    const name = workflowHumanStateName(definition, state.id, italian);
+    const roles = [];
+    if (state.id === definition.initial_state) roles.push(italian ? "iniziale" : "starting");
+    if (state.terminal === true) roles.push(italian ? "finale" : "final");
+    return roles.length > 0 ? `${name} (${roles.join(", ")})` : name;
+  });
+}
+
+function workflowHumanAllRoutes(definition, italian) {
+  return (definition?.transitions ?? []).map((transition) => {
+    workflowHumanDisplayIdentifier(transition.id, "transition_id", italian);
+    const from = workflowHumanStateName(definition, transition.from, italian);
+    const to = workflowHumanStateName(definition, transition.to, italian);
+    const defaultLabel = `${humanizeWorkflowIdentifier(transition.from)} to ${humanizeWorkflowIdentifier(transition.to)}`;
+    const label = italian && transition.label === defaultLabel
+      ? "collegamento previsto"
+      : workflowHumanSafeValue(transition.label, italian, { key: "transition_label" });
+    const conditions = (transition.guards ?? [])
+      .map((guard) => describeWorkflowGuard(guard, italian))
+      .filter(Boolean);
+    const rule = conditions.length > 0
+      ? conditions.join(italian ? " e " : " and ")
+      : (italian ? "non richiede condizioni aggiuntive" : "requires no additional condition");
+    return `${from} → ${to} (${label}): ${rule}`;
+  });
+}
+
+const WORKFLOW_HUMAN_VALUE_LIMITS = Object.freeze({
+  textCharacters: 240,
+  collectionItems: 10,
+  nestingLevels: 3,
+  renderedCharacters: 4_000,
+});
+
+const WORKFLOW_HASH_LIKE_VALUE = /^(?:[a-f0-9]{32,}|[A-Za-z0-9+/]{40,}={0,2})$/u;
+const WORKFLOW_UUID_LIKE_VALUE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
+const WORKFLOW_UNSAFE_UNICODE = /[\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0\u{E0001}\u{E0020}-\u{E007F}]/u;
+
+function failWorkflowHumanValue(reason, italian) {
+  fail(italian
+    ? `Il processo o adattamento non può essere approvato in modo completo e leggibile: ${reason}. Riduci o suddividi il contenuto, quindi riproponilo.`
+    : `The process or adjustment cannot be reviewed completely and readably: ${reason}. Shorten or split the content, then propose it again.`);
+}
+
+function workflowHumanKeyParts(key) {
+  return String(key)
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+}
+
+function assertWorkflowHumanSafeCharacters(value, italian) {
+  const text = String(value);
+  if (WORKFLOW_UNSAFE_UNICODE.test(text) || [...text].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint >= 0xD800 && codePoint <= 0xDFFF;
+  })) {
+    failWorkflowHumanValue(italian
+      ? "un testo contiene caratteri di controllo, direzione o invisibili non sicuri"
+      : "text contains unsafe control, direction, or invisible characters", italian);
+  }
+}
+
+function workflowHumanSecretLikeKey(key) {
+  const words = workflowHumanKeyParts(key).map((part) => part.toLowerCase());
+  const joined = words.join(" ");
+  return words.some((word) => ["secret", "password", "passwd", "credential", "credentials", "token", "cookie"].includes(word))
+    || ["api key", "access key", "client secret", "private key"].some((phrase) => joined.includes(phrase));
+}
+
+function workflowHumanHashLikeKey(key) {
+  return workflowHumanKeyParts(key).some((part) => ["hash", "checksum", "digest"].includes(part.toLowerCase()));
+}
+
+function workflowHumanMetadataLabel(key, italian) {
+  assertWorkflowHumanSafeCharacters(key, italian);
+  if (workflowHumanSecretLikeKey(key)) {
+    failWorkflowHumanValue(italian
+      ? "le informazioni descrittive contengono una chiave che potrebbe custodire un segreto"
+      : "the descriptive information contains a key that could hold a secret", italian);
+  }
+  if (workflowHumanHashLikeKey(key)) {
+    failWorkflowHumanValue(italian
+      ? "un valore tecnico di verifica deve restare fuori dalle informazioni da approvare"
+      : "a technical verification value must stay outside the information being approved", italian);
+  }
+  const italianExactLabels = new Map([
+    ["normal_checkpoint_count", "Numero di momenti ordinari di conferma"],
+    ["workflow_kind", "Tipo di processo"],
+    ["phase_order", "Ordine dei passaggi"],
+    ["retention_days", "Giorni di conservazione"],
+    ["review_days", "Giorni per la revisione"],
+    ["after_days", "Dopo quanti giorni"],
+    ["audience", "Destinatari"], ["owners", "Responsabili"], ["owner", "Responsabile"],
+    ["review_settings", "Impostazioni di revisione"], ["mode", "Modalità"],
+    ["required", "Obbligatorio"], ["channels", "Canali"], ["policy", "Regole"],
+    ["mandatory", "Obbligatorio"], ["regions", "Aree"], ["region", "Area"],
+    ["approval_note", "Nota di approvazione"], ["team_authorized", "Autorizzazione del team"],
+  ]);
+  if (italian && italianExactLabels.has(String(key))) return italianExactLabels.get(String(key));
+  const replacements = italian
+    ? new Map([
+        ["id", "Riferimento"], ["identifier", "Riferimento"], ["path", "Posizione"],
+        ["workflow", "Processo"], ["overlay", "Adattamento"], ["definition", "Modello del processo"],
+        ["checkpoint", "Momento di revisione"], ["schema", "Formato dei dati"],
+        ["profile", "Scelta operativa"], ["receipt", "Prova"], ["metadata", "Informazioni"],
+        ["order", "Ordine"], ["count", "Numero"], ["kind", "Tipo"],
+      ])
+    : new Map([
+        ["id", "Reference"], ["identifier", "Reference"], ["path", "Location"],
+        ["workflow", "Process"], ["overlay", "Adjustment"], ["definition", "Process model"],
+        ["checkpoint", "Review moment"], ["schema", "Data format"],
+        ["profile", "Working choice"], ["receipt", "Proof"], ["metadata", "Information"],
+      ]);
+  return workflowHumanKeyParts(key)
+    .map((part) => replacements.get(part.toLowerCase()) ?? humanizeWorkflowIdentifier(part))
+    .join(" ");
+}
+
+function workflowHumanFriendlyString(value, key, italian) {
+  assertWorkflowHumanSafeCharacters(value, italian);
+  if (value.length > WORKFLOW_HUMAN_VALUE_LIMITS.textCharacters) {
+    failWorkflowHumanValue(italian
+      ? `un testo supera ${WORKFLOW_HUMAN_VALUE_LIMITS.textCharacters} caratteri`
+      : `one text value exceeds ${WORKFLOW_HUMAN_VALUE_LIMITS.textCharacters} characters`, italian);
+  }
+  if (WORKFLOW_HASH_LIKE_VALUE.test(value) || WORKFLOW_UUID_LIKE_VALUE.test(value)) {
+    failWorkflowHumanValue(italian
+      ? "un riferimento tecnico non ha un nome comprensibile per la revisione umana"
+      : "a technical reference has no human-readable name for review", italian);
+  }
+  if (/(?:^|\s)--[a-z]|(?:^|\s)(?:\.{0,2}|~)\/[A-Za-z0-9]|^[A-Za-z]:\\/iu.test(value)) {
+    failWorkflowHumanValue(italian
+      ? "un comando o una posizione tecnica è stato inserito nelle informazioni descrittive"
+      : "a command or technical location was placed in the descriptive information", italian);
+  }
+  const italianExactCopy = new Map([
+    ["Software project governed workflow preset.", "Processo governato predefinito per un progetto software."],
+    ["Change request governed workflow preset.", "Processo governato predefinito per una richiesta di modifica."],
+    ["Technical assessment governed workflow preset.", "Processo governato predefinito per una valutazione tecnica."],
+    ["Generic governed process governed workflow preset.", "Processo governato generico predefinito."],
+  ]);
+  const presentationValue = (italian ? italianExactCopy.get(value) : null)
+    ?? (italian ? workflowItalianPresentation(value) : null)
+    ?? value;
+  const identifierKey = workflowHumanKeyParts(key).some((part) => ["id", "identifier"].includes(part.toLowerCase()));
+  const identifierValue = /^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+$/u.test(value);
+  let friendly = presentationValue === value && (identifierKey || identifierValue)
+    ? humanizeWorkflowIdentifier(value)
+    : presentationValue;
+  const contentIsItalian = /\b(?:il|lo|la|gli|le|un|una|di|del|della|per|con|senza|approvazione|revisione)\b/iu.test(value);
+  const vocabulary = italian || contentIsItalian
+    ? [
+        [/\bbounded[-_ ]autonomous\b/giu, "completamento entro i limiti approvati"],
+        [/\bcheckpointed\b/giu, "avanzamento tra i momenti di revisione concordati"],
+        [/\baudit[-_ ]only\b/giu, "approvazione registrata ma non verificata esternamente"],
+        [/\bworkflow\b/giu, "processo"], [/\boverlay\b/giu, "adattamento"],
+        [/\bdefinition\b/giu, "modello del processo"], [/\bcheckpoint\b/giu, "momento di revisione"],
+        [/\bschema\b/giu, "formato dei dati"], [/\bprofile\b/giu, "scelta operativa"],
+        [/\breceipt\b/giu, "prova"],
+      ]
+    : [
+        [/\bbounded[-_ ]autonomous\b/giu, "completion within the approved limits"],
+        [/\bcheckpointed\b/giu, "progress between the agreed review moments"],
+        [/\baudit[-_ ]only\b/giu, "approval recorded but not externally verified"],
+        [/\bworkflow\b/giu, "process"], [/\boverlay\b/giu, "adjustment"],
+        [/\bdefinition\b/giu, "process model"], [/\bcheckpoint\b/giu, "review moment"],
+        [/\bschema\b/giu, "data format"], [/\bprofile\b/giu, "working choice"],
+        [/\breceipt\b/giu, "proof"],
+      ];
+  for (const [pattern, replacement] of vocabulary) friendly = friendly.replace(pattern, replacement);
+  const escaped = friendly
+    .replaceAll("\\", "\\\\")
+    .replaceAll("“", "\\“")
+    .replaceAll("”", "\\”");
+  return `“${escaped}”`;
+}
+
+function workflowHumanSafeValue(value, italian, { key = "value", depth = 0 } = {}) {
+  if (depth > WORKFLOW_HUMAN_VALUE_LIMITS.nestingLevels) {
+    failWorkflowHumanValue(italian
+      ? `un valore supera ${WORKFLOW_HUMAN_VALUE_LIMITS.nestingLevels} livelli di dettaglio`
+      : `one value exceeds ${WORKFLOW_HUMAN_VALUE_LIMITS.nestingLevels} levels of detail`, italian);
+  }
+  if (typeof value === "string") return workflowHumanFriendlyString(value, key, italian);
+  if (value === null) return italian ? "vuoto" : "empty";
+  if (value === true) return italian ? "sì" : "yes";
+  if (value === false) return "no";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : (italian ? "numero non valido" : "invalid number");
+  if (Array.isArray(value)) {
+    if (value.length > WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems) {
+      failWorkflowHumanValue(italian
+        ? `un elenco contiene più di ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} valori`
+        : `one list contains more than ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} values`, italian);
+    }
+    const items = value.map((item) => workflowHumanSafeValue(item, italian, { key, depth: depth + 1 }));
+    return `${italian ? "elenco" : "list"} (${items.join(", ")})`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length > WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems) {
+      failWorkflowHumanValue(italian
+        ? `un gruppo contiene più di ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} valori`
+        : `one group contains more than ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} values`, italian);
+    }
+    const rendered = entries.map(([nestedKey, nestedValue]) =>
+      `${workflowHumanMetadataLabel(nestedKey, italian)} = ${workflowHumanSafeValue(nestedValue, italian, { key: nestedKey, depth: depth + 1 })}`);
+    return `${italian ? "dettagli" : "details"} (${rendered.join("; ")})`;
+  }
+  failWorkflowHumanValue(italian ? "un valore non è descrivibile" : "one value cannot be described", italian);
+}
+
+function workflowHumanValuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function workflowHumanMetadataChanges(before, after, patch, italian) {
+  const entries = Object.entries(patch ?? {});
+  if (entries.length > WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems) {
+    failWorkflowHumanValue(italian
+      ? `un gruppo contiene più di ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} modifiche`
+      : `one group contains more than ${WORKFLOW_HUMAN_VALUE_LIMITS.collectionItems} changes`, italian);
+  }
+  return entries.flatMap(([key, requestedValue]) => {
+    const nextValue = Object.hasOwn(after ?? {}, key) ? after[key] : requestedValue;
+    const hadPrevious = Object.hasOwn(before ?? {}, key);
+    if (hadPrevious && workflowHumanValuesEqual(before[key], nextValue)) return [];
+    const label = workflowHumanMetadataLabel(key, italian);
+    const next = workflowHumanSafeValue(nextValue, italian, { key });
+    if (!hadPrevious) return [italian ? `${label} viene impostato su ${next}` : `${label} is set to ${next}`];
+    const previous = workflowHumanSafeValue(before[key], italian, { key });
+    return [italian ? `${label} cambia da ${previous} a ${next}` : `${label} changes from ${previous} to ${next}`];
+  });
+}
+
+function workflowHumanMetadataDifference(scope, before, after, patch, italian) {
+  const changes = workflowHumanMetadataChanges(before, after, patch, italian);
+  if (changes.length === 0) return null;
+  return italian ? `${scope}: ${changes.join("; ")}` : `${scope}: ${changes.join("; ")}`;
+}
+
+function workflowHumanOverlayDifferences(definition, overlay, effective, italian) {
+  const differences = [];
+  const baseLabel = definition?.label ?? definition?.name ?? definition?.title;
+  if (overlay?.label && overlay.label !== baseLabel) {
+    const before = workflowHumanSafeValue(baseLabel, italian, { key: "label" });
+    const after = workflowHumanSafeValue(overlay.label, italian, { key: "label" });
+    differences.push(italian
+      ? `il nome mostrato cambia da ${before} a ${after}`
+      : `the displayed name changes from ${before} to ${after}`);
+  }
+  if (overlay?.description && overlay.description !== definition?.description) {
+    const after = workflowHumanSafeValue(overlay.description, italian, { key: "description" });
+    if (definition?.description) {
+      const before = workflowHumanSafeValue(definition.description, italian, { key: "description" });
+      differences.push(italian
+        ? `la descrizione mostrata cambia da ${before} a ${after}`
+        : `the displayed description changes from ${before} to ${after}`);
+    } else {
+      differences.push(italian ? `la descrizione mostrata diventa ${after}` : `the displayed description becomes ${after}`);
+    }
+  }
+  for (const override of overlay?.state_overrides ?? []) {
+    const baseState = (definition?.states ?? []).find((entry) => entry.id === override.state_id);
+    const effectiveState = (effective?.states ?? []).find((entry) => entry.id === override.state_id);
+    const before = workflowHumanStateName(definition, override.state_id, italian);
+    const after = workflowHumanStateName(effective, override.state_id, italian);
+    if (override.label && before !== after) {
+      differences.push(italian
+        ? `il passaggio “${before}” viene mostrato come “${after}”`
+        : `the “${before}” step is shown as “${after}”`);
+    }
+    if (override.metadata && Object.keys(override.metadata).length > 0) {
+      const difference = workflowHumanMetadataDifference(
+        italian ? `informazioni del passaggio “${after || before}”` : `information for the “${after || before}” step`,
+        baseState?.metadata,
+        effectiveState?.metadata,
+        override.metadata,
+        italian,
+      );
+      if (difference) differences.push(difference);
+    }
+  }
+  for (const override of overlay?.transition_overrides ?? []) {
+    const baseTransition = (definition?.transitions ?? []).find((entry) => entry.id === override.transition_id);
+    const effectiveTransition = (effective?.transitions ?? []).find((entry) => entry.id === override.transition_id);
+    const from = workflowHumanStateName(effective, baseTransition?.from, italian);
+    const to = workflowHumanStateName(effective, baseTransition?.to, italian);
+    if (override.label && override.label !== baseTransition?.label) {
+      const label = workflowHumanSafeValue(override.label, italian, { key: "transition_label" });
+      differences.push(italian
+        ? `il collegamento da “${from}” a “${to}” viene mostrato come ${label}`
+        : `the route from “${from}” to “${to}” is shown as ${label}`);
+    }
+    if ((override.guard_parameters ?? []).length > 0) {
+      const conditions = (effectiveTransition?.guards ?? [])
+        .map((guard) => describeWorkflowGuard(guard, italian))
+        .filter(Boolean);
+      differences.push(italian
+        ? `per passare da “${from}” a “${to}”, ${conditions.join(" e ") || "si applica la condizione concordata"}`
+        : `to move from “${from}” to “${to}”, ${conditions.join(" and ") || "the agreed condition must be met"}`);
+    }
+    if (override.metadata && Object.keys(override.metadata).length > 0) {
+      const difference = workflowHumanMetadataDifference(
+        italian ? `informazioni del collegamento da “${from}” a “${to}”` : `information for the route from “${from}” to “${to}”`,
+        baseTransition?.metadata,
+        effectiveTransition?.metadata,
+        override.metadata,
+        italian,
+      );
+      if (difference) differences.push(difference);
+    }
+  }
+  if (overlay?.metadata && Object.keys(overlay.metadata).length > 0) {
+    const difference = workflowHumanMetadataDifference(
+      italian ? "informazioni generali" : "general information",
+      definition?.metadata,
+      effective?.metadata,
+      overlay.metadata,
+      italian,
+    );
+    if (difference) differences.push(difference);
+  }
+  if (differences.join("; ").length > WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters) {
+    failWorkflowHumanValue(italian
+      ? `il riepilogo supera ${WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters} caratteri`
+      : `the review summary exceeds ${WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters} characters`, italian);
+  }
+  return differences;
+}
+
+function workflowHumanDefinitionDetails(definition, italian) {
+  const details = [];
+  const name = definition?.label ?? definition?.name ?? definition?.title;
+  if (name) {
+    details.push(italian
+      ? `nome mostrato: ${workflowHumanSafeValue(name, italian, { key: "name" })}`
+      : `displayed name: ${workflowHumanSafeValue(name, italian, { key: "name" })}`);
+  }
+  if (definition?.description) {
+    details.push(italian
+      ? `scopo: ${workflowHumanSafeValue(definition.description, italian, { key: "description" })}`
+      : `purpose: ${workflowHumanSafeValue(definition.description, italian, { key: "description" })}`);
+  }
+  const general = workflowHumanMetadataDifference(
+    italian ? "informazioni generali" : "general information",
+    {}, definition?.metadata, definition?.metadata, italian,
+  );
+  if (general) details.push(general);
+  for (const state of definition?.states ?? []) {
+    const stateName = workflowHumanStateName(definition, state.id, italian);
+    if (state.description) {
+      details.push(italian
+        ? `descrizione del passaggio “${stateName}”: ${workflowHumanSafeValue(state.description, italian, { key: "description" })}`
+        : `description of the “${stateName}” step: ${workflowHumanSafeValue(state.description, italian, { key: "description" })}`);
+    }
+    const metadata = workflowHumanMetadataDifference(
+      italian ? `informazioni del passaggio “${stateName}”` : `information for the “${stateName}” step`,
+      {}, state.metadata, state.metadata, italian,
+    );
+    if (metadata) details.push(metadata);
+  }
+  for (const transition of definition?.transitions ?? []) {
+    const from = workflowHumanStateName(definition, transition.from, italian);
+    const to = workflowHumanStateName(definition, transition.to, italian);
+    if (transition.description) {
+      details.push(italian
+        ? `descrizione del collegamento da “${from}” a “${to}”: ${workflowHumanSafeValue(transition.description, italian, { key: "description" })}`
+        : `description of the route from “${from}” to “${to}”: ${workflowHumanSafeValue(transition.description, italian, { key: "description" })}`);
+    }
+    const metadata = workflowHumanMetadataDifference(
+      italian ? `informazioni del collegamento da “${from}” a “${to}”` : `information for the route from “${from}” to “${to}”`,
+      {}, transition.metadata, transition.metadata, italian,
+    );
+    if (metadata) details.push(metadata);
+  }
+  return details;
+}
+
+function workflowHumanReviewLines(
+  definition,
+  options,
+  { overlay = null, effective = definition, requiresConfirmation = true } = {},
+) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const sequence = workflowHumanMainSequence(effective, italian);
+  const initial = workflowHumanStateName(effective, effective?.initial_state, italian);
+  const allSteps = workflowHumanAllSteps(effective, italian);
+  const allRoutes = workflowHumanAllRoutes(effective, italian);
+  const conditions = workflowHumanConditionSentences(effective, italian);
+  const reviews = (effective?.normal_checkpoints ?? [])
+    .map((checkpoint) => workflowHumanDisplayIdentifier(checkpoint, "checkpoint", italian))
+    .filter(Boolean);
+  const differences = overlay ? workflowHumanOverlayDifferences(definition, overlay, effective, italian) : [];
+  const descriptiveDetails = overlay ? [] : workflowHumanDefinitionDetails(effective, italian);
+  const lines = [
+    `${italian ? "Percorso principale" : "Main sequence"}: ${sequence.join(" → ") || (italian ? "nessun passaggio definito" : "no steps defined")}.`,
+    `${italian ? "Punto di partenza" : "Starting point"}: ${initial || (italian ? "non definito" : "not defined")}.`,
+    `${italian ? "Tutti i passaggi" : "All steps"}: ${allSteps.join("; ") || (italian ? "nessuno" : "none")}.`,
+    `${italian ? "Tutti i collegamenti consentiti" : "All allowed routes"}: ${allRoutes.join("; ") || (italian ? "nessuno" : "none")}.`,
+    `${italian ? "Controlli e condizioni" : "Checks and conditions"}: ${conditions.length > 0
+      ? `${conditions.join("; ")}.`
+      : (italian ? "non sono richieste condizioni aggiuntive tra i passaggi elencati." : "no additional conditions are required between the listed steps.")}`,
+    `${italian ? "Momenti ordinari di conferma" : "Usual review moments"}: ${reviews.length > 0
+      ? `${reviews.join(", ")}.`
+      : (italian ? "questo processo non ne prevede." : "this process defines none.")}`,
+    ...(!overlay ? [`${requiresConfirmation
+      ? (italian ? "Contenuto descrittivo da confermare" : "Descriptive content to confirm")
+      : (italian ? "Contenuto descrittivo" : "Descriptive content")}: ${descriptiveDetails.length > 0
+      ? `${descriptiveDetails.join("; ")}.`
+      : (italian ? "non sono presenti altre informazioni descrittive." : "there is no additional descriptive information.")}`] : []),
+    ...(overlay ? [`${italian ? "Cosa cambia con questo adattamento" : "What this adjustment changes"}: ${differences.length > 0
+      ? `${differences.join("; ")}.`
+      : (italian ? "non cambia testi, condizioni o informazioni descrittive." : "it changes no wording, conditions, or descriptive information.")}`] : []),
+  ];
+  if (lines.join("\n").length > WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters) {
+    failWorkflowHumanValue(italian
+      ? `il riepilogo supera ${WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters} caratteri`
+      : `the review summary exceeds ${WORKFLOW_HUMAN_VALUE_LIMITS.renderedCharacters} characters`, italian);
+  }
+  return lines;
 }
 
 function listWorkflowDefinitionsCommand(context, options) {
@@ -1423,19 +2002,20 @@ function showWorkflowDefinition(context, options) {
       }));
     resolved = { id, version: preset.version, path: null, record: preset, included: true };
   }
+  const requiresConfirmation = resolved.record.status === "proposed";
   outputWorkflowResult(options, {
     schema_version: "workflow-definition-view:v1",
     status: resolved.record.status || "ready",
     source: resolved.included ? "included" : "project",
     path: resolved.path ? toProjectPath(context, resolved.path) : null,
     definition: resolved.record,
-  }, "shown", [
+  }, requiresConfirmation ? "shown_proposed" : "shown_approved", [
     `Definition: ${resolved.record.id} version ${resolved.record.version}`,
     `Status: ${resolved.record.status || "included"}`,
     `Initial state: ${resolved.record.initial_state}`,
     `States: ${Array.isArray(resolved.record.states) ? resolved.record.states.map((state) => state.id || state).join(", ") : Object.keys(resolved.record.states || {}).join(", ")}`,
     ...(resolved.path ? [`Path: ${toProjectPath(context, resolved.path)}`] : ["Source: included preset"]),
-  ]);
+  ], workflowHumanReviewLines(resolved.record, options, { requiresConfirmation }));
 }
 
 function proposeWorkflowDefinition(context, options) {
@@ -1472,6 +2052,7 @@ function proposeWorkflowDefinition(context, options) {
   if (summary) input = { ...input, description: input.description || summary };
   const definition = callWorkflowDomain("Unable to prepare workflow definition", () => buildWorkflowDefinition(input));
   validateWorkflowDefinitionRecord(definition, `workflow definition ${id}`);
+  const reviewLines = workflowHumanReviewLines(definition, options);
   const filePath = workflowDefinitionPath(context, id, version);
   writeJsonFile(filePath, definition, { force: false });
   const attribution = buildAttribution(context, options, "workflow.definition.propose");
@@ -1496,7 +2077,7 @@ function proposeWorkflowDefinition(context, options) {
     `Path: ${toProjectPath(context, filePath)}`,
     `Content hash: ${definition.definition_hash}`,
     `Approve: agentic-sdlc workflow definition approve --id ${id} --definition-version ${version} --actor-type human --approval-source explicit-user --summary "Approved the displayed steps, checks, and limits"`,
-  ]);
+  ], reviewLines);
 }
 
 function approveWorkflowDefinitionCommand(context, options) {
@@ -1508,6 +2089,7 @@ function approveWorkflowDefinitionCommand(context, options) {
     fail(`Workflow definition ${id} version ${version} is '${resolved.record.status}', expected proposed.`);
   }
   validateWorkflowDefinitionRecord(resolved.record, `workflow definition ${id}`);
+  workflowHumanReviewLines(resolved.record, options);
   const attribution = buildAttribution(context, options, "workflow.definition.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a workflow definition");
   const approval = buildApprovalRecord(context, options, attribution, {
@@ -1521,6 +2103,7 @@ function approveWorkflowDefinitionCommand(context, options) {
   const approved = callWorkflowDomain("Unable to approve workflow definition", () =>
     approveWorkflowDefinition(resolved.record, { approval: workflowApprovalForDomain(approval) }));
   validateWorkflowDefinitionRecord(approved, `approved workflow definition ${id}`);
+  const reviewLines = workflowHumanReviewLines(approved, options, { requiresConfirmation: false });
   writeJsonFile(resolved.path, approved, { force: true });
   appendTraceEvent(context, null, {
     type: "gate",
@@ -1544,7 +2127,7 @@ function approveWorkflowDefinitionCommand(context, options) {
     `Definition: ${id} version ${version}`,
     `Approval: ${approval.id}`,
     `Path: ${toProjectPath(context, resolved.path)}`,
-  ]);
+  ], reviewLines);
 }
 
 function workflowDefinitionRef(definition) {
@@ -1588,6 +2171,7 @@ function proposeWorkflowOverlay(context, options) {
   validateWorkflowOverlayRecord(overlay, definition, `workflow overlay ${id}`);
   const effective = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
     applyWorkflowOverlay(definition, overlay, { allow_proposed: true }));
+  const reviewLines = workflowHumanReviewLines(definition, options, { overlay, effective });
   const filePath = workflowOverlayPath(context, id, version);
   writeJsonFile(filePath, overlay, { force: false });
   const attribution = buildAttribution(context, options, "workflow.overlay.propose");
@@ -1617,7 +2201,7 @@ function proposeWorkflowOverlay(context, options) {
     `Path: ${toProjectPath(context, filePath)}`,
     `Content hash: ${overlay.overlay_hash}`,
     `Effective hash: ${effective.effective_hash}`,
-  ]);
+  ], reviewLines);
 }
 
 function approveWorkflowOverlayCommand(context, options) {
@@ -1631,6 +2215,9 @@ function approveWorkflowOverlayCommand(context, options) {
   const definitionEntry = workflowDefinitionForOverlay(context, resolved.record);
   const definition = definitionEntry.record;
   validateWorkflowOverlayRecord(resolved.record, definition, `workflow overlay ${id}`);
+  const effective = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
+    applyWorkflowOverlay(definition, resolved.record, { allow_proposed: true }));
+  const reviewLines = workflowHumanReviewLines(definition, options, { overlay: resolved.record, effective });
   const attribution = buildAttribution(context, options, "workflow.overlay.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a workflow overlay");
   const approval = buildApprovalRecord(context, options, attribution, {
@@ -1670,7 +2257,7 @@ function approveWorkflowOverlayCommand(context, options) {
     `Overlay: ${id} version ${version}`,
     `Approval: ${approval.id}`,
     `Path: ${toProjectPath(context, resolved.path)}`,
-  ]);
+  ], reviewLines);
 }
 
 function workflowDefinitionForOverlay(context, overlay) {
@@ -1741,7 +2328,7 @@ function explainWorkflowOverlay(context, options) {
     `Changes: ${changes.length}`,
     `Effective hash: ${effective.effective_hash}`,
     `Path: ${toProjectPath(context, resolved.path)}`,
-  ]);
+  ], workflowHumanReviewLines(definitionEntry.record, options, { overlay: resolved.record, effective }));
 }
 
 function startWorkflowInstance(context, options) {
@@ -1775,48 +2362,119 @@ function startWorkflowInstance(context, options) {
   }
   const attribution = buildAttribution(context, options, "workflow.instance.start");
   const summary = getOptionString(options, "summary");
-  const instance = callWorkflowDomain("Unable to start workflow instance", () => createWorkflowInstance({
-    id,
-    effective_definition: effectiveDefinition,
-    created_at: now(),
-    actor: attribution.actor,
-    ...(summary ? { metadata: { summary } } : {}),
-  }));
   const instancePath = workflowInstancePath(context, id);
   const eventsPath = workflowEventsPath(context, id);
-  if (fs.existsSync(workflowInstanceRoot(context, id))) {
-    fail(`Workflow instance ${id} already exists.`);
-  }
-  writeJsonFile(instancePath, instance, { force: false });
+  const checkpointPath = workflowCheckpointPath(context, id);
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const creationLockPath = workflowInstanceCreationLockPath(context, id);
+  const startTransactionPath = workflowInstanceStartTransactionPath(context, id);
+  const startRequest = buildWorkflowStartRequest(
+    id,
+    definition,
+    overlayEntry,
+    effectiveDefinition,
+    attribution.actor,
+    summary,
+  );
+  const releaseCreationLock = acquireFileLock(creationLockPath);
+  let instance;
+  let checkpoint;
+  let recovered = false;
   try {
-    writeTextFile(eventsPath, "", { force: false });
-  } catch (error) {
-    if (fs.existsSync(instancePath)) fs.rmSync(instancePath);
-    throw error;
+    const pending = readWorkflowStartTransaction(context, id);
+    let journal;
+    if (pending.exists) {
+      if (!pending.valid) {
+        fail(`Workflow instance ${id} has an unreadable interrupted start record: ${pending.errors.join("; ")}`);
+      }
+      const errors = workflowStartTransactionErrors(
+        pending.journal,
+        startRequest,
+        effectiveDefinition,
+      );
+      if (errors.length > 0) {
+        fail(`Workflow instance ${id} has an interrupted start that does not match this request: ${errors.join("; ")}`);
+      }
+      journal = pending.journal;
+      instance = journal.instance;
+      checkpoint = journal.checkpoint;
+      recovered = true;
+    } else {
+      if (fs.existsSync(workflowInstanceRoot(context, id))) {
+        fail(`Workflow instance ${id} already exists.`);
+      }
+      if (fs.existsSync(workflowInstanceStagingRoot(context, id))) {
+        fail(`Workflow instance ${id} has staging data without a trusted start record; remove it only after restoring or auditing the original transaction.`);
+      }
+      instance = callWorkflowDomain("Unable to start workflow instance", () => createWorkflowInstance({
+        id,
+        effective_definition: effectiveDefinition,
+        created_at: now(),
+        actor: attribution.actor,
+        ...(summary ? { metadata: { summary } } : {}),
+      }));
+      const startTrace = buildWorkflowStartTraceRecord(
+        context,
+        instance,
+        definition,
+        overlayEntry,
+        attribution,
+        [instancePath, eventsPath, checkpointPath],
+      );
+      checkpoint = callWorkflowDomain("Unable to create the workflow integrity checkpoint", () =>
+        createWorkflowCheckpoint({
+          instance,
+          effective_definition: effectiveDefinition,
+          events: [],
+          trace_chain_hash: extendWorkflowTraceChain(null, startTrace),
+        }));
+      journal = { startTrace };
+    }
+    const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+    try {
+      if (!pending.exists) {
+        const ownershipConflicts = inspectWorkflowTraceOwnershipConflictsLocked(context, id, tracePath);
+        if (ownershipConflicts.length > 0) {
+          fail(`Workflow instance ${id} already has conflicting audit ownership: ${ownershipConflicts.join("; ")}`);
+        }
+        const traceIntent = inspectWorkflowTraceIntent(context, journal.startTrace);
+        if (!traceIntent.valid || traceIntent.exists) {
+          fail(traceIntent.errors[0] || `Trace id ${journal.startTrace.id} already exists before the workflow instance was created.`);
+        }
+        journal = buildWorkflowStartTransaction({
+          request: startRequest,
+          instance,
+          checkpoint,
+          trace_event: journal.startTrace,
+          trace_anchor: workflowTraceAnchor(tracePath),
+        });
+        ensureWorkflowDirectoryDurably(path.dirname(startTransactionPath));
+        writeWorkflowJsonDurably(startTransactionPath, journal, { atomicCreate: true });
+      }
+      completeWorkflowStartTransactionLocked(context, journal);
+    } finally {
+      releaseTraceLock();
+    }
+  } finally {
+    releaseCreationLock();
   }
-  appendTraceEvent(context, null, {
-    type: "implementation",
-    outcome: "ready",
-    summary: `Started workflow instance ${id}`,
-    action: "workflow.instance.start",
-    actor: attribution.actor,
-    evidence: [toProjectPath(context, instancePath), toProjectPath(context, eventsPath)],
-    related: [id, definition.id, ...(overlayEntry ? [overlayEntry.record.id] : [])],
-    git: attribution.git,
-    run: attribution.run,
-  });
   outputWorkflowResult(options, {
     schema_version: "workflow-instance-start:v1",
     status: "started",
     instance_path: toProjectPath(context, instancePath),
     events_path: toProjectPath(context, eventsPath),
+    checkpoint_path: toProjectPath(context, checkpointPath),
+    recovered,
     instance,
+    checkpoint,
   }, "started", [
     `Instance: ${id}`,
     `Definition: ${definition.id} version ${definition.version}`,
     ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
     `Initial state: ${instance.current_state || instance.initial_state || effectiveDefinition.initial_state}`,
     `Path: ${toProjectPath(context, instancePath)}`,
+    `Integrity checkpoint: ${toProjectPath(context, checkpointPath)}`,
+    ...(recovered ? ["Recovered the exact interrupted start without creating a duplicate instance."] : []),
   ]);
 }
 
@@ -1838,6 +2496,1085 @@ function readWorkflowInstance(context, id) {
   const instancePath = workflowInstancePath(context, id);
   if (!fs.existsSync(instancePath)) fail(`Workflow instance ${id} does not exist.`);
   return { instancePath, instance: readProjectJson(context, instancePath) };
+}
+
+function readCompletedWorkflowInstance(context, id) {
+  const releaseCreationLock = acquireFileLock(workflowInstanceCreationLockPath(context, id));
+  try {
+    // A workflow start publishes several durable records. Waiting on the
+    // creation lock prevents status or transition from observing that set
+    // before its trace has committed or the whole start has rolled back.
+    if (fs.existsSync(workflowInstanceStartTransactionPath(context, id))) {
+      fail(`Workflow instance ${id} has an interrupted start. Status and transitions remain unavailable; repeat the exact start command to complete it safely.`);
+    }
+    return readWorkflowInstance(context, id);
+  } finally {
+    releaseCreationLock();
+  }
+}
+
+function readWorkflowCheckpoint(context, instanceId) {
+  const checkpointPath = workflowCheckpointPath(context, instanceId);
+  if (!fs.existsSync(checkpointPath)) {
+    return {
+      valid: false,
+      checkpoint: null,
+      checkpointPath,
+      errors: [`Workflow instance ${instanceId} is missing its durable integrity checkpoint.`],
+    };
+  }
+  try {
+    return {
+      valid: true,
+      checkpoint: JSON.parse(readProjectText(context, checkpointPath)),
+      checkpointPath,
+      errors: [],
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      checkpoint: null,
+      checkpointPath,
+      errors: [`Workflow instance ${instanceId} integrity checkpoint cannot be read: ${error.message}`],
+    };
+  }
+}
+
+function workflowTransitionJournalHash(journal) {
+  const { transaction_hash: _transactionHash, ...hashInput } = journal;
+  return computeStableHash(hashInput);
+}
+
+function buildWorkflowStartTraceRecord(context, instance, definition, overlayEntry, attribution, paths) {
+  return {
+    id: `TR-WF-START-${instance.instance_hash.slice(0, 24)}`,
+    story_id: null,
+    type: "implementation",
+    summary: `Started workflow instance ${instance.id}`,
+    outcome: "ready",
+    actor: attribution.actor,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: "workflow.instance.start",
+    evidence: paths.map((filePath) => toProjectPath(context, filePath)),
+    related: [instance.id, definition.id, ...(overlayEntry ? [overlayEntry.record.id] : [])],
+    git: attribution.git,
+    run: attribution.run,
+    created_at: instance.created_at,
+  };
+}
+
+function extendWorkflowTraceChain(previousTraceChainHash, traceEvent) {
+  if (
+    previousTraceChainHash !== null
+    && (typeof previousTraceChainHash !== "string" || !/^[a-f0-9]{64}$/u.test(previousTraceChainHash))
+  ) {
+    fail("Workflow trace chain has an invalid previous digest.");
+  }
+  return computeStableHash({
+    previous_trace_chain_hash: previousTraceChainHash,
+    trace_event: traceEvent,
+  });
+}
+
+function workflowStartRequestHash(request) {
+  const { intent_hash: _intentHash, ...hashInput } = request;
+  return computeStableHash(hashInput);
+}
+
+function buildWorkflowStartRequest(id, definition, overlayEntry, effectiveDefinition, actor, summary) {
+  const request = {
+    instance_id: id,
+    definition_ref: workflowDefinitionRef(definition),
+    overlay_ref: overlayEntry
+      ? {
+          id: overlayEntry.record.id,
+          version: overlayEntry.record.version,
+          hash: overlayEntry.record.overlay_hash,
+        }
+      : null,
+    effective_hash: effectiveDefinition.effective_hash,
+    actor,
+    summary: summary || null,
+  };
+  return { ...request, intent_hash: workflowStartRequestHash(request) };
+}
+
+function workflowStartTransactionHash(journal) {
+  const { transaction_hash: _TransactionHash, ...hashInput } = journal;
+  return computeStableHash(hashInput);
+}
+
+function buildWorkflowStartTransaction({ request, instance, checkpoint, trace_event, trace_anchor }) {
+  const journal = {
+    kind: "workflow_instance_start_transaction",
+    schema_version: "workflow-instance-start-transaction:v1",
+    request,
+    instance,
+    checkpoint,
+    trace_event,
+    trace_anchor,
+  };
+  return { ...journal, transaction_hash: workflowStartTransactionHash(journal) };
+}
+
+function readWorkflowStartTransaction(context, instanceId) {
+  const transactionPath = workflowInstanceStartTransactionPath(context, instanceId);
+  if (!fs.existsSync(transactionPath)) {
+    return { exists: false, valid: true, transactionPath, journal: null, errors: [] };
+  }
+  try {
+    return {
+      exists: true,
+      valid: true,
+      transactionPath,
+      journal: JSON.parse(readProjectText(context, transactionPath)),
+      errors: [],
+    };
+  } catch (error) {
+    return {
+      exists: true,
+      valid: false,
+      transactionPath,
+      journal: null,
+      errors: [`Interrupted workflow start record cannot be read: ${error.message}`],
+    };
+  }
+}
+
+function workflowTraceAnchorErrors(anchor) {
+  const errors = [];
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) {
+    return ["trace anchor must be an object"];
+  }
+  const unknown = Object.keys(anchor).filter((key) => !["size_bytes", "prefix_hash"].includes(key));
+  if (unknown.length > 0) errors.push(`trace anchor has unsupported fields: ${unknown.join(", ")}`);
+  if (!Number.isSafeInteger(anchor.size_bytes) || anchor.size_bytes < 0) {
+    errors.push("trace anchor size must be a non-negative whole number");
+  }
+  if (typeof anchor.prefix_hash !== "string" || !/^[a-f0-9]{64}$/u.test(anchor.prefix_hash)) {
+    errors.push("trace anchor prefix hash is invalid");
+  }
+  return errors;
+}
+
+function workflowStartTransactionErrors(journal, expectedRequest, effectiveDefinition) {
+  const errors = [];
+  if (!journal || typeof journal !== "object" || Array.isArray(journal)) {
+    return ["start transaction must be a JSON object"];
+  }
+  const allowedKeys = new Set([
+    "kind", "schema_version", "request", "instance", "checkpoint", "trace_event", "trace_anchor", "transaction_hash",
+  ]);
+  const unknown = Object.keys(journal).filter((key) => !allowedKeys.has(key));
+  if (unknown.length > 0) errors.push(`start transaction has unsupported fields: ${unknown.join(", ")}`);
+  if (
+    journal.kind !== "workflow_instance_start_transaction"
+    || journal.schema_version !== "workflow-instance-start-transaction:v1"
+  ) {
+    errors.push("start transaction has an unsupported format");
+  }
+  if (stableJson(journal.request) !== stableJson(expectedRequest)) {
+    errors.push("start intent differs from the interrupted request");
+  }
+  if (journal.request?.intent_hash !== workflowStartRequestHash(journal.request || {})) {
+    errors.push("start intent hash does not match its content");
+  }
+  if (journal.transaction_hash !== workflowStartTransactionHash(journal)) {
+    errors.push("start transaction hash does not match its content");
+  }
+  errors.push(...workflowTraceAnchorErrors(journal.trace_anchor));
+  if (
+    journal.instance?.id !== expectedRequest.instance_id
+    || journal.instance?.effective_hash !== effectiveDefinition.effective_hash
+  ) {
+    errors.push("start transaction instance does not match the requested process");
+  }
+  try {
+    const checkpointValidation = validateWorkflowCheckpoint(journal.checkpoint, {
+      instance: journal.instance,
+      effective_definition: effectiveDefinition,
+    });
+    if (checkpointValidation?.valid !== true) {
+      errors.push(...(checkpointValidation?.errors || ["start checkpoint is invalid"]));
+    }
+    const replay = replayWorkflowEvents({
+      instance: journal.instance,
+      effective_definition: effectiveDefinition,
+      events: [],
+      checkpoint: journal.checkpoint,
+    }, { require_checkpoint: true });
+    if (replay?.valid !== true) errors.push(...(replay?.errors || ["empty start history is invalid"]));
+  } catch (error) {
+    errors.push(`start checkpoint cannot be validated: ${error.message}`);
+  }
+  if (
+    journal.trace_event?.id !== `TR-WF-START-${String(journal.instance?.instance_hash || "").slice(0, 24)}`
+    || journal.trace_event?.action !== "workflow.instance.start"
+    || journal.trace_event?.created_at !== journal.instance?.created_at
+    || !Array.isArray(journal.trace_event?.related)
+    || journal.trace_event.related[0] !== expectedRequest.instance_id
+  ) {
+    errors.push("start trace intent does not describe the pinned instance");
+  }
+  try {
+    if (journal.checkpoint?.trace_chain_hash !== extendWorkflowTraceChain(null, journal.trace_event)) {
+      errors.push("start checkpoint does not bind the complete start trace");
+    }
+  } catch {
+    errors.push("start checkpoint trace binding cannot be validated");
+  }
+  return Array.from(new Set(errors));
+}
+
+function workflowStartMaterialErrors(context, rootPath, journal) {
+  if (!fs.existsSync(rootPath)) return ["instance directory is missing"];
+  let entries;
+  try {
+    entries = safeReadDir(rootPath).sort();
+  } catch (error) {
+    return [error.message];
+  }
+  const expectedEntries = ["checkpoint.json", "events.jsonl", "instance.json"];
+  const errors = stableJson(entries) === stableJson(expectedEntries)
+    ? []
+    : [`instance directory contains unexpected entries: ${entries.join(", ") || "none"}`];
+  const instancePath = path.join(rootPath, "instance.json");
+  const eventsPath = path.join(rootPath, "events.jsonl");
+  const checkpointPath = path.join(rootPath, "checkpoint.json");
+  try {
+    if (stableJson(readProjectJson(context, instancePath)) !== stableJson(journal.instance)) {
+      errors.push("instance header differs from the start transaction");
+    }
+    if (readProjectText(context, eventsPath) !== "") {
+      errors.push("new instance event history is not empty");
+    }
+    if (stableJson(readProjectJson(context, checkpointPath)) !== stableJson(journal.checkpoint)) {
+      errors.push("instance checkpoint differs from the start transaction");
+    }
+  } catch (error) {
+    errors.push(error.message);
+  }
+  return errors;
+}
+
+function prepareWorkflowStartStaging(context, journal) {
+  const instanceId = journal.request.instance_id;
+  const stagingRoot = workflowInstanceStagingRoot(context, instanceId);
+  ensureWorkflowDirectoryDurably(stagingRoot);
+  const expectedFiles = new Map([
+    ["instance.json", Buffer.from(`${JSON.stringify(journal.instance, null, 2)}\n`, "utf8")],
+    ["events.jsonl", Buffer.alloc(0)],
+    ["checkpoint.json", Buffer.from(`${JSON.stringify(journal.checkpoint, null, 2)}\n`, "utf8")],
+  ]);
+  const entries = safeReadDir(stagingRoot).sort();
+  const unexpected = entries.filter((entry) => !expectedFiles.has(entry));
+  if (unexpected.length > 0) {
+    fail(`Workflow instance ${instanceId} staging data contains unexpected entries: ${unexpected.join(", ")}`);
+  }
+  for (const [fileName, expectedBytes] of expectedFiles) {
+    writeWorkflowStartStagingFileDurably(path.join(stagingRoot, fileName), expectedBytes, fileName);
+  }
+  const errors = workflowStartMaterialErrors(context, stagingRoot, journal);
+  if (errors.length > 0) fail(`Workflow start staging validation failed: ${errors.join("; ")}`);
+  return stagingRoot;
+}
+
+function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName) {
+  assertNoSymlinkPathSegments(filePath);
+  const parentPath = path.dirname(filePath);
+  const parentIdentity = captureDirectoryIdentity(parentPath);
+  let descriptor;
+  let writeRequired = true;
+  try {
+    if (fs.existsSync(filePath)) {
+      const entry = fs.lstatSync(filePath);
+      if (entry.isSymbolicLink() || !entry.isFile()) {
+        fail(`Workflow start staging entry is not a regular file: ${fileName}`);
+      }
+      descriptor = fs.openSync(filePath, fs.constants.O_RDWR | NO_FOLLOW_FLAG);
+      verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+      const existing = fs.readFileSync(descriptor);
+      if (existing.equals(expectedBytes)) {
+        fs.fsyncSync(descriptor);
+        writeRequired = false;
+      } else if (
+        existing.length > expectedBytes.length
+        || !expectedBytes.subarray(0, existing.length).equals(existing)
+      ) {
+        fail(`Workflow start staging entry differs from its durable journal: ${fileName}`);
+      }
+    } else {
+      descriptor = fs.openSync(
+        filePath,
+        fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
+        0o600,
+      );
+      verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    }
+    if (writeRequired) {
+      fs.ftruncateSync(descriptor, 0);
+      if (
+        process.env.NODE_ENV === "test"
+        && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE === `during-staging-${fileName}`
+        && expectedBytes.length > 1
+      ) {
+        writeWorkflowBufferAtStart(descriptor, expectedBytes.subarray(0, Math.floor(expectedBytes.length / 2)));
+        fs.fsyncSync(descriptor);
+        process.kill(process.pid, "SIGKILL");
+      }
+      writeWorkflowBufferAtStart(descriptor, expectedBytes);
+      fs.fsyncSync(descriptor);
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  syncWorkflowDirectory(parentPath);
+}
+
+function writeWorkflowBufferAtStart(descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = fs.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (written <= 0) fail("Workflow staging write made no progress.");
+    offset += written;
+  }
+}
+
+function completeWorkflowStartTransactionLocked(context, journal) {
+  const instanceId = journal.request.instance_id;
+  const finalRoot = workflowInstanceRoot(context, instanceId);
+  const stagingRoot = workflowInstanceStagingRoot(context, instanceId);
+  if (fs.existsSync(finalRoot)) {
+    const errors = workflowStartMaterialErrors(context, finalRoot, journal);
+    if (errors.length > 0) fail(`Interrupted workflow start cannot trust the published instance: ${errors.join("; ")}`);
+    if (fs.existsSync(stagingRoot)) {
+      fail(`Interrupted workflow start has both staged and published data for ${instanceId}.`);
+    }
+  } else {
+    prepareWorkflowStartStaging(context, journal);
+    maybeCrashWorkflowStartForTest("after-staging-before-publish");
+    fs.renameSync(stagingRoot, finalRoot);
+    syncWorkflowDirectory(path.dirname(stagingRoot));
+    syncWorkflowDirectory(workflowInstancesRoot(context));
+  }
+  for (const fileName of ["instance.json", "events.jsonl", "checkpoint.json"]) {
+    syncWorkflowFile(path.join(finalRoot, fileName));
+  }
+  maybeCrashWorkflowStartForTest("after-publish-before-trace");
+  if (
+    process.env.NODE_ENV === "test"
+    && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE === "before-append"
+  ) {
+    fail("Simulated workflow start trace interruption before append.");
+  }
+  ensureWorkflowTraceRecordLocked(
+    path.join(context.sdlcRoot, "traces", "project.jsonl"),
+    journal.trace_event,
+    journal.trace_anchor,
+  );
+  removeWorkflowFileDurably(workflowInstanceStartTransactionPath(context, instanceId));
+}
+
+function maybeCrashWorkflowStartForTest(phase) {
+  if (
+    process.env.NODE_ENV === "test"
+    && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE === phase
+  ) {
+    process.kill(process.pid, "SIGKILL");
+  }
+}
+
+function buildWorkflowTransitionTraceRecord(context, instanceId, targetState, event, attribution, summary) {
+  return {
+    id: `TR-WF-${event.event_hash}`,
+    story_id: null,
+    type: "implementation",
+    summary: summary || `Transitioned workflow instance ${instanceId} to ${targetState}`,
+    outcome: "passed",
+    actor: attribution.actor,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: "workflow.instance.transition",
+    evidence: [
+      toProjectPath(context, workflowEventsPath(context, instanceId)),
+      toProjectPath(context, workflowCheckpointPath(context, instanceId)),
+    ],
+    related: [instanceId, event.event_hash],
+    git: attribution.git,
+    run: attribution.run,
+    created_at: event.timestamp,
+  };
+}
+
+function buildWorkflowTransitionJournal(
+  instance,
+  priorCheckpoint,
+  event,
+  nextCheckpoint,
+  traceEvent,
+  eventAnchor,
+  traceAnchor,
+) {
+  const journal = {
+    kind: "workflow_transition_transaction",
+    schema_version: "workflow-transition-transaction:v1",
+    instance_id: instance.id,
+    instance_hash: instance.instance_hash,
+    effective_hash: event.effective_hash,
+    from_sequence: priorCheckpoint.sequence,
+    from_checkpoint_hash: priorCheckpoint.checkpoint_hash,
+    from_trace_chain_hash: priorCheckpoint.trace_chain_hash,
+    event,
+    checkpoint: nextCheckpoint,
+    event_anchor: eventAnchor,
+    trace_event: traceEvent,
+    trace_anchor: traceAnchor,
+    hash_algorithm: priorCheckpoint.hash_algorithm,
+  };
+  return { ...journal, transaction_hash: workflowTransitionJournalHash(journal) };
+}
+
+function workflowTransitionJournalErrors(journal, instance, effectiveDefinition, expected = {}) {
+  const errors = [];
+  if (!journal || typeof journal !== "object" || Array.isArray(journal)) {
+    return ["pending workflow transition must be a JSON object"];
+  }
+  const allowedKeys = new Set([
+    "kind", "schema_version", "instance_id", "instance_hash", "effective_hash", "from_sequence",
+    "from_checkpoint_hash", "from_trace_chain_hash", "event", "checkpoint", "event_anchor", "trace_event", "trace_anchor",
+    "hash_algorithm", "transaction_hash",
+  ]);
+  const unknownKeys = Object.keys(journal).filter((key) => !allowedKeys.has(key));
+  if (unknownKeys.length > 0) errors.push(`pending workflow transition has unsupported fields: ${unknownKeys.join(", ")}`);
+  if (journal.kind !== "workflow_transition_transaction" || journal.schema_version !== "workflow-transition-transaction:v1") {
+    errors.push("pending workflow transition has an unsupported format");
+  }
+  if (journal.instance_id !== instance.id || journal.instance_hash !== instance.instance_hash) {
+    errors.push("pending workflow transition does not belong to this instance");
+  }
+  if (journal.effective_hash !== effectiveDefinition.effective_hash) {
+    errors.push("pending workflow transition does not match the pinned workflow definition");
+  }
+  if (!Number.isSafeInteger(journal.from_sequence) || journal.from_sequence < 0) {
+    errors.push("pending workflow transition has an invalid starting sequence");
+  }
+  if (typeof journal.from_checkpoint_hash !== "string" || !/^[a-f0-9]{64}$/u.test(journal.from_checkpoint_hash)) {
+    errors.push("pending workflow transition has an invalid starting checkpoint hash");
+  }
+  if (typeof journal.from_trace_chain_hash !== "string" || !/^[a-f0-9]{64}$/u.test(journal.from_trace_chain_hash)) {
+    errors.push("pending workflow transition has an invalid starting trace-chain hash");
+  }
+  if (typeof journal.transaction_hash !== "string" || journal.transaction_hash !== workflowTransitionJournalHash(journal)) {
+    errors.push("pending workflow transition hash does not match its content");
+  }
+  if (journal.hash_algorithm !== "sha256:stable-json:v1") {
+    errors.push("pending workflow transition hash algorithm is invalid");
+  }
+  if (!journal.event || typeof journal.event !== "object" || Array.isArray(journal.event)) {
+    errors.push("pending workflow transition is missing its event");
+  }
+  if (!journal.checkpoint || typeof journal.checkpoint !== "object" || Array.isArray(journal.checkpoint)) {
+    errors.push("pending workflow transition is missing its final checkpoint");
+  }
+  if (!journal.trace_event || typeof journal.trace_event !== "object" || Array.isArray(journal.trace_event)) {
+    errors.push("pending workflow transition is missing its trace intent");
+  }
+  errors.push(...workflowTraceAnchorErrors(journal.event_anchor).map((error) => `event ${error}`));
+  errors.push(...workflowTraceAnchorErrors(journal.trace_anchor).map((error) => `trace ${error}`));
+  if (journal.event) {
+    if (journal.event.instance_id !== instance.id || journal.event.instance_hash !== instance.instance_hash) {
+      errors.push("pending workflow event does not belong to this instance");
+    }
+    if (journal.event.effective_hash !== effectiveDefinition.effective_hash) {
+      errors.push("pending workflow event does not match the pinned workflow definition");
+    }
+    if (journal.event.sequence !== journal.from_sequence + 1) {
+      errors.push("pending workflow event does not immediately follow the starting sequence");
+    }
+    if (expected.requestId && journal.event.idempotency_key !== expected.requestId) {
+      errors.push("pending workflow transition belongs to a different request");
+    }
+    if (expected.targetState && journal.event.to !== expected.targetState) {
+      errors.push("pending workflow transition targets a different state");
+    }
+  }
+  if (journal.checkpoint && journal.event) {
+    if (
+      journal.checkpoint.sequence !== journal.event.sequence
+      || journal.checkpoint.last_event_hash !== journal.event.event_hash
+      || journal.checkpoint.current_state !== journal.event.to
+      || journal.checkpoint.updated_at !== journal.event.timestamp
+    ) {
+      errors.push("pending workflow final checkpoint does not describe its event");
+    }
+    const checkpointValidation = validateWorkflowCheckpoint(journal.checkpoint, {
+      instance,
+      effective_definition: effectiveDefinition,
+    });
+    if (checkpointValidation?.valid !== true) errors.push(...(checkpointValidation?.errors || ["pending workflow final checkpoint is invalid"]));
+  }
+  if (journal.trace_event && journal.event) {
+    if (
+      journal.trace_event.id !== `TR-WF-${String(journal.event.event_hash || "")}`
+      || journal.trace_event.action !== "workflow.instance.transition"
+      || journal.trace_event.created_at !== journal.event.timestamp
+      || !Array.isArray(journal.trace_event.related)
+      || journal.trace_event.related[0] !== instance.id
+      || journal.trace_event.related[1] !== journal.event.event_hash
+    ) {
+      errors.push("pending workflow trace intent does not describe its event");
+    }
+    try {
+      if (
+        journal.checkpoint?.trace_chain_hash
+        !== extendWorkflowTraceChain(journal.from_trace_chain_hash, journal.trace_event)
+      ) {
+        errors.push("pending workflow checkpoint does not bind the complete transition trace");
+      }
+    } catch {
+      errors.push("pending workflow checkpoint trace binding cannot be validated");
+    }
+  }
+  return errors;
+}
+
+function readWorkflowPendingTransition(context, instanceId) {
+  const pendingPath = workflowPendingTransitionPath(context, instanceId);
+  if (!fs.existsSync(pendingPath)) return { exists: false, valid: true, pendingPath, journal: null, errors: [] };
+  try {
+    return {
+      exists: true,
+      valid: true,
+      pendingPath,
+      journal: JSON.parse(readProjectText(context, pendingPath)),
+      errors: [],
+    };
+  } catch (error) {
+    return {
+      exists: true,
+      valid: false,
+      pendingPath,
+      journal: null,
+      errors: [`Pending workflow transition cannot be read: ${error.message}`],
+    };
+  }
+}
+
+function inspectWorkflowTraceIntent(context, traceEvent) {
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  if (!fs.existsSync(tracePath)) return { valid: true, exists: false, tracePath, errors: [] };
+  try {
+    const matches = readProjectText(context, tracePath)
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.id === traceEvent.id);
+    if (matches.length === 0) return { valid: true, exists: false, tracePath, errors: [] };
+    if (matches.length !== 1 || stableJson(matches[0]) !== stableJson(traceEvent)) {
+      return { valid: false, exists: true, tracePath, errors: [`Trace id ${traceEvent.id} is duplicated or has different content.`] };
+    }
+    return { valid: true, exists: true, tracePath, errors: [] };
+  } catch (error) {
+    return { valid: false, exists: false, tracePath, errors: [`Workflow trace cannot be verified: ${error.message}`] };
+  }
+}
+
+function inspectWorkflowTraceOwnershipConflictsLocked(context, instanceId, tracePath) {
+  if (!fs.existsSync(tracePath)) return [];
+  let traces;
+  try {
+    traces = readProjectText(context, tracePath)
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    return [`project audit trace cannot be verified: ${error.message}`];
+  }
+  return traces
+    .filter((entry) =>
+      ["workflow.instance.start", "workflow.instance.transition"].includes(entry?.action)
+      && Array.isArray(entry?.related)
+      && entry.related[0] === instanceId)
+    .map((entry) => `trace ${entry.id || "without-id"} already claims this instance`);
+}
+
+function workflowJsonLinesAtAnchor(filePath, anchor, label) {
+  const anchorErrors = workflowTraceAnchorErrors(anchor);
+  if (anchorErrors.length > 0) return { valid: false, records: [], errors: anchorErrors };
+  const bytes = workflowTraceBytes(filePath);
+  if (bytes.length < anchor.size_bytes) {
+    return { valid: false, records: [], errors: [`${label} is shorter than its transaction anchor.`] };
+  }
+  const prefix = bytes.subarray(0, anchor.size_bytes);
+  const prefixHash = crypto.createHash("sha256").update(prefix).digest("hex");
+  if (prefixHash !== anchor.prefix_hash) {
+    return { valid: false, records: [], errors: [`${label} prefix differs from its transaction anchor.`] };
+  }
+  if (prefix.length > 0 && prefix.at(-1) !== 0x0A) {
+    return { valid: false, records: [], errors: [`${label} anchor does not end at a complete record boundary.`] };
+  }
+  try {
+    return {
+      valid: true,
+      records: prefix.toString("utf8").split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line)),
+      errors: [],
+    };
+  } catch (error) {
+    return { valid: false, records: [], errors: [`${label} anchor cannot be parsed: ${error.message}`] };
+  }
+}
+
+function recoverPendingWorkflowTransition(context, instanceId, instance, effectiveDefinition, expected) {
+  const pending = readWorkflowPendingTransition(context, instanceId);
+  if (!pending.exists || !pending.valid) return pending;
+  const errors = workflowTransitionJournalErrors(pending.journal, instance, effectiveDefinition, expected);
+  if (errors.length > 0) return { ...pending, valid: false, errors };
+  const journal = pending.journal;
+  const eventsPath = workflowEventsPath(context, instanceId);
+  const checkpointPath = workflowCheckpointPath(context, instanceId);
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    const eventState = workflowEventRecordStateLocked(eventsPath, journal.event, journal.event_anchor);
+    if (!eventState.valid) return { ...pending, valid: false, errors: eventState.errors };
+    if (eventState.exists && !eventState.exact_suffix) {
+      return { ...pending, valid: false, errors: ["Pending workflow event is not the exact tail of its anchored history."] };
+    }
+    if (!eventState.exists && eventState.suffix_bytes > 0 && !eventState.repairable) {
+      return { ...pending, valid: false, errors: ["Workflow event history advanced outside the pending transition."] };
+    }
+    const traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    if (!traceState.valid) return { ...pending, valid: false, errors: traceState.errors };
+    const base = workflowJsonLinesAtAnchor(eventsPath, journal.event_anchor, "Workflow event history");
+    if (!base.valid) return { ...pending, valid: false, errors: base.errors };
+    if (base.records.length !== journal.from_sequence) {
+      return { ...pending, valid: false, errors: ["Pending workflow event anchor has the wrong sequence length."] };
+    }
+    const checkpointRead = readWorkflowCheckpoint(context, instanceId);
+    if (!checkpointRead.valid) return { ...pending, valid: false, errors: checkpointRead.errors };
+    const currentCheckpoint = checkpointRead.checkpoint;
+    const currentIsBase = currentCheckpoint.checkpoint_hash === journal.from_checkpoint_hash;
+    const currentIsTarget = currentCheckpoint.checkpoint_hash === journal.checkpoint.checkpoint_hash;
+    if (!currentIsBase && !currentIsTarget) {
+      return { ...pending, valid: false, errors: ["Pending workflow transition does not match the current checkpoint."] };
+    }
+    if (currentIsBase && currentCheckpoint.trace_chain_hash !== journal.from_trace_chain_hash) {
+      return { ...pending, valid: false, errors: ["Pending workflow transition does not match the current audit trace chain."] };
+    }
+    if (currentIsBase) {
+      const baseReplay = replayWorkflowEvents({
+        instance,
+        effective_definition: effectiveDefinition,
+        events: base.records,
+        checkpoint: currentCheckpoint,
+      }, { require_checkpoint: true });
+      if (!baseReplay.valid) return { ...pending, valid: false, errors: baseReplay.errors };
+    }
+    const targetEvents = [...base.records, journal.event];
+    const targetReplay = replayWorkflowEvents({
+      instance,
+      effective_definition: effectiveDefinition,
+      events: targetEvents,
+      checkpoint: journal.checkpoint,
+    }, { require_checkpoint: true });
+    if (!targetReplay.valid) return { ...pending, valid: false, errors: targetReplay.errors };
+    ensureWorkflowEventRecordLocked(eventsPath, journal.event, journal.event_anchor);
+    if (!currentIsTarget) writeWorkflowJsonDurably(checkpointPath, journal.checkpoint, { force: true });
+    else syncWorkflowFile(checkpointPath);
+    ensureWorkflowTraceRecordLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    removeWorkflowFileDurably(pending.pendingPath);
+    return {
+      ...pending,
+      valid: true,
+      recovered: true,
+      events: targetEvents,
+      checkpoint: journal.checkpoint,
+      trace_event: journal.trace_event,
+    };
+  } finally {
+    releaseTraceLock();
+  }
+}
+
+function persistWorkflowTransitionTransaction(
+  context,
+  instanceId,
+  instance,
+  effectiveDefinition,
+  events,
+  transition,
+  priorCheckpoint,
+  attribution,
+  summary,
+) {
+  const eventsPath = workflowEventsPath(context, instanceId);
+  const checkpointPath = workflowCheckpointPath(context, instanceId);
+  const pendingPath = workflowPendingTransitionPath(context, instanceId);
+  const traceEvent = buildWorkflowTransitionTraceRecord(
+    context,
+    instanceId,
+    transition.event.to,
+    transition.event,
+    attribution,
+    summary,
+  );
+  const nextCheckpoint = callWorkflowDomain("Unable to update the workflow integrity checkpoint", () =>
+    createWorkflowCheckpoint({
+      instance,
+      effective_definition: effectiveDefinition,
+      events: [...events, transition.event],
+      trace_chain_hash: extendWorkflowTraceChain(priorCheckpoint.trace_chain_hash, traceEvent),
+    }));
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    const priorTraceCoverage = inspectWorkflowTraceCoverageLocked(
+      context,
+      instanceId,
+      instance,
+      events,
+      priorCheckpoint,
+      tracePath,
+    );
+    if (!priorTraceCoverage.valid) {
+      fail(`Workflow audit trace changed before the transition commit: ${priorTraceCoverage.errors.join("; ")}`);
+    }
+    const traceIntent = inspectWorkflowTraceIntent(context, traceEvent);
+    if (!traceIntent.valid || traceIntent.exists) {
+      fail(traceIntent.errors[0] || `Trace id ${traceEvent.id} already exists before the transition was recorded.`);
+    }
+    const journal = buildWorkflowTransitionJournal(
+      instance,
+      priorCheckpoint,
+      transition.event,
+      nextCheckpoint,
+      traceEvent,
+      workflowTraceAnchor(eventsPath),
+      workflowTraceAnchor(tracePath),
+    );
+    writeWorkflowJsonDurably(pendingPath, journal, { atomicCreate: true });
+    ensureWorkflowEventRecordLocked(eventsPath, transition.event, journal.event_anchor);
+    maybeInterruptWorkflowTransitionForTest("after-event-before-checkpoint");
+    writeWorkflowJsonDurably(checkpointPath, nextCheckpoint, { force: true });
+    maybeInterruptWorkflowTransitionForTest("after-checkpoint-before-trace");
+    ensureWorkflowTraceRecordLocked(tracePath, traceEvent, journal.trace_anchor);
+    maybeInterruptWorkflowTransitionForTest("after-trace-before-journal-clear");
+    removeWorkflowFileDurably(pendingPath);
+    return { checkpoint: nextCheckpoint, trace_event: traceEvent };
+  } finally {
+    releaseTraceLock();
+  }
+}
+
+function maybeInterruptWorkflowTransitionForTest(phase) {
+  if (
+    process.env.NODE_ENV === "test"
+    && process.env.AGENTIC_SDLC_TEST_WORKFLOW_FAILURE_PHASE === phase
+  ) {
+    fail(`Simulated workflow persistence interruption at ${phase}.`);
+  }
+}
+
+function inspectWorkflowRuntimeIntegrity(context, instanceId, instance, effectiveDefinition, events) {
+  const pending = readWorkflowPendingTransition(context, instanceId);
+  if (pending.exists) {
+    const journalErrors = pending.valid
+      ? workflowTransitionJournalErrors(pending.journal, instance, effectiveDefinition)
+      : pending.errors;
+    const recoveryAvailable = pending.valid && journalErrors.length === 0;
+    return {
+      valid: false,
+      checkpoint: null,
+      checkpointPath: workflowCheckpointPath(context, instanceId),
+      pendingPath: pending.pendingPath,
+      recovery_available: recoveryAvailable,
+      recovery_request_id: recoveryAvailable ? pending.journal.event.idempotency_key : null,
+      recovery_target_state: recoveryAvailable ? pending.journal.event.to : null,
+      errors: recoveryAvailable
+        ? ["A workflow transition was interrupted and must be retried with the same request before status can be trusted."]
+        : journalErrors,
+    };
+  }
+  const checkpointRead = readWorkflowCheckpoint(context, instanceId);
+  if (!checkpointRead.valid) return checkpointRead;
+  let validation;
+  try {
+    validation = validateWorkflowCheckpoint(checkpointRead.checkpoint, {
+      instance,
+      effective_definition: effectiveDefinition,
+    });
+  } catch (error) {
+    return {
+      ...checkpointRead,
+      valid: false,
+      errors: [`Workflow instance ${instanceId} integrity checkpoint is invalid: ${error.message}`],
+    };
+  }
+  if (validation !== true && validation?.valid !== true) {
+    return {
+      ...checkpointRead,
+      valid: false,
+      errors: Array.isArray(validation?.errors) && validation.errors.length > 0
+        ? validation.errors
+        : [`Workflow instance ${instanceId} integrity checkpoint is invalid.`],
+    };
+  }
+  let replay;
+  try {
+    replay = replayWorkflowEvents({
+      instance,
+      effective_definition: effectiveDefinition,
+      events,
+      checkpoint: checkpointRead.checkpoint,
+    }, { require_checkpoint: true });
+  } catch (error) {
+    return {
+      ...checkpointRead,
+      valid: false,
+      errors: [`Workflow instance ${instanceId} history cannot be replayed safely: ${error.message}`],
+    };
+  }
+  if (replay?.valid !== true) {
+    return {
+      ...checkpointRead,
+      valid: false,
+      replay,
+      errors: Array.isArray(replay?.errors) && replay.errors.length > 0
+        ? replay.errors
+        : [`Workflow instance ${instanceId} history failed integrity validation.`],
+    };
+  }
+  const traceCoverage = inspectWorkflowTraceCoverage(
+    context,
+    instanceId,
+    instance,
+    events,
+    checkpointRead.checkpoint,
+  );
+  return {
+    ...checkpointRead,
+    valid: traceCoverage.valid,
+    replay,
+    trace_coverage: traceCoverage,
+    errors: traceCoverage.errors,
+  };
+}
+
+function inspectWorkflowTraceCoverage(context, instanceId, instance, events, checkpoint) {
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    return inspectWorkflowTraceCoverageLocked(context, instanceId, instance, events, checkpoint, tracePath);
+  } finally {
+    releaseTraceLock();
+  }
+}
+
+function inspectWorkflowTraceCoverageLocked(context, instanceId, instance, events, checkpoint, tracePath) {
+  if (!fs.existsSync(tracePath)) {
+    return {
+      valid: false,
+      tracePath,
+      errors: [`Workflow instance ${instanceId} is missing its project audit trace.`],
+    };
+  }
+  let traces;
+  try {
+    traces = readProjectText(context, tracePath)
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    return {
+      valid: false,
+      tracePath,
+      errors: [`Workflow instance ${instanceId} project audit trace cannot be verified: ${error.message}`],
+    };
+  }
+
+  const errors = [];
+  const orderedWorkflowTraces = [];
+  const expectedStartId = `TR-WF-START-${String(instance.instance_hash || "").slice(0, 24)}`;
+  const startTraces = traces.filter((entry) =>
+    entry?.id === expectedStartId
+    || (
+      entry?.action === "workflow.instance.start"
+      && Array.isArray(entry?.related)
+      && entry.related[0] === instanceId
+    ));
+  if (startTraces.length !== 1) {
+    errors.push(`Workflow instance ${instanceId} must have exactly one matching start trace.`);
+  } else {
+    const startTrace = startTraces[0];
+    orderedWorkflowTraces.push(startTrace);
+    if (
+      startTrace.id !== expectedStartId
+      || startTrace.action !== "workflow.instance.start"
+      || startTrace.created_at !== instance.created_at
+      || !Array.isArray(startTrace.related)
+      || startTrace.related[0] !== instanceId
+    ) {
+      errors.push(`Workflow instance ${instanceId} start trace does not match its immutable header.`);
+    }
+  }
+
+  const expectedTransitionIds = new Set();
+  for (const event of events) {
+    const expectedId = `TR-WF-${String(event.event_hash || "")}`;
+    expectedTransitionIds.add(expectedId);
+    const matching = traces.filter((entry) =>
+      entry?.id === expectedId
+      || (
+        entry?.action === "workflow.instance.transition"
+        && Array.isArray(entry?.related)
+        && entry.related[0] === instanceId
+        && entry.related[1] === event.event_hash
+      ));
+    if (matching.length !== 1) {
+      errors.push(`Workflow event ${event.event_hash || "unknown"} must have exactly one matching transition trace.`);
+      continue;
+    }
+    const trace = matching[0];
+    orderedWorkflowTraces.push(trace);
+    if (
+      trace.id !== expectedId
+      || trace.action !== "workflow.instance.transition"
+      || trace.created_at !== event.timestamp
+      || !Array.isArray(trace.related)
+      || !trace.related.includes(instanceId)
+      || !trace.related.includes(event.event_hash)
+    ) {
+      errors.push(`Workflow event ${event.event_hash || "unknown"} transition trace does not match its history record.`);
+    }
+  }
+  const unexpectedTransitions = traces.filter((entry) =>
+    entry?.action === "workflow.instance.transition"
+    && Array.isArray(entry?.related)
+    && entry.related[0] === instanceId
+    && !expectedTransitionIds.has(entry.id));
+  if (unexpectedTransitions.length > 0) {
+    errors.push(`Workflow instance ${instanceId} has transition traces that are absent from its event history.`);
+  }
+  if (orderedWorkflowTraces.length === events.length + 1) {
+    const positions = orderedWorkflowTraces.map((trace) => traces.indexOf(trace));
+    if (positions.some((position, index) => index > 0 && position <= positions[index - 1])) {
+      errors.push(`Workflow instance ${instanceId} audit traces are not in the same order as its event history.`);
+    }
+    try {
+      const observedTraceChain = orderedWorkflowTraces.reduce(
+        (previous, trace) => extendWorkflowTraceChain(previous, trace),
+        null,
+      );
+      if (checkpoint.trace_chain_hash !== observedTraceChain) {
+        errors.push(`Workflow instance ${instanceId} audit trace content differs from its durable checkpoint.`);
+      }
+    } catch (error) {
+      errors.push(`Workflow instance ${instanceId} audit trace chain cannot be verified: ${error.message}`);
+    }
+  }
+  return { valid: errors.length === 0, tracePath, errors: Array.from(new Set(errors)) };
+}
+
+function workflowIntegrityBlockedGuidance(options, integrity = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  if (integrity.recovery_available === true) {
+    const destination = integrity.recovery_target_state
+      ? workflowHumanDisplayIdentifier(integrity.recovery_target_state, "state_id", italian)
+      : (italian ? "già indicata" : "already shown");
+    return italian
+      ? {
+          result: "Un avanzamento è stato interrotto prima di completare tutte le registrazioni, quindi l’esecuzione è ferma in sicurezza.",
+          impact: "Lo stato non viene dichiarato valido e questa consultazione non modifica alcun file.",
+          required_decision: "Non serve una nuova approvazione e non devi ripristinare file manualmente.",
+          protection_boundary: "Per completare le registrazioni mancanti devi ripetere lo stesso avanzamento verso la stessa destinazione; un avanzamento diverso resta bloccato.",
+          next_action: `Ripeti lo stesso avanzamento verso “${destination}”; il sistema verificherà e completerà una sola volta ciò che manca.`,
+          details: {},
+        }
+      : {
+          result: "A transition stopped before all records were completed, so the run is safely paused.",
+          impact: "No state is declared valid, and this status check changes no file.",
+          required_decision: "No new approval is needed, and you should not restore files manually.",
+          protection_boundary: "To complete the missing records, repeat the same transition toward the same destination; a different transition remains blocked.",
+          next_action: `Repeat the same transition toward “${destination}”; the system will verify it and complete each missing record once.`,
+          details: {},
+        };
+  }
+  return italian
+    ? {
+        result: "La cronologia registrata non è affidabile, quindi questa esecuzione è stata fermata in sicurezza.",
+        impact: "Lo stato corrente non viene dichiarato valido e non viene proposto alcun passaggio successivo.",
+        required_decision: "Non approvare né ripetere avanzamenti finché la cronologia non è stata ripristinata.",
+        protection_boundary: "Nessun nuovo evento è stato registrato e i permessi già concordati restano invariati.",
+        next_action: "Ripristina i file originali dell’esecuzione da una copia attendibile, quindi ripeti il controllo.",
+        details: {},
+      }
+    : {
+        result: "The recorded history cannot be trusted, so this run was stopped safely.",
+        impact: "No current state is declared valid, and no next step is offered.",
+        required_decision: "Do not approve or retry progress until the recorded history has been restored.",
+        protection_boundary: "No new event was recorded, and the already agreed permissions remain unchanged.",
+        next_action: "Restore the run’s original files from a trusted copy, then run the check again.",
+        details: {},
+      };
+}
+
+function blockWorkflowOnIntegrityFailure(context, options, instanceId, integrity, operation) {
+  const checkpointPath = integrity.checkpointPath || workflowCheckpointPath(context, instanceId);
+  const guidance = workflowIntegrityBlockedGuidance(options, integrity);
+  output(options, {
+    schema_version: "workflow-instance-integrity-blocked:v1",
+    status: "blocked",
+    error_code: "WORKFLOW_HISTORY_INTEGRITY_FAILED",
+    instance_id: instanceId,
+    operation,
+    integrity: "invalid",
+    errors: integrity.errors || [],
+    recovery: integrity.recovery_available === true
+      ? {
+          available: true,
+          request_id: integrity.recovery_request_id,
+          target_state: integrity.recovery_target_state,
+        }
+      : { available: false },
+    checkpoint_path: toProjectPath(context, checkpointPath),
+    human_guidance: guidance,
+  }, humanGuidanceLines(guidance, [
+    `Instance: ${instanceId}`,
+    `Operation blocked: ${operation}`,
+    `Checkpoint path: ${toProjectPath(context, checkpointPath)}`,
+    ...(integrity.recovery_available === true ? [
+      `Recovery request id: ${integrity.recovery_request_id}`,
+      `Recovery destination: ${integrity.recovery_target_state}`,
+    ] : []),
+    ...(integrity.errors || []).map((error) => `Integrity error: ${error}`),
+  ], options));
+  process.exitCode = 1;
+}
+
+function workflowIdempotentGuidance(options) {
+  const italian = humanGuidanceLocale(options) === "it";
+  return italian
+    ? {
+        result: "Questa richiesta era già stata applicata; non è stato apportato alcun cambiamento.",
+        impact: "L’esecuzione resta allo stesso passo e non è stata aggiunta una nuova voce alla cronologia.",
+        required_decision: "Non devi decidere nulla per questo nuovo tentativo.",
+        protection_boundary: "Nessun permesso è stato ampliato e nessuna azione esterna è stata autorizzata.",
+        next_action: "Consulta lo stato corrente e continua solo con un passaggio successivo consentito.",
+        details: {},
+      }
+    : {
+        result: "This request had already been applied; no change was made.",
+        impact: "The run remains at the same step, and no new history entry was added.",
+        required_decision: "You do not need to decide anything for this retry.",
+        protection_boundary: "No permission was widened, and no external action was authorized.",
+        next_action: "Review the current status and continue only with a permitted next step.",
+        details: {},
+      };
 }
 
 function instanceDefinitionReference(instance) {
@@ -1908,16 +3645,257 @@ function loadEffectiveDefinitionForInstance(context, instance) {
   return { definitionEntry, overlayEntry, effectiveDefinition };
 }
 
-function appendWorkflowEventUnlocked(filePath, event) {
+const WORKFLOW_WINDOWS_DIRECTORY_SYNC_UNSUPPORTED = new Set([
+  "EACCES", "EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EPERM",
+]);
+
+function syncWorkflowDirectory(directoryPath) {
+  let descriptor;
+  let opened = false;
+  try {
+    descriptor = fs.openSync(directoryPath, fs.constants.O_RDONLY);
+    opened = true;
+    fs.fsyncSync(descriptor);
+    return true;
+  } catch (error) {
+    // On Windows the directory can be opened for metadata inspection while
+    // FlushFileBuffers on that directory handle is unsupported. Do not hide
+    // ACL/path failures raised by openSync itself.
+    if (
+      process.platform === "win32"
+      && opened
+      && WORKFLOW_WINDOWS_DIRECTORY_SYNC_UNSUPPORTED.has(error?.code)
+    ) {
+      return false;
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function syncWorkflowFile(filePath) {
   assertNoSymlinkPathSegments(filePath);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   let descriptor;
   try {
-    descriptor = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_APPEND | NO_FOLLOW_FLAG);
+    // FlushFileBuffers requires a write-capable handle on Windows.
+    descriptor = fs.openSync(filePath, fs.constants.O_RDWR | NO_FOLLOW_FLAG);
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
-    fs.writeFileSync(descriptor, `${JSON.stringify(event)}\n`);
+    fs.fsyncSync(descriptor);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  syncWorkflowDirectory(path.dirname(filePath));
+}
+
+function ensureWorkflowDirectoryDurably(directoryPath) {
+  if (fs.existsSync(directoryPath)) {
+    const entry = fs.lstatSync(directoryPath);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      fail(`Refusing unstable workflow directory: ${directoryPath}`);
+    }
+    return false;
+  }
+  const parentPath = path.dirname(directoryPath);
+  ensureWorkflowDirectoryDurably(parentPath);
+  fs.mkdirSync(directoryPath);
+  syncWorkflowDirectory(parentPath);
+  return true;
+}
+
+function workflowTraceBytes(filePath) {
+  if (!fs.existsSync(filePath)) return Buffer.alloc(0);
+  assertNoSymlinkPathSegments(filePath);
+  const entry = fs.lstatSync(filePath);
+  if (entry.isSymbolicLink() || !entry.isFile()) fail(`Workflow trace is not a regular file: ${filePath}`);
+  return fs.readFileSync(filePath);
+}
+
+function workflowTraceAnchor(filePath) {
+  const bytes = workflowTraceBytes(filePath);
+  return {
+    size_bytes: bytes.length,
+    prefix_hash: crypto.createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey, recordLabel) {
+  const anchorErrors = workflowTraceAnchorErrors(anchor);
+  if (anchorErrors.length > 0) return { valid: false, exists: false, repairable: false, errors: anchorErrors };
+  const bytes = workflowTraceBytes(filePath);
+  if (bytes.length < anchor.size_bytes) {
+    return { valid: false, exists: false, repairable: false, errors: [`${recordLabel} is shorter than the transaction anchor.`] };
+  }
+  const prefix = bytes.subarray(0, anchor.size_bytes);
+  const prefixHash = crypto.createHash("sha256").update(prefix).digest("hex");
+  if (prefixHash !== anchor.prefix_hash) {
+    return { valid: false, exists: false, repairable: false, errors: [`${recordLabel} prefix differs from the transaction anchor.`] };
+  }
+  let parsed = null;
+  try {
+    parsed = bytes.toString("utf8").split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    // A crash may leave only a prefix of the one deterministic line owned by
+    // this transaction. That exact suffix is the only malformed state that
+    // recovery is allowed to truncate.
+  }
+  const expectedLine = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  const suffix = bytes.subarray(anchor.size_bytes);
+  if (parsed) {
+    const matches = parsed.filter((entry) => entry?.[identityKey] === value?.[identityKey]);
+    if (matches.length > 1 || (matches.length === 1 && stableJson(matches[0]) !== stableJson(value))) {
+      return {
+        valid: false,
+        exists: matches.length > 0,
+        repairable: false,
+        errors: [`${recordLabel} identity ${value?.[identityKey]} is duplicated or has different content.`],
+      };
+    }
+    return {
+      valid: true,
+      exists: matches.length === 1,
+      repairable: false,
+      suffix_bytes: suffix.length,
+      expected_line_bytes: expectedLine.length,
+      exact_suffix: suffix.equals(expectedLine),
+      errors: [],
+    };
+  }
+  const repairable = suffix.length > 0
+    && suffix.length < expectedLine.length
+    && expectedLine.subarray(0, suffix.length).equals(suffix);
+  return repairable
+    ? {
+        valid: true,
+        exists: false,
+        repairable: true,
+        suffix_bytes: suffix.length,
+        expected_line_bytes: expectedLine.length,
+        exact_suffix: false,
+        errors: [],
+      }
+    : { valid: false, exists: false, repairable: false, errors: [`${recordLabel} contains a malformed suffix outside the current transaction.`] };
+}
+
+function workflowTraceRecordStateLocked(filePath, value, anchor) {
+  return workflowJsonLineRecordStateLocked(filePath, value, anchor, "id", "Workflow trace");
+}
+
+function workflowEventRecordStateLocked(filePath, value, anchor) {
+  return workflowJsonLineRecordStateLocked(filePath, value, anchor, "event_hash", "Workflow event history");
+}
+
+function truncateWorkflowFileDurably(filePath, size) {
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDWR | NO_FOLLOW_FLAG);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    fs.ftruncateSync(descriptor, size);
+    fs.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  syncWorkflowDirectory(path.dirname(filePath));
+}
+
+function appendWorkflowJsonLineUnlocked(filePath, value) {
+  assertNoSymlinkPathSegments(filePath);
+  ensureWorkflowDirectoryDurably(path.dirname(filePath));
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      filePath,
+      fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | NO_FOLLOW_FLAG,
+      0o600,
+    );
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
+    if (
+      process.env.NODE_ENV === "test"
+      && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE === "after-append-before-sync"
+    ) {
+      fail("Simulated workflow start trace interruption after append.");
+    }
+    fs.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  syncWorkflowDirectory(path.dirname(filePath));
+}
+
+function ensureWorkflowTraceRecordLocked(filePath, value, anchor) {
+  let state = workflowTraceRecordStateLocked(filePath, value, anchor);
+  if (!state.valid) fail(state.errors.join("; "));
+  if (state.exists) {
+    syncWorkflowFile(filePath);
+    return { repaired: false, appended: false };
+  }
+  const repaired = state.repairable;
+  if (repaired) truncateWorkflowFileDurably(filePath, anchor.size_bytes);
+  appendWorkflowJsonLineUnlocked(filePath, value);
+  state = workflowTraceRecordStateLocked(filePath, value, anchor);
+  if (!state.valid || !state.exists) {
+    fail(state.errors[0] || `Workflow trace ${value.id} was not committed exactly once.`);
+  }
+  return { repaired, appended: true };
+}
+
+function ensureWorkflowEventRecordLocked(filePath, value, anchor) {
+  let state = workflowEventRecordStateLocked(filePath, value, anchor);
+  if (!state.valid) fail(state.errors.join("; "));
+  if (state.exists && !state.exact_suffix) {
+    fail("Workflow event history contains records after the event owned by the pending transaction.");
+  }
+  if (state.exists) {
+    syncWorkflowFile(filePath);
+    return { repaired: false, appended: false };
+  }
+  if (state.suffix_bytes > 0 && !state.repairable) {
+    fail("Workflow event history advanced outside the pending transaction.");
+  }
+  const repaired = state.repairable;
+  if (repaired) truncateWorkflowFileDurably(filePath, anchor.size_bytes);
+  appendWorkflowJsonLineUnlocked(filePath, value);
+  state = workflowEventRecordStateLocked(filePath, value, anchor);
+  if (!state.valid || !state.exists || !state.exact_suffix) {
+    fail(state.errors[0] || `Workflow event ${value.event_hash} was not committed exactly once.`);
+  }
+  return { repaired, appended: true };
+}
+
+function writeWorkflowJsonDurably(filePath, value, options = {}) {
+  const written = writeJsonFile(filePath, value, options);
+  syncWorkflowFile(filePath);
+  return written;
+}
+
+function writeWorkflowTextDurably(filePath, value, options = {}) {
+  const written = writeTextFile(filePath, value, options);
+  syncWorkflowFile(filePath);
+  return written;
+}
+
+function removeWorkflowFileDurably(filePath) {
+  if (!fs.existsSync(filePath)) return false;
+  assertNoSymlinkPathSegments(filePath);
+  const parentPath = path.dirname(filePath);
+  fs.rmSync(filePath);
+  syncWorkflowDirectory(parentPath);
+  return true;
+}
+
+function removeWorkflowDirectoryIfEmptyDurably(directoryPath) {
+  try {
+    fs.rmdirSync(directoryPath);
+    syncWorkflowDirectory(path.dirname(directoryPath));
+    return true;
+  } catch (error) {
+    if (["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error?.code)) return false;
+    throw error;
   }
 }
 
@@ -1939,58 +3917,109 @@ function transitionWorkflowInstance(context, options) {
   const id = normalizeId(requireOption(options, "id"));
   const to = requireOption(options, "to");
   const idempotencyKey = normalizeId(requireOption(options, "request-id"));
-  const { instance } = readWorkflowInstance(context, id);
+  const { instance } = readCompletedWorkflowInstance(context, id);
   const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
   const eventsPath = workflowEventsPath(context, id);
+  const checkpointPath = workflowCheckpointPath(context, id);
   const releaseLock = acquireFileLock(`${eventsPath}.lock`);
   let result;
   let events;
+  let integrityFailure = null;
+  let attribution;
   try {
-    events = readWorkflowEvents(context, id);
-    const attribution = buildAttribution(context, options, "workflow.instance.transition");
-    result = callWorkflowDomain("Unable to move workflow instance", () => createWorkflowTransition({
-      instance,
-      effective_definition: effectiveDefinition,
-      events,
-      to,
-      timestamp: now(),
-      actor: attribution.actor,
-      idempotency_key: idempotencyKey,
-      context: parseWorkflowGuardContext(options),
-    }));
-    const alreadyRecorded = events.some((event) =>
-      event.event_hash === result.event.event_hash
-      || event.idempotency_key === result.event.idempotency_key);
-    if (!alreadyRecorded) appendWorkflowEventUnlocked(eventsPath, result.event);
+    const recovery = recoverPendingWorkflowTransition(context, id, instance, effectiveDefinition, {
+      requestId: idempotencyKey,
+      targetState: to,
+    });
+    if (!recovery.valid) {
+      integrityFailure = {
+        ...recovery,
+        checkpointPath,
+      };
+    } else {
+      events = readWorkflowEvents(context, id);
+      const integrity = inspectWorkflowRuntimeIntegrity(context, id, instance, effectiveDefinition, events);
+      if (!integrity.valid) {
+        integrityFailure = integrity;
+      } else {
+        attribution = buildAttribution(context, options, "workflow.instance.transition");
+        result = callWorkflowDomain("Unable to move workflow instance", () => createWorkflowTransition({
+          instance,
+          effective_definition: effectiveDefinition,
+          events,
+          checkpoint: integrity.checkpoint,
+          to,
+          timestamp: now(),
+          actor: attribution.actor,
+          idempotency_key: idempotencyKey,
+          context: parseWorkflowGuardContext(options),
+        }, { require_checkpoint: true }));
+        if (!result.idempotent) {
+          maybeInterleaveConflictingWorkflowTraceForTest(context, id);
+          persistWorkflowTransitionTransaction(
+            context,
+            id,
+            instance,
+            effectiveDefinition,
+            events,
+            result,
+            integrity.checkpoint,
+            attribution,
+            getOptionString(options, "summary"),
+          );
+        }
+      }
+    }
   } finally {
     releaseLock();
   }
-  const attribution = buildAttribution(context, options, "workflow.instance.transition");
-  appendTraceEvent(context, null, {
-    type: "implementation",
-    outcome: "passed",
-    summary: getOptionString(options, "summary") || `Transitioned workflow instance ${id} to ${to}`,
-    action: "workflow.instance.transition",
-    actor: attribution.actor,
-    evidence: [toProjectPath(context, eventsPath)],
-    related: [id, result.event.id || result.event.event_hash],
-    git: attribution.git,
-    run: attribution.run,
-  });
-  outputWorkflowResult(options, {
+  if (integrityFailure) {
+    blockWorkflowOnIntegrityFailure(context, options, id, integrityFailure, "transition");
+    return;
+  }
+  const currentState = result.replay.current_state || result.replay.state;
+  const payload = {
     schema_version: "workflow-instance-transition:v1",
-    status: "transitioned",
+    status: result.idempotent ? "unchanged" : "transitioned",
+    idempotent: result.idempotent === true,
     instance_id: id,
+    current_state: currentState,
     events_path: toProjectPath(context, eventsPath),
+    checkpoint_path: toProjectPath(context, checkpointPath),
     event: result.event,
     replay: result.replay,
-  }, "transitioned", [
+  };
+  const details = [
     `Instance: ${id}`,
-    `State: ${result.replay.current_state || result.replay.state || to}`,
+    `State: ${currentState}`,
     `Sequence: ${result.event.sequence}`,
     `Event hash: ${result.event.event_hash}`,
     `Path: ${toProjectPath(context, eventsPath)}`,
-  ]);
+    `Integrity checkpoint: ${toProjectPath(context, checkpointPath)}`,
+  ];
+  if (result.idempotent) {
+    const guidance = workflowIdempotentGuidance(options);
+    output(options, { ...payload, human_guidance: guidance }, humanGuidanceLines(guidance, details, options));
+    return;
+  }
+  outputWorkflowResult(options, payload, "transitioned", details);
+}
+
+function maybeInterleaveConflictingWorkflowTraceForTest(context, instanceId) {
+  if (
+    process.env.NODE_ENV !== "test"
+    || process.env.AGENTIC_SDLC_TEST_WORKFLOW_TRACE_INTERLEAVING !== "conflicting-transition-trace"
+  ) {
+    return;
+  }
+  appendTraceEvent(context, null, {
+    type: "implementation",
+    summary: `Simulated conflicting trace for ${instanceId}`,
+    outcome: "passed",
+    actor: { id: "workflow-interleaving-test", type: "system", name: "Workflow interleaving test" },
+    action: "workflow.instance.transition",
+    related: [instanceId, "f".repeat(64)],
+  });
 }
 
 function workflowCurrentState(replay, instance, definition) {
@@ -2008,14 +4037,23 @@ function workflowNextStates(definition, currentState) {
 function showWorkflowInstance(context, options, { explain = false } = {}) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
-  const { instancePath, instance } = readWorkflowInstance(context, id);
+  const { instancePath, instance } = readCompletedWorkflowInstance(context, id);
   const { definitionEntry, overlayEntry, effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
-  const events = readWorkflowEvents(context, id);
-  const replay = callWorkflowDomain("Unable to reconstruct workflow instance", () => replayWorkflowEvents({
-    instance,
-    effective_definition: effectiveDefinition,
-    events,
-  }));
+  const eventsPath = workflowEventsPath(context, id);
+  const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+  let events;
+  let integrity;
+  try {
+    events = readWorkflowEvents(context, id);
+    integrity = inspectWorkflowRuntimeIntegrity(context, id, instance, effectiveDefinition, events);
+  } finally {
+    releaseLock();
+  }
+  if (!integrity.valid) {
+    blockWorkflowOnIntegrityFailure(context, options, id, integrity, explain ? "explain" : "status");
+    return;
+  }
+  const replay = integrity.replay;
   const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
   const nextStates = workflowNextStates(effectiveDefinition, currentState);
   outputWorkflowResult(options, {
@@ -2025,8 +4063,10 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
     current_state: currentState,
     next_states: nextStates,
     event_count: events.length,
-    integrity: replay.integrity || replay.status || "valid",
+    integrity: replay.integrity,
     replay,
+    checkpoint_path: toProjectPath(context, integrity.checkpointPath),
+    checkpoint: integrity.checkpoint,
     ...(explain ? { events } : {}),
   }, "instance_shown", [
     `Instance: ${id}`,
@@ -2036,7 +4076,8 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
     `Definition: ${definitionEntry.record.id} version ${definitionEntry.record.version}`,
     ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
     `Instance path: ${toProjectPath(context, instancePath)}`,
-    `Events path: ${toProjectPath(context, workflowEventsPath(context, id))}`,
+    `Events path: ${toProjectPath(context, eventsPath)}`,
+    `Integrity checkpoint: ${toProjectPath(context, integrity.checkpointPath)}`,
   ]);
 }
 
@@ -3961,8 +6002,8 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
         : `“Start ${decision.story_id || "this task"} under ${decision.contract_id || "the approved brief"}; stop and ask if scope or budget must change.”`;
     case "select_delivery_autonomy":
       return italian
-        ? `“Per ${decision.story_id || "questa attività"}, scegli controllo passo per passo / autonomia con checkpoint / piena autonomia entro i limiti esatti, soltanto per questa pull request.”`
-        : `“For ${decision.story_id || "this work item"}, use step-by-step control / autonomy with checkpoints / full autonomy inside the exact agreed limits for this pull request only.”`;
+        ? "“Per questa attività, chiedimi conferma a ogni passaggio importante / procedi da solo tra i momenti di revisione ma fermati prima dei passaggi delicati / completa questa pull request da solo entro i limiti mostrati.”"
+        : "“For this work, ask before every important step / work independently between review moments but pause before sensitive steps / complete this pull request independently within the displayed limits.”";
     case "repair_delivery_autonomy":
       return italian
         ? '“Mantieni separata questa consegna, correggi repository, branch, ambito o checkpoint esatti e rivalutala senza riutilizzare un’approvazione precedente.”'
@@ -3975,21 +6016,48 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
 }
 
 function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
-  if (locale !== "it") return originalQuestion;
+  const italian = locale === "it";
   switch (decision.contract_action) {
     case "select_delivery_autonomy":
-      return "Quale livello di autonomia vuoi usare per questa singola pull request o questo singolo rilascio locale?";
+      return italian
+        ? "Quanto vuoi che proceda in autonomia per questa singola pull request o questo singolo rilascio locale?"
+        : "How independently should I work on this one pull request or local release?";
     case "repair_delivery_autonomy":
-      return "Confermi di correggere il perimetro esatto di questa consegna e di rivalutarlo senza riusare approvazioni precedenti?";
+      return italian
+        ? "Confermi di correggere i limiti esatti di questa consegna e di rivalutarla senza riusare approvazioni precedenti?"
+        : "Should I correct this delivery’s exact limits and evaluate it again without reusing an earlier approval?";
     case "confirm_start":
-      return "Confermi l’avvio di questa attività entro l’incarico e i limiti mostrati?";
+      return italian ? "Confermi l’avvio di questa attività entro l’incarico e i limiti mostrati?" : originalQuestion;
     case "approve_contract":
-      return "Confermi che l’incarico mostrato descrive correttamente ciò che deve essere fatto e prodotto?";
+      return italian ? "Confermi che l’incarico mostrato descrive correttamente ciò che deve essere fatto e prodotto?" : originalQuestion;
     case "initialize_sdlc":
-      return "Quali file e informazioni devo usare come contesto iniziale affidabile del progetto?";
+      return italian ? "Quali file e informazioni devo usare come contesto iniziale affidabile del progetto?" : originalQuestion;
     default:
-      return "Conferma la decisione descritta sopra oppure indica cosa deve cambiare.";
+      return italian ? "Conferma la decisione descritta sopra oppure indica cosa deve cambiare." : originalQuestion;
   }
+}
+
+function taskStartAutonomyChoiceLines(decision, italian) {
+  if (decision.contract_action !== "select_delivery_autonomy") return [];
+  return italian
+    ? [
+        "",
+        "Scelta per questa consegna:",
+        "- Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale?",
+        "  1. Chiedimi conferma prima di ogni passaggio importante.",
+        "  2. Procedi da solo tra un momento di revisione e l’altro, ma fermati prima dei passaggi delicati concordati.",
+        "  3. Completa questa consegna da solo entro i limiti mostrati; fermati se cambiano ambito, destinazione o rischio.",
+        "La scelta vale soltanto per questa consegna e non sarà riutilizzata per la successiva.",
+      ]
+    : [
+        "",
+        "Choice for this delivery:",
+        "- How independently should I work on this pull request or local release?",
+        "  1. Ask before every important step.",
+        "  2. Work independently between review moments, but pause before the sensitive steps we agree.",
+        "  3. Complete this delivery independently within the displayed limits; stop if scope, target, or risk changes.",
+        "This choice applies only to this delivery and will not be reused for the next one.",
+      ];
 }
 
 function userFriendlyTaskStartIntro(decision, locale = "en") {
@@ -4042,7 +6110,7 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
 function userFriendlyBlockingReason(code, locale = "en") {
   if (locale === "it") {
     const italianExplanations = {
-      autonomy_checkpoint_required: "La consegna può procedere autonomamente tra i checkpoint concordati, ma ha raggiunto un passaggio che richiede una nuova conferma.",
+      autonomy_checkpoint_required: "La consegna può procedere da sola tra i momenti di revisione concordati, ma ora ha raggiunto un passaggio che richiede una nuova conferma.",
       autonomy_human_approval_required: "Il perimetro di autonomia scelto richiede ancora una decisione umana esplicita prima di diventare attivo.",
       autonomy_policy_blocked: "L’autonomia richiesta è fuori dai limiti di sicurezza approvati, quindi l’esecuzione resta ferma.",
       autonomy_profile_contract_mismatch: "La scelta di autonomia appartiene a un incarico diverso e non può essere riutilizzata per questa attività.",
@@ -4059,7 +6127,7 @@ function userFriendlyBlockingReason(code, locale = "en") {
       story_contract_missing: "L’attività non ha ancora un incarico concordato.",
       story_not_found: "L’attività indicata non esiste ancora.",
       story_reference_required: "Devo sapere a quale attività appartiene questo lavoro.",
-      "delivery.authority.audit_only_caps_autonomy": "L’approvazione è registrata ma non è firmata in modo verificabile; la piena autonomia viene quindi ridotta ad autonomia tra checkpoint espliciti.",
+      "delivery.authority.audit_only_caps_autonomy": "La scelta è stata salvata, ma questa installazione non può ancora verificare automaticamente chi l’ha approvata. Per sicurezza, procederò da solo soltanto tra i momenti di revisione concordati e ti chiederò conferma nei passaggi delicati.",
       "delivery.concurrent_run_limit_exceeded": "Questa consegna ha già il numero massimo di esecuzioni attive e non è possibile avviarne un’altra.",
       "delivery.story_refs_stale": "L’attività è cambiata dopo l’approvazione della consegna e il perimetro deve essere rivisto.",
     };
@@ -4085,7 +6153,7 @@ function userFriendlyBlockingReason(code, locale = "en") {
     contract_not_approved: "The work brief exists, but you still need to confirm it or ask for changes.",
     contract_phase_mismatch: "The selected work brief is for a different kind of work, so it needs to be revised or replaced.",
     contract_revision_requested: "You asked to revise the work brief before starting.",
-    "delivery.authority.audit_only_caps_autonomy": "The approval is recorded but not independently signed, so full autonomy is reduced to autonomy between explicit checkpoints.",
+    "delivery.authority.audit_only_caps_autonomy": "The choice was saved, but this installation cannot yet verify automatically who approved it. For safety, I will work independently only between the agreed review moments and ask again before sensitive steps.",
     "delivery.concurrent_run_limit_exceeded": "This delivery already has the maximum number of active runs, so another run cannot start over it.",
     "delivery.story_refs_stale": "The story changed after this delivery profile was approved, so the exact boundary must be reviewed again.",
     invalid_canonical_intent: "The request was not normalized into a supported action.",
@@ -4116,6 +6184,7 @@ function userFriendlyBlockingReason(code, locale = "en") {
 function formatTaskStartDecision(decision) {
   const italian = decision.__human_locale === "it";
   const ready = decision.status === "ready_to_execute" && decision.execution_allowed;
+  const autonomyChoiceLines = taskStartAutonomyChoiceLines(decision, italian);
   const lines = [
     `${italian ? "Risultato" : "Outcome"}: ${ready
       ? (italian ? "Il lavoro concordato è pronto per iniziare." : "The agreed work is ready to start.")
@@ -4132,6 +6201,7 @@ function formatTaskStartDecision(decision) {
     `${italian ? "Prossimo passo" : "Next step"}: ${ready
       ? (italian ? "Inizia soltanto il lavoro già concordato." : "Begin only the work already agreed.")
       : (italian ? "Leggi la spiegazione facoltativa e chiarisci il punto in attesa." : "Review the optional explanation and clarify the pending point.")}`,
+    ...autonomyChoiceLines,
     "",
     italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
     ...(decision.assistant_message
@@ -7478,16 +9548,76 @@ function showRequirements(context, options) {
         effective_status: effective.status,
         supersession: effective.event,
         autonomy: profile
-          ? { profile_id: profile.id, status: profile.status, ceiling: profile.autonomy_ceiling, profile_hash: profile.profile_hash }
-          : { profile_id: null, status: "legacy", ceiling: "supervised", profile_hash: null },
+          ? {
+              profile_id: profile.id,
+              status: profile.status,
+              ceiling: profile.autonomy_ceiling,
+              profile_hash: profile.profile_hash,
+              authority_assurance: profile.authority_assurance,
+            }
+          : { profile_id: null, status: "legacy", ceiling: "supervised", profile_hash: null, authority_assurance: null },
       };
     });
   if (id && records.length === 0) {
     fail(`Requirement ${id} does not exist.`);
   }
-  output(options, { requirements: records }, records.length
-    ? records.map((record) => `${record.id}: ${record.effective_status || record.status || "unknown"} — ceiling ${record.autonomy.ceiling} — ${record.title || "untitled"}`)
-    : ["No requirements found."]);
+  const italian = humanGuidanceLocale(options) === "it";
+  const perRequirement = records.map((record) => record.autonomy.profile_id
+    ? requirementAutonomyCeilingGuidance({
+        status: record.autonomy.status,
+        requirement_id: record.id,
+        profile_id: record.autonomy.profile_id,
+        autonomy_ceiling: record.autonomy.ceiling,
+        authority_assurance: record.autonomy.authority_assurance,
+      }, { locale: italian ? "it" : "en" })
+    : {
+        result: italian
+          ? "Per questo requisito lavorerò nel modo più prudente e chiederò conferma prima di ogni modifica importante."
+          : "For this requirement, I will use the most cautious way of working and ask before every important change.",
+        impact: italian
+          ? "La modalità di lavoro non è ancora stata concordata nel nuovo formato."
+          : "The way of working has not yet been agreed in the current format.",
+        required_decision: italian
+          ? "Concorda il requisito nel formato attuale prima di scegliere l’autonomia di una consegna."
+          : "Agree the requirement in the current format before choosing delivery independence.",
+        protection_boundary: italian
+          ? "Nessun lavoro, merge o rilascio è autorizzato da questo stato."
+          : "This status authorizes no work, merge, or release.",
+        next_action: italian
+          ? "Aggiorna il requisito, poi scegli separatamente come lavorerò per ogni consegna."
+          : "Update the requirement, then choose separately how I will work for each delivery.",
+        details: {},
+      });
+  const aggregateGuidance = records.length === 1
+    ? perRequirement[0]
+    : {
+        result: records.length > 0
+          ? (italian ? `Sono stati trovati ${records.length} requisiti.` : `${records.length} requirements were found.`)
+          : (italian ? "Non è stato trovato alcun requisito." : "No requirement was found."),
+        impact: italian
+          ? "Ogni requisito stabilisce soltanto la massima autonomia disponibile; per ogni pull request o rilascio locale la scelta viene fatta separatamente."
+          : "Each requirement sets only the maximum available independence; every pull request or local release gets a separate choice.",
+        required_decision: italian
+          ? "Non serve una decisione per consultare questo elenco."
+          : "No decision is needed to review this list.",
+        protection_boundary: italian
+          ? "L’elenco non autorizza lavoro, merge, rilasci o accessi esterni."
+          : "The list authorizes no work, merge, release, or external access.",
+        next_action: italian
+          ? "Apri il requisito che vuoi rivedere oppure crea la scelta per la prossima consegna."
+          : "Open the requirement you want to review, or create the choice for the next delivery.",
+        details: {},
+      };
+  const summaries = records.length > 1
+    ? perRequirement.map((guidance, index) => `${italian ? "Requisito" : "Requirement"} ${index + 1}: ${guidance.result}`)
+    : [];
+  const technical = records.map((record) => [
+    `Requirement: ${record.id}`,
+    `Status: ${record.effective_status || record.status || "unknown"}`,
+    `Maximum technical level: ${record.autonomy.ceiling}`,
+    `Title: ${record.title || "untitled"}`,
+  ].join("; "));
+  output(options, { requirements: records }, humanGuidanceLines(aggregateGuidance, technical, options, summaries));
 }
 
 function showRequirementAutonomy(context, options) {
@@ -7518,7 +9648,28 @@ function showRequirementAutonomy(context, options) {
         `Maximum technical level: ${profile.autonomy_ceiling}`,
         `Profile status: ${profile.status}`,
       ], options)
-    : [`Requirement ${id}: legacy supervised fallback; create requirement:v2 to negotiate autonomy.`]);
+    : humanGuidanceLines({
+        result: humanGuidanceLocale(options) === "it"
+          ? "Per questo requisito lavorerò nel modo più prudente."
+          : "For this requirement, I will use the most cautious way of working.",
+        impact: humanGuidanceLocale(options) === "it"
+          ? "Ti chiederò conferma prima di ogni modifica importante perché la modalità di lavoro non è ancora stata concordata nel formato attuale."
+          : "I will ask before every important change because the way of working has not yet been agreed in the current format.",
+        required_decision: humanGuidanceLocale(options) === "it"
+          ? "Concorda il requisito nel formato attuale prima di scegliere l’autonomia di una consegna."
+          : "Agree the requirement in the current format before choosing delivery independence.",
+        protection_boundary: humanGuidanceLocale(options) === "it"
+          ? "Questo stato non autorizza lavoro, merge, rilasci o accessi esterni."
+          : "This status authorizes no work, merge, release, or external access.",
+        next_action: humanGuidanceLocale(options) === "it"
+          ? "Aggiorna il requisito, poi scegli separatamente come lavorerò per ogni pull request o rilascio locale."
+          : "Update the requirement, then choose separately how I will work for every pull request or local release.",
+        details: {},
+      }, [
+        `Requirement: ${id}`,
+        "Technical fallback: supervised",
+        "Migration target: requirement:v2",
+      ], options));
 }
 
 function validateApprovalEvidenceIntegrity(context, approval, label) {
@@ -29573,9 +31724,30 @@ function appendJsonLine(filePath, value) {
   ensureDir(path.dirname(filePath));
   const releaseLock = acquireFileLock(`${filePath}.lock`);
   try {
+    assertJsonLineTailComplete(filePath);
     fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
   } finally {
     releaseLock();
+  }
+}
+
+function assertJsonLineTailComplete(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    const size = fs.fstatSync(descriptor).size;
+    if (size === 0) return;
+    const finalByte = Buffer.allocUnsafe(1);
+    const bytesRead = fs.readSync(descriptor, finalByte, 0, 1, size - 1);
+    if (bytesRead !== 1 || finalByte[0] !== 0x0A) {
+      fail(`Cannot append to an incomplete JSONL record: ${filePath}. Recover the interrupted owner first.`);
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
 }
 
@@ -29656,14 +31828,18 @@ function reclaimStaleInternalLock(lockPath) {
       return true;
     }
   }
-  if (ageMs < INTERNAL_LOCK_STALE_MS) {
-    return false;
-  }
-  if (metadata?.host && metadata.host !== os.hostname() && ageMs < INTERNAL_LOCK_REMOTE_STALE_MS) {
-    return false;
-  }
-  if ((!metadata?.host || metadata.host === os.hostname()) && Number.isInteger(metadata?.pid) && processIsAlive(metadata.pid)) {
-    return false;
+  const localOwner = !metadata?.host || metadata.host === os.hostname();
+  if (localOwner && Number.isInteger(metadata?.pid)) {
+    // A dead local process cannot still own the lock. Reclaim immediately so
+    // durable journals can recover from SIGKILL or power-loss equivalents
+    // without an artificial thirty-second outage. A recycled live PID stays
+    // conservative and keeps the lock.
+    if (processIsAlive(metadata.pid)) return false;
+  } else {
+    if (ageMs < INTERNAL_LOCK_STALE_MS) return false;
+    if (metadata?.host && metadata.host !== os.hostname() && ageMs < INTERNAL_LOCK_REMOTE_STALE_MS) {
+      return false;
+    }
   }
   const stalePath = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
   try {
