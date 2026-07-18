@@ -114,7 +114,12 @@ test("dedicated launch uses argv without a shell and keeps an IPC parent boundar
   const calls = [];
   const child = new EventEmitter();
   const launched = launchDedicatedObservatory({
-    argv: ["observe", "--root", "project with spaces", "--json"],
+    argv: [
+      "observe",
+      "--root", "portfolio with spaces",
+      "--portfolio-manifest", "config/project list.json",
+      "--json",
+    ],
     scriptPath: "bin/agentic-sdlc.mjs",
     executable: process.execPath,
     execArgv: ["--disable-proto=throw", "--no-warnings"],
@@ -132,7 +137,9 @@ test("dedicated launch uses argv without a shell and keeps an IPC parent boundar
   assert.deepEqual(calls[0].args, [
     "observe",
     "--root",
-    "project with spaces",
+    "portfolio with spaces",
+    "--portfolio-manifest",
+    "config/project list.json",
     "--json",
   ]);
   assert.equal(calls[0].options.execPath, path.resolve(process.execPath));

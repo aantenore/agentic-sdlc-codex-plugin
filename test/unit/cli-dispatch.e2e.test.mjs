@@ -43,6 +43,9 @@ test("runtime registry dispatches help, presets, completion, and Observatory boo
   const flags = new Set(help.options.map((descriptor) => descriptor.flag));
   assert.equal(flags.has("--target-event"), true);
   assert.equal(flags.has("--redaction-policy"), true);
+  const observeHelp = JSON.parse(mustRun(["help", "observe", "--json"]).stdout);
+  const observeFlags = new Set(observeHelp.options.map((descriptor) => descriptor.flag));
+  assert.equal(observeFlags.has("--portfolio-manifest"), true);
 
   const presets = JSON.parse(mustRun(["preset", "list", "--json"]).stdout);
   assert.equal(presets.schema_version, "agentic-sdlc-cli-preset-list-v1");
@@ -57,6 +60,18 @@ test("runtime registry dispatches help, presets, completion, and Observatory boo
   });
   assert.equal(observed.stdout, "");
   assert.equal(observed.stderr, "");
+
+  const missingManifest = run([
+    "observe",
+    "--root", project,
+    "--portfolio-manifest", "missing.json",
+    "--no-open",
+    "--json",
+  ]);
+  assert.equal(missingManifest.status, 1);
+  const missingError = JSON.parse(missingManifest.stderr);
+  assert.match(missingError.error.message, /portfolio could not be opened/u);
+  assert.match(missingError.error.message, /--portfolio-manifest/u);
 });
 
 test("catalog options and explicit compatibility options remain accepted by the parser", () => {

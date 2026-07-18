@@ -95,6 +95,7 @@ import {
   OBSERVATORY_WORKER_MARKER,
   shouldLaunchDedicatedObservatory,
 } from "../lib/change-observatory/runtime.mjs";
+import { ObservatoryPathError } from "../lib/change-observatory/path-safety.mjs";
 import { createObservatoryConfiguration } from "../lib/change-observatory/configuration.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 import {
@@ -885,6 +886,7 @@ async function runObserveFromCli({ options, rawArgs }) {
     }
     await runObserveCommand({
       projectRoot: path.resolve(String(options.root || process.cwd())),
+      portfolioManifest: options["portfolio-manifest"],
       host: options.host,
       port: options.port,
       openBrowser: options["no-open"] !== true,
@@ -896,6 +898,12 @@ async function runObserveFromCli({ options, rawArgs }) {
     });
   } catch (error) {
     if (error instanceof TypeError) fail(error.message);
+    if (options["portfolio-manifest"] !== undefined && error instanceof ObservatoryPathError) {
+      fail(
+        `The portfolio could not be opened: ${error.message}. `
+        + "Check --root and the explicit relative path passed to --portfolio-manifest.",
+      );
+    }
     throw error;
   }
 }
@@ -34480,7 +34488,8 @@ function printHelp() {
   console.log(`Agentic SDLC ${VERSION}
 
 Usage:
-  agentic-sdlc observe [--root path] [--host 127.0.0.1] [--port 0] [--no-open] [--json]
+  agentic-sdlc observe [--root path] [--portfolio-manifest relative.json]
+      [--host 127.0.0.1] [--port 0] [--no-open] [--json]
   agentic-sdlc doctor [--root path] [--json]
   agentic-sdlc config status [--root path] [--json]
   agentic-sdlc config migrate [--root path] [--json]
@@ -34684,6 +34693,8 @@ Global options:
 Change Observatory options:
   --host 127.0.0.1       Loopback bind address. Other interfaces are rejected.
   --port n               Local port from 0 to 65535. Defaults to 0 (ephemeral).
+  --portfolio-manifest path
+                         Show only the projects listed in this relative JSON manifest.
   --no-open              Do not invoke the operating-system browser opener.
   --json                 Emit compact NDJSON ready/stopped lifecycle events.
 

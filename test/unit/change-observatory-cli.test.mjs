@@ -34,6 +34,44 @@ test("normalizes loopback launch options and validates ports", () => {
   }
   assert.equal(parseObserveOptions({ locale: "it-IT" }).locale, "it");
   assert.throws(() => parseObserveOptions({ locale: "fr" }), /must be en or it/);
+  assert.equal(
+    parseObserveOptions({ portfolioManifest: "config/portfolio.json" }).portfolioManifest,
+    "config/portfolio.json",
+  );
+  for (const portfolioManifest of ["", " portfolio.json", "portfolio.json ", 42]) {
+    assert.throws(
+      () => parseObserveOptions({ portfolioManifest }),
+      /needs --portfolio-manifest with one explicit relative JSON path/u,
+    );
+  }
+});
+
+test("run command enables portfolio mode only for an explicit manifest", async () => {
+  let receivedOptions;
+  const output = createMemoryStream();
+  const running = await runObserveCommand({
+    projectRoot: ".",
+    portfolioManifest: "config/portfolio.json",
+    openBrowser: false,
+    json: true,
+  }, {
+    registerSignals: false,
+    stdout: output,
+    async serverFactory(options) {
+      receivedOptions = options;
+      return {
+        ...(await successfulServer()),
+        modelUrl: "http://127.0.0.1:43127/api/v1/portfolio",
+      };
+    },
+  });
+
+  assert.equal(receivedOptions.portfolioManifest, "config/portfolio.json");
+  const event = JSON.parse(output.value.trim());
+  assert.equal(event.mode, "portfolio");
+  assert.equal(event.portfolio_manifest, "config/portfolio.json");
+  assert.equal(event.model_url, "http://127.0.0.1:43127/api/v1/portfolio");
+  await running.close();
 });
 
 test("resolves the bundled UI relative to the installed launcher module", async () => {
@@ -76,6 +114,7 @@ test("run command suppresses the opener with --no-open and emits one ready event
 
   assert.equal(opened, false);
   assert.equal(receivedOptions.assetRoot, bundledObservatoryAssetRoot());
+  assert.equal(Object.hasOwn(receivedOptions, "portfolioManifest"), false);
   assert.equal(receivedOptions.locale, "en");
   const event = JSON.parse(output.value.trim());
   assert.equal(event.event, "observatory.ready");
