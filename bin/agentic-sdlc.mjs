@@ -183,6 +183,14 @@ import {
   resolveCommand,
 } from "../lib/cli/dispatch.mjs";
 import {
+  MutationGovernanceError,
+  appendJsonLineNoFollow,
+  assertMutationExecutionAuthorized,
+  createProjectMutationGovernance,
+  runWithMutationGovernance,
+  withGovernedMutation,
+} from "../lib/governance/mutation-guard.mjs";
+import {
   CliPresetError,
   exportCliPresets,
   listCliPresets,
@@ -888,6 +896,39 @@ async function runObserveFromCli({ options, rawArgs }) {
   }
 }
 
+function mutationGovernanceActor(options) {
+  const assertedId = getOptionString(options, "actor")
+    || getOptionString(options, "actor-name")
+    || "local-cli";
+  const assertedType = getOptionString(options, "actor-type")
+    || (getOptionString(options, "actor") ? "agent" : "system");
+  return { type: assertedType, id: assertedId };
+}
+
+function mutationGovernanceEvidencePaths(options) {
+  return [
+    ...normalizeRawListOption(options.evidence),
+    ...normalizeRawListOption(options["approval-evidence"]),
+  ];
+}
+
+async function dispatchWithMutationGovernance(registry, resolution, invocation) {
+  const { context, options } = invocation;
+  const governance = createProjectMutationGovernance({
+    root: context.root,
+    governance_policy: context.config?.governance_policy,
+    canonical_action: resolution?.canonical_action,
+    command_path: resolution?.canonical_path?.join(" "),
+    actor: mutationGovernanceActor(options),
+    evidence_paths: mutationGovernanceEvidencePaths(options),
+  });
+  context.mutationGovernanceObservations = governance.observations;
+  return runWithMutationGovernance(
+    governance,
+    () => registry.dispatch(resolution, invocation),
+  );
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const rawJsonRequested = rawBooleanOptionRequested(rawArgs, "json");
@@ -949,14 +990,14 @@ async function main() {
     }
     const context = buildContext(parsed.options);
     if (handler?.stage === "pre-config") {
-      await registry.dispatch(resolution, { ...invocation, context });
+      await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
       return;
     }
     assertConfigAllowsCommand(context, resolution, parsed.options, parsed.positionals);
     if (!resolution || !handler) {
       fail(`Unknown command: ${parsed.positionals.slice(0, 2).join(" ")}`);
     }
-    await registry.dispatch(resolution, { ...invocation, context });
+    await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
   } catch (error) {
     const jsonRequested = parsed.options?.json === true || rawJsonRequested;
     const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
@@ -974,7 +1015,9 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    const expected = error instanceof UserError || error instanceof CliPresetError;
+    const expected = error instanceof UserError
+      || error instanceof CliPresetError
+      || error instanceof MutationGovernanceError;
     {
       const italian = (() => {
         try {
@@ -2726,7 +2769,7 @@ function completeWorkflowStartTransactionLocked(context, journal) {
   } else {
     prepareWorkflowStartStaging(context, journal);
     maybeCrashWorkflowStartForTest("after-staging-before-publish");
-    fs.renameSync(stagingRoot, finalRoot);
+    renamePathGoverned(stagingRoot, finalRoot);
     syncWorkflowDirectory(path.dirname(stagingRoot));
     syncWorkflowDirectory(workflowInstancesRoot(context));
   }
@@ -3864,14 +3907,14 @@ function removeWorkflowFileDurably(filePath) {
   if (!fs.existsSync(filePath)) return false;
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
-  fs.rmSync(filePath);
+  removePathGoverned(filePath);
   syncWorkflowDirectory(parentPath);
   return true;
 }
 
 function removeWorkflowDirectoryIfEmptyDurably(directoryPath) {
   try {
-    fs.rmdirSync(directoryPath);
+    removeEmptyDirectoryGoverned(directoryPath);
     syncWorkflowDirectory(path.dirname(directoryPath));
     return true;
   } catch (error) {
@@ -4102,7 +4145,10 @@ function buildCliErrorPayload(
   const unknown = error instanceof UnknownCommandError;
   const errorRedactionPolicy = errorRedaction.policy;
   const describeUnknown = unknown && !errorRedaction.withholdDetails;
-  const expected = unknown || error instanceof UserError || error instanceof CliPresetError;
+  const expected = unknown
+    || error instanceof UserError
+    || error instanceof CliPresetError
+    || error instanceof MutationGovernanceError;
   const normalized = normalizeOperationalError(
     errorRedaction.withholdDetails
       ? {
@@ -4124,6 +4170,8 @@ function buildCliErrorPayload(
       ? "CLI_PRESET_ERROR"
       : error instanceof UserError
         ? "USER_ERROR"
+      : error instanceof MutationGovernanceError
+        ? error.code
       : "INTERNAL_ERROR";
   const redactedUnknownPath = describeUnknown
     ? redactText(error.path || "", errorRedactionPolicy)
@@ -4746,10 +4794,10 @@ function migrateProjectConfig(context, options) {
         if (lockExisted) {
           writeTextFile(context.configLockPath, lockBefore, { force: true });
         } else if (fs.existsSync(context.configLockPath)) {
-          fs.rmSync(context.configLockPath, { force: true });
+          removePathGoverned(context.configLockPath, { force: true });
         }
         if (receiptWritten && receiptPath && fs.existsSync(receiptPath)) {
-          fs.rmSync(receiptPath, { force: true });
+          removePathGoverned(receiptPath, { force: true });
         }
       } catch (rollbackError) {
         fail(`Configuration migration failed and rollback also failed: ${rollbackError.message}`);
@@ -5259,7 +5307,7 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id}`);
     writeJsonFile(receiptPath, receipt, { force: true });
   } catch (error) {
-    if (deliveryStartPath) fs.rmSync(deliveryStartPath, { force: true });
+    if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
     throw error;
   }
   return toProjectPath(context, receiptPath);
@@ -17884,7 +17932,7 @@ async function completeAssessmentProposalLocked(context, options, id) {
           writeTextFile(target.path, target.original, { force: true });
         } else if (fs.existsSync(target.path)) {
           assertNoSymlinkPathSegments(target.path);
-          fs.rmSync(target.path);
+          removePathGoverned(target.path);
         }
       } catch (rollbackError) {
         rollbackErrors.push(`${toProjectPath(context, target.path)}: ${rollbackError.message}`);
@@ -25121,7 +25169,7 @@ function clearCache(context, options) {
   ensureInitialized(context);
   const cacheRoot = resolveProjectFilePath(context, path.join(SDLC_DIR, "cache"), { mustExist: false });
   assertNoSymlinkPathSegments(cacheRoot);
-  fs.rmSync(cacheRoot, { recursive: true, force: true });
+  removePathGoverned(cacheRoot, { recursive: true, force: true });
   ensureDir(cacheRoot);
   output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
 }
@@ -26377,10 +26425,10 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
       ensureDir(path.dirname(operation.targetPath));
       if (fs.existsSync(operation.targetPath)) {
         const backupPath = `${operation.targetPath}.backup-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-        fs.renameSync(operation.targetPath, backupPath);
+        renamePathGoverned(operation.targetPath, backupPath);
         backups.push({ targetPath: operation.targetPath, backupPath });
       }
-      fs.renameSync(operation.sourcePath, operation.targetPath);
+      renamePathGoverned(operation.sourcePath, operation.targetPath);
       completed.push(operation);
     }
     for (const operation of completed) {
@@ -26389,7 +26437,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
     commit();
     for (const backup of backups) {
       try {
-        fs.rmSync(backup.backupPath, { force: true });
+        removePathGoverned(backup.backupPath, { force: true });
       } catch {
         // The archive is committed; an orphaned backup is safer than rolling it back incompletely.
       }
@@ -26402,7 +26450,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
       try {
         if (fs.existsSync(operation.targetPath) && !fs.existsSync(operation.sourcePath)) {
           ensureDir(path.dirname(operation.sourcePath));
-          fs.renameSync(operation.targetPath, operation.sourcePath);
+          renamePathGoverned(operation.targetPath, operation.sourcePath);
         }
       } catch {
         // Continue restoring the remaining files; the final error reports the failed transaction.
@@ -26411,7 +26459,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
     for (const backup of [...backups].reverse()) {
       try {
         if (fs.existsSync(backup.backupPath)) {
-          fs.renameSync(backup.backupPath, backup.targetPath);
+          renamePathGoverned(backup.backupPath, backup.targetPath);
         }
       } catch {
         // Best effort rollback for a filesystem-level failure.
@@ -26943,7 +26991,7 @@ function migrateActiveReleaseScope(context, options) {
       }
     } catch (error) {
       if (archiveWritten && plan?.preparedArchive.filePath && fs.existsSync(plan.preparedArchive.filePath)) {
-        fs.rmSync(plan.preparedArchive.filePath, { force: true });
+        removePathGoverned(plan.preparedArchive.filePath, { force: true });
       }
       if (configWritten) {
         writeJsonFile(plan.configPath, plan.rawConfig, { force: true });
@@ -32907,7 +32955,40 @@ function writeJsonFile(filePath, value, options = {}) {
   writeTextFile(filePath, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
+function removePathGoverned(filePath, options = {}) {
+  const operation = options.recursive ? "directory.remove" : "file.remove";
+  return withGovernedMutation({ operation, path: filePath }, () => {
+    assertMutationExecutionAuthorized({ operation, path: filePath });
+    fs.rmSync(filePath, options);
+    return true;
+  });
+}
+
+function removeEmptyDirectoryGoverned(directoryPath) {
+  return withGovernedMutation({ operation: "directory.remove", path: directoryPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.remove", path: directoryPath });
+    fs.rmdirSync(directoryPath);
+    return true;
+  });
+}
+
+function renamePathGoverned(sourcePath, targetPath) {
+  return withGovernedMutation({ operation: "path.rename.source", path: sourcePath }, () =>
+    withGovernedMutation({ operation: "path.rename.target", path: targetPath }, () => {
+      assertMutationExecutionAuthorized({ operation: "path.rename.source", path: sourcePath });
+      assertMutationExecutionAuthorized({ operation: "path.rename.target", path: targetPath });
+      fs.renameSync(sourcePath, targetPath);
+      return true;
+    }));
+}
+
 function writeTextFile(filePath, content, options = {}) {
+  return withGovernedMutation({ operation: "file.write", path: filePath }, () =>
+    writeTextFileAuthorized(filePath, content, options));
+}
+
+function writeTextFileAuthorized(filePath, content, options = {}) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
   ensureDir(parentPath);
@@ -32936,7 +33017,10 @@ function writeTextFile(filePath, content, options = {}) {
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity, options);
+      writeFileToStableParent(tempPath, content, parentIdentity, {
+        ...options,
+        governanceTargetPath: filePath,
+      });
       assertDirectoryIdentity(parentPath, parentIdentity);
       try {
         fs.linkSync(tempPath, filePath);
@@ -32949,6 +33033,7 @@ function writeTextFile(filePath, content, options = {}) {
       if (options.durable) syncWorkflowDirectory(parentPath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
         fs.rmSync(tempPath, { force: true });
       }
     }
@@ -32960,18 +33045,24 @@ function writeTextFile(filePath, content, options = {}) {
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity);
+      writeFileToStableParent(tempPath, content, parentIdentity, {
+        governanceTargetPath: filePath,
+      });
       assertDirectoryIdentity(parentPath, parentIdentity);
+      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
       fs.renameSync(tempPath, filePath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
         fs.rmSync(tempPath, { force: true });
       }
     }
     return true;
   }
   try {
-    writeFileToStableParent(filePath, content, parentIdentity);
+    writeFileToStableParent(filePath, content, parentIdentity, {
+      governanceTargetPath: filePath,
+    });
   } catch (error) {
     if (error && error.code === "EEXIST") {
       fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
@@ -33070,6 +33161,10 @@ function sameStableFileIdentity(left, right) {
 }
 
 function writeFileToStableParent(filePath, content, parentIdentity, options = {}) {
+  assertMutationExecutionAuthorized({
+    operation: "file.write",
+    path: options.governanceTargetPath ?? filePath,
+  });
   assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
   let descriptor;
   let created = false;
@@ -33090,21 +33185,29 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
       fs.closeSync(descriptor);
     }
     if (created && !complete && directoryIdentityMatches(path.dirname(filePath), parentIdentity)) {
+      assertMutationExecutionAuthorized({
+        operation: "file.write",
+        path: options.governanceTargetPath ?? filePath,
+      });
       fs.rmSync(filePath, { force: true });
     }
   }
 }
 
 function appendJsonLine(filePath, value) {
-  assertNoSymlinkPathSegments(filePath);
-  ensureDir(path.dirname(filePath));
-  const releaseLock = acquireFileLock(`${filePath}.lock`);
-  try {
-    assertJsonLineTailComplete(filePath);
-    fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
-  } finally {
-    releaseLock();
-  }
+  return withGovernedMutation({ operation: "file.append", path: filePath }, () => {
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
+    assertNoSymlinkPathSegments(filePath);
+    ensureDir(path.dirname(filePath));
+    const releaseLock = acquireFileLock(`${filePath}.lock`);
+    try {
+      assertJsonLineTailComplete(filePath);
+      assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
+      appendJsonLineNoFollow(filePath, value);
+    } finally {
+      releaseLock();
+    }
+  });
 }
 
 function assertJsonLineTailComplete(filePath) {
@@ -33128,6 +33231,12 @@ function assertJsonLineTailComplete(filePath) {
 }
 
 function acquireFileLock(lockPath) {
+  return withGovernedMutation({ operation: "lock.acquire", path: lockPath }, () =>
+    acquireFileLockAuthorized(lockPath));
+}
+
+function acquireFileLockAuthorized(lockPath) {
+  assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
   assertNoSymlinkPathSegments(lockPath);
   ensureDir(path.dirname(lockPath));
   const nonce = crypto.randomBytes(12).toString("hex");
@@ -33163,6 +33272,7 @@ function acquireFileLock(lockPath) {
     }
   }
   try {
+    assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
     fs.writeFileSync(descriptor, JSON.stringify(metadata));
     fs.closeSync(descriptor);
   } catch (error) {
@@ -33172,6 +33282,7 @@ function acquireFileLock(lockPath) {
       // Preserve the original metadata-write or close error.
     }
     try {
+      assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
       fs.rmSync(lockPath, { force: true });
     } catch {
       // A partially initialized lock remaining on disk is safer than hiding the failure.
@@ -33179,14 +33290,17 @@ function acquireFileLock(lockPath) {
     throw error;
   }
   return () => {
-    try {
-      const current = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, "utf8")) : null;
-      if (current?.nonce === nonce) {
-        fs.rmSync(lockPath, { force: true });
+    withGovernedMutation({ operation: "lock.release", path: lockPath }, () => {
+      try {
+        const current = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, "utf8")) : null;
+        if (current?.nonce === nonce) {
+          assertMutationExecutionAuthorized({ operation: "lock.release", path: lockPath });
+          fs.rmSync(lockPath, { force: true });
+        }
+      } catch {
+        // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
       }
-    } catch {
-      // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
-    }
+    });
   };
 }
 
@@ -33218,16 +33332,20 @@ function reclaimStaleInternalLock(lockPath) {
     }
   }
   const stalePath = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  try {
-    fs.renameSync(lockPath, stalePath);
-    fs.rmSync(stalePath, { force: true });
-    return true;
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
+  return withGovernedMutation({ operation: "lock.reclaim", path: lockPath }, () => {
+    try {
+      assertMutationExecutionAuthorized({ operation: "lock.reclaim", path: lockPath });
+      fs.renameSync(lockPath, stalePath);
+      assertMutationExecutionAuthorized({ operation: "lock.reclaim", path: lockPath });
+      fs.rmSync(stalePath, { force: true });
       return true;
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        return true;
+      }
+      return false;
     }
-    return false;
-  }
+  });
 }
 
 function processIsAlive(pid) {
@@ -33261,7 +33379,12 @@ function assertNoSymlinkPathSegments(filePath) {
 }
 
 function ensureDir(dirPath) {
-  fs.mkdirSync(dirPath, { recursive: true });
+  if (fs.existsSync(dirPath)) return false;
+  return withGovernedMutation({ operation: "directory.create", path: dirPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
+    fs.mkdirSync(dirPath, { recursive: true });
+    return true;
+  });
 }
 
 function safeReadDir(dirPath) {

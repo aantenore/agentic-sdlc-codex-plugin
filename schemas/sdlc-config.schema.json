@@ -174,7 +174,7 @@
         "fail_closed"
       ],
       "properties": {
-        "mode": { "const": "enforce" },
+        "mode": { "enum": ["audit", "enforce"] },
         "policy_file": {
           "type": "string",
           "minLength": 1,
@@ -195,8 +195,14 @@
           "minLength": 1,
           "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
         },
-        "fail_closed": { "const": true }
+        "fail_closed": { "type": "boolean" }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "enforce" } }, "required": ["mode"] },
+          "then": { "properties": { "fail_closed": { "const": true } } }
+        }
+      ],
       "additionalProperties": false
     },
     "observability_policy": {
