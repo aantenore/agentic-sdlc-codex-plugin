@@ -195,6 +195,12 @@
           "minLength": 1,
           "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
         },
+        "audit_events_root": {
+          "description": "Optional operational audit-event root. Defaults outside .sdlc so identity-tree replacement cannot discard events.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
         "fail_closed": { "type": "boolean" }
       },
       "allOf": [

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { createGovernancePolicy } from "../../lib/governance/policy-engine.mjs";
 import { planIdentityMigration } from "../../lib/identity-migration.mjs";
+import { DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT } from "../../lib/governance/mutation-guard.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
@@ -223,6 +224,48 @@ test("CLI audit pointer records policy misses without blocking legacy-compatible
   const result = createStory(project, "ST-GOV-AUDIT");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-GOV-AUDIT", "story.json")), true);
+  const auditRoot = path.join(project, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+  const auditEvents = fs.readdirSync(auditRoot);
+  assert.ok(auditEvents.length > 0, "audit misses must survive the CLI process that observed them");
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(auditRoot, auditEvents[0]), "utf8")).kind,
+    "governance_mutation_audit_event",
+  );
+});
+
+test("CLI warns clearly when audited work continues without a durable audit record", (t) => {
+  const project = projectFixture(t, "audit-warning");
+  initialize(project);
+  const governanceRoot = path.join(project, ".sdlc", "governance");
+  const operationalRoot = path.join(project, ".sdlc-governance");
+  const blockedAuditPath = path.join(operationalRoot, "blocked-audit-events");
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.mkdirSync(operationalRoot, { recursive: true });
+  fs.writeFileSync(path.join(governanceRoot, "policy.json"), `${JSON.stringify(denyAllPolicy(), null, 2)}\n`);
+  fs.writeFileSync(blockedAuditPath, "this path is intentionally not a directory\n");
+  unpinWithGovernance(project, {
+    mode: "audit",
+    policy_file: ".sdlc/governance/policy.json",
+    decision_receipts_root: ".sdlc/governance/decisions",
+    use_receipts_root: ".sdlc/governance/uses",
+    revocations_root: ".sdlc/governance/revocations",
+    audit_events_root: ".sdlc-governance/blocked-audit-events",
+    fail_closed: false,
+  });
+
+  const result = createStory(project, "ST-GOV-AUDIT-WARNING");
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotThrow(() => JSON.parse(result.stdout));
+  const warning = JSON.parse(result.stderr);
+  assert.equal(warning.code, "MUTATION_AUDIT_RECORD_NOT_SAVED");
+  assert.match(warning.message, /command completed/u);
+  assert.match(warning.message, /audit history is incomplete/u);
+  assert.equal(fs.readFileSync(blockedAuditPath, "utf8"), "this path is intentionally not a directory\n");
+
+  const failed = createStory(project, "ST-GOV-AUDIT-WARNING");
+  assert.notEqual(failed.status, 0, failed.stdout);
+  assert.match(failed.stderr, /MUTATION_AUDIT_RECORD_NOT_SAVED/u);
+  assert.match(failed.stderr, /already exists|File already exists/u);
 });
 
 test("identity dual-path revalidation remains non-blocking in audit and fail-closed in enforce", (t) => {
@@ -266,6 +309,10 @@ test("identity dual-path revalidation remains non-blocking in audit and fail-clo
   assert.equal(auditApplied.status, 0, auditApplied.stderr);
   assert.equal(JSON.parse(auditApplied.stdout).status, "applied");
   assert.equal(JSON.parse(fs.readFileSync(auditProjectPath, "utf8")).owner_email, targetEmail);
+  assert.ok(
+    fs.readdirSync(path.join(auditProject, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"))).length > 0,
+    "identity audit events must remain outside and survive the replaced .sdlc tree",
+  );
 
   const enforceProject = projectFixture(t, "identity-enforce");
   initialize(enforceProject);

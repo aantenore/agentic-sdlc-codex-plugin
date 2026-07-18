@@ -4,10 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { computeStableHash } from "../../lib/canonical.mjs";
+import { computeStableHash, omitKeys } from "../../lib/canonical.mjs";
 import { createCommandSubject } from "../../lib/governance/command-subject.mjs";
+import { validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
 import {
   MAX_EXACT_MUTATION_BATCH,
+  DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT,
+  MAX_GOVERNANCE_AUDIT_EVENT_BYTES,
+  MAX_GOVERNANCE_AUDIT_EVENT_FILES,
   MutationGovernanceError,
   appendJsonLineNoFollow,
   assertMutationExecutionAuthorized,
@@ -390,6 +394,99 @@ test("pointer governance persists exact receipts and reloads revocations before 
   assert.equal(fs.existsSync(deniedTarget), false);
 });
 
+test("audit pointer persists bounded immutable deny and error events but no allow event", () => {
+  const root = fixture(test, "audit-events");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const allowedTarget = path.join(root, ".sdlc", "story.json");
+  const deniedTarget = path.join(root, ".sdlc", "story-denied.json");
+  const errorTarget = path.join(root, ".sdlc", "story-error.json");
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  const policyPath = path.join(governanceRoot, "policy.json");
+  fs.writeFileSync(policyPath, `${JSON.stringify(policyFor(mutationSubject()))}\n`);
+  const pointer = {
+    mode: "audit",
+    policy_file: ".sdlc/governance/policy.json",
+    decision_receipts_root: ".sdlc/governance/decisions",
+    use_receipts_root: ".sdlc/governance/uses",
+    revocations_root: ".sdlc/governance/revocations",
+    fail_closed: false,
+  };
+  const createGovernance = () => createProjectMutationGovernance({
+    root,
+    governance_policy: pointer,
+    canonical_action: "story.update",
+    command_path: "story update",
+    actor: ACTOR,
+    evidence_paths: [],
+    now: () => NOW,
+  });
+  const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+
+  runWithMutationGovernance(createGovernance(), () => withGovernedMutation({
+    operation: "file.write",
+    path: deniedTarget,
+    evidence_refs: EXACT_EVIDENCE,
+  }, () => fs.writeFileSync(deniedTarget, "audit continued")));
+  const afterDeny = fs.readdirSync(auditRoot);
+  assert.equal(afterDeny.length, 1);
+
+  runWithMutationGovernance(createGovernance(), () => withGovernedMutation({
+    operation: "file.write",
+    path: allowedTarget,
+    evidence_refs: EXACT_EVIDENCE,
+  }, () => {
+    assertMutationExecutionAuthorized({
+      operation: "file.write",
+      path: allowedTarget,
+      evidence_refs: EXACT_EVIDENCE,
+    });
+    fs.writeFileSync(allowedTarget, "allowed");
+  }));
+  assert.equal(fs.readdirSync(auditRoot).length, 1, "allowed decisions must not create audit-miss events");
+
+  fs.writeFileSync(policyPath, "secret-token-must-not-be-persisted");
+  runWithMutationGovernance(createGovernance(), () => withGovernedMutation({
+    operation: "file.write",
+    path: errorTarget,
+    evidence_refs: EXACT_EVIDENCE,
+  }, () => fs.writeFileSync(errorTarget, "audit continued after policy error")));
+  const eventNames = fs.readdirSync(auditRoot).sort();
+  assert.equal(eventNames.length, 2);
+  assert.equal(eventNames.some((name) => name.endsWith(".lock")), false);
+  const events = eventNames.map((name) => {
+    assert.match(name, /^event-[a-f0-9]{64}\.json$/u);
+    const eventPath = path.join(auditRoot, name);
+    assert.equal(fs.lstatSync(eventPath).isSymbolicLink(), false);
+    assert.equal(fs.statSync(eventPath).mode & 0o777, 0o600);
+    assert.ok(fs.statSync(eventPath).size <= MAX_GOVERNANCE_AUDIT_EVENT_BYTES);
+    return JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  });
+  for (const event of events) {
+    assert.equal(event.kind, "governance_mutation_audit_event");
+    assert.equal(event.schema_version, "governance-mutation-audit-event:v1");
+    assert.equal(event.hash_algorithm, "sha256:stable-json:v1");
+    assert.equal(event.event_hash, computeStableHash(omitKeys(event, ["event_hash", "hash_algorithm"])));
+    assert.equal(
+      validateAgainstSchema(event, "governance-mutation-audit-event.schema.json").valid,
+      true,
+    );
+    assert.match(event.summary, /audit mode allowed execution to continue/u);
+  }
+  assert.ok(events.some((event) => event.error_digest !== null));
+  assert.equal(JSON.stringify(events).includes("secret-token-must-not-be-persisted"), false);
+
+  runWithMutationGovernance(createGovernance(), () => withGovernedMutation({
+    operation: "file.write",
+    path: errorTarget,
+    evidence_refs: EXACT_EVIDENCE,
+  }, () => fs.writeFileSync(errorTarget, "same audit error remained non-blocking")));
+  assert.equal(
+    fs.readdirSync(auditRoot).length,
+    2,
+    "an identical immutable event must be idempotent instead of creating a duplicate",
+  );
+});
+
 test("receipt persistence refuses a configured directory renamed behind an exact symlink", (t) => {
   const root = fixture(t, "receipt-parent-race");
   const governanceRoot = path.join(root, ".sdlc", "governance");
@@ -457,6 +554,115 @@ test("receipt persistence refuses a configured directory renamed behind an exact
     .map((name) => path.join(outsideDecisions, name));
   assert.ok(outsideFiles.length <= 1);
   assert.equal(outsideFiles.some((filePath) => fs.statSync(filePath).size > 0), false);
+});
+
+test("audit event sink race is fail-open and never writes bytes through a swapped symlink", (t) => {
+  const root = fixture(t, "audit-event-race");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+  const target = path.join(root, ".sdlc", "story-denied.json");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-sdlc-audit-outside-"));
+  const outsideAudit = path.join(outside, "audit-events");
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.mkdirSync(auditRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(governanceRoot, "policy.json"),
+    `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+  );
+  const governance = createProjectMutationGovernance({
+    root,
+    governance_policy: {
+      mode: "audit",
+      policy_file: ".sdlc/governance/policy.json",
+      decision_receipts_root: ".sdlc/governance/decisions",
+      use_receipts_root: ".sdlc/governance/uses",
+      revocations_root: ".sdlc/governance/revocations",
+      fail_closed: false,
+    },
+    canonical_action: "story.update",
+    command_path: "story update",
+    actor: ACTOR,
+    now: () => NOW,
+  });
+  const originalOpenSync = fs.openSync;
+  let raced = false;
+  fs.openSync = function racedAuditOpen(filePath, ...args) {
+    const resolved = typeof filePath === "string" ? path.resolve(filePath) : "";
+    if (!raced && resolved.startsWith(`${auditRoot}${path.sep}event-`)) {
+      fs.renameSync(auditRoot, outsideAudit);
+      fs.symlinkSync(outsideAudit, auditRoot, "dir");
+      raced = true;
+    }
+    return originalOpenSync.call(fs, filePath, ...args);
+  };
+  try {
+    runWithMutationGovernance(governance, () => withGovernedMutation({
+      operation: "file.write",
+      path: target,
+      evidence_refs: EXACT_EVIDENCE,
+    }, () => fs.writeFileSync(target, "audit fail-open")));
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(raced, true);
+  assert.equal(fs.readFileSync(target, "utf8"), "audit fail-open");
+  assert.equal(governance.observations.filter((outcome) =>
+    outcome.reason_codes?.includes("mutation.audit_sink_unavailable")).length, 1);
+  const outsideFiles = fs.readdirSync(outsideAudit).map((name) => path.join(outsideAudit, name));
+  assert.ok(outsideFiles.length <= 1);
+  assert.equal(outsideFiles.some((eventPath) => fs.statSync(eventPath).size > 0), false);
+});
+
+test("full and oversized audit stores stay bounded without blocking audited work", (t) => {
+  const runCase = (label, prepareStore) => {
+    const root = fixture(t, label);
+    const governanceRoot = path.join(root, ".sdlc", "governance");
+    const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+    const target = path.join(root, ".sdlc", `${label}.json`);
+    fs.mkdirSync(governanceRoot, { recursive: true });
+    fs.mkdirSync(auditRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(governanceRoot, "policy.json"),
+      `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+    );
+    prepareStore(auditRoot);
+    const beforeNames = fs.readdirSync(auditRoot).sort();
+    const governance = createProjectMutationGovernance({
+      root,
+      governance_policy: {
+        mode: "audit",
+        policy_file: ".sdlc/governance/policy.json",
+        decision_receipts_root: ".sdlc/governance/decisions",
+        use_receipts_root: ".sdlc/governance/uses",
+        revocations_root: ".sdlc/governance/revocations",
+        fail_closed: false,
+      },
+      canonical_action: "story.update",
+      command_path: "story update",
+      actor: ACTOR,
+      now: () => NOW,
+    });
+    runWithMutationGovernance(governance, () => withGovernedMutation({
+      operation: "file.write",
+      path: target,
+      evidence_refs: EXACT_EVIDENCE,
+    }, () => fs.writeFileSync(target, "bounded audit fail-open")));
+    assert.equal(fs.readFileSync(target, "utf8"), "bounded audit fail-open");
+    assert.deepEqual(fs.readdirSync(auditRoot).sort(), beforeNames);
+    assert.equal(governance.observations.some((outcome) =>
+      outcome.reason_codes?.includes("mutation.audit_sink_unavailable")), true);
+  };
+
+  runCase("audit-full", (auditRoot) => {
+    for (let index = 0; index < MAX_GOVERNANCE_AUDIT_EVENT_FILES; index += 1) {
+      fs.writeFileSync(path.join(auditRoot, `event-${index.toString(16).padStart(64, "0")}.json`), "");
+    }
+  });
+  runCase("audit-oversized", (auditRoot) => {
+    const oversized = path.join(auditRoot, `event-${"a".repeat(64)}.json`);
+    fs.writeFileSync(oversized, Buffer.alloc(MAX_GOVERNANCE_AUDIT_EVENT_BYTES + 1));
+  });
 });
 
 test("enforce rejects a self-asserted actor without verified host or CI identity", () => {

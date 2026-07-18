@@ -956,10 +956,35 @@ async function dispatchWithMutationGovernance(registry, resolution, invocation) 
     evidence_paths: mutationGovernanceEvidencePaths(options),
   });
   context.mutationGovernanceObservations = governance.observations;
-  return runWithMutationGovernance(
-    governance,
-    () => registry.dispatch(resolution, invocation),
-  );
+  try {
+    return await runWithMutationGovernance(
+      governance,
+      () => registry.dispatch(resolution, invocation),
+    );
+  } finally {
+    try {
+      emitMutationAuditSinkWarning(governance, options);
+    } catch {
+      // A warning channel must never replace the command's primary result.
+    }
+  }
+}
+
+function emitMutationAuditSinkWarning(governance, options) {
+  const unavailable = governance.observations.some((outcome) =>
+    outcome?.reason_codes?.includes("mutation.audit_sink_unavailable"));
+  if (!unavailable) return;
+  const message = "The command completed, but its safety audit record could not be saved. "
+    + "Check the configured audit-events directory; until it is fixed, the audit history is incomplete.";
+  if (options.json) {
+    console.error(JSON.stringify({
+      kind: "agentic_sdlc_warning",
+      code: "MUTATION_AUDIT_RECORD_NOT_SAVED",
+      message,
+    }));
+    return;
+  }
+  console.error(`Warning: ${message}`);
 }
 
 async function main() {
