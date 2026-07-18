@@ -185,6 +185,36 @@ test("canonicalizes parsed JSON without changing immutable JSON semantics", (t) 
   );
 });
 
+test("canonical parsed JSON creates own properties without invoking inherited setters", (t) => {
+  const { root, write } = fixture(t);
+  const key = "canonicalQueryInheritedSetter";
+  const previousDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  let setterCalls = 0;
+  Object.defineProperty(Object.prototype, key, {
+    configurable: true,
+    set() {
+      setterCalls += 1;
+    },
+  });
+  t.after(() => {
+    if (previousDescriptor) {
+      Object.defineProperty(Object.prototype, key, previousDescriptor);
+    } else {
+      delete Object.prototype[key];
+    }
+  });
+  write(".sdlc/contracts/INHERITED-SETTER.json", `{"${key}":"kept"}\n`);
+
+  const session = openCanonicalQuerySession({ root });
+  const actual = session.readJson("contracts/INHERITED-SETTER.json");
+
+  assert.equal(setterCalls, 0);
+  assert.equal(Object.hasOwn(actual, key), true);
+  assert.equal(actual[key], "kept");
+  assert.equal(Object.getPrototypeOf(actual), Object.prototype);
+  assert.ok(Object.isFrozen(actual));
+});
+
 test("does not cache parsed JSON when its verified source changes during parsing", (t) => {
   const { root, write } = fixture(t);
   const sourcePath = ".sdlc/stories/ST-1/story.json";
