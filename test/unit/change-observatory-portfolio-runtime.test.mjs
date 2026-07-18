@@ -181,6 +181,29 @@ test("retries rejected runtime initialization and never reads sources for summar
   assert.equal(sourceReads, 1);
 });
 
+test("forwards reviewed global privacy and operational policy to every project runtime", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  const redactionPolicy = Object.freeze({ source: "reviewed-global-policy" });
+  const operationalPolicy = Object.freeze({ availabilityTarget: 0.995 });
+  const received = [];
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    redactionPolicy,
+    operationalPolicy,
+    createProjectRuntime(options) {
+      received.push(options);
+      return fakeProjectRuntime(options.projectId);
+    },
+  });
+
+  await runtime.getSummaryRepresentation();
+
+  assert.equal(received.length, 3);
+  assert.ok(received.every((options) => options.redactionPolicy === redactionPolicy));
+  assert.ok(received.every((options) => options.operationalPolicy === operationalPolicy));
+});
+
 async function createPortfolioFixture(t) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-portfolio-runtime-"));
   const root = await fs.realpath(temporary);
