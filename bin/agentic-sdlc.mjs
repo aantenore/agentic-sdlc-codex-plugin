@@ -10127,7 +10127,12 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
         }
         expected.body_sha256 = expectedBodyHash;
       }
-      if (expectedState) expected.is_draft = expectedState === "draft";
+      if (expectedState) {
+        if (!["draft", "ready"].includes(expectedState)) {
+          fail("pull_request.update --expected-pr-state must be exactly draft or ready.");
+        }
+        expected.is_draft = expectedState === "draft";
+      }
       if (expectedBase) {
         if (expectedBase !== profile.pull_request_target.base_branch) {
           fail("pull_request.update cannot retarget the pull request outside the approved base branch.");
@@ -10201,6 +10206,105 @@ function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
       after_sha: afterSha,
       committed_paths: committedPaths,
     },
+  };
+}
+
+function verifyLegacyCompletedGitPush(context, authorization) {
+  const push = authorization.action_details?.push;
+  const precondition = authorization.action_details?.push_precondition;
+  if (!push?.remote || !push.destination_ref || !push.source_sha) {
+    fail(`git.push authorization ${authorization.id} lacks an exact remote operation.`);
+  }
+  if (
+    !precondition
+    || precondition.remote !== push.remote
+    || precondition.destination_ref !== push.destination_ref
+    || precondition.observed_sha === push.source_sha
+  ) {
+    fail(`git.push authorization ${authorization.id} lacks a distinct pre-action remote-ref observation.`);
+  }
+  let output;
+  try {
+    output = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+  } catch (error) {
+    fail(`git.push remote verification failed: ${String(error.stderr || error.message).trim()}`);
+  }
+  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
+    parts.length >= 2 && parts[1] === push.destination_ref);
+  if (matches.length !== 1 || matches[0][0] !== push.source_sha) {
+    fail(`git.push completion is not proven: ${push.destination_ref} does not resolve to ${push.source_sha}.`);
+  }
+  return {
+    provider: "git-remote",
+    remote: push.remote,
+    destination_ref: push.destination_ref,
+    observed_sha: matches[0][0],
+    verified_at: now(),
+  };
+}
+
+function verifyLegacyCompletedGitHubMerge(profile, authorization) {
+  const merge = authorization.action_details?.merge;
+  const precondition = authorization.action_details?.merge_precondition;
+  if (!merge?.pr_url || !merge.source_sha) {
+    fail(`pull_request.merge authorization ${authorization.id} lacks an exact GitHub PR operation.`);
+  }
+  if (
+    precondition?.provider !== "github-cli"
+    || precondition.state !== "OPEN"
+    || precondition.pr_url !== canonicalAbsoluteUrl(merge.pr_url)
+    || precondition.head_sha !== merge.source_sha
+  ) {
+    fail(`pull_request.merge authorization ${authorization.id} lacks an exact open-PR precondition.`);
+  }
+  let raw;
+  try {
+    raw = childProcess.execFileSync(
+      "gh",
+      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    fail(`pull_request.merge provider verification requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
+  }
+  let observed;
+  try {
+    observed = JSON.parse(raw);
+  } catch {
+    fail("pull_request.merge provider returned invalid JSON.");
+  }
+  const authorizedAt = Date.parse(authorization.authorized_at || "");
+  const mergedAt = Date.parse(observed.mergedAt || "");
+  if (
+    observed.state !== "MERGED"
+    || observed.isDraft === true
+    || !observed.mergedAt
+    || !observed.mergeCommit?.oid
+    || observed.headRefOid !== merge.source_sha
+    || observed.headRefName !== profile.pull_request_target.head_branch
+    || observed.baseRefName !== profile.pull_request_target.base_branch
+    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
+    || !Number.isFinite(authorizedAt)
+    || !Number.isFinite(mergedAt)
+    || mergedAt < authorizedAt
+  ) {
+    fail("pull_request.merge completion is not proven by the exact GitHub PR, head SHA, branches, and merged state.");
+  }
+  return {
+    provider: "github-cli",
+    pr_url: canonicalAbsoluteUrl(observed.url),
+    state: observed.state,
+    is_draft: false,
+    head_sha: observed.headRefOid,
+    head_branch: observed.headRefName,
+    base_branch: observed.baseRefName,
+    merge_commit_sha: observed.mergeCommit.oid,
+    merged_at: observed.mergedAt,
+    verified_at: now(),
   };
 }
 
@@ -12795,17 +12899,34 @@ function evaluateDeliveryAction(context, options) {
       }
     }
     if (completingAction && DELIVERY_PROVIDER_ACTIONS.has(action) && reportedOutcome === "passed") {
-      const completedProviderOperation = verifyDeliveryProviderCompletion(
-        profile,
-        action,
-        priorAuthorization.action_details?.provider_operation,
-        actionReceiptTimestamp,
-      );
-      actionDetails = withProviderCompatibilityProjection(
-        action,
-        priorAuthorization.action_details,
-        completedProviderOperation,
-      );
+      const providerOperation = priorAuthorization.action_details?.provider_operation;
+      if (providerOperation?.precondition_receipt) {
+        const completedProviderOperation = verifyDeliveryProviderCompletion(
+          profile,
+          action,
+          providerOperation,
+          actionReceiptTimestamp,
+        );
+        actionDetails = withProviderCompatibilityProjection(
+          action,
+          priorAuthorization.action_details,
+          completedProviderOperation,
+        );
+      } else if (profile.schema_version === "delivery-execution-profile:v1") {
+        if (action === "git.push") {
+          actionDetails = {
+            ...priorAuthorization.action_details,
+            remote_verification: verifyLegacyCompletedGitPush(context, priorAuthorization),
+          };
+        } else if (action === "pull_request.merge") {
+          actionDetails = {
+            ...priorAuthorization.action_details,
+            provider_verification: verifyLegacyCompletedGitHubMerge(profile, priorAuthorization),
+          };
+        }
+      } else {
+        fail(`The authorization for ${action} has no verified starting state.`);
+      }
     }
     if (completingAction && evidence.length === 0) {
       fail(`Delivery action ${action} completion requires at least one immutable --evidence file.`);

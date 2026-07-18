@@ -7,7 +7,10 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { computeDeliveryExecutionProfileHash } from "../lib/autonomy-policy.mjs";
+import {
+  buildDeliveryExecutionProfile,
+  computeDeliveryExecutionProfileHash,
+} from "../lib/autonomy-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -544,6 +547,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(receipt.delivery_profile_ref.id, "AUT-PR-1");
   assert.equal(receipt.autonomy_decision_ref.id, automatic.autonomy_decision.id);
   assert.equal(receipt.start_basis, "checkpointed-profile");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/1",
+    "--expected-pr-state", "almost-ready",
+  ], /expected-pr-state.*draft.*ready/iu);
   mustFail([
     "autonomy", "delivery", "action",
     "--root", project,
@@ -1206,6 +1217,131 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     forgedGateError.error.message,
     /Delivery lifecycle receipt .*close\.json validation failed: .*approval\.status: must equal "approved"/u,
   );
+});
+
+test("an in-flight v1 push authorization completes through its legacy verifier", () => {
+  const project = tmpProject("legacy-v1-push-completion");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LEGACY-PUSH",
+    contractId: "CONTRACT-LEGACY-PUSH",
+    profileId: "AUT-LEGACY-PUSH",
+  });
+  const proposed = mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--delivery", "PR-LEGACY-PUSH",
+    "--kind", "pull_request",
+    "--story", "ST-LEGACY-PUSH",
+    "--contract", "CONTRACT-LEGACY-PUSH",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "bounded-autonomous",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+  ]).delivery_profile;
+  const profilePath = path.join(
+    project,
+    ".sdlc",
+    "autonomy",
+    "deliveries",
+    "AUT-LEGACY-PUSH.json",
+  );
+  const legacyProposed = buildDeliveryExecutionProfile(proposed);
+  assert.equal(legacyProposed.schema_version, "delivery-execution-profile:v1");
+  fs.writeFileSync(profilePath, `${JSON.stringify(legacyProposed, null, 2)}\n`, "utf8");
+
+  const activated = mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--phase", "implementation",
+    ...humanApproval("Approve the historical v1 delivery fixture"),
+  ]).delivery_profile;
+  assert.equal(activated.schema_version, "delivery-execution-profile:v1");
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LEGACY-PUSH"),
+    "--delivery-profile", "AUT-LEGACY-PUSH",
+  ]);
+  assert.equal(started.execution_allowed, true);
+
+  const sourcePath = path.join(project, "src", "legacy-change.txt");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "legacy in-flight push\n", "utf8");
+  mustGit(project, ["add", "--", "src/legacy-change.txt"]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.commit",
+    "--scope-path", "src/legacy-change.txt",
+  ]);
+  const beforeCommit = mustGit(project, ["rev-parse", "HEAD"]);
+  mustGit(project, ["commit", "-m", "test: legacy v1 in-flight push"]);
+  const afterCommit = mustGit(project, ["rev-parse", "HEAD"]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.commit",
+    "--outcome", "passed",
+    "--evidence", "src/legacy-change.txt",
+  ]);
+
+  const authorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.push",
+    "--remote", "origin",
+    "--confirm-action",
+    ...humanApproval("Approve the historical v1 push checkpoint"),
+  ], { env: fakeGitRemoteEnv(project, beforeCommit) });
+  assert.equal(authorization.action_receipt.profile_ref.hash, activated.profile_hash);
+  assert.equal(
+    authorization.action_receipt.action_details.provider_operation.binding.source,
+    "legacy-v1",
+  );
+
+  const legacyAuthorization = structuredClone(authorization.action_receipt);
+  delete legacyAuthorization.action_details.provider_operation;
+  const approvalSubject = {
+    profile_id: legacyAuthorization.profile_ref.id,
+    profile_hash: legacyAuthorization.profile_ref.hash,
+    delivery_id: legacyAuthorization.delivery.id,
+    action: legacyAuthorization.action,
+    runtime_target: legacyAuthorization.runtime_target,
+    action_details: legacyAuthorization.action_details,
+  };
+  if (legacyAuthorization.approval) {
+    legacyAuthorization.approval.approved_content_hash = crypto.createHash("sha256")
+      .update(stableJson(approvalSubject))
+      .digest("hex");
+  }
+  legacyAuthorization.receipt_hash = lifecycleReceiptHash(legacyAuthorization);
+  fs.writeFileSync(
+    path.join(project, authorization.action_receipt_path),
+    `${JSON.stringify(legacyAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+
+  const completion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.push",
+    "--outcome", "passed",
+    "--evidence", "src/legacy-change.txt",
+  ], { env: fakeGitRemoteEnv(project, afterCommit) });
+  assert.equal(completion.status, "completed");
+  assert.equal(completion.action_receipt.authorization_receipt_ref.hash, legacyAuthorization.receipt_hash);
+  assert.equal(completion.action_receipt.action_details.provider_operation, undefined);
+  assert.equal(completion.action_receipt.action_details.remote_verification.provider, "git-remote");
+  assert.equal(completion.action_receipt.action_details.remote_verification.observed_sha, afterCommit);
 });
 
 test("git.push rejects commits created outside the exact delivery action chain", () => {
