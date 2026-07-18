@@ -162,6 +162,13 @@ test("support bundle is allowlisted, redacted, bounded, and content-verifiable",
   assert.equal(verifySupportBundleDigest(tampered), false);
 });
 
+test("recent request retention rejects values above the configured hard bound", () => {
+  assert.throws(
+    () => createOperations({ maxRecentRequests: 1_001 }),
+    /no greater than 1000/u,
+  );
+});
+
 function createOperations(overrides = {}) {
   let index = 0;
   return createObservatoryOperations({

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
+import { canonicalJson } from "../../lib/canonical.mjs";
 import { createRedactionPolicy } from "../../lib/observability/redaction.mjs";
 import {
   createSupportBundle,
@@ -67,6 +69,61 @@ test("support bundle digest detects content changes but does not claim authentic
   tampered.sections.health.status = "ok";
   tampered.integrity.assurance = "signed_and_authentic";
   assert.equal(verifySupportBundleDigest(tampered), false);
+
+  const forgedMetadata = JSON.parse(JSON.stringify(bundle));
+  forgedMetadata.integrity.authenticity = "provider_signed";
+  forgedMetadata.integrity.signature = "FAKE";
+  assert.equal(verifySupportBundleDigest(forgedMetadata), false);
+
+  const forgedTopLevel = JSON.parse(JSON.stringify(bundle));
+  forgedTopLevel.authenticity_claimed = true;
+  forgedTopLevel.signature = "FAKE";
+  const forgedPayload = Object.fromEntries(
+    Object.entries(forgedTopLevel).filter(([key]) => key !== "integrity"),
+  );
+  forgedTopLevel.integrity.digest = crypto
+    .createHash("sha256")
+    .update(canonicalJson(forgedPayload), "utf8")
+    .digest("hex");
+  assert.equal(verifySupportBundleDigest(forgedTopLevel), false);
+});
+
+test("support bundles use credential-safe defaults", () => {
+  const token = `github_pat_${"A".repeat(32)}`;
+  const bundle = createSupportBundle({
+    sections: { environment: { note: `${token} owner@example.com` } },
+    correlationId: CORRELATION_ID,
+    generatedAt: "2026-07-18T10:00:00.000Z",
+  });
+
+  assert.equal(JSON.stringify(bundle).includes(token), false);
+  assert.equal(JSON.stringify(bundle).includes("owner@example.com"), false);
+  assert.equal(bundle.redaction.applied, true);
+  assert.equal(verifySupportBundleDigest(bundle), true);
+
+  const unsafeSection = `github_pat_${"a".repeat(32)}`;
+  assert.throws(
+    () => createSupportBundle({
+      sections: { [unsafeSection]: { status: "ok" } },
+      allowedSections: [unsafeSection],
+      correlationId: CORRELATION_ID,
+      generatedAt: "2026-07-18T10:00:00.000Z",
+    }),
+    (error) => error?.code === "support_bundle_section_name_unsafe",
+  );
+  assert.throws(
+    () => createSupportBundle({
+      sections: { [unsafeSection]: { status: "ok" } },
+      allowedSections: ["health"],
+      correlationId: CORRELATION_ID,
+      generatedAt: "2026-07-18T10:00:00.000Z",
+    }),
+    (error) => {
+      assert.equal(error?.code, "support_bundle_section_name_unsafe");
+      assert.doesNotMatch(String(error?.message), /github_pat_/u);
+      return true;
+    },
+  );
 });
 
 test("support bundles reject non-allowlisted sections and withhold all data on redaction limits", () => {

@@ -1005,6 +1005,41 @@
       "handoff"
     ]
   },
+  "observability": {
+    "enabled": true,
+    "external_sinks": "disabled",
+    "redaction": {
+      "mode": "before_persistence_and_presentation",
+      "secret_patterns": [],
+      "pii_patterns": [],
+      "identifier_allow_patterns": []
+    },
+    "correlation": {
+      "enabled": true,
+      "format": "corr-uuid"
+    },
+    "metrics": {
+      "enabled": true,
+      "cardinality": "closed",
+      "external_sinks": "disabled"
+    },
+    "readiness": {
+      "liveness_is_shallow": true,
+      "warm_before_ready": true
+    },
+    "slo": {
+      "mode": "advisory",
+      "availability_target": 0.99,
+      "readiness_target": 0.99,
+      "minimum_samples": 20
+    },
+    "support_bundle": {
+      "enabled": true,
+      "max_recent_requests": 50,
+      "integrity": "sha256_of_redacted_canonical_content",
+      "authenticity_claimed": false
+    }
+  },
   "phases": {
     "discovery": {
       "purpose": "Understand the problem, target users, market context, constraints, and value hypothesis before solution design.",

@@ -96,6 +96,33 @@ agentic-sdlc observe --root /path/to/project --port 0 --no-open --json
 
 The server binds only to `127.0.0.1`, selects an ephemeral port by default, protects evidence APIs with a per-run token carried in the URL fragment, and makes no project writes. Plain-language explanations retain their `codex-generated`, `deterministic`, or `human-authored` label and contain only stored summaries, rationale, alternatives, inputs, outputs, and evidence—never private chain-of-thought. See [Change Observatory](docs/change-observatory.md) for the full model.
 
+Operationally, the plugin now makes failures easier to investigate without
+sending project data anywhere. Every governed CLI operation and Observatory
+request has a `corr-<uuid>` correlation ID, and errors return a stable code plus that ID
+without returning a stack trace, raw internal detail, token, or secret-bearing
+path. A safe project-relative path may still be shown when it tells the operator
+what to correct. The Observatory exposes
+separate “the process is answering” and “the project can be read” checks,
+in-memory metrics with a fixed set of labels, advisory SLOs, and a redacted
+support bundle. External metric and log sinks are disabled.
+
+New trace events are redacted before they are saved and are linked by hashes to
+a local checkpoint. This detects edits, reordering, truncation, and checkpoint
+drift during later validation. It is deliberately **tamper-evident local
+integrity**, not a signature, proof of origin, or “tamper-proof” storage: someone
+who can replace both the trace and its checkpoint can create a different
+internally consistent history. Evidence fingerprints are calculated from the
+redacted representation, so a digest does not preserve a hidden fingerprint of
+the original secret.
+
+Random-looking text is not treated as a secret by itself. Redaction happens
+when a value has a known credential format, appears in credential context, is
+explicitly configured as sensitive, or matches a configured secret/PII rule.
+That keeps authorization action IDs such as `AUT-ACT-...`, SHA digests, UUIDs,
+correlation IDs, source paths, and other legitimate audit references readable.
+Identifier allow rules describe legitimate IDs; they never override a known
+credential detector or an explicit project privacy rule.
+
 ## How It Works
 
 A normal local assessment has **two user checkpoints**, not one approval for every internal record. The first confirms facts about the project; the second approves one immutable, complete execution tranche.

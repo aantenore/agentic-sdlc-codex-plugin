@@ -1,4 +1,16 @@
 const SUPPORTED_LOCALES = new Set(["en", "it"]);
+const MAX_TECHNICAL_ERROR_CHARACTERS = 1_024;
+const TECHNICAL_ERROR_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u;
+const TECHNICAL_CORRELATION_ID_PATTERN = /^corr-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
+const UNSAFE_TECHNICAL_ERROR_PATTERNS = Object.freeze([
+  /\b[^\s@]{1,64}@[^\s@]{1,189}\.[^\s@]{1,63}\b/u,
+  /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/iu,
+  /\b(?:AKIA[A-Z0-9]{16}|(?:github_pat_|gh[opsur]_|glpat-|sk-(?:proj-)?|sk_(?:live|test)_|xox[baprs]-)[A-Za-z0-9_-]{8,})/iu,
+  /\beyJ[A-Za-z0-9_-]{5,512}\.[A-Za-z0-9_-]{5,768}\.[A-Za-z0-9_-]{10,512}\b/u,
+  /\b(?:Set-Cookie|Cookie)\s*:/iu,
+  /-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----/u,
+  /(?:["'](?=[A-Za-z0-9_])|\b)[A-Za-z0-9_]{0,128}(?:access[_-]?token|api[_-]?key|authorization|client[_-]?secret|password|private[_-]?key|refresh[_-]?token|secret)["']?\s*[:=]/iu,
+]);
 
 let activeLocale = "en";
 
@@ -802,12 +814,49 @@ export function humanGuidanceTextForItem(item, locale = activeLocale) {
 
 export function localizedErrorGuidance(error) {
   const isItalian = activeLocale === "it";
+  const fallback = isItalian ? "Errore non specificato" : "Unspecified error";
+  const message = boundedTechnicalErrorProperty(error, "message", null, fallback);
+  const code = boundedTechnicalErrorProperty(error, "code", TECHNICAL_ERROR_CODE_PATTERN);
+  const correlationId = boundedTechnicalErrorProperty(
+    error,
+    "correlationId",
+    TECHNICAL_CORRELATION_ID_PATTERN,
+  )?.toLowerCase();
+  const technical = [
+    `${isItalian ? "Errore" : "Error"}: ${message}`,
+    ...(code ? [`${isItalian ? "Codice" : "Code"}: ${code}`] : []),
+    ...(correlationId
+      ? [`${isItalian ? "ID correlazione" : "Correlation ID"}: ${correlationId}`]
+      : []),
+  ].join(" · ");
   return Object.freeze({
     outcome: isItalian ? "La storia del progetto non è disponibile." : "The project history is unavailable.",
     impact: isItalian ? "Questa pagina non può mostrare richieste, decisioni o prove finché il collegamento non viene ripristinato." : "This page cannot show requests, decisions, or evidence until the connection is restored.",
     decision: isItalian ? "Non approvare nulla basandoti su questa vista incompleta." : "Do not approve anything based on this incomplete view.",
     protection: isItalian ? "La vista resta in sola lettura e non modifica alcun file." : "The view remains read-only and does not change any files.",
     nextAction: isItalian ? "Aggiorna la pagina; se il problema continua, apri i dettagli tecnici." : "Refresh the page; if the problem continues, open technical details.",
-    technical: String(error?.message || (isItalian ? "Errore non specificato" : "Unspecified error")),
+    technical,
   });
+}
+
+function boundedTechnicalErrorProperty(error, property, pattern = null, fallback = null) {
+  let value;
+  try {
+    value = error?.[property];
+  } catch {
+    return fallback;
+  }
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim();
+  if (
+    normalized.length === 0
+    || normalized.length > MAX_TECHNICAL_ERROR_CHARACTERS
+    || /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(normalized)
+    || (property === "message"
+      && UNSAFE_TECHNICAL_ERROR_PATTERNS.some((candidate) => candidate.test(normalized)))
+    || (pattern && !pattern.test(normalized))
+  ) {
+    return fallback;
+  }
+  return normalized;
 }

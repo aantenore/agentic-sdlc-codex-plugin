@@ -1519,6 +1519,56 @@ test("returns bounded missing-state diagnostics for empty and absent knowledge b
   assert.ok(emptyModel.diagnostics.every((diagnostic) => diagnostic.sourceRefs.every((ref) => !path.isAbsolute(ref.path))));
 });
 
+test("bounds aggregate traversal across many empty directories", async (t) => {
+  const root = await createProject(t);
+  for (let index = 0; index < 6; index += 1) {
+    await fs.mkdir(path.join(root, ".sdlc", `empty-${index}`));
+  }
+
+  const options = { clock: () => FIXED_TIME, limits: { maxEntries: 4 } };
+  const first = await buildObservatoryViewModel(root, options);
+  const second = await buildObservatoryViewModel(root, options);
+
+  assert.deepEqual(second, first);
+  assert.equal(first.records.length, 0);
+  assert.equal(
+    first.diagnostics.some((diagnostic) => (
+      diagnostic.code === "max_entries_exceeded"
+      && diagnostic.sourceRefs[0]?.path === ".sdlc"
+    )),
+    true,
+  );
+});
+
+test("skips an oversized directory atomically at the aggregate entry limit", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "entry-limit",
+    project_name: "Entry Limit",
+  });
+  const wide = path.join(root, ".sdlc", "z-wide");
+  await fs.mkdir(wide);
+  for (let index = 0; index < 3; index += 1) {
+    await fs.writeFile(path.join(wide, `ignored-${index}.bin`), "x\n", "utf8");
+  }
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxEntries: 4 },
+  });
+
+  assert.equal(model.project.id, "entry-limit");
+  assert.deepEqual(model.records.map((record) => record.path), [".sdlc/project.json"]);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => (
+      diagnostic.code === "max_entries_exceeded"
+      && diagnostic.sourceRefs[0]?.path === ".sdlc/z-wide"
+    )),
+    true,
+  );
+});
+
 test("tolerates legacy records and isolates malformed JSON and JSONL", async (t) => {
   const root = await createProject(t);
   await writeJson(root, ".sdlc/project.json", {

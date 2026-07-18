@@ -6,9 +6,11 @@ import {
   humanGuidanceForItem,
   humanGuidanceTextForItem,
   localeFromLocation,
+  localizedErrorGuidance,
   setLocale,
   t,
 } from "../../ui/change-observatory/i18n.js";
+import { ObservatoryApiError } from "../../ui/change-observatory/api.js";
 import {
   renderFatalError,
   renderDiagnostics,
@@ -440,6 +442,63 @@ test("summary, inspector, and error compose five human fields in English and Ita
     const technical = descendants(error, (node) => node.tagName === "details");
     assert.equal(technical.length, 1);
     assert.match(technical[0].textContent, /internal transport failure/u);
+  }
+});
+
+test("API error code and correlation stay inside localized optional technical details", (t) => {
+  const previousDocument = globalThis.document;
+  globalThis.document = fakeDocument();
+  t.after(() => {
+    globalThis.document = previousDocument;
+    setLocale("en");
+  });
+
+  const correlationId = "corr-123e4567-e89b-12d3-a456-426614174000";
+  const error = new ObservatoryApiError("The project history is temporarily unavailable.", {
+    status: 503,
+    code: "model_unavailable",
+    correlationId,
+  });
+
+  for (const locale of ["en", "it"]) {
+    setLocale(locale);
+    const guidance = localizedErrorGuidance(error);
+    const primaryGuidance = [
+      guidance.outcome,
+      guidance.impact,
+      guidance.decision,
+      guidance.protection,
+      guidance.nextAction,
+    ].join("\n");
+    assert.doesNotMatch(primaryGuidance, /model_unavailable|corr-123e4567/u, locale);
+    assert.match(guidance.technical, /model_unavailable/u, locale);
+    assert.match(guidance.technical, new RegExp(correlationId, "u"), locale);
+    assert.match(
+      guidance.technical,
+      locale === "it" ? /Codice:.*ID correlazione:/u : /Code:.*Correlation ID:/u,
+      locale,
+    );
+
+    const container = new FakeNode("main");
+    renderFatalError(container, error);
+    assert.doesNotMatch(primaryText(container), /model_unavailable|corr-123e4567/u, locale);
+    const technical = descendants(container, (node) => node.tagName === "details");
+    assert.equal(technical.length, 1, locale);
+    assert.match(technical[0].textContent, /model_unavailable/u, locale);
+    assert.match(technical[0].textContent, new RegExp(correlationId, "u"), locale);
+  }
+});
+
+test("optional error details with credential context fail closed", () => {
+  setLocale("en");
+  for (const message of [
+    'payload {"password":"p@ssw0rd!"}',
+    "Cookie: session=abcdefghijklmnop",
+    [`eyJ${"H".repeat(20)}`, "P".repeat(32), "S".repeat(43)].join("."),
+  ]) {
+    const guidance = localizedErrorGuidance(new Error(message));
+    assert.equal(guidance.technical, "Error: Unspecified error");
+    assert.doesNotMatch(guidance.technical, /p@ssw0rd|Cookie|eyJ/u);
   }
 });
 

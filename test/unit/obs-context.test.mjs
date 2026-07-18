@@ -10,6 +10,7 @@ import {
 import {
   REDACTION_LIMIT_PLACEHOLDER,
   REDACTION_PLACEHOLDER,
+  createOperationalRedactionPolicy,
   createRedactionPolicy,
 } from "../../lib/observability/redaction.mjs";
 
@@ -48,6 +49,10 @@ test("operation contexts reject ambiguous operation and correlation identifiers"
   assert.throws(
     () => createCorrelationId(() => "not-a-uuid"),
     (error) => error?.code === "correlation_id_invalid",
+  );
+  assert.throws(
+    () => createOperationContext({ operation: `github_pat_${"a".repeat(32)}` }),
+    (error) => error?.code === "operation_name_invalid",
   );
 });
 
@@ -110,4 +115,48 @@ test("error normalization masks unsafe codes and fails closed when a limit is re
   assert.equal(envelope.error.redaction_limited, true);
   assert.equal(envelope.error.details, REDACTION_LIMIT_PLACEHOLDER);
   assert.match(envelope.error.message, /sensitive details were withheld/u);
+});
+
+test("operational error normalization uses credential-safe defaults", () => {
+  const context = createOperationContext({
+    operation: "cli.run",
+    correlationId: CORRELATION_ID,
+    startedAt: "2026-07-18T10:00:00.000Z",
+  });
+  const token = `github_pat_${"A".repeat(32)}`;
+  const envelope = normalizeOperationalError({
+    message: `opener failed with ${token} for owner@example.com`,
+    details: { authorization: token },
+  }, { context });
+
+  assert.equal(JSON.stringify(envelope).includes(token), false);
+  assert.equal(JSON.stringify(envelope).includes("owner@example.com"), false);
+  assert.match(envelope.error.message, /\[REDACTED\]/u);
+  assert.throws(
+    () => normalizeOperationalError({ message: "safe" }, {
+      context: {
+        ...context,
+        operation: `github_pat_${"a".repeat(32)}`,
+      },
+    }),
+    (error) => error?.code === "operation_name_invalid",
+  );
+});
+
+test("project privacy patterns cannot invalidate fixed operation metadata", () => {
+  const context = createOperationContext({
+    operation: "cli.run",
+    correlationId: "corr-123e4567-e89b-12d3-a456-426614174000",
+    startedAt: "2026-07-18T10:00:00.000Z",
+  });
+  const policy = createOperationalRedactionPolicy({
+    piiPatterns: [{ name: "operation_canary", pattern: "cli[.]run" }],
+  });
+
+  const normalized = normalizeOperationalError(
+    { code: "user_error", message: "safe failure", statusCode: 400 },
+    { context, redactionPolicy: policy },
+  );
+  assert.equal(normalized.operation, "cli.run");
+  assert.equal(normalized.error.message, "safe failure");
 });

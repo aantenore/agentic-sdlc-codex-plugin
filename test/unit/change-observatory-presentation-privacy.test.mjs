@@ -11,6 +11,7 @@ import {
 } from "../../lib/change-observatory/index.mjs";
 import {
   REDACTION_LIMIT_PLACEHOLDER,
+  createOperationalRedactionPolicy,
   createRedactionPolicy,
 } from "../../lib/observability/redaction.mjs";
 
@@ -24,7 +25,7 @@ const REDACTION_CONFIG = Object.freeze({
   secrets: [SECRET],
   piiPatterns: [{
     name: "email",
-    pattern: "[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}",
+    pattern: "owner@example\\.test",
   }],
 });
 
@@ -144,6 +145,112 @@ test("sanitizes normalized presentation fields and their derived text surfaces",
   );
 });
 
+test("redacts credential and email filenames from source paths and model raw links by default", async (t) => {
+  const root = await createProject(t);
+  const credentialCanary = `github_pat_${"B".repeat(24)}`;
+  const relativePath = `.sdlc/requirements/${credentialCanary}-${EMAIL}.json`;
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "path-presentation-privacy",
+    project_name: "Path Presentation Privacy",
+  });
+  await writeJson(root, relativePath, {
+    schema_version: "0.1.0",
+    id: "REQ-PATH-PRIVACY",
+    title: "Keep source locations private",
+  });
+
+  const source = await readSourceRecord(root, relativePath);
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => new Date("2026-07-18T12:00:00.000Z"),
+  });
+  const requirement = model.summary.asked.find((item) => item.id === "REQ-PATH-PRIVACY");
+  const record = model.records.find((item) => item.id === "REQ-PATH-PRIVACY");
+
+  assert.ok(requirement);
+  assert.ok(record);
+  assert.notEqual(source.path, relativePath);
+  for (const item of [requirement, record]) {
+    assert.equal(item.rawHref, null);
+    assert.equal(item.rawAvailable, false);
+    assert.equal(item.sourceRefs[0].rawAvailable, false);
+  }
+  for (const value of [source, model]) {
+    const serialized = JSON.stringify(value);
+    assert.equal(serialized.includes(credentialCanary), false);
+    assert.equal(serialized.includes(EMAIL), false);
+    assert.equal(serialized.includes(encodeURIComponent(EMAIL)), false);
+  }
+  for (const href of collectStringFields(model, "rawHref")) {
+    assert.equal(href.includes(credentialCanary), false);
+    assert.equal(href.includes(encodeURIComponent(EMAIL)), false);
+    assert.equal(decodeURIComponent(href).includes(credentialCanary), false);
+    assert.equal(decodeURIComponent(href).includes(EMAIL), false);
+  }
+});
+
+test("fails closed when property names would leak through source redaction pointers", async (t) => {
+  const root = await createProject(t);
+  const credentialCanary = `github_pat_${"C".repeat(24)}`;
+  const structured = {
+    schema_version: "0.1.0",
+    narrative: {
+      chainOfThoughtIncluded: true,
+      [credentialCanary]: "credential-named private reasoning",
+      [EMAIL]: "email-named private reasoning",
+    },
+  };
+  await writeJson(root, ".sdlc/private-property.json", structured);
+  await writeText(root, ".sdlc/private-property.jsonl", `${JSON.stringify(structured)}\n`);
+
+  for (const relativePath of [".sdlc/private-property.json", ".sdlc/private-property.jsonl"]) {
+    const source = await readSourceRecord(root, relativePath);
+    const serialized = JSON.stringify(source);
+
+    assert.equal(source.contentOmitted, true);
+    assert.equal(source.parseError, "presentation_redaction_limited");
+    assert.deepEqual(source.redactions, [""]);
+    assert.equal(Object.hasOwn(source, "data"), false);
+    assert.equal(Object.hasOwn(source, "entries"), false);
+    assert.equal(serialized.includes(credentialCanary), false);
+    assert.equal(serialized.includes(EMAIL), false);
+  }
+});
+
+test("redacts credential-shaped names from non-canonical source diagnostics", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Symbolic-link diagnostic coverage requires Unix symlink semantics");
+    return;
+  }
+
+  const root = await createProject(t);
+  const credentialCanary = `github_pat_${"A".repeat(24)}`;
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "diagnostic-path-privacy",
+    project_name: "Diagnostic Path Privacy",
+  });
+  await fs.symlink(
+    "project.json",
+    path.join(root, ".sdlc", `${credentialCanary}.json`),
+    "file",
+  );
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => new Date("2026-07-18T12:00:00.000Z"),
+    redactionPolicy: createOperationalRedactionPolicy(),
+  });
+  const diagnostic = model.diagnostics.find((item) => item.code === "symlink_ignored");
+
+  assert.ok(diagnostic, "expected the non-canonical symlink to produce a diagnostic");
+  assert.ok(diagnostic.sourceRefs.length > 0, "expected the diagnostic to identify its source");
+  for (const sourceRef of diagnostic.sourceRefs) {
+    assert.equal(String(sourceRef.path ?? "").includes(credentialCanary), false);
+    assert.equal(String(sourceRef.rawHref ?? "").includes(credentialCanary), false);
+  }
+  assert.equal(JSON.stringify(model).includes(credentialCanary), false);
+});
+
 test("fails closed when configured redaction limits are exceeded", async (t) => {
   const root = await createProject(t);
   const repeatedSecret = "repeat-secret";
@@ -209,6 +316,22 @@ function assertRepresentationMetadata(source, representation) {
     source.sha256,
     crypto.createHash("sha256").update(bytes).digest("hex"),
   );
+}
+
+function collectStringFields(root, field) {
+  const values = [];
+  const seen = new WeakSet();
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (typeof current[field] === "string") values.push(current[field]);
+    for (const value of Object.values(current)) {
+      if (value !== null && typeof value === "object") stack.push(value);
+    }
+  }
+  return values;
 }
 
 async function createProject(t) {

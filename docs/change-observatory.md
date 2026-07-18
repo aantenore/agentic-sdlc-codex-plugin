@@ -45,6 +45,53 @@ agentic-sdlc observe \
 
 `observatory.ready.url` is the browser URL. Keep the process alive while using the application and stop it with `SIGINT` or `SIGTERM`.
 
+## Operational Checks And Diagnostics
+
+There are two different meanings of “healthy”. **Live** means the local process
+is answering HTTP requests. **Ready** means it has also rechecked the project
+and UI boundaries and can build the current read model. A damaged or temporarily
+changing `.sdlc` tree may therefore leave `/live` at `200` while `/ready`
+returns `503`; this is intentional and makes the failure diagnosable without
+pretending the evidence is usable. Startup performs the readiness warm-up
+before announcing `observatory.ready`.
+
+All routes accept only `GET` and `HEAD` and are available only on the loopback
+server. “Bearer token” below means the random per-run token that the browser
+reads from the URL fragment and keeps in session memory.
+
+| Endpoint | Authentication | What it answers |
+| --- | --- | --- |
+| `/api/v1/live` | None | Is the local HTTP process answering? This check does not read project evidence. |
+| `/api/v1/health` | None | Compatibility alias for the same shallow liveness check. |
+| `/api/v1/ready` | Bearer token | Can the pinned project/UI boundaries and current canonical read model be validated now? Returns `503` when not ready. |
+| `/api/v1/observatory` | Bearer token | Returns the normalized read model, with `ETag` and conditional `304` support. |
+| `/api/v1/source?path=...` | Bearer token | Returns one allowed, bounded, presentation-redacted source record. |
+| `/api/v1/metrics` | Bearer token | Returns the current process-local metric snapshot. |
+| `/api/v1/slo` | Bearer token | Evaluates advisory availability and readiness objectives over samples from this process. |
+| `/api/v1/support-bundle` | Bearer token | Returns allowlisted, redacted diagnostic sections plus a content-integrity digest. |
+
+Each request receives an `X-Correlation-ID` response header in the form
+`corr-<uuid>`. A caller may send an existing valid ID in the request header;
+invalid values fail with a stable `400` response. Error bodies contain a safe
+code, message, retryability flag, and correlation ID. They do not expose a
+stack trace, project root, token, secret, or raw exception detail.
+
+Metrics live only in memory for the lifetime of this server process. Their
+labels are selected from fixed route, status, cache-event, and readiness values;
+project paths, story IDs, messages, and correlation IDs are not metric labels.
+This closed cardinality keeps both memory use and diagnostic shape bounded.
+The SLO endpoint is advisory: the default availability and readiness targets
+are `0.99`, with `20` samples required before it reports `met` or `breached`.
+It does not block a delivery or claim provider-grade monitoring.
+
+The support bundle includes only numeric limits, schema/runtime versions,
+readiness state, metric/SLO snapshots, and a bounded recent-request list with
+time, correlation ID, route, safe code, and status. Redaction is applied before
+the bundle is returned. Its SHA-256 digest covers the canonical **redacted**
+payload, so it can reveal later content changes without retaining a fingerprint
+of removed secret bytes. The digest is not a signature, origin proof, or
+authenticity claim.
+
 ## What It Shows
 
 - the recorded request and requirement behind an iteration;
@@ -166,11 +213,58 @@ The stored explanation scope is always `recorded-evidence-only`. Valid kinds are
 - Only `GET` and `HEAD` are accepted. Responses use no-store caching, same-origin resource policy, a restrictive CSP, and no CORS permission.
 - The application and server do not write to the target project.
 
+Before a trace is persisted, the operational redactor removes values under
+sensitive keys, known token formats, bearer values, configured secret/PII
+patterns, email addresses, credential assignments, and private-key blocks.
+Before any normalized or raw-source surface is displayed, presentation
+redaction runs again. If its configured bounds are exceeded, the affected
+content is withheld instead of being shown unredacted.
+
+Long random-looking text is not a secret merely because of its entropy. A value
+is redacted when it has a known credential form or context, is explicitly
+configured as sensitive, or matches a configured secret/PII pattern. This is
+why a normal receipt ID such as
+`AUT-ACT-20260718113959949-d28fa8` is retained as an audit reference rather than
+misclassified as a secret. Projects may add detector patterns and identifier
+allow patterns in `.sdlc/config.json`; unsafe or ambiguous regular expressions
+are rejected. Custom repetition must have an explicit maximum of 256 characters;
+email is already covered by the bounded built-in detector. An identifier allow
+pattern should be as narrow as its contract and can never disable a known
+credential detector or an explicit privacy rule.
+
 The server keeps one serialized read model for the current canonical revision. Concurrent requests share one rebuild, and subsequent requests receive a strong `ETag`; an unchanged conditional `GET` or `HEAD` returns `304` without serializing or transferring the model again. Before every reuse, the server rechecks the project boundary and a deterministic, bounded snapshot of canonical source content. Changes during a rebuild cause a retry rather than publishing a mixed revision. Derived cache and index directories never participate in the revision.
 
-The same configured limits bound revision scanning and normalization: file count, individual file bytes, aggregate bytes, depth, and record collection size. The loopback server scans up to the configured record budget but materializes at most 1,000 entries in each visual collection by default; an embedding API may choose another explicit bound. Oversized or unreadable evidence is represented by a stable diagnostic boundary instead of causing an unbounded read. The deterministic enterprise benchmark verifies warm-response p95 and RSS budgets on the full canonical workload.
+The browser keeps only the matching model and `ETag` in memory. It sends
+`If-None-Match` on refresh and reuses that exact model after `304`. It does not
+persist the model to local storage, and a `304` without a matching in-memory
+model is treated as an error rather than an instruction to display stale or
+unknown data.
+
+The same configured limits bound revision scanning and normalization: aggregate
+directory entries, file count, individual file bytes, aggregate bytes, depth,
+and record collection size. A directory that would cross the entry budget is
+skipped as one unit and reported, so the result never depends on whichever
+filename happened to be read first. The loopback server scans up to the
+configured record budget but materializes at most 1,000 entries in each visual
+collection by default; an embedding API may choose another explicit bound.
+Oversized or unreadable evidence is represented by a stable diagnostic boundary
+instead of causing an unbounded read. The deterministic enterprise benchmark
+verifies warm-response p95 and RSS budgets on the full canonical workload.
 
 The token protects against unrelated local processes guessing the random port. It is an ephemeral local capability, not a multi-user identity or remote-access system. Do not publish the URL, tunnel the port, or bind it to another interface.
+
+The project-local `observability` configuration controls additional redaction
+patterns, readiness/SLO thresholds, and the recent-request bound. The shipped
+policy fixes metric cardinality and keeps both top-level and metric
+`external_sinks` disabled. There is no background exporter, hosted collector,
+or telemetry upload in this implementation.
+
+The privacy configuration is pinned when Change Observatory starts. It is
+checked again before and after every project-data read. If `.sdlc/config.json`
+is added, removed, changed, made invalid, or replaced by a symlink while the
+server is running, liveness stays available but readiness and project-data
+routes stop. Restart Change Observatory to review and apply the new settings;
+the existing process never mixes evidence produced under two privacy policies.
 
 ## Troubleshooting
 
@@ -182,4 +276,4 @@ node /path/to/installed-plugin/bin/agentic-sdlc.mjs doctor \
   --json
 ```
 
-The doctor checks the launcher, core, UI, skill, agent card, package/manifest version, and optional target-project KB. A missing `.sdlc` directory is displayed as missing lineage rather than initialized or modified automatically. A malformed `.sdlc/config.json` does not block `observe`, because the read-only observatory is dispatched before mutable workflow configuration is loaded.
+The doctor checks the launcher, core, UI, skill, agent card, package/manifest version, and optional target-project KB. A missing `.sdlc` directory is displayed as missing lineage rather than initialized or modified automatically. A malformed `.sdlc/config.json` blocks Observatory readiness because that file defines the privacy policy used for project data. Correct the configuration and start `observe` again; the shallow liveness endpoint remains available only while an already-running server reports the safe failure.

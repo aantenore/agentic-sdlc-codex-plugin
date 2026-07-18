@@ -151,9 +151,119 @@
     },
     "release_evidence_policy": {
       "$ref": "#/$defs/release_policy"
+    },
+    "observability": {
+      "$ref": "#/$defs/observability_policy"
     }
   },
   "$defs": {
+    "observability_policy": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "external_sinks",
+        "redaction",
+        "correlation",
+        "metrics",
+        "readiness",
+        "slo",
+        "support_bundle"
+      ],
+      "properties": {
+        "enabled": { "const": true },
+        "external_sinks": { "const": "disabled" },
+        "redaction": {
+          "type": "object",
+          "required": ["mode", "secret_patterns", "pii_patterns", "identifier_allow_patterns"],
+          "properties": {
+            "mode": { "const": "before_persistence_and_presentation" },
+            "secret_patterns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/redaction_pattern" }
+            },
+            "pii_patterns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/redaction_pattern" }
+            },
+            "identifier_allow_patterns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/redaction_pattern" }
+            },
+            "sensitive_keys": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": false
+        },
+        "correlation": {
+          "type": "object",
+          "required": ["enabled", "format"],
+          "properties": {
+            "enabled": { "const": true },
+            "format": { "const": "corr-uuid" }
+          },
+          "additionalProperties": false
+        },
+        "metrics": {
+          "type": "object",
+          "required": ["enabled", "cardinality", "external_sinks"],
+          "properties": {
+            "enabled": { "const": true },
+            "cardinality": { "const": "closed" },
+            "external_sinks": { "const": "disabled" }
+          },
+          "additionalProperties": false
+        },
+        "readiness": {
+          "type": "object",
+          "required": ["liveness_is_shallow", "warm_before_ready"],
+          "properties": {
+            "liveness_is_shallow": { "const": true },
+            "warm_before_ready": { "const": true }
+          },
+          "additionalProperties": false
+        },
+        "slo": {
+          "type": "object",
+          "required": ["mode", "availability_target", "readiness_target", "minimum_samples"],
+          "properties": {
+            "mode": { "const": "advisory" },
+            "availability_target": { "type": "number", "minimum": 0, "maximum": 1 },
+            "readiness_target": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minimum_samples": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "support_bundle": {
+          "type": "object",
+          "required": ["enabled", "max_recent_requests", "integrity", "authenticity_claimed"],
+          "properties": {
+            "enabled": { "const": true },
+            "max_recent_requests": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "integrity": { "const": "sha256_of_redacted_canonical_content" },
+            "authenticity_claimed": { "const": false }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "redaction_pattern": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 512 },
+        {
+          "type": "object",
+          "required": ["name", "pattern"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "pattern": { "type": "string", "minLength": 1, "maxLength": 512 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "autonomy_policy": {
       "type": "object",
       "required": [

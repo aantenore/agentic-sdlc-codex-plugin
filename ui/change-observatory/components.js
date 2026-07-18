@@ -273,6 +273,8 @@ export function phaseSelectionId(iterationId, phase) {
 }
 
 export function phaseSelectionItem(iteration, phaseState) {
+  const primarySource = phaseState.sourceRefs[0];
+  const rawAvailable = primarySource?.rawAvailable !== false;
   return {
     id: phaseSelectionId(iteration.id, phaseState.phase),
     type: "phase-state",
@@ -283,7 +285,8 @@ export function phaseSelectionItem(iteration, phaseState) {
     timestamp: iteration.timestamp,
     provenance: phaseState.provenance,
     sourceRefs: phaseState.sourceRefs,
-    rawHref: phaseState.sourceRefs[0] ? rawHrefForPath(phaseState.sourceRefs[0].path) : null,
+    rawHref: rawAvailable && primarySource ? rawHrefForPath(primarySource.path) : null,
+    ...(rawAvailable ? {} : { rawAvailable: false }),
     narrative: {
       inputSummary: null,
       outputSummary: null,
@@ -1021,7 +1024,8 @@ function evidenceSection(item, narrative) {
     return section;
   }
   unique.forEach((entry) => {
-    const source = entry.sourceRefs?.find((candidate) => candidate.path?.startsWith(".sdlc/"));
+    const source = entry.sourceRefs?.find((candidate) =>
+      candidate.rawAvailable !== false && candidate.path?.startsWith(".sdlc/"));
     const href = source ? rawHrefForPath(source.path) : null;
     section.append(
       node("div", { className: "source-row" }, [

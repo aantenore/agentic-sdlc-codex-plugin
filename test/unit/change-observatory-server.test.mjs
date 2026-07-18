@@ -8,11 +8,21 @@ import test from "node:test";
 
 import {
   buildObservatoryViewModel,
+  createObservatoryRequestHandler,
   startObservatoryServer,
 } from "../../lib/change-observatory/index.mjs";
+import { ObservatoryPathError } from "../../lib/change-observatory/path-safety.mjs";
 import { verifySupportBundleDigest } from "../../lib/observability/support-bundle.mjs";
 
 const CORRELATION_PATTERN = /^corr-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+
+test("public request-handler factory requires an access token", async (t) => {
+  const fixture = await createServerFixture(t);
+  await assert.rejects(
+    () => createObservatoryRequestHandler({ projectRoot: fixture.projectRoot }),
+    /access token must be/u,
+  );
+});
 
 test("serves health, view model, raw records, static assets, and HEAD over loopback", async (t) => {
   const fixture = await createServerFixture(t);
@@ -98,6 +108,181 @@ test("liveness is shallow while readiness reports model failure and later recove
   assert.equal(recovered.statusCode, 200);
   assert.equal(recovered.json.status, "ready");
   assert.equal(builds, 2);
+});
+
+test("invalid privacy configuration keeps liveness shallow and blocks project-data routes", async (t) => {
+  const fixture = await createServerFixture(t);
+  const canary = `github_pat_${"A".repeat(32)}`;
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "config.json"), JSON.stringify({
+    observability: { redaction: { secret_pattern: [canary] } },
+  }));
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  assert.equal((await request(running, "/api/v1/live", { authenticated: false })).statusCode, 200);
+  const ready = await request(running, "/api/v1/ready");
+  assert.equal(ready.statusCode, 503);
+  assert.equal(ready.json.status, "not_ready");
+  assert.equal(ready.json.code, "observability_configuration_invalid");
+  for (const endpoint of [
+    "/api/v1/observatory",
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`,
+  ]) {
+    const blocked = await request(running, endpoint);
+    assert.equal(blocked.statusCode, 503);
+    assert.equal(blocked.json.error.code, "observability_configuration_invalid");
+    assert.equal(
+      blocked.json.error.message,
+      "Project observability configuration is invalid. Correct .sdlc/config.json and retry.",
+    );
+    assert.equal(blocked.json.error.retryable, false);
+    assert.doesNotMatch(blocked.body, /github_pat_|server-fixture/u);
+  }
+});
+
+test("a configuration change after startup blocks project data until restart", async (t) => {
+  const fixture = await createServerFixture(t);
+  const employeeId = "EMP-654321";
+  const projectPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
+  const project = JSON.parse(await fs.readFile(projectPath, "utf8"));
+  await fs.writeFile(projectPath, `${JSON.stringify({ ...project, owner: employeeId })}\n`, "utf8");
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  const before = await request(
+    running,
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`,
+  );
+  assert.equal(before.statusCode, 200);
+  assert.equal(before.json.data.owner, employeeId);
+
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "config.json"), JSON.stringify({
+    observability: {
+      redaction: { pii_patterns: [{ name: "employee", pattern: "EMP-[0-9]{6}" }] },
+    },
+  }));
+
+  for (const endpoint of [
+    "/api/v1/observatory",
+    `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`,
+  ]) {
+    const blocked = await request(running, endpoint);
+    assert.equal(blocked.statusCode, 503, endpoint);
+    assert.equal(blocked.json.error.code, "observability_configuration_changed", endpoint);
+    assert.match(blocked.json.error.message, /Restart it/u, endpoint);
+    assert.doesNotMatch(blocked.body, /EMP-654321|server-fixture/u, endpoint);
+  }
+  const ready = await request(running, "/api/v1/ready");
+  assert.equal(ready.statusCode, 503);
+  assert.equal(ready.json.code, "observability_configuration_changed");
+  assert.equal((await request(running, "/api/v1/live", { authenticated: false })).statusCode, 200);
+
+  await fs.rm(path.join(fixture.projectRoot, ".sdlc", "config.json"));
+  const stillBlocked = await request(running, "/api/v1/observatory");
+  assert.equal(stillBlocked.statusCode, 503);
+  assert.equal(stillBlocked.json.error.code, "observability_configuration_changed");
+});
+
+test("a privacy change during a model build prevents the mixed-policy response", async (t) => {
+  const fixture = await createServerFixture(t);
+  const canary = "EMP-777777";
+  const projectPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
+  const project = JSON.parse(await fs.readFile(projectPath, "utf8"));
+  await fs.writeFile(projectPath, `${JSON.stringify({ ...project, owner: canary })}\n`, "utf8");
+  let changed = false;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    async buildViewModel(...args) {
+      const model = await buildObservatoryViewModel(...args);
+      if (!changed) {
+        changed = true;
+        await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "config.json"), JSON.stringify({
+          observability: {
+            redaction: { pii_patterns: [{ name: "employee", pattern: "EMP-[0-9]{6}" }] },
+          },
+        }));
+      }
+      return model;
+    },
+  });
+  t.after(() => running.close());
+
+  const blocked = await request(running, "/api/v1/observatory");
+  assert.equal(blocked.statusCode, 503);
+  assert.equal(blocked.json.error.code, "observability_configuration_changed");
+  assert.doesNotMatch(blocked.body, /EMP-777777|server-fixture/u);
+});
+
+test("invalid or symlinked configuration introduced after startup fails closed", async (t) => {
+  if (process.platform === "win32") t.skip("Symlink lifecycle coverage requires Unix semantics");
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+  assert.equal((await request(running, "/api/v1/observatory")).statusCode, 200);
+
+  const configPath = path.join(fixture.projectRoot, ".sdlc", "config.json");
+  const invalidCanary = `github_pat_${"Z".repeat(32)}`;
+  await fs.writeFile(configPath, JSON.stringify({
+    observability: { redaction: { secret_pattern: [invalidCanary] } },
+  }));
+  const invalid = await request(running, "/api/v1/observatory");
+  assert.equal(invalid.statusCode, 503);
+  assert.equal(invalid.json.error.code, "observability_configuration_invalid");
+  assert.doesNotMatch(invalid.body, /github_pat_/u);
+
+  const secondFixture = await createServerFixture(t);
+  const second = await startObservatoryServer({
+    projectRoot: secondFixture.projectRoot,
+    assetRoot: secondFixture.assetRoot,
+  });
+  t.after(() => second.close());
+  const outside = path.join(path.dirname(secondFixture.projectRoot), "outside-config.json");
+  await fs.writeFile(outside, JSON.stringify({ observability: {} }));
+  await fs.symlink(outside, path.join(secondFixture.projectRoot, ".sdlc", "config.json"), "file");
+  const symlinked = await request(second, "/api/v1/observatory");
+  assert.equal(symlinked.statusCode, 403);
+  assert.equal(symlinked.json.error.code, "symlink_forbidden");
+  assert.doesNotMatch(symlinked.body, new RegExp(escapeRegExp(outside), "u"));
+});
+
+test("known server errors use the configured project redaction policy", async (t) => {
+  const fixture = await createServerFixture(t);
+  const employeeId = "EMP-123456";
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "config.json"), JSON.stringify({
+    observability: {
+      redaction: {
+        pii_patterns: [{ name: "employee", pattern: "EMP-[0-9]{6}" }],
+      },
+    },
+  }));
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    async buildViewModel() {
+      throw new ObservatoryPathError(
+        "model_unavailable",
+        `Employee ${employeeId} failed`,
+        503,
+      );
+    },
+  });
+  t.after(() => running.close());
+
+  const response = await request(running, "/api/v1/observatory");
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.json.error.code, "model_unavailable");
+  assert.equal(response.json.error.message, "Employee [REDACTED] failed");
+  assert.doesNotMatch(response.body, /EMP-123456/u);
 });
 
 test("operational endpoints require bearer authentication for GET and HEAD", async (t) => {

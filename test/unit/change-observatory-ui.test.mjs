@@ -19,6 +19,7 @@ import {
   normalizeDossier,
   normalizeViewModel,
   rawHrefForPath,
+  rawTargetFor,
   recordSelectionKey,
   safeRawHref,
 } from "../../ui/change-observatory/model.js";
@@ -447,6 +448,44 @@ test("dossier normalization is fail-closed for provenance, linkage, and raw sour
   }
 });
 
+test("redacted source paths never produce raw UI targets", () => {
+  const redactedPath = ".sdlc/requirements/[REDACTED].json";
+  const model = normalizeViewModel(viewModel({
+    summary: {
+      asked: [{
+        id: "REQ-REDACTED",
+        type: "requirement",
+        title: "Redacted source",
+        summary: "The source location is intentionally unavailable.",
+        provenance: "recorded",
+        sourceRefs: [{ path: redactedPath, rawAvailable: false }],
+        rawHref: null,
+        rawAvailable: false,
+      }],
+      changed: [],
+      decided: [],
+    },
+    records: [{
+      path: redactedPath,
+      kind: "requirement",
+      provenance: "recorded",
+      rawHref: null,
+      rawAvailable: false,
+    }],
+  }));
+  const item = model.summary.asked[0];
+  const record = model.records[0];
+
+  assert.equal(item.rawHref, null);
+  assert.equal(item.rawAvailable, false);
+  assert.equal(item.sourceRefs[0].rawAvailable, false);
+  assert.equal(record.rawHref, null);
+  assert.equal(record.rawAvailable, false);
+  assert.equal(isCanonicalEvidencePath(redactedPath), false);
+  assert.equal(rawHrefForPath(redactedPath), null);
+  assert.equal(rawTargetFor(item), null);
+});
+
 test("projects valid IntentABI evidence onto the closed content-free UI contract", () => {
   const model = normalizeViewModel(viewModel({
     semanticObservations: [semanticObservation()],
@@ -823,5 +862,8 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(app, /selectedIterationId/);
   assert.match(app, /case "select-iteration"/);
   assert.match(app, /filter === "dossier"/);
+  assert.match(app, /localizedErrorGuidance/);
+  assert.match(app, /rawSourceErrorText/);
+  assert.match(app, /Technical details \(optional\)/);
   assert.doesNotMatch(app, /fixture|demo|mock/i);
 });

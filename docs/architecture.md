@@ -117,6 +117,74 @@ flowchart LR
 
 During `init`, the plugin copies the effective SDLC configuration to `.sdlc/config.json`. Later gate and orchestration commands read that project-local config, so a different `--template-dir` cannot silently weaken an initialized project's policy.
 
+## Local Observability And Integrity Boundary
+
+The practical goal is simple: when an operation fails, an operator can connect
+the error to the relevant local activity without exposing project content or
+pretending that a local hash is a trusted signature.
+
+```mermaid
+flowchart LR
+  Operation["CLI operation or local HTTP request"] --> Correlation["Correlation ID"]
+  Operation --> Redaction["Redact secrets and configured PII"]
+  Redaction --> Trace["Append trace event"]
+  Trace --> Chain["Event hash chain + local checkpoint"]
+  Chain --> Gate["Integrity and selected evidence checks"]
+  Correlation --> Error["Stable redacted error envelope"]
+  Correlation --> Metrics["In-memory closed-cardinality metrics"]
+  Metrics --> SLO["Advisory SLO evaluation"]
+  Metrics --> Bundle["Redacted support bundle + content digest"]
+```
+
+Every new general trace event receives a sequence, previous-event hash, and
+event hash. A sibling checkpoint under `.sdlc/traces/.integrity/` anchors the
+legacy prefix and the newly sealed chain. Appends use a local lock, no-follow
+file opens, synchronized writes, and atomic checkpoint replacement. Recovery
+may adopt a complete valid event or remove only an interrupted partial tail; it
+does not silently discard a complete invalid record. Strict gates verify the
+trace/checkpoint pair and any evidence reference marked for current-content
+verification.
+
+This mechanism provides local tamper evidence and content integrity. It can
+detect an edited, reordered, truncated, or mismatched trace, but it does not
+authenticate the actor, origin, or time and is not tamper-proof. A privileged
+party able to replace both the trace and checkpoint can construct another
+consistent pair. Authenticity requires an independent signed or append-only
+anchor outside this local boundary.
+
+Operational redaction runs before trace persistence and again at Observatory
+presentation boundaries. Sensitive keys, known credential forms, configured
+secret/PII patterns, email addresses, bearer values, credential assignments,
+and private-key blocks are replaced. Entropy alone never classifies a value as
+a secret. SHA digests, UUIDs, `corr-<uuid>` values, exact
+`AUT-ACT-<timestamp>-<suffix>` authorization action IDs, and other opaque audit
+references therefore remain readable unless an explicit privacy rule matches
+them. Identifier allow rules cannot override a credential detector or a
+configured secret/PII pattern. Trace evidence fingerprints use the redacted
+UTF-8 representation rather than the original sensitive bytes.
+
+One `corr-<uuid>` context follows a CLI operation or Observatory request into
+trace records, response headers, and stable error envelopes. Unexpected errors
+are normalized before display, so callers receive a safe error code,
+retryability, and correlation ID without a stack, token, secret-bearing path,
+or raw exception detail. A safe canonical or project-relative path may be
+retained when it is the actionable location the operator must correct.
+
+Change Observatory keeps request, latency, cache, and readiness metrics only in
+process memory. Metric labels come from fixed allowlists, so a path, story ID,
+token, or error message cannot create unbounded series. Availability and
+readiness objectives are advisory and report insufficient data until the
+configured minimum sample count is reached. The support bundle contains only
+allowlisted redacted sections and a SHA-256 digest of its canonical redacted
+content; that digest detects content changes but is not a signature or proof of
+origin. `external_sinks: disabled` is enforced by configuration, so the plugin
+does not export these signals.
+
+The Observatory model cache still validates the canonical project revision.
+Its strong `ETag` is retained by the browser client only in memory; a later
+`If-None-Match` request can reuse the same model on `304`. A `304` without a
+matching client cache fails closed instead of displaying an unknown model.
+
 ## Command-Scoped Canonical Queries
 
 Each read-heavy command opens one bounded query session over the canonical `.sdlc` tree. The session builds its sorted file catalog lazily once, memoizes parsed JSON and JSONL by content hash, and reuses small deterministic indexes for story, requirement, output, dependency, and trace lookups. This removes repeated directory walks and all-pairs joins without changing command output, exit codes, or the source of truth.
