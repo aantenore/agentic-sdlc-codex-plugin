@@ -93,7 +93,7 @@ After checkpoint 1, run `assessment proposal prepare`. It creates:
 The proposal binds `baseline_ref.approved_content_hash` and hashes the complete approval payload with `proposal_hash`. It includes:
 
 - scope ID/title/summary and real requirement ID;
-- exact `requirement:v2` revision and requirement execution profile ceiling;
+- exact `requirement:v2` revision and its approved maximum working limit;
 - story reservation and acceptance criteria;
 - artifact type, preset, sections, canonical delivery, generator, verifier, and destination;
 - capabilities, permissions, targets, and evidence plan;
@@ -113,7 +113,7 @@ Use six primary blocks when a delivery unit is in scope; omit block 5 only for a
 2. **Deliverable, verification** — sections, format, extension, media type, path, delivery mode, generator, verifier, and required verification dimensions.
 3. **Tools, security, writes** — installed capabilities, permissions, targets, full write-set, and excluded risky operations.
 4. **Budget and stop policy** — the complete execution tranche.
-5. **Delivery autonomy** — requirement ceiling, one named PR or local-release profile, selected/effective level, target, actions, paths, checkpoints, non-reuse, and merge/deploy exclusions.
+5. **Working choice for this delivery** — requirement limit, one named PR or local release, requested and actually available mode, target, actions, paths, review moments, non-reuse, and merge/deploy exclusions.
 6. **Start and boundary** — internal records/actions, task start, final delivery, exception triggers, and exclusions.
 
 Put proposal/baseline hashes, requirement/story/template/contract IDs, subject hashes, authorization actions, artifact types, and idempotency key in a compact technical appendix. It may be collapsible, but not hidden from the decision.
@@ -188,18 +188,26 @@ Use `requirement propose|approve|revise|supersede|status`. Reuse only when ident
 
 ## Delivery Autonomy Choice
 
-The requirement execution profile supplies only an autonomy ceiling. It does not authorize execution. Before each delivery begins, show one explicit choice among `supervised`, `checkpointed`, and `bounded-autonomous` for exactly one delivery kind:
+The requirement records only the greatest freedom that may be offered; it does not authorize execution. Before each delivery begins, ask the user to choose in plain language for that one delivery:
 
-- `pull_request`: show repository, base branch, head branch, canonical actions, explicit write paths, the one story/approved-contract pair, exclusions, and whether merge is requested;
-- `local_release`: show the local root, canonical allowed actions and write paths, shell-free JSON-argv smoke tests, the one story/approved-contract pair, required rollback, and explicit denial of external, production, and destructive access.
+1. **Ask before every important step.**
+2. **Work between the agreed review moments.**
+3. **Finish this delivery within the displayed limits.**
 
-Explain the recommended level using requirement clarity, testability, reversibility, environment, data/security impact, known tools, write paths, and budget. Prior successful runs may inform that recommendation but never grant the level. The effective result is the most restrictive of host, project, requirement, delivery, contract, capability, environment, and budget.
+Never lead with internal level names. Show the recommendation, why it fits, and what would make a safer choice preferable. Then show the exact delivery boundary:
 
-The choice applies to one delivery ID and content hash, exactly one story/approved-contract pair, cannot be reused for another PR or local release, permits at most one concurrent run, and closes when terminal. `audit_only` authority is capped at `checkpointed`, including for local release. Effective `bounded-autonomous` requires an external host/CI Ed25519 receipt for the exact profile-approval subject, `authority_policy.mode: host_verified`, a matching trusted public key, and `--host-receipt-file` on approval. Merge to `main` or another protected branch and every remote or production deployment remain explicit exceptions.
+- For a pull request, show repository, source and destination branches, allowed actions and files, the one approved requirement contract, exclusions, and whether merge is included.
+- For a local release, show the local destination, allowed actions and files, smoke checks, the one approved requirement contract, restoration procedure, and the explicit exclusion of remote, production, and destructive access.
 
-For delivery work, reserve the planned profile ID in the requirement-bound story contract and approve the contract first. Then create the matching profile and bind it to the immutable requirement, story, and contract hashes. The reserved ID is not a profile hash or approval. Task start supplies the profile and rejects drift; do not rewrite the approved contract to create a circular reference.
+Use requirement clarity, testability, reversibility, environment, data/security impact, known tools, write paths, and budget to explain the recommendation. Prior successful runs may inform it but never grant more freedom. If any project, requirement, contract, tool, environment, or budget rule is stricter than the user’s choice, explain the practical reduction in ordinary language.
 
-After start, explain the action lifecycle as **authorize → execute the exact recorded operation → complete with evidence**. The authorization receipt does not run Git or call a provider. At a `host_verified` checkpoint, require an external Ed25519 receipt for action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject; `audit_only` records explicit approval without claiming verified authority. Passing `release.local` completion runs the exact approved smoke argv in a supported read-only/no-network sandbox; passing release or merge completion writes the terminal receipt automatically. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for its post-state. These observations are not provider-signed offline attestations, so also preserve durable host/CI/provider evidence.
+The choice applies to one PR or local release and exactly one approved requirement contract. It cannot be reused, permits at most one concurrent run, and closes when that delivery finishes. Merging to `main` or another protected branch and every remote or production deployment remain separate unless the displayed boundary explicitly includes them.
+
+After the user-facing choice, optional technical details may show the stored mapping: `supervised`, `checkpointed`, or `bounded-autonomous`. The strongest mapping requires an external host/CI Ed25519 proof for that exact approval; without it, execution is reduced to work between agreed review moments. The internal assurance names `audit_only` and `host_verified`, profile IDs, hashes, and receipt paths belong only after the technical divider.
+
+For delivery work, reserve the planned delivery-record ID in the requirement-bound story contract and approve the contract first. Then bind the delivery record to the immutable requirement, story, and contract hashes. Task start rejects drift; do not rewrite the approved contract to create a circular reference.
+
+After start, explain the action lifecycle as **approve the exact action → execute it → record what happened**. Approval evidence does not itself run Git or call a provider. A local release runs only the approved smoke commands in the supported isolated environment. Push or merge first records the live remote state and completion checks the exact Git remote or GitHub pull request afterward. Preserve durable host, CI, or provider evidence when available; internal action names and signed-subject details remain optional technical information.
 
 ## Proposal-Bound Authorization
 

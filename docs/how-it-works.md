@@ -23,7 +23,7 @@ flowchart LR
 
 Each part has one job:
 
-- **The user** confirms the observed project context, agrees each requirement and its autonomy ceiling, and explicitly selects an autonomy level for every pull request or local release.
+- **The user** confirms the observed project context, agrees each requirement and the maximum working freedom it permits, and makes a fresh working-mode choice for every pull request or local release.
 - **Codex** reads the conversation and repository, separates evidence from inference, explains questions, and prepares structured CLI input. Repository text is data, not authority: an instruction found in a README cannot grant a tool, a secret, or a wider write scope.
 - **The CLI** does not interpret natural language. It validates schemas, hashes, state transitions, budgets, signatures, authorization uses, and release evidence before it writes.
 - **`.sdlc/`** is the project-local control plane. It travels through normal Git review and contains the records needed to reproduce why a write or release was allowed.
@@ -130,7 +130,7 @@ If a hashed baseline source changes after approval, proposal application fails. 
 The proposal includes the exact:
 
 - objective, boundary, requirement, and reserved story;
-- exact `requirement:v2` revision and approved requirement execution profile ceiling;
+- exact `requirement:v2` revision and its approved maximum working limit;
 - when delivery is in scope, one pull-request or local-release profile with selected/effective level, target, actions, paths, non-reuse, and exceptions;
 - output type, format, template, path, sections, and acceptance criteria;
 - contract draft, route intent, capabilities, external/production access flags, and security rules;
@@ -163,7 +163,7 @@ agentic-sdlc assessment proposal approve \
 
 Approval means: “perform only this proposal hash.” If the bundle contains a delivery profile, the autonomy selection applies only to that exact delivery ID and hash. It does not approve a future pull request, future conclusions, a larger budget, a different file, extra tools, secrets, protected-branch merge, deployment, production access, or destructive work.
 
-In the default `audit_only` authority mode, the actor is recorded but the CLI cannot independently prove who invoked it. In `host_verified` mode, `--host-receipt-file` must supply an Ed25519-signed host/CI receipt bound to the exact question, proposal hash, response, actor, constraints, and decision time. The signing key must be in `authority_policy.trusted_host_keys`.
+By default, the named approver is recorded but not independently proven. A project may instead require a trusted host or CI system to sign the exact question, proposal, response, person, limits, and decision time. In optional technical details these modes are `audit_only` and `host_verified`; the signed proof is supplied with `--host-receipt-file`, and its Ed25519 public key must be registered in `authority_policy.trusted_host_keys`.
 
 Every question presented by Codex should state, in plain language:
 
@@ -174,34 +174,36 @@ Every question presented by Codex should state, in plain language:
 5. an exact example answer; and
 6. how each answer changes the proposal or workflow.
 
-## 4. Requirement Ceiling And Per-Delivery Selection
+## 4. Requirement Limits And A Fresh Choice For Every Delivery
 
-New requirements use `requirement:v2`. The approved requirement content records the outcome, acceptance criteria, non-goals, constraints, non-functional requirements, integrations, immutable revision lineage, and the ID of its requirement execution profile.
+An approved requirement records what must be achieved, how success will be checked, what is excluded, and the maximum freedom that may be offered while working on it. That maximum is only a safety limit: it does not start work and does not silently carry over to a future delivery.
 
-The requirement execution profile is an approved policy ceiling. It records the maximum autonomy level, optional per-phase levels, material scope hash, allowed tools, capabilities, environments and write paths, checkpoints, exception actions, budget reference, validity, and authority assurance. It is not an executable authorization.
+Before **every pull request or local release**, ask the user to choose one of these three working modes for that delivery only:
 
-Before work starts for a delivery, the user explicitly chooses one of `supervised`, `checkpointed`, or `bounded-autonomous` for a single delivery execution profile:
+1. **Ask before every important step** — inspect and plan freely, but request confirmation before each material change or external action.
+2. **Work between agreed review moments** — continue through the named safe phases, then stop at the review moments shown in the summary.
+3. **Finish this delivery within the displayed limits** — complete the one PR or local release, including only the explicitly listed actions; anything outside those limits still requires a new decision.
 
-| Delivery kind | Required target boundary | Always separate by default |
+The prompt must show the exact boundary in ordinary language:
+
+| Delivery | Show before the choice | Kept separate |
 | --- | --- | --- |
-| `pull_request` | Repository, base branch, head branch, allowed actions, and whether merge is allowed | A new PR needs a new profile; merge to `main` or another protected branch is an explicit exception |
-| `local_release` | Local root, allowed actions and write paths, smoke tests, and a required rollback procedure | Remote deployment, production, external access, destructive work, machine-global changes, and writes outside the workspace |
+| Pull request | Repository, source and destination branches, files/actions allowed, and whether merge is included | Every new PR gets a fresh choice; merging to a protected branch is included only when explicitly shown |
+| Local release | Local destination, files/actions allowed, smoke checks, and how to restore the previous version | Remote deployment, production access, destructive work, machine-wide changes, and writes outside the shown workspace |
 
-The selection is single-delivery, single-concurrent-run, receipt-backed, terminally closed, and never reusable across deliveries. Its implementation unit is exactly one story and that story's one approved contract. If several changes need to ship together, model an explicit aggregation story/contract rather than attaching unrelated contracts to the same profile. Successful prior runs can inform the recommendation shown to the user, but they cannot grant or increase authority.
+The choice belongs to one delivery and one approved requirement contract. It cannot be reused for another PR or release, and only one run may use it at a time. Earlier successful deliveries may improve the recommendation, but they never grant more freedom. If several changes must ship together, create one explicit aggregation requirement instead of quietly combining unrelated work.
 
-For delivery work, reserve the planned profile ID in the requirement-bound story contract and approve that contract first. The matching delivery profile then binds the immutable contract hash together with the requirement-profile and story hashes. The reserved ID is not a profile hash or approval. Task start supplies the profile and rejects drift; the contract is not rewritten to point back to it.
+The system always applies the safest limit among the user’s choice, the project rules, the requirement, its contract, the available tools, the environment, and the budget. Any one of those may reduce what can happen; none may silently increase it. Missing, expired, revoked, or changed inputs stop the delivery safely.
 
-The deterministic evaluator uses the most restrictive boundary:
+The approval screen should lead with a readable summary: what will be delivered, where, which files and actions are allowed, where work will pause, what remains excluded, when the choice expires, and how rollback works. Machine JSON and internal identifiers remain available as optional audit details; understanding the JSON is not a prerequisite for informed approval.
 
-> effective autonomy = minimum of host, project, requirement, delivery, contract, capability, environment, and budget constraints
+### Optional technical mapping
 
-A contract or phase override may narrow the level but never widen it. If one delivery covers several requirements, the lowest applicable ceiling wins. Missing, stale, expired, revoked, unknown, or materially drifted inputs fail closed. Legacy `requirement:v1` records default to a `supervised` ceiling and do not silently acquire a delivery selection.
+The stored names for the three choices are `supervised`, `checkpointed`, and `bounded-autonomous`. The requirement safety limit is stored in a requirement execution profile; the one-delivery choice is stored in a separate delivery execution profile bound to the immutable requirement, story, and contract hashes.
 
-`bounded-autonomous` requires `host_verified` authority or trusted CI attestation. `audit_only` can record attribution but cannot prove it, so the evaluator caps effective autonomy at `checkpointed`, even when the target is only local. Effective bounded execution therefore has an external prerequisite: a trusted host/CI issues an Ed25519 receipt for the exact delivery-profile approval subject, the project sets `authority_policy.mode` to `host_verified` and registers that public key in `authority_policy.trusted_host_keys`, and approval supplies the receipt through `--host-receipt-file`. The CLI verifies the authority; it cannot sign itself into a higher level.
+The strongest choice is effective only when a trusted host or CI system signs the exact approval. Without that external proof, the system records who was named but limits execution to working between agreed review moments. Internally these two assurance modes are `host_verified` and `audit_only`; the CLI verifies a supplied Ed25519 host receipt and cannot create its own higher authority.
 
-The reviewer should inspect the full proposed JSON before approval: requirement ceiling, requested/effective cap, delivery and target identity, one story/contract pair, canonical actions, write paths, automatic phases, checkpoints, exceptions, expiry, and explicit non-reuse. A prose level such as “checkpointed” without those boundaries is not an informed approval.
-
-Task-start behavior is configuration-driven. `supervised` always stops for confirmation. For any other effective level, a phase starts automatically only when it is listed in `autonomy_policy.presets.<level>.automatic_phases`; an unlisted phase still returns an exact confirmation checkpoint. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic while leaving release actions checkpointed. This is phase policy, not a trust score learned from earlier successes.
+At task start, phases run automatically only when both the selected mode and the exact delivery allow them. The default middle mode permits analysis, design, implementation, and validation between review moments, while release or merge remains a separate stop unless it was explicitly included.
 
 ## 5. Exact Authorization: Action × Subject
 

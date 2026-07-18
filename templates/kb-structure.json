@@ -36,7 +36,7 @@
   "directories": {
     "baseline": "Existing-project current-state baselines, imported documents, inferred context, and formal approval records.",
     "assessments": "Immutable assessment proposals, mutable workflow state, approvals, and idempotent application journals.",
-    "workflows": "Versioned workflow definitions and overlays plus immutable instance headers and append-only event streams.",
+    "workflows": "Versioned workflow definitions and overlays plus durable start journals, same-filesystem staging, immutable instance headers, append-only event streams, checkpoints binding the ordered full audit-trace chain, and hash-bound pending transitions recoverable only by the same idempotent retry.",
     "budgets": "Execution budgets, versioned amendments, and usage snapshots under the configured budget storage root.",
     "contracts": "Phase and story contracts.",
     "authorizations": "Explicit, action-scoped delegated automation grants with immutable approval evidence.",
