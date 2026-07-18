@@ -6,6 +6,8 @@ import childProcess from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { computeStableHash } from "../lib/canonical.mjs";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
 const sourceEmail = "former@example.invalid";
@@ -119,6 +121,67 @@ test("migration identity CLI requires the reviewed plan hash and rejects snapsho
   assert.match(drift, /plan changed after preview/u);
   assert.equal(JSON.parse(fs.readFileSync(latePath, "utf8")).actor.email, sourceEmail);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "migrations")), false);
+});
+
+test("migration identity CLI recovers only the prepared exact physical mutation set", (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "identity-migration-cli-recovery-"));
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }));
+  run(project, "init", "--project-id", "identity-recovery", "--project-name", "Identity Recovery");
+
+  const liveRoot = path.join(project, ".sdlc");
+  const before = readTree(liveRoot);
+  const nonce = "a".repeat(24);
+  const planHash = "b".repeat(64);
+  const transactionName = `.sdlc-identity-migration-txn-${nonce}`;
+  const journalName = `.sdlc-identity-migration-journal-${nonce}.json`;
+  const transactionRoot = path.join(project, transactionName);
+  fs.mkdirSync(transactionRoot, { recursive: true });
+  fs.cpSync(liveRoot, path.join(transactionRoot, "original"), {
+    recursive: true,
+    errorOnExist: true,
+  });
+  fs.writeFileSync(path.join(liveRoot, "project.json"), `${JSON.stringify({ interrupted: true })}\n`);
+  const lock = {
+    schema_version: "identity-migration-lock:v1",
+    migration_id: `MIG-IDENTITY-${"c".repeat(12)}-${"d".repeat(12)}`,
+    plan_hash: planHash,
+    pid: 2_147_483_647,
+    host: os.hostname(),
+    nonce,
+    transaction_root: transactionName,
+    journal_path: journalName,
+    phase: "acquired",
+    generation: 0,
+    created_at: "2026-07-18T10:00:00.000Z",
+  };
+  fs.writeFileSync(
+    path.join(project, ".sdlc-identity-migration.lock"),
+    `${JSON.stringify(lock, null, 2)}\n`,
+  );
+  const journal = {
+    ...lock,
+    phase: "shadow_activated",
+    generation: 1,
+    updated_at: "2026-07-18T10:01:00.000Z",
+  };
+  journal.journal_hash = computeStableHash(journal);
+  fs.writeFileSync(path.join(project, journalName), `${JSON.stringify(journal, null, 2)}\n`);
+
+  const recovered = runJson(
+    project,
+    "migration", "identity", "--recover",
+    "--recovery-nonce", nonce,
+    "--plan-hash", planHash,
+  );
+  assert.equal(recovered.status, "rolled_back");
+  assert.deepEqual(readTree(liveRoot), before);
+  assert.equal(fs.existsSync(transactionRoot), false);
+  assert.equal(fs.existsSync(path.join(project, journalName)), false);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc-identity-migration.lock")), false);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration-recovery-")),
+    [],
+  );
 });
 
 test("identity migration lock blocks every non-recovery CLI command before project context reads", (t) => {

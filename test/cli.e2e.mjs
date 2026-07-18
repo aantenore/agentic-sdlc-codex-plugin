@@ -3348,6 +3348,10 @@ test("config migration is reviewed separately before active release history is a
     "--json",
   ]).stdout);
   assert.equal(configApplied.status, "applied");
+  assert.equal(configApplied.trace_warning, null, "exact bootstrap omitted a trace/checkpoint mutation");
+  assert.equal(fs.existsSync(path.join(project, configApplied.receipt.path)), true);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "locks", "config-migration.lock")), false);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "traces", "project.jsonl.lock")), false);
 
   const applied = JSON.parse(mustRun([
     "migration",

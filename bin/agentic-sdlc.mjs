@@ -151,6 +151,7 @@ import {
   IdentityMigrationError,
   applyIdentityMigration,
   planIdentityMigration,
+  prepareIdentityMigrationRecovery,
   publicIdentityMigrationPlan,
   recoverIdentityMigration,
   validateIdentityMigrationReceipt,
@@ -3827,6 +3828,7 @@ function appendWorkflowJsonLineUnlockedAuthorized(filePath, value) {
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   let descriptor;
   try {
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
     descriptor = fs.openSync(
       filePath,
       fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | NO_FOLLOW_FLAG,
@@ -4788,13 +4790,12 @@ function migrateProjectConfig(context, options) {
         canonical_action: "config.migrate",
         plan_hash: expectedPlanHash,
         expected_plan_hash: currentPlan.plan_hash,
-        exact_mutations: [{ operation: "transaction.execute", path: context.projectConfigPath }],
+        exact_mutations: configMigrationBootstrapMutations(context, currentPlan),
       });
-      return consumeBootstrapMutationGrant(grant, {
-        canonical_action: "config.migrate",
-        operation: "transaction.execute",
-        path: context.projectConfigPath,
-      }, () => migrateProjectConfig(context, { ...options, __bootstrapGrantConsumed: true }));
+      return consumeBootstrapMutationGrant(
+        grant,
+        () => migrateProjectConfig(context, { ...options, __bootstrapGrantConsumed: true }),
+      );
     }
   }
 
@@ -4964,6 +4965,61 @@ function migrateProjectConfig(context, options) {
     ...(application.receipt ? [`- Receipt: ${toProjectPath(context, receiptPath)}`] : []),
     ...(traceWarning ? [`- Warning: ${traceWarning}`] : []),
   ]);
+}
+
+function configMigrationBootstrapMutations(context, plan) {
+  const transactionLock = path.join(context.sdlcRoot, "locks", "config-migration.lock");
+  const receiptPath = path.join(
+    context.sdlcRoot,
+    "migrations",
+    "config",
+    `MIG-CONFIG-${plan.plan_hash.slice(0, 16)}.json`,
+  );
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const traceCheckpoint = traceIntegrityCheckpointPath(tracePath);
+  const traceCheckpointBackup = `${traceCheckpoint}.previous`;
+  const tracePolicy = buildTraceRedactionPolicy(context);
+  const tracePolicySource = describeRedactionPolicy(tracePolicy);
+  assertTraceEvidencePolicySourceSafety(tracePolicySource);
+  const tracePolicyBytes = `${JSON.stringify(tracePolicySource, null, 2)}\n`;
+  const tracePolicyPath = path.join(
+    context.root,
+    TRACE_EVIDENCE_POLICY_SOURCE_ROOT,
+    `${hashBuffer(Buffer.from(tracePolicyBytes, "utf8"))}.json`,
+  );
+  const exact = [
+    ["directory.create", path.join(context.sdlcRoot, "locks")],
+    ["lock.acquire", transactionLock],
+    ["lock.reclaim", transactionLock],
+    ["lock.release", transactionLock],
+    ["file.write", context.projectConfigPath],
+    ["file.write", context.configLockPath],
+    ["file.remove", context.configLockPath],
+    ["directory.create", path.join(context.sdlcRoot, "migrations")],
+    ["directory.create", path.join(context.sdlcRoot, "migrations", "config")],
+    ["file.write", receiptPath],
+    ["file.remove", receiptPath],
+    ["directory.create", path.dirname(tracePolicyPath)],
+    ["lock.acquire", `${tracePolicyPath}.lock`],
+    ["lock.release", `${tracePolicyPath}.lock`],
+    ["file.write", tracePolicyPath],
+    ["lock.acquire", `${tracePath}.lock`],
+    ["lock.release", `${tracePath}.lock`],
+    ["directory.create", path.dirname(traceCheckpoint)],
+    ["path.chmod", path.dirname(traceCheckpoint)],
+    ["lock.acquire", `${traceCheckpoint}.lock`],
+    ["lock.remove", `${traceCheckpoint}.lock`],
+    ["file.append", tracePath],
+    ["file.truncate", tracePath],
+    ["file.write", traceCheckpoint],
+    ["file.remove", traceCheckpoint],
+    ["path.rename.source", traceCheckpoint],
+    ["path.rename.target", traceCheckpoint],
+    ["path.rename.source", traceCheckpointBackup],
+    ["path.rename.target", traceCheckpointBackup],
+    ["file.remove", traceCheckpointBackup],
+  ].map(([operation, filePath]) => ({ operation, path: filePath }));
+  return [...new Map(exact.map((entry) => [`${entry.operation}\0${path.resolve(entry.path)}`, entry])).values()];
 }
 
 function assertConfigAllowsCommand(context, resolution, options, positionals = []) {
@@ -7748,23 +7804,47 @@ function clamp01(value) {
 
 function initProject(context, options) {
   if (!fs.existsSync(context.sdlcRoot)) {
+    const exactMutations = initBootstrapMutations(context);
     const grant = createBootstrapMutationGrant({
       root: context.root,
       canonical_action: "init",
       first_time: true,
-      exact_mutations: [{ operation: "transaction.execute", path: context.sdlcRoot }],
+      exact_mutations: exactMutations,
     });
-    return consumeBootstrapMutationGrant(grant, {
-      canonical_action: "init",
-      operation: "transaction.execute",
-      path: context.sdlcRoot,
-    }, () => {
+    return consumeBootstrapMutationGrant(grant, () => {
       const result = initializeProject(context, options);
       output(options, result.payload, result.messages);
     });
   }
   const result = initializeProject(context, options);
   output(options, result.payload, result.messages);
+}
+
+function initBootstrapMutations(context) {
+  const directories = [
+    context.sdlcRoot,
+    ...context.config.kb_directories.map((directory) => path.join(context.sdlcRoot, directory)),
+    path.join(context.sdlcRoot, "output-contracts", "templates"),
+    path.join(context.sdlcRoot, "output-contracts", "decisions"),
+    path.join(context.sdlcRoot, "work-items", "epics"),
+    path.join(context.sdlcRoot, "work-items", "tasks"),
+  ];
+  const files = [
+    path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME),
+    path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME),
+    path.join(context.sdlcRoot, "project.json"),
+    path.join(context.sdlcRoot, "README.md"),
+    path.join(context.sdlcRoot, ".gitignore"),
+    path.join(context.sdlcRoot, "output-contracts", "registry.json"),
+    path.join(context.sdlcRoot, "dependencies", "graph.json"),
+    ...context.config.phase_order.map((phase) =>
+      path.join(context.sdlcRoot, "contracts", `contract-${phase}-v1.json`)),
+  ];
+  const exact = [
+    ...directories.map((directoryPath) => ({ operation: "directory.create", path: directoryPath })),
+    ...files.map((filePath) => ({ operation: "file.write", path: filePath })),
+  ];
+  return [...new Map(exact.map((entry) => [`${entry.operation}\0${path.resolve(entry.path)}`, entry])).values()];
 }
 
 async function runDoctor(context, options) {
@@ -27203,6 +27283,17 @@ function migrateIdentity(context, options) {
       fail("Identity migration --recover requires both --recovery-nonce and --plan-hash from the verified lock.");
     }
     try {
+      const recoveryPreparation = prepareIdentityMigrationRecovery({
+        projectRoot: context.root,
+        recoveryNonce,
+        planHash: recoveryPlanHash,
+      });
+      if (recoveryPreparation.status === "no_recovery_needed") {
+        output(options, { status: "no_recovery_needed", recovered: false }, [
+          "No interrupted identity migration requires recovery.",
+        ]);
+        return;
+      }
       const grant = createBootstrapMutationGrant({
         root: context.root,
         canonical_action: "migration.identity",
@@ -27211,19 +27302,14 @@ function migrateIdentity(context, options) {
         expected_nonce: recoveryNonce,
         plan_hash: recoveryPlanHash,
         expected_plan_hash: recoveryPlanHash,
-        exact_mutations: [{
-          operation: "transaction.execute",
-          path: path.join(context.root, ".sdlc-identity-migration.lock"),
-        }],
+        exact_mutations: recoveryPreparation.exact_mutations,
       });
-      const result = consumeBootstrapMutationGrant(grant, {
-        canonical_action: "migration.identity",
-        operation: "transaction.execute",
-        path: path.join(context.root, ".sdlc-identity-migration.lock"),
-      }, () => recoverIdentityMigration({
+      const result = consumeBootstrapMutationGrant(grant, () => recoverIdentityMigration({
         projectRoot: context.root,
         recoveryNonce,
         planHash: recoveryPlanHash,
+        recoveryPreparation,
+        mutationGateway: executeIdentityMutation,
       }));
       output(options, result, [
         result.status === "rolled_back"
@@ -27285,6 +27371,7 @@ function migrateIdentity(context, options) {
     }
     const result = options.apply
       ? applyIdentityMigration(plan, {
+          mutationGateway: executeIdentityMutation,
           rebuildDerived: ({ projectRoot, sdlcRoot }) => {
             const stagedContext = { ...context, root: projectRoot, sdlcRoot };
             const cache = buildCache(stagedContext);
@@ -33229,6 +33316,13 @@ function writeJsonFile(filePath, value, options = {}) {
   writeTextFile(filePath, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
+function executeIdentityMutation(request, effect) {
+  return withGovernedMutation(request, () => {
+    assertMutationExecutionAuthorized(request);
+    return effect();
+  });
+}
+
 function removePathGoverned(filePath, options = {}) {
   const operation = options.recursive ? "directory.remove" : "file.remove";
   return withGovernedMutation({ operation, path: filePath }, () => {
@@ -33445,6 +33539,10 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
   let created = false;
   let complete = false;
   try {
+    assertMutationExecutionAuthorized({
+      operation: "file.write",
+      path: options.governanceTargetPath ?? filePath,
+    });
     descriptor = fs.openSync(
       filePath,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
@@ -33452,6 +33550,10 @@ function writeFileToStableParent(filePath, content, parentIdentity, options = {}
     );
     created = true;
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    assertMutationExecutionAuthorized({
+      operation: "file.write",
+      path: options.governanceTargetPath ?? filePath,
+    });
     fs.writeFileSync(descriptor, content);
     if (options.durable) fs.fsyncSync(descriptor);
     complete = true;

@@ -1135,6 +1135,22 @@ test("identity migration recovery restores a durable backup after an interrupted
     recoveryNonce: nonce,
     planHash,
   });
+  const lockBeforeDeniedRecovery = fs.readFileSync(path.join(project, ".sdlc-identity-migration.lock"));
+  assert.throws(() => recoverIdentityMigration({
+    projectRoot: project,
+    recoveryNonce: nonce,
+    planHash,
+    recoveryPreparation: preparation,
+    mutationGateway() {
+      throw new Error("recovery mutation denied before effect");
+    },
+  }), /denied before effect/u);
+  assert.deepEqual(snapshotTree(liveRoot), interrupted);
+  assert.deepEqual(
+    fs.readFileSync(path.join(project, ".sdlc-identity-migration.lock")),
+    lockBeforeDeniedRecovery,
+  );
+  assert.equal(findRecoveryClaims(project).length, 0);
   const exactMutations = new Set(preparation.exact_mutations.map(({ operation, path: mutationPath }) =>
     `${operation}\u0000${mutationPath}`));
   const observedMutations = [];

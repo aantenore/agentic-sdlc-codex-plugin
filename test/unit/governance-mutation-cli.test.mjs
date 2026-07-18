@@ -153,6 +153,20 @@ function createStory(project, id) {
   ]);
 }
 
+test("CLI init completes through its exact bootstrap mutation profile", (t) => {
+  const project = projectFixture(t, "init-bootstrap");
+  initialize(project);
+  for (const relativePath of [
+    ".sdlc/config.json",
+    ".sdlc/config.lock.json",
+    ".sdlc/project.json",
+    ".sdlc/output-contracts/registry.json",
+    ".sdlc/dependencies/graph.json",
+  ]) {
+    assert.equal(fs.existsSync(path.join(project, relativePath)), true, `missing initialized path ${relativePath}`);
+  }
+});
+
 test("CLI dispatch enforces an inline policy before creating the first story entry", (t) => {
   const project = projectFixture(t, "enforce");
   initialize(project);
