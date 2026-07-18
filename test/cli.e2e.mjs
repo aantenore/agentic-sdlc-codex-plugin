@@ -3909,9 +3909,8 @@ test("test and release traces require real canonical evidence in strict mode", (
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /test trace requires at least one evidence path/);
 
   const evidence = writeArtifact(project, ".sdlc/tests/ST-001-test-run.json", "{}\n");
-  fs.rmSync(path.join(project, ".sdlc", "traces", "ST-001.jsonl"));
   mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "test", "--summary", "Tests passed", "--evidence", evidence.replaceAll("/", "\\")]);
-  assert.deepEqual(readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl"))[0].evidence, [evidence]);
+  assert.deepEqual(readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl")).at(-1).evidence, [evidence]);
   writeJson(storyPath, { ...storyData, phase: "release", status: "release" });
   mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "release", "--summary", "Release ready"]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /release.*requires at least one evidence path/);
@@ -7464,6 +7463,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
   assert.ok(files.includes("lib/change-observatory/cli.mjs"));
+  assert.ok(files.includes("lib/change-observatory/runtime.mjs"));
   assert.ok(files.includes("lib/change-observatory/intentabi-adapter.mjs"));
   assert.ok(files.includes("ui/change-observatory/index.html"));
   assert.ok(files.includes("ui/change-observatory/app.js"));
@@ -7520,7 +7520,9 @@ test("npm package installs as a complete reusable plugin", async (t) => {
     { cwd: observedProject, encoding: "utf8", timeout: 30_000 },
   );
   assert.equal(initialized.status, 0, `installed init failed\n${initialized.stdout}\n${initialized.stderr}`);
-  fs.writeFileSync(path.join(observedProject, ".sdlc", "config.json"), "{ malformed on purpose\n");
+  const malformedStoryRoot = path.join(observedProject, ".sdlc", "stories", "ST-MALFORMED");
+  fs.mkdirSync(malformedStoryRoot, { recursive: true });
+  fs.writeFileSync(path.join(malformedStoryRoot, "story.json"), "{ malformed on purpose\n");
   const intentAbiEventId = "123e4567-e89b-42d3-a456-426614174010";
   const intentAbiRelativePath = `.sdlc/observations/intentabi/${intentAbiEventId}.json`;
   const intentAbiDigest = (character) => `hmac-sha256:evidence:${character.repeat(64)}`;

@@ -13,6 +13,7 @@ import {
   createEnterpriseFoundationFixture,
 } from "./benchmark-foundation.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
+import { observatoryWorkerEnvironment } from "../lib/change-observatory/runtime.mjs";
 
 export const ENTERPRISE_PERFORMANCE_BENCHMARK_SCHEMA = "enterprise-performance-benchmark:v1";
 export const ENTERPRISE_CANONICAL_QUERY_WORKER_SCHEMA = "enterprise-performance-canonical-query-worker:v1";
@@ -24,6 +25,7 @@ const DEFAULT_WORKER_TIMEOUT_MS = 120_000;
 const CHILD_TERMINATION_TIMEOUT_MS = 2_000;
 const MAX_WORKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_COLD_MODEL_BYTES = 64 * 1024 * 1024;
+const ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES = 10 * 1024 * 1024;
 const CANONICAL_QUERY_WORKER_FLAG = "--internal-canonical-query-worker";
 const OBSERVATORY_WORKER_FLAG = "--internal-observatory-worker";
 const OBSERVATORY_MODEL_VERIFIER_FLAG = "--internal-observatory-model-verifier";
@@ -609,7 +611,7 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
       child = spawn(resolvedExecutable, spawnArguments, {
         cwd: process.cwd(),
         detached: process.platform !== "win32",
-        env: process.env,
+        env: observatoryWorkerEnvironment(process.env),
         stdio: ["ignore", "pipe", "pipe", "ipc"],
         windowsHide: true,
       });
@@ -2007,6 +2009,11 @@ export function validateObservatoryModelArtifact(filePath, manifest, {
   if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > maxBytes) {
     throw new Error(`Observatory cold model artifact must be between 1 and ${maxBytes} bytes`);
   }
+  if (stat.size > ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES) {
+    throw new Error(
+      `Observatory cold model artifact exceeds the ${ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES}-byte enterprise payload budget`,
+    );
+  }
   if (expectedSizeBytes !== null && stat.size !== expectedSizeBytes) {
     throw new Error("Observatory cold model artifact size does not match the streamed response");
   }
@@ -2177,9 +2184,6 @@ export function validateObservatoryModelArtifact(filePath, manifest, {
     || !oracleHasSourcePath(targetDossier, targetStoryPath)
   ) {
     throw new Error("Observatory cold model omitted the target iteration dossier");
-  }
-  if (JSON.stringify(targetIteration.dossier) !== JSON.stringify(targetDossier)) {
-    throw new Error("Observatory cold model target iteration is not attached to its dossier");
   }
   if (!isOracleObject(targetDossier.lanes)) {
     throw new TypeError("Observatory cold model target dossier omitted its lanes");
@@ -2487,8 +2491,13 @@ function validateOracleIterations(
       }
     }
     retainedLaneCounts.set(expectedStoryId, expectedCounts);
-    if (JSON.stringify(iteration.dossier) !== JSON.stringify(dossier)) {
-      throw new Error(`Observatory retained iteration ${expectedStoryId} has a different dossier`);
+    if (
+      iteration.dossier !== undefined
+      && JSON.stringify(iteration.dossier) !== JSON.stringify(dossier)
+    ) {
+      throw new Error(
+        `Observatory retained iteration ${expectedStoryId} has a different legacy inline dossier`,
+      );
     }
   }
   return retainedLaneCounts;
@@ -2782,42 +2791,45 @@ function runCanonicalQuery(session, manifest) {
     storyStatuses[status] = (storyStatuses[status] || 0) + 1;
   }
 
-  let records = 0;
-  let targetRecord = null;
-  for (const file of session.listFiles({
+  const recordAggregate = session.aggregateJsonLines({
     under: manifest.layout.records_root,
-    extensions: [".jsonl"],
-  })) {
-    for (const record of session.readJsonLines(file.path)) {
-      if (!record.valid) continue;
-      records += 1;
-      if (record.value.id === manifest.query_targets.record_id) {
-        targetRecord = {
-          id: record.value.id,
-          path: record.path,
-          line: record.line,
-          story_id: record.value.story_id,
-          sequence: record.value.sequence,
-        };
-      }
-    }
-  }
+    onInvalid: "skip",
+    operations: [
+      { id: "records", operation: "count" },
+      {
+        id: "target_record",
+        operation: "last",
+        where: { field: "id", equals: manifest.query_targets.record_id },
+        project: ["id", "story_id", "sequence"],
+        includeSource: true,
+      },
+    ],
+  });
+  const records = recordAggregate.results.records;
+  const selectedTargetRecord = recordAggregate.results.target_record;
+  const targetRecord = selectedTargetRecord.value === null
+    ? null
+    : {
+        ...selectedTargetRecord.value,
+        path: selectedTargetRecord.source.path,
+        line: selectedTargetRecord.source.line,
+      };
 
   const dependencyGraph = session.readJson(manifest.query_targets.dependency_path);
-  let traceEvents = 0;
-  let targetStoryTraceEvents = 0;
-  for (const file of session.listFiles({
+  const traceAggregate = session.aggregateJsonLines({
     under: manifest.layout.traces_root,
-    extensions: [".jsonl"],
-  })) {
-    for (const record of session.readJsonLines(file.path)) {
-      if (!record.valid) continue;
-      traceEvents += 1;
-      if (record.value.story_id === manifest.query_targets.story_id) {
-        targetStoryTraceEvents += 1;
-      }
-    }
-  }
+    onInvalid: "skip",
+    operations: [
+      { id: "trace_events", operation: "count" },
+      {
+        id: "target_story_trace_events",
+        operation: "count",
+        where: { field: "story_id", equals: manifest.query_targets.story_id },
+      },
+    ],
+  });
+  const traceEvents = traceAggregate.results.trace_events;
+  const targetStoryTraceEvents = traceAggregate.results.target_story_trace_events;
 
   return {
     canonical_files: session.catalog().files.length,

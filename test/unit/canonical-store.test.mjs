@@ -76,6 +76,49 @@ test("returns content-bound text and JSON snapshots without an extra physical re
   assert.equal(store.metrics().cache_hits, 2);
 });
 
+test("bounded snapshots reject oversized files before reading or caching their bytes", (t) => {
+  const root = fixture(t);
+  fs.writeFileSync(path.join(root, "oversized.txt"), "0123456789");
+  const store = openCanonicalStore({ root });
+
+  assert.throws(
+    () => store.snapshot("oversized.txt", { maxBytes: 5 }),
+    (error) => error instanceof CanonicalStoreError && error.code === "file_too_large",
+  );
+  assert.equal(store.metrics().physical_reads, 0);
+  assert.equal(store.metrics().bytes_read, 0);
+
+  const accepted = store.snapshot("oversized.txt", { maxBytes: 10 });
+  assert.equal(accepted.byteLength, 10);
+  assert.equal(accepted.readText(), "0123456789");
+  assert.equal(store.metrics().physical_reads, 1);
+  assert.throws(
+    () => store.snapshot("oversized.txt", { maxBytes: 9 }),
+    (error) => error instanceof CanonicalStoreError && error.code === "file_too_large",
+  );
+  assert.equal(store.metrics().physical_reads, 1);
+});
+
+test("bounded walks stop at the first file or directory-entry overflow", (t) => {
+  const root = fixture(t);
+  fs.writeFileSync(path.join(root, "second.txt"), "second\n");
+  const store = openCanonicalStore({ root });
+
+  assert.throws(
+    () => store.walk(".", { maxFiles: 2, maxEntries: 100 }),
+    (error) => error instanceof CanonicalStoreError && error.code === "walk_limit_exceeded",
+  );
+  assert.throws(
+    () => store.walk(".", { maxFiles: 100, maxEntries: 1 }),
+    (error) => error instanceof CanonicalStoreError && error.code === "walk_limit_exceeded",
+  );
+  assert.deepEqual(
+    store.walk(".", { maxFiles: 3, maxEntries: 10 })
+      .map((filePath) => path.relative(root, filePath).split(path.sep).join("/")),
+    ["alpha.txt", "nested/data.json", "second.txt"],
+  );
+});
+
 test("fails a verified snapshot closed after file or parent replacement", (t) => {
   const root = fixture(t);
   const store = openCanonicalStore({ root });
@@ -299,5 +342,28 @@ test("rejects a symbolic-link project root", (t) => {
   assert.throws(
     () => openCanonicalStore({ root: link }),
     (error) => error instanceof CanonicalStoreError && error.code === "invalid_root",
+  );
+});
+
+test("full missing-path inspection detects an ancestor symlink swap", (t) => {
+  if (process.platform === "win32") return;
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "canonical-store-ancestor-"));
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true, maxRetries: 3 }));
+  const parent = path.join(outer, "parent");
+  const root = path.join(parent, "project");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, "record.json"), '{"stable":true}\n');
+  const store = openCanonicalStore({ root });
+  const movedParent = path.join(outer, "parent-original");
+  fs.renameSync(parent, movedParent);
+  fs.symlinkSync(movedParent, parent, "dir");
+
+  assert.throws(
+    () => store.inspect("missing.json"),
+    (error) => error instanceof CanonicalStoreError && error.code === "root_changed",
+  );
+  assert.throws(
+    () => store.readJson("record.json"),
+    (error) => error instanceof CanonicalStoreError && error.code === "path_outside_root",
   );
 });

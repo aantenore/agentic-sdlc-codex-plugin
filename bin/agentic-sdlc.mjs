@@ -90,7 +90,32 @@ import {
   validateContextOptimizationLineage,
 } from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
+import {
+  launchDedicatedObservatory,
+  OBSERVATORY_WORKER_MARKER,
+  shouldLaunchDedicatedObservatory,
+} from "../lib/change-observatory/runtime.mjs";
+import { createObservatoryConfiguration } from "../lib/change-observatory/configuration.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
+import {
+  recoverTraceIntegrity,
+  sealTraceEvent,
+  withTraceIntegritySnapshot,
+} from "../lib/trace-integrity.mjs";
+import {
+  createOperationContext,
+  normalizeOperationalError,
+} from "../lib/observability/context.mjs";
+import {
+  createLegacyEvidenceV1RedactionPolicy,
+  createHistoricalOperationalEvidenceV1RedactionPolicy,
+  createOperationalRedactionPolicy,
+  createRedactionPolicyFromSource,
+  describeRedactionPolicy,
+  redactText,
+  redactValue,
+  redactValueWithMetadata,
+} from "../lib/observability/redaction.mjs";
 import {
   buildRequirementProposal,
   buildRequirementRef,
@@ -154,6 +179,7 @@ const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
+const MAX_CLI_ERROR_CONFIG_BYTES = 2 * 1024 * 1024;
 const PROJECT_CONFIG_LOCK_FILE_NAME = "config.lock.json";
 const LEGACY_CONFIG_PROFILE_ID = "sdlc-config-v1@0.11.0";
 const INTERNAL_LOCK_WAIT_MS = 5000;
@@ -168,6 +194,9 @@ const BUILT_IN_BUDGET_METER_ADAPTERS = Object.freeze({
   }),
 });
 const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
+const TRACE_EVIDENCE_POLICY_REF_SCHEMA = "trace-evidence-redaction-policy-ref:v1";
+const TRACE_EVIDENCE_POLICY_BINDING_SCHEMA = "trace-evidence-redaction-policy-binding:v1";
+const TRACE_EVIDENCE_POLICY_SOURCE_ROOT = `${SDLC_DIR}/evidence-redaction-policies`;
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const OUTPUT_DELIVERY_MODES = new Set(["artifact", "artifact-plus-chat-summary"]);
 const OUTPUT_VISUAL_FORMATS = new Set(["docx", "xlsx", "pdf", "pptx", "html"]);
@@ -461,6 +490,7 @@ const KNOWN_OPTIONS = new Set([
   "task-gate",
   "template",
   "template-dir",
+  "target-event",
   "target-root",
   "terminal-status",
   "text",
@@ -490,6 +520,7 @@ const KNOWN_OPTIONS = new Set([
   "validation",
   "view",
   "workflow-preset",
+  "redaction-policy",
   "guard-input-json",
 ]);
 const REPEATABLE_OPTIONS = new Set([
@@ -537,6 +568,7 @@ const REPEATABLE_OPTIONS = new Set([
   "source",
   "tool",
   "validation",
+  "target-event",
   "write-path",
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
@@ -636,6 +668,8 @@ const TRACE_TYPES = new Set([
   "test",
 ]);
 const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready"]);
+const CLI_OPERATION_CONTEXT = createOperationContext({ operation: "cli.run" });
+const OPERATIONAL_REDACTION_POLICY = createOperationalRedactionPolicy();
 
 async function main() {
   const rawArgs = process.argv.slice(2);
@@ -689,6 +723,14 @@ async function main() {
     }
     if (command === "observe") {
       try {
+        if (shouldLaunchDedicatedObservatory()) {
+          const termination = await launchDedicatedObservatory({
+            argv: rawArgs,
+            scriptPath: fileURLToPath(import.meta.url),
+          });
+          process.exitCode = termination.exitCode;
+          return;
+        }
         await runObserveCommand({
           projectRoot: path.resolve(String(parsed.options.root || process.cwd())),
           host: parsed.options.host,
@@ -696,6 +738,9 @@ async function main() {
           openBrowser: parsed.options["no-open"] !== true,
           json: parsed.options.json === true,
           locale: humanGuidanceLocale(parsed.options),
+        }, {
+          parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
+            && process.env[OBSERVATORY_WORKER_MARKER] === "1",
         });
       } catch (error) {
         if (error instanceof TypeError) fail(error.message);
@@ -1026,6 +1071,10 @@ async function main() {
       appendTrace(context, parsed.options);
       return;
     }
+    if (command === "trace" && subcommand === "evidence" && rest[0] === "bind") {
+      bindHistoricalTraceEvidencePolicy(context, parsed.options);
+      return;
+    }
     if (command === "sync" && subcommand === "record") {
       recordSyncEvent(context, parsed.options);
       return;
@@ -1121,17 +1170,24 @@ async function main() {
 
     fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
   } catch (error) {
+    const jsonRequested = parsed.options?.json === true || rawJsonRequested;
+    const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
+    const errorRedactionPolicy = errorRedaction.policy;
     if (error instanceof UnknownCommandError) {
-      if (parsed.options?.json === true || rawJsonRequested) {
-        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+      if (jsonRequested) {
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options, errorRedaction), null, 2));
         process.exitCode = 1;
         return;
       }
-      console.error(error.message);
+      const safeMessage = errorRedaction.withholdDetails
+        ? "Project privacy configuration is invalid or unsafe; command details were withheld."
+        : redactText(error.message, errorRedactionPolicy);
+      console.error(`${safeMessage}\nCorrelation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`);
       process.exitCode = 1;
       return;
     }
-    if (error instanceof UserError || error instanceof CliPresetError) {
+    const expected = error instanceof UserError || error instanceof CliPresetError;
+    {
       const italian = (() => {
         try {
           return humanGuidanceLocale(parsed.options) === "it";
@@ -1156,11 +1212,24 @@ async function main() {
             next: "Next step",
             details: "Technical details (optional)",
           };
-      if (parsed.options?.json === true || rawJsonRequested) {
-        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+      if (jsonRequested) {
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options, errorRedaction), null, 2));
         process.exitCode = 1;
         return;
       }
+      const normalized = normalizeOperationalError(
+        errorRedaction.withholdDetails
+          ? {
+              code: "observability_configuration_invalid",
+              message: "Project privacy configuration is invalid or unsafe; command details were withheld.",
+              statusCode: 400,
+              retryable: false,
+            }
+          : expected
+          ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
+          : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
+        { context: CLI_OPERATION_CONTEXT, redactionPolicy: errorRedactionPolicy },
+      );
       console.error([
         `${labels.outcome}: ${italian ? "Il comando non è stato completato." : "The command could not be completed."}`,
         `${labels.impact}: ${italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically."}`,
@@ -1169,12 +1238,12 @@ async function main() {
         `${labels.next}: ${italian ? "Consulta la diagnosi facoltativa, correggi il problema e riprova." : "Review the optional diagnosis, correct the problem, and try again."}`,
         "",
         `${labels.details}:`,
-        `- Error: ${error.message}`,
+        `- Error: ${normalized.error.message}`,
+        `- Correlation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`,
       ].join("\n"));
       process.exitCode = 1;
       return;
     }
-    throw error;
   }
 }
 
@@ -2413,13 +2482,16 @@ function startWorkflowInstance(context, options) {
         actor: attribution.actor,
         ...(summary ? { metadata: { summary } } : {}),
       }));
-      const startTrace = buildWorkflowStartTraceRecord(
+      const startTrace = prepareGovernedTraceEvent(
         context,
-        instance,
-        definition,
-        overlayEntry,
-        attribution,
-        [instancePath, eventsPath, checkpointPath],
+        buildWorkflowStartTraceRecord(
+          context,
+          instance,
+          definition,
+          overlayEntry,
+          attribution,
+          [instancePath, eventsPath, checkpointPath],
+        ),
       );
       checkpoint = callWorkflowDomain("Unable to create the workflow integrity checkpoint", () =>
         createWorkflowCheckpoint({
@@ -2575,8 +2647,18 @@ function extendWorkflowTraceChain(previousTraceChainHash, traceEvent) {
   }
   return computeStableHash({
     previous_trace_chain_hash: previousTraceChainHash,
-    trace_event: traceEvent,
+    trace_event: workflowTraceIntent(traceEvent),
   });
+}
+
+function workflowTraceIntent(traceEvent) {
+  if (!traceEvent || typeof traceEvent !== "object" || Array.isArray(traceEvent)) return traceEvent;
+  const { _trace_integrity: _integrityEnvelope, ...intent } = traceEvent;
+  return intent;
+}
+
+function workflowTraceIntentMatches(storedEvent, expectedIntent) {
+  return stableJson(workflowTraceIntent(storedEvent)) === stableJson(workflowTraceIntent(expectedIntent));
 }
 
 function workflowStartRequestHash(request) {
@@ -2871,6 +2953,7 @@ function completeWorkflowStartTransactionLocked(context, journal) {
     fail("Simulated workflow start trace interruption before append.");
   }
   ensureWorkflowTraceRecordLocked(
+    context,
     path.join(context.sdlcRoot, "traces", "project.jsonl"),
     journal.trace_event,
     journal.trace_anchor,
@@ -3075,7 +3158,7 @@ function inspectWorkflowTraceIntent(context, traceEvent) {
       .map((line) => JSON.parse(line))
       .filter((entry) => entry.id === traceEvent.id);
     if (matches.length === 0) return { valid: true, exists: false, tracePath, errors: [] };
-    if (matches.length !== 1 || stableJson(matches[0]) !== stableJson(traceEvent)) {
+    if (matches.length !== 1 || !workflowTraceIntentMatches(matches[0], traceEvent)) {
       return { valid: false, exists: true, tracePath, errors: [`Trace id ${traceEvent.id} is duplicated or has different content.`] };
     }
     return { valid: true, exists: true, tracePath, errors: [] };
@@ -3148,7 +3231,11 @@ function recoverPendingWorkflowTransition(context, instanceId, instance, effecti
     if (!eventState.exists && eventState.suffix_bytes > 0 && !eventState.repairable) {
       return { ...pending, valid: false, errors: ["Workflow event history advanced outside the pending transition."] };
     }
-    const traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    let traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    if (!traceState.valid) {
+      recoverWorkflowTraceIntegrityAtAnchorLocked(context, tracePath, journal.trace_anchor);
+      traceState = workflowTraceRecordStateLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    }
     if (!traceState.valid) return { ...pending, valid: false, errors: traceState.errors };
     const base = workflowJsonLinesAtAnchor(eventsPath, journal.event_anchor, "Workflow event history");
     if (!base.valid) return { ...pending, valid: false, errors: base.errors };
@@ -3186,7 +3273,7 @@ function recoverPendingWorkflowTransition(context, instanceId, instance, effecti
     ensureWorkflowEventRecordLocked(eventsPath, journal.event, journal.event_anchor);
     if (!currentIsTarget) writeWorkflowJsonDurably(checkpointPath, journal.checkpoint, { force: true });
     else syncWorkflowFile(checkpointPath);
-    ensureWorkflowTraceRecordLocked(tracePath, journal.trace_event, journal.trace_anchor);
+    ensureWorkflowTraceRecordLocked(context, tracePath, journal.trace_event, journal.trace_anchor);
     removeWorkflowFileDurably(pending.pendingPath);
     return {
       ...pending,
@@ -3215,13 +3302,16 @@ function persistWorkflowTransitionTransaction(
   const eventsPath = workflowEventsPath(context, instanceId);
   const checkpointPath = workflowCheckpointPath(context, instanceId);
   const pendingPath = workflowPendingTransitionPath(context, instanceId);
-  const traceEvent = buildWorkflowTransitionTraceRecord(
+  const traceEvent = prepareGovernedTraceEvent(
     context,
-    instanceId,
-    transition.event.to,
-    transition.event,
-    attribution,
-    summary,
+    buildWorkflowTransitionTraceRecord(
+      context,
+      instanceId,
+      transition.event.to,
+      transition.event,
+      attribution,
+      summary,
+    ),
   );
   const nextCheckpoint = callWorkflowDomain("Unable to update the workflow integrity checkpoint", () =>
     createWorkflowCheckpoint({
@@ -3262,7 +3352,7 @@ function persistWorkflowTransitionTransaction(
     maybeInterruptWorkflowTransitionForTest("after-event-before-checkpoint");
     writeWorkflowJsonDurably(checkpointPath, nextCheckpoint, { force: true });
     maybeInterruptWorkflowTransitionForTest("after-checkpoint-before-trace");
-    ensureWorkflowTraceRecordLocked(tracePath, traceEvent, journal.trace_anchor);
+    ensureWorkflowTraceRecordLocked(context, tracePath, traceEvent, journal.trace_anchor);
     maybeInterruptWorkflowTransitionForTest("after-trace-before-journal-clear");
     removeWorkflowFileDurably(pendingPath);
     return { checkpoint: nextCheckpoint, trace_event: traceEvent };
@@ -3385,10 +3475,21 @@ function inspectWorkflowTraceCoverageLocked(context, instanceId, instance, event
   }
   let traces;
   try {
-    traces = readProjectText(context, tracePath)
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    const snapshot = withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+    if (!snapshot.integrity.valid) {
+      return {
+        valid: false,
+        tracePath,
+        errors: snapshot.integrity.errors.map((entry) =>
+          `Workflow instance ${instanceId} project audit trace failed integrity verification (${entry.code || "invalid"}).`),
+      };
+    }
+    traces = snapshot.records
+      .filter((entry) => entry.valid === true)
+      .map((entry) => entry.event);
   } catch (error) {
     return {
       valid: false,
@@ -3720,7 +3821,14 @@ function workflowTraceAnchor(filePath) {
   };
 }
 
-function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey, recordLabel) {
+function workflowJsonLineRecordStateLocked(
+  filePath,
+  value,
+  anchor,
+  identityKey,
+  recordLabel,
+  { recordsMatch = (stored, expected) => stableJson(stored) === stableJson(expected) } = {},
+) {
   const anchorErrors = workflowTraceAnchorErrors(anchor);
   if (anchorErrors.length > 0) return { valid: false, exists: false, repairable: false, errors: anchorErrors };
   const bytes = workflowTraceBytes(filePath);
@@ -3744,7 +3852,7 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
   const suffix = bytes.subarray(anchor.size_bytes);
   if (parsed) {
     const matches = parsed.filter((entry) => entry?.[identityKey] === value?.[identityKey]);
-    if (matches.length > 1 || (matches.length === 1 && stableJson(matches[0]) !== stableJson(value))) {
+    if (matches.length > 1 || (matches.length === 1 && !recordsMatch(matches[0], value))) {
       return {
         valid: false,
         exists: matches.length > 0,
@@ -3755,6 +3863,7 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
     return {
       valid: true,
       exists: matches.length === 1,
+      stored_record: matches.length === 1 ? matches[0] : null,
       repairable: false,
       suffix_bytes: suffix.length,
       expected_line_bytes: expectedLine.length,
@@ -3779,7 +3888,14 @@ function workflowJsonLineRecordStateLocked(filePath, value, anchor, identityKey,
 }
 
 function workflowTraceRecordStateLocked(filePath, value, anchor) {
-  return workflowJsonLineRecordStateLocked(filePath, value, anchor, "id", "Workflow trace");
+  return workflowJsonLineRecordStateLocked(
+    filePath,
+    value,
+    anchor,
+    "id",
+    "Workflow trace",
+    { recordsMatch: workflowTraceIntentMatches },
+  );
 }
 
 function workflowEventRecordStateLocked(filePath, value, anchor) {
@@ -3814,12 +3930,6 @@ function appendWorkflowJsonLineUnlocked(filePath, value) {
     );
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
-    if (
-      process.env.NODE_ENV === "test"
-      && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE === "after-append-before-sync"
-    ) {
-      fail("Simulated workflow start trace interruption after append.");
-    }
     fs.fsyncSync(descriptor);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
@@ -3827,21 +3937,104 @@ function appendWorkflowJsonLineUnlocked(filePath, value) {
   syncWorkflowDirectory(path.dirname(filePath));
 }
 
-function ensureWorkflowTraceRecordLocked(filePath, value, anchor) {
+function recoverWorkflowTraceIntegrityAtAnchorLocked(context, filePath, anchor) {
+  const anchored = workflowJsonLinesAtAnchor(filePath, anchor, "Workflow trace");
+  if (!anchored.valid) fail(anchored.errors.join("; "));
+  try {
+    recoverTraceIntegrity(traceIntegrityOptions(context, filePath));
+  } catch (error) {
+    // A pre-integrity interrupted workflow may have left the exact partial
+    // intent described by its journal. That one legacy case is repaired below;
+    // every other integrity failure remains fail-closed.
+    if (error?.code !== "legacy_prefix_incomplete") {
+      failTraceIntegrityWrite(error);
+    }
+  }
+  const recoveredAnchor = workflowJsonLinesAtAnchor(filePath, anchor, "Workflow trace");
+  if (!recoveredAnchor.valid) fail(recoveredAnchor.errors.join("; "));
+}
+
+function ensureWorkflowTraceRecordLocked(context, filePath, value, anchor) {
+  let repairedLegacyRawAppend = false;
+  const beforeRecovery = workflowTraceRecordStateLocked(filePath, value, anchor);
+  if (
+    beforeRecovery.valid
+    && beforeRecovery.exists
+    && beforeRecovery.stored_record?._trace_integrity === undefined
+  ) {
+    if (!beforeRecovery.exact_suffix) {
+      fail(`Legacy workflow trace ${value.id} is not the exact transaction suffix; later audit records must be preserved.`);
+    }
+    const legacySnapshot = workflowTraceIntegritySnapshotLocked(context, filePath);
+    if (legacySnapshot.integrity.valid && legacySnapshot.integrity.initialized) {
+      syncWorkflowFile(filePath);
+      return {
+        repaired: false,
+        appended: false,
+        legacy: true,
+        event: beforeRecovery.stored_record,
+      };
+    }
+    const safeUncommittedRawSuffix = (
+      legacySnapshot.integrity.valid
+      && legacySnapshot.integrity.initialized === false
+    ) || (
+      legacySnapshot.integrity.valid === false
+      && legacySnapshot.integrity.errors.length > 0
+      && legacySnapshot.integrity.errors.every((entry) => entry.code === "checkpoint_drift")
+    );
+    if (!safeUncommittedRawSuffix) {
+      fail(`Legacy workflow trace ${value.id} is not a safely recoverable uncommitted suffix.`);
+    }
+    truncateWorkflowFileDurably(filePath, anchor.size_bytes);
+    repairedLegacyRawAppend = true;
+  }
+  recoverWorkflowTraceIntegrityAtAnchorLocked(context, filePath, anchor);
   let state = workflowTraceRecordStateLocked(filePath, value, anchor);
   if (!state.valid) fail(state.errors.join("; "));
   if (state.exists) {
+    const storedEvent = assertWorkflowStoredTraceIntegrityLocked(context, filePath, value);
     syncWorkflowFile(filePath);
-    return { repaired: false, appended: false };
+    return { repaired: repairedLegacyRawAppend, appended: false, event: storedEvent };
   }
-  const repaired = state.repairable;
+  const repaired = repairedLegacyRawAppend || state.repairable;
   if (repaired) truncateWorkflowFileDurably(filePath, anchor.size_bytes);
-  appendWorkflowJsonLineUnlocked(filePath, value);
+  const storedEvent = sealPreparedTraceEventLocked(context, filePath, value);
   state = workflowTraceRecordStateLocked(filePath, value, anchor);
-  if (!state.valid || !state.exists) {
+  if (!state.valid || !state.exists || !workflowTraceIntentMatches(storedEvent, value)) {
     fail(state.errors[0] || `Workflow trace ${value.id} was not committed exactly once.`);
   }
-  return { repaired, appended: true };
+  const verifiedEvent = assertWorkflowStoredTraceIntegrityLocked(context, filePath, value);
+  return { repaired, appended: true, event: verifiedEvent };
+}
+
+function assertWorkflowStoredTraceIntegrityLocked(context, tracePath, expectedIntent) {
+  const snapshot = workflowTraceIntegritySnapshotLocked(context, tracePath);
+  if (!snapshot.integrity.valid) {
+    fail(`Workflow trace integrity verification failed: ${snapshot.integrity.errors.map((entry) => entry.code).join(", ") || "invalid trace"}`);
+  }
+  const matches = snapshot.records
+    .filter((entry) => entry.valid === true && entry.event?.id === expectedIntent?.id)
+    .map((entry) => entry.event);
+  if (
+    matches.length !== 1
+    || !workflowTraceIntentMatches(matches[0], expectedIntent)
+    || matches[0]?._trace_integrity?.schema_version !== "trace-integrity-event:v1"
+  ) {
+    fail(`Workflow trace ${expectedIntent?.id || "unknown"} is missing, duplicated, unsealed, or has different content.`);
+  }
+  return matches[0];
+}
+
+function workflowTraceIntegritySnapshotLocked(context, tracePath) {
+  try {
+    return withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+  } catch (error) {
+    failTraceIntegrityWrite(error);
+  }
 }
 
 function ensureWorkflowEventRecordLocked(filePath, value, anchor) {
@@ -4106,7 +4299,11 @@ function rawBooleanOptionRequested(argv, optionName) {
 
 class UserError extends Error {}
 
-function buildCliErrorPayload(error, options = {}) {
+function buildCliErrorPayload(
+  error,
+  options = {},
+  errorRedaction = resolveCliErrorRedactionPolicy(options),
+) {
   const italian = (() => {
     try {
       return humanGuidanceLocale(options) === "it";
@@ -4115,22 +4312,48 @@ function buildCliErrorPayload(error, options = {}) {
     }
   })();
   const unknown = error instanceof UnknownCommandError;
-  const code = unknown
+  const errorRedactionPolicy = errorRedaction.policy;
+  const describeUnknown = unknown && !errorRedaction.withholdDetails;
+  const expected = unknown || error instanceof UserError || error instanceof CliPresetError;
+  const normalized = normalizeOperationalError(
+    errorRedaction.withholdDetails
+      ? {
+          code: "observability_configuration_invalid",
+          message: "Project privacy configuration is invalid or unsafe; command details were withheld.",
+          statusCode: 400,
+          retryable: false,
+        }
+      : expected
+      ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
+      : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
+    { context: CLI_OPERATION_CONTEXT, redactionPolicy: errorRedactionPolicy },
+  );
+  const code = errorRedaction.withholdDetails
+    ? "OBSERVABILITY_CONFIGURATION_INVALID"
+    : unknown
     ? error.code
     : error instanceof CliPresetError
       ? "CLI_PRESET_ERROR"
-      : "USER_ERROR";
-  const message = unknown
-    ? `Unknown command: ${error.path || "(empty)"}`
-    : String(error.message || "The command could not be completed.");
-  const guidance = unknown
+      : error instanceof UserError
+        ? "USER_ERROR"
+      : "INTERNAL_ERROR";
+  const redactedUnknownPath = describeUnknown
+    ? redactText(error.path || "", errorRedactionPolicy)
+    : unknown ? "[REDACTED]" : "";
+  const redactedUnknownSuggestions = describeUnknown
+    ? (error.suggestions || []).map((value) => redactText(value, errorRedactionPolicy))
+    : [];
+  const message = describeUnknown
+    ? redactText(`Unknown command: ${error.path || "(empty)"}`, errorRedactionPolicy)
+    : normalized.error.message;
+  const guidance = describeUnknown
     ? {
         result: italian ? "Non ho trovato l’azione richiesta." : "The requested action was not found.",
         impact: italian ? "Nessun progetto è stato aperto o modificato." : "No project was opened or changed.",
         required_decision: italian ? "Scegli se correggere la formulazione oppure usare l’aiuto principale." : "Choose whether to correct the wording or use the main help.",
         protection_boundary: italian ? "File locali, repository remoti, rilasci e produzione restano invariati." : "Local files, remote repositories, releases, and production remain unchanged.",
         next_action: italian ? "Controlla la scrittura e riprova con una delle azioni suggerite." : "Check the spelling and try one of the suggested actions.",
-        details: { path: error.path || "", suggestions: error.suggestions || [] },
+        details: { path: redactedUnknownPath, suggestions: redactedUnknownSuggestions },
       }
     : {
         result: italian ? "Il comando non è stato completato." : "The command could not be completed.",
@@ -4143,13 +4366,59 @@ function buildCliErrorPayload(error, options = {}) {
   return {
     schema_version: "agentic-sdlc-cli-error:v1",
     status: "error",
+    correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
     error: {
       code,
       message,
-      ...(unknown ? { path: error.path || "", suggestions: error.suggestions || [] } : {}),
+      retryable: normalized.error.retryable,
+      ...(unknown ? {
+        path: redactedUnknownPath,
+        suggestions: redactedUnknownSuggestions,
+      } : {}),
     },
     human_guidance: guidance,
   };
+}
+
+function resolveCliErrorRedactionPolicy(options) {
+  let configPath;
+  try {
+    const root = path.resolve(String(options.root || process.cwd()));
+    configPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
+    let entry;
+    try {
+      entry = fs.lstatSync(configPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+      // Missing is optional only when no parent segment is a symlink. A
+      // symlinked knowledge-base path could hide a configured privacy policy.
+      assertNoSymlinkPathSegments(configPath);
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, false);
+    }
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+    }
+    resolveProjectFilePath({ root }, configPath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(configPath);
+    const config = readProjectJsonBounded(
+      { root },
+      configPath,
+      MAX_CLI_ERROR_CONFIG_BYTES,
+    );
+    if (config === null || typeof config !== "object" || Array.isArray(config)) {
+      return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+    }
+    return cliErrorRedactionResolution(
+      createObservatoryConfiguration(config.observability ?? {}).redactionPolicy,
+      false,
+    );
+  } catch {
+    return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
+  }
+}
+
+function cliErrorRedactionResolution(policy, withholdDetails) {
+  return Object.freeze({ policy, withholdDetails });
 }
 
 function parseArgs(argv) {
@@ -10467,6 +10736,34 @@ function localReleaseBoundaryCheckpointFromSource(source) {
   );
 }
 
+function localReleaseRuntimeBoundaryProjection(source) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  return {
+    schema_version: source.schema_version,
+    target_hash: source.target_hash,
+    platform: source.platform,
+    workspace_real_path: source.workspace_real_path,
+    target_real_path: source.target_real_path,
+    global_roots: Array.isArray(source.global_roots) ? [...source.global_roots] : source.global_roots,
+    target_outside_workspace: source.target_outside_workspace,
+    target_machine_global: source.target_machine_global,
+  };
+}
+
+function localDeliveryRuntimeBoundaryChanged(authorizedSnapshot, currentSnapshot) {
+  if (
+    authorizedSnapshot?.delivery_kind !== "local_release"
+    || currentSnapshot?.delivery_kind !== "local_release"
+    || authorizedSnapshot?.action !== currentSnapshot?.action
+    || !authorizedSnapshot?.local_boundary_source
+    || !currentSnapshot?.local_boundary_source
+  ) {
+    return false;
+  }
+  return stableJson(localReleaseRuntimeBoundaryProjection(authorizedSnapshot.local_boundary_source))
+    !== stableJson(localReleaseRuntimeBoundaryProjection(currentSnapshot.local_boundary_source));
+}
+
 function localReleaseBoundaryRequiresCheckpoint(context, target) {
   return localReleaseBoundaryCheckpointFromSource(localReleaseBoundarySource(context, target));
 }
@@ -11639,6 +11936,11 @@ function deliveryActionReceipts(context, profileId) {
     .filter((record) => record.profile_ref?.id === profileId);
 }
 
+function compareDeliveryAuthorizationOrder(left, right) {
+  return String(left.authorized_at).localeCompare(String(right.authorized_at))
+    || String(left.id).localeCompare(String(right.id));
+}
+
 function pullRequestCommitLineage(profile) {
   return {
     schema_version: "pull-request-commit-lineage:v1",
@@ -11774,7 +12076,7 @@ function validateCommitMediationCandidate(
       authorization.effective_level,
       "git.commit",
     );
-    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointValidation.required) {
+    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointPolicy.required) {
       errors.push(`${label} authorization has an invalid immutable checkpoint policy`);
     }
   }
@@ -12148,11 +12450,12 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     || authorization.delivery?.id !== profile.delivery_id
     || authorization.delivery?.kind !== profile.delivery_kind
     || authorization.effective_level !== decision.effective_level
-    || authorization.checkpoint_required !== actionPolicy.required
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
   const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
+  let checkpointRequired = actionPolicy.required;
+  const auditWarnings = [];
   if (checkpointSnapshot) {
     const snapshotValidation = validateDeliveryActionCheckpointPolicySnapshot(
       context,
@@ -12161,6 +12464,13 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       decision.effective_level,
       authorization.action,
     );
+    if (!snapshotValidation.valid) {
+      fail(`Delivery action authorization ${authorization.id} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
+    }
+    checkpointRequired = checkpointSnapshot.required;
+    if (authorization.checkpoint_required !== checkpointRequired) {
+      fail(`Delivery action authorization ${authorization.id} checkpoint flag disagrees with its immutable event-time policy snapshot.`);
+    }
     const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
       context,
       profile,
@@ -12168,9 +12478,18 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       authorization.action,
       actionPolicy,
     );
-    if (!snapshotValidation.valid || stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
-      fail(`Delivery action authorization ${authorization.id} has a stale or invalid checkpoint policy snapshot.`);
+    if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+      if (localDeliveryRuntimeBoundaryChanged(checkpointSnapshot, currentSnapshot)) {
+        fail(
+          `Delivery action authorization ${authorization.id} was approved for a different local target or machine scope; authorize this exact action again.`,
+        );
+      }
+      auditWarnings.push(
+        `Delivery action authorization ${authorization.id} remains valid for this exact action; updated approval rules apply to later actions.`,
+      );
     }
+  } else if (authorization.checkpoint_required !== checkpointRequired) {
+    fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
   if (authorization.action === "git.push") {
     const coverageProof = authorization.action_details?.commit_coverage || null;
@@ -12193,9 +12512,9 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       }
     }
   }
-  if (!actionPolicy.required) return;
+  if (!checkpointRequired) return { checkpointRequired, auditWarnings };
   if (authorization.approval?.status !== "approved") {
-    fail(`Delivery action authorization ${authorization.id} lacks its currently required formal approval.`);
+    fail(`Delivery action authorization ${authorization.id} lacks the formal approval required by its event-time checkpoint policy.`);
   }
   const subject = {
     profile_id: profile.id,
@@ -12234,6 +12553,7 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     fail(`Delivery action authorization ${authorization.id} governance is invalid: ${report.errors.join("; ")}`);
   }
   validateDeliveryActionHostAuthority(context, profile, authorization);
+  return { checkpointRequired, auditWarnings };
 }
 
 function terminalStatusForDeliveryAction(action) {
@@ -12409,7 +12729,7 @@ function evaluateDeliveryAction(context, options) {
       fail(`Delivery profile ${profileId} does not authorize pull_request.merge.`);
     }
     const actionPolicy = deliveryActionCheckpointRequired(context, profile, decision.effective_level, action);
-    const checkpointRequired = actionPolicy.required;
+    let checkpointRequired = actionPolicy.required;
     const reportedOutcome = getOptionString(options, "outcome");
     const completingAction = Boolean(reportedOutcome);
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
@@ -12526,14 +12846,23 @@ function evaluateDeliveryAction(context, options) {
             && receipt.status === "authorized"
             && receipt.profile_ref?.hash === profile.profile_hash
             && !consumedAuthorizationIds.has(receipt.id))
-          .sort((left, right) => String(left.authorized_at).localeCompare(String(right.authorized_at)))
+          .sort(compareDeliveryAuthorizationOrder)
           .at(-1) || null
       : null;
     if (completingAction && !priorAuthorization) {
       fail(`Delivery action ${action} must be authorized before recording its outcome.`);
     }
+    let actionAuditWarnings = [];
     if (completingAction) {
-      assertCurrentDeliveryActionAuthorization(context, profile, decision, actionPolicy, priorAuthorization);
+      const authorizationValidation = assertCurrentDeliveryActionAuthorization(
+        context,
+        profile,
+        decision,
+        actionPolicy,
+        priorAuthorization,
+      );
+      checkpointRequired = authorizationValidation.checkpointRequired;
+      actionAuditWarnings = authorizationValidation.auditWarnings;
     }
     if (completingAction) {
       actionDetails = action === "git.commit" && reportedOutcome === "passed"
@@ -12640,6 +12969,15 @@ function evaluateDeliveryAction(context, options) {
     }
     const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
     writeJsonFile(receiptPath, receipt, { atomicCreate: true });
+    if (
+      process.env.NODE_ENV === "test"
+      && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE === "after-terminal-completion-receipt"
+      && completingAction
+      && reportedOutcome === "passed"
+      && terminalStatusForDeliveryAction(action)
+    ) {
+      fail("Simulated interruption after the terminal completion receipt was persisted.");
+    }
     const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
       ? repairTerminalDeliveryClose(context, profile, executionState)
       : null;
@@ -12715,6 +13053,7 @@ function evaluateDeliveryAction(context, options) {
       action_receipt_path: toProjectPath(context, receiptPath),
       lifecycle_status: autoClosePath ? "terminal" : "started",
       close_receipt_path: autoClosePath,
+      audit_warnings: actionAuditWarnings,
       human_guidance: completingAction ? completionGuidance : guidance,
     }, completingAction
       ? humanGuidanceLines(completionGuidance, [
@@ -23900,10 +24239,161 @@ function appendTrace(context, options) {
       event: gitEvent,
     },
     run: attribution.run,
+    correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
     created_at: now(),
   };
-  appendJsonLine(tracePath, event);
-  output(options, { status: "appended", trace_path: tracePath, event }, [`Appended ${type} trace ${event.id}`]);
+  const sealedEvent = sealGovernedTraceEvent(context, tracePath, event);
+  output(options, { status: "appended", trace_path: tracePath, event: sealedEvent }, [`Appended ${type} trace ${sealedEvent.id}`]);
+}
+
+function bindHistoricalTraceEvidencePolicy(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  if (storyId && !readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const targetIds = [...new Set(normalizeListOption(options["target-event"]).map(String))];
+  if (targetIds.length === 0) fail("Provide at least one --target-event to bind.");
+  const policyName = String(requireOption(options, "redaction-policy"));
+  if (!["legacy_evidence_v1", "operational_evidence_v1", "operational_v2"].includes(policyName)) {
+    fail("--redaction-policy must be legacy_evidence_v1, operational_evidence_v1, or operational_v2.");
+  }
+  const policy = policyName === "legacy_evidence_v1"
+    ? buildLegacyEvidenceV1RedactionPolicy(context)
+    : policyName === "operational_evidence_v1"
+      ? buildHistoricalOperationalEvidenceV1RedactionPolicy(context)
+      : buildTraceRedactionPolicy(context);
+  let policySourceRef;
+  const traceFile = storyId ? `${storyId}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const bindUnderLock = () => {
+    let records;
+    try {
+      records = withTraceIntegritySnapshot(
+        traceIntegrityOptions(context, tracePath),
+        ({ integrity, records: snapshotRecords, present }) => {
+          if (!present || !integrity.valid || !integrity.initialized) {
+            fail("Historical evidence policy binding requires a valid sealed trace.");
+          }
+          return snapshotRecords;
+        },
+      );
+    } catch (error) {
+      if (error instanceof UserError) throw error;
+      failTraceIntegrityWrite(error);
+    }
+    if (
+      process.env.NODE_ENV === "test"
+      && /^\d{1,4}$/u.test(process.env.AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS || "")
+    ) {
+      sleepSync(Math.min(Number(process.env.AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS), 1_000));
+    }
+    const events = records.filter((record) => record.valid).map((record) => record.event);
+    const byId = new Map();
+    for (const event of events) {
+      if (byId.has(event.id)) fail(`Trace contains duplicate event id ${event.id}.`);
+      byId.set(event.id, event);
+    }
+    const alreadyBound = new Set();
+    for (const event of events) {
+      for (const binding of Array.isArray(event.evidence_policy_bindings) ? event.evidence_policy_bindings : []) {
+        const key = traceEvidencePolicyBindingKey(binding?.target);
+        if (key) alreadyBound.add(key);
+      }
+    }
+    const bindings = [];
+    for (const targetId of targetIds) {
+      const target = byId.get(targetId);
+      if (!target || target?._trace_integrity?.schema_version !== "trace-integrity-event:v1") {
+        fail(`Target trace event ${targetId} is missing or unsealed.`);
+      }
+      const refs = Array.isArray(target.evidence_refs)
+        ? target.evidence_refs.filter((ref) => ref?.representation === "redacted_utf8_v1")
+        : [];
+      if (refs.length === 0) fail(`Target trace event ${targetId} has no historical v1 evidence refs.`);
+      for (const ref of refs) {
+        const bindingTarget = {
+          event_id: target.id,
+          event_hash: target._trace_integrity.event_hash,
+          evidence_path: ref.path,
+          evidence_sha256: ref.sha256,
+          evidence_ref_sha256: traceEvidenceRefHash(ref),
+        };
+        const key = traceEvidencePolicyBindingKey(bindingTarget);
+        if (alreadyBound.has(key)) fail(`Historical evidence ref ${target.id}:${ref.path} is already bound.`);
+        const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+        const representation = redactedEvidenceRepresentation(filePath, policy);
+        if (!evidenceRepresentationMatchesRef(representation, ref)) {
+          fail(`Selected redaction policy does not reproduce ${target.id}:${ref.path}.`);
+        }
+        policySourceRef ||= traceEvidencePolicySourceRef(context, policy);
+        alreadyBound.add(key);
+        bindings.push({
+          schema_version: TRACE_EVIDENCE_POLICY_BINDING_SCHEMA,
+          target: bindingTarget,
+          policy_source_ref: policySourceRef,
+        });
+      }
+    }
+    const attribution = buildAttribution(context, options, "trace.evidence-policy.bind");
+    const event = sealPreparedTraceEventLocked(
+      context,
+      tracePath,
+      prepareGovernedTraceEvent(context, {
+        id: `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+        story_id: storyId,
+        type: "decision",
+        summary: getOptionString(options, "summary")
+          || `Bound ${bindings.length} historical evidence reference${bindings.length === 1 ? "" : "s"} to ${policyName}`,
+        outcome: "passed",
+        actor: attribution.actor,
+        ...buildTraceAuthorityMetadata(context, options, attribution),
+        action: "trace.evidence-policy.bind",
+        evidence: [policySourceRef.path],
+        evidence_policy_bindings: bindings,
+        related: targetIds,
+        git: attribution.git,
+        run: attribution.run,
+        correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
+        created_at: now(),
+      }),
+    );
+    return { bindings, event };
+  };
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  let result;
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    result = bindUnderLock();
+  } finally {
+    releaseTraceLock();
+  }
+  const { bindings, event } = result;
+  output(options, {
+    status: "bound",
+    trace_path: tracePath,
+    policy_source_ref: policySourceRef,
+    binding_count: bindings.length,
+    event,
+  }, [`Bound ${bindings.length} historical evidence references to ${policyName}`]);
+}
+
+function traceEvidenceRefHash(ref) {
+  return hashBuffer(Buffer.from(stableJson(ref), "utf8"));
+}
+
+function traceEvidencePolicyBindingKey(target) {
+  if (!target || typeof target !== "object") return null;
+  const values = [
+    target.event_id,
+    target.event_hash,
+    target.evidence_path,
+    target.evidence_sha256,
+    target.evidence_ref_sha256,
+  ];
+  return values.every((value) => typeof value === "string" && value.length > 0)
+    ? values.join("\u0000")
+    : null;
 }
 
 function recordSyncEvent(context, options) {
@@ -28139,6 +28629,330 @@ function hashBuffer(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
+function sealGovernedTraceEvent(context, tracePath, event) {
+  const preparedEvent = prepareGovernedTraceEvent(context, event);
+  const releaseLegacyTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    return sealPreparedTraceEventLocked(context, tracePath, preparedEvent);
+  } finally {
+    releaseLegacyTraceLock();
+  }
+}
+
+function prepareGovernedTraceEvent(context, event) {
+  const redactionPolicy = buildTraceRedactionPolicy(context);
+  const evidenceRefs = buildTraceEvidenceRefs(context, event, redactionPolicy);
+  const redacted = redactValue({
+    ...event,
+    evidence_refs: evidenceRefs,
+  }, redactionPolicy);
+  if (!redacted || typeof redacted !== "object" || Array.isArray(redacted)) {
+    fail("Trace redaction reached its safety limit; no event was persisted.");
+  }
+  return redacted;
+}
+
+function sealPreparedTraceEventLocked(context, tracePath, preparedEvent) {
+  try {
+    return sealTraceEvent({
+      ...traceIntegrityOptions(context, tracePath),
+      event: preparedEvent,
+      hooks: workflowTraceSealTestHooks(preparedEvent),
+    }).event;
+  } catch (error) {
+    failTraceIntegrityWrite(error);
+  }
+}
+
+function traceIntegrityOptions(context, tracePath) {
+  return { boundaryRoot: context.sdlcRoot, tracePath };
+}
+
+function workflowTraceSealTestHooks(event) {
+  if (
+    process.env.NODE_ENV !== "test"
+    || event?.action !== "workflow.instance.start"
+    || process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_TRACE_FAILURE !== "after-append-before-sync"
+  ) {
+    return {};
+  }
+  return {
+    after_append_write() {
+      fail("Simulated workflow start trace interruption after append.");
+    },
+  };
+}
+
+function failTraceIntegrityWrite(error) {
+  const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
+    ? error.code
+    : "trace_integrity_failed";
+  fail(`Trace integrity blocked the write (${code}). Run the integrity check before retrying.`);
+}
+
+function assertNoPendingWorkflowTraceTransaction(context, tracePath) {
+  const projectTracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  if (path.resolve(tracePath) !== path.resolve(projectTracePath)) return;
+  const pending = [];
+  const startsRoot = workflowInstanceStartTransactionsRoot(context);
+  for (const entry of safeReadDir(startsRoot)) {
+    if (entry.endsWith(".json") && fs.existsSync(path.join(startsRoot, entry))) {
+      pending.push(`start:${entry.slice(0, -5)}`);
+    }
+  }
+  const instancesRoot = workflowInstancesRoot(context);
+  for (const entry of safeReadDir(instancesRoot)) {
+    if (entry.startsWith(".")) continue;
+    const pendingPath = path.join(instancesRoot, entry, "pending-transition.json");
+    if (fs.existsSync(pendingPath)) pending.push(`transition:${entry}`);
+  }
+  if (pending.length > 0) {
+    fail(`Project trace has a pending workflow transaction (${pending.sort().join(", ")}); recover it before appending another audit event.`);
+  }
+}
+
+function buildTraceRedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createOperationalRedactionPolicy);
+}
+
+function buildLegacyEvidenceV1RedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createLegacyEvidenceV1RedactionPolicy);
+}
+
+function buildHistoricalOperationalEvidenceV1RedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createHistoricalOperationalEvidenceV1RedactionPolicy);
+}
+
+function traceEvidencePolicySourceRef(context, policy) {
+  let source;
+  try {
+    source = describeRedactionPolicy(policy);
+    assertTraceEvidencePolicySourceSafety(source);
+  } catch {
+    fail("The trace evidence redaction policy cannot be represented safely.");
+  }
+  const bytes = `${JSON.stringify(source, null, 2)}\n`;
+  const sha256 = hashBuffer(Buffer.from(bytes, "utf8"));
+  const projectPath = `${TRACE_EVIDENCE_POLICY_SOURCE_ROOT}/${sha256}.json`;
+  const filePath = resolveProjectFilePath(context, projectPath, { mustExist: false });
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  try {
+    writeTextFile(filePath, bytes, {
+      atomicCreate: true,
+      durable: true,
+      maxExistingBytes: Buffer.byteLength(bytes, "utf8"),
+    });
+  } finally {
+    releaseLock();
+  }
+  return {
+    schema_version: TRACE_EVIDENCE_POLICY_REF_SCHEMA,
+    path: projectPath,
+    sha256,
+  };
+}
+
+function loadTraceEvidencePolicySource(context, ref, options = {}) {
+  if (
+    !ref
+    || typeof ref !== "object"
+    || Array.isArray(ref)
+    || Object.keys(ref).sort().join("\u0000") !== ["path", "schema_version", "sha256"].sort().join("\u0000")
+    || ref.schema_version !== TRACE_EVIDENCE_POLICY_REF_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))
+    || ref.path !== `${TRACE_EVIDENCE_POLICY_SOURCE_ROOT}/${ref.sha256}.json`
+  ) {
+    fail("Trace evidence policy source reference is malformed.");
+  }
+  const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const bytes = readFileFromStableParent(filePath, parentIdentity, {
+    maxBytes: 256 * 1024,
+    tooLargeMessage: "Trace evidence policy source exceeds the 256 KiB limit.",
+  });
+  if (hashBuffer(Buffer.from(bytes, "utf8")) !== ref.sha256) {
+    fail("Trace evidence policy source hash does not match its content address.");
+  }
+  let source;
+  try {
+    source = JSON.parse(bytes);
+  } catch {
+    fail("Trace evidence policy source is not valid JSON.");
+  }
+  try {
+    assertTraceEvidencePolicySourceSafety(source, options.allowedAlgorithms);
+    return createRedactionPolicyFromSource(source);
+  } catch {
+    fail("Trace evidence policy source is unsupported or non-canonical.");
+  }
+}
+
+function assertTraceEvidencePolicySourceSafety(source, allowedAlgorithms) {
+  const permitted = new Set(allowedAlgorithms ?? [
+    "legacy_evidence_v1",
+    "operational_evidence_v1",
+    "operational_v2",
+  ]);
+  if (!source || typeof source !== "object" || Array.isArray(source) || !permitted.has(source.algorithm)) {
+    throw new TypeError("unsupported trace evidence redaction algorithm");
+  }
+  const baselinePolicy = source.algorithm === "legacy_evidence_v1"
+    ? createLegacyEvidenceV1RedactionPolicy()
+    : source.algorithm === "operational_evidence_v1"
+      ? createHistoricalOperationalEvidenceV1RedactionPolicy()
+      : createOperationalRedactionPolicy();
+  const baseline = describeRedactionPolicy(baselinePolicy);
+  if (
+    stableJson(source.limits) !== stableJson(baseline.limits)
+    || source.replacement !== baseline.replacement
+    || stableJson(source.credential_assignment_detector)
+      !== stableJson(baseline.credential_assignment_detector)
+  ) {
+    throw new TypeError("trace evidence redaction safety boundary changed");
+  }
+  if (
+    !Array.isArray(source.sensitive_keys)
+    || source.sensitive_keys.length > 256
+    || source.sensitive_keys.some((key) => typeof key !== "string" || key.length === 0 || key.length > 128)
+    || !Array.isArray(source.detectors)
+    || !Array.isArray(source.identifier_allow_patterns)
+    || source.detectors.length + source.identifier_allow_patterns.length > baseline.limits.maxPatterns
+  ) {
+    throw new TypeError("trace evidence redaction policy exceeds its immutable safety limits");
+  }
+  const hasCanonicalEntry = (entries, required) => {
+    const serialized = new Set(entries.map((entry) => stableJson(entry)));
+    return required.every((entry) => serialized.has(stableJson(entry)));
+  };
+  if (
+    !baseline.sensitive_keys.every((key) => source.sensitive_keys.includes(key))
+    || !hasCanonicalEntry(source.detectors, baseline.detectors)
+    || !hasCanonicalEntry(source.identifier_allow_patterns, baseline.identifier_allow_patterns)
+  ) {
+    throw new TypeError("trace evidence redaction policy omits a mandatory privacy detector");
+  }
+}
+
+function createTraceRedactionPolicy(context, factory) {
+  const configured = context.config.observability?.redaction;
+  const secretPatterns = normalizeTraceDetectorPatterns(configured?.secret_patterns, "secret_patterns", "configured_secret");
+  const piiPatterns = normalizeTraceDetectorPatterns(configured?.pii_patterns, "pii_patterns", "configured_pii");
+  const identifierAllowPatterns = normalizeTraceDetectorPatterns(
+    configured?.identifier_allow_patterns,
+    "identifier_allow_patterns",
+    "configured_identifier",
+  );
+  const sensitiveKeys = configured?.sensitive_keys;
+  if (sensitiveKeys !== undefined && (
+    !Array.isArray(sensitiveKeys)
+    || sensitiveKeys.some((value) => typeof value !== "string" || value.trim() === "")
+  )) {
+    fail("observability.redaction.sensitive_keys must be an array of non-empty strings");
+  }
+  try {
+    return factory({
+      secretPatterns,
+      piiPatterns,
+      identifierAllowPatterns,
+      ...(sensitiveKeys === undefined ? {} : { sensitiveKeys }),
+    });
+  } catch {
+    fail("The configured observability redaction policy is invalid.");
+  }
+}
+
+function normalizeTraceDetectorPatterns(value, fieldName, prefix) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail(`observability.redaction.${fieldName} must be an array`);
+  return value.map((entry, index) => {
+    if (typeof entry === "string") return { name: `${prefix}_${index + 1}`, pattern: entry };
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) return entry;
+    fail(`Observability redaction pattern ${prefix}_${index + 1} must be a string or object`);
+  });
+}
+
+function buildTraceEvidenceRefs(context, event, policy) {
+  const refs = [];
+  let policySourceRef;
+  const evidence = Array.isArray(event.evidence) ? event.evidence : [];
+  for (const projectPath of evidence) {
+    let filePath;
+    try {
+      filePath = resolveProjectFilePath(context, projectPath, { mustExist: true, fileOnly: true });
+    } catch {
+      continue;
+    }
+    const representation = redactedEvidenceRepresentation(filePath, policy);
+    policySourceRef ||= traceEvidencePolicySourceRef(context, policy);
+    refs.push({
+      path: projectPath,
+      size_bytes: Buffer.byteLength(representation, "utf8"),
+      sha256: hashBuffer(Buffer.from(representation, "utf8")),
+      representation: "redacted_utf8_v2",
+      policy_source_ref: policySourceRef,
+      verification: shouldVerifyTraceEvidence(event, projectPath)
+        ? "current_content"
+        : "snapshot_only",
+    });
+  }
+  return refs;
+}
+
+function redactedEvidenceRepresentation(filePath, policy) {
+  const maximumBytes = 16 * 1024 * 1024;
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const source = readFileFromStableParent(filePath, parentIdentity, {
+    maxBytes: maximumBytes,
+    tooLargeMessage: "Trace evidence exceeds the 16 MiB integrity snapshot limit.",
+  });
+  const extension = path.extname(filePath).toLowerCase();
+  try {
+    if (extension === ".json") {
+      const parsed = JSON.parse(source);
+      if (
+        parsed?.kind === "trace_evidence_manifest"
+        || parsed?.schema_version === "trace-evidence-manifest:v1"
+      ) {
+        assertRecordSchema(
+          parsed,
+          "trace-evidence-manifest.schema.json",
+          "Trace evidence manifest",
+        );
+      }
+      const presented = redactValueWithMetadata(parsed, policy);
+      if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+      return `${JSON.stringify(presented.value)}\n`;
+    }
+    if (extension === ".jsonl") {
+      const lines = source.split(/\r?\n/u);
+      return lines.map((line) => {
+        if (!line.trim()) return "";
+        const presented = redactValueWithMetadata(JSON.parse(line), policy);
+        if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+        return JSON.stringify(presented.value);
+      }).join("\n");
+    }
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    // Malformed text remains bounded and is redacted as text without persisting raw bytes.
+  }
+  const presented = redactValueWithMetadata(source, policy);
+  if (presented.limited) fail("Trace evidence redaction reached its safety limit.");
+  return presented.value;
+}
+
+function shouldVerifyTraceEvidence(event, projectPath) {
+  if (["test", "release"].includes(event.type)) return true;
+  if (["git.commit", "git.push", "pull_request.merge", "release.local"].includes(event.action)) {
+    return String(projectPath).replace(/\\/gu, "/").startsWith(`${SDLC_DIR}/autonomy/actions/`)
+      || String(projectPath).replace(/\\/gu, "/").includes("/evidence/");
+  }
+  return false;
+}
+
 function appendTraceEvent(context, storyId, event) {
   const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
   const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
@@ -28160,10 +28974,10 @@ function appendTraceEvent(context, storyId, event) {
     ...(event.narrative ? { narrative: event.narrative } : {}),
     git: event.git || buildGitMetadata(context.root),
     run: event.run || buildRunMetadata({}),
+    correlation_id: event.correlation_id || CLI_OPERATION_CONTEXT.correlation_id,
     created_at: event.created_at || now(),
   };
-  appendJsonLine(tracePath, traceEvent);
-  return traceEvent;
+  return sealGovernedTraceEvent(context, tracePath, traceEvent);
 }
 
 function rebuildIndex(context, options) {
@@ -28348,7 +29162,13 @@ function gateCheck(context, options) {
       }
     }
     for (const reference of manifest.contracts || []) report.checked.push(`contract ${reference.id}`);
-    for (const reference of manifest.stories || []) report.checked.push(`story ${reference.id}`);
+    for (const reference of manifest.stories || []) {
+      report.checked.push(`story ${reference.id}`);
+      validateTraces(context, report, reference.id, {
+        required: storyTraceIsExpected(context, reference.id),
+      });
+    }
+    validateTraces(context, report, null, { projectOnly: true });
     for (const artifact of manifest.artifacts || []) report.checked.push(`artifact ${artifact.id}`);
     report.warnings.push("Historical records outside this release manifest are logically archived out of the active release scope and were not used to decide this gate.");
   } else {
@@ -30039,8 +30859,30 @@ function validateCompletedRemoteActionReceipt(report, receipt, authorization, la
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  const recoverableTerminal = options.allowRecoverableTerminal === true
+    && actions.some((receipt) =>
+      terminalStatusForDeliveryAction(receipt.action)
+      && receipt.status === "completed"
+      && receipt.outcome === "passed");
   const historical = state.lifecycle_status === "terminal"
-    || effectiveDeliveryProfileStatus(context, profile).status === "revoked";
+    || effectiveDeliveryProfileStatus(context, profile).status === "revoked"
+    || recoverableTerminal;
+  const consumedAuthorizationIds = new Set(actions
+    .filter((receipt) => receipt.status === "completed")
+    .map((receipt) => receipt.authorization_receipt_ref?.id)
+    .filter(Boolean));
+  const liveAuthorizationIds = new Set();
+  const liveAuthorizationsByAction = new Map();
+  for (const authorization of actions.filter((receipt) =>
+    receipt.status === "authorized" && !consumedAuthorizationIds.has(receipt.id))) {
+    const current = liveAuthorizationsByAction.get(authorization.action);
+    if (!current || compareDeliveryAuthorizationOrder(current, authorization) < 0) {
+      liveAuthorizationsByAction.set(authorization.action, authorization);
+    }
+  }
+  for (const authorization of liveAuthorizationsByAction.values()) {
+    liveAuthorizationIds.add(authorization.id);
+  }
   let expectedEffectiveLevel = "supervised";
   try {
     const start = state.start_receipt;
@@ -30116,6 +30958,17 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
   }
   for (const receipt of actions) {
     const actionLabel = `${label} action receipt ${receipt.id}`;
+    const supersededAuthorization = receipt.status === "authorized"
+      && !consumedAuthorizationIds.has(receipt.id)
+      && !liveAuthorizationIds.has(receipt.id);
+    const receiptHistorical = historical
+      || receipt.status === "completed"
+      || consumedAuthorizationIds.has(receipt.id)
+      || supersededAuthorization;
+    if (supersededAuthorization) {
+      const warning = `${actionLabel} is superseded by a later unconsumed authorization for the same action`;
+      if (!report.warnings.includes(warning)) report.warnings.push(warning);
+    }
     if (receipt.profile_ref?.hash !== profile.profile_hash) {
       report.errors.push(`${actionLabel} is bound to stale profile content`);
     }
@@ -30134,7 +30987,7 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
-    const actionPolicy = historical
+    const actionPolicy = receiptHistorical && profile.delivery_kind === "local_release"
       ? null
       : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
     if (receipt.effective_level !== expectedEffectiveLevel) {
@@ -30154,9 +31007,31 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       report.errors.push(`${actionLabel} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
     }
     let checkpointRequired = actionPolicy?.required ?? false;
-    if (historical && snapshotValidation?.valid) {
-      checkpointRequired = snapshotValidation.required;
-    } else if (historical) {
+    if (snapshotValidation?.valid) {
+      checkpointRequired = checkpointSnapshot.required;
+      if (actionPolicy) {
+        const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+          context,
+          profile,
+          expectedEffectiveLevel,
+          receipt.action,
+          actionPolicy,
+        );
+        if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+          if (
+            !receiptHistorical
+            && localDeliveryRuntimeBoundaryChanged(checkpointSnapshot, currentSnapshot)
+          ) {
+            report.errors.push(
+              `${actionLabel} was approved for a different local target or machine scope; authorize this exact action again`,
+            );
+          } else {
+            const policyWarning = `${actionLabel} remains valid for this exact action; updated approval rules apply to later actions`;
+            if (!report.warnings.includes(policyWarning)) report.warnings.push(policyWarning);
+          }
+        }
+      }
+    } else if (receiptHistorical) {
       const immutableLegacyCheckpoint = expectedEffectiveLevel === "supervised"
         || (profile.checkpoints || []).includes(receipt.action)
         || DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS.includes(receipt.action)
@@ -30167,17 +31042,6 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       checkpointRequired = receipt.checkpoint_required === true;
       const legacyWarning = `${label} uses legacy action receipts without an event-time checkpoint policy snapshot; immutable boundaries and recorded approvals were verified`;
       if (!report.warnings.includes(legacyWarning)) report.warnings.push(legacyWarning);
-    } else if (checkpointSnapshot && snapshotValidation?.valid) {
-      const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
-        context,
-        profile,
-        expectedEffectiveLevel,
-        receipt.action,
-        actionPolicy,
-      );
-      if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
-        report.errors.push(`${actionLabel} checkpoint policy snapshot is stale for the current exact policy source`);
-      }
     }
     if (receipt.checkpoint_required !== checkpointRequired) {
       report.errors.push(`${actionLabel} checkpoint flag does not match its exact action policy`);
@@ -30903,78 +31767,192 @@ function validateExecutionPolicySelection(selection, name, valueKey, label, repo
   }
 }
 
-function validateTraces(context, report, storyId = null) {
+function validateTraces(context, report, storyId = null, options = {}) {
   const tracesRoot = path.join(context.sdlcRoot, "traces");
-  const files = storyId
-    ? [path.join(tracesRoot, `${storyId}.jsonl`)].filter((filePath) => fs.existsSync(filePath))
-    : walkFiles(tracesRoot).filter((filePath) => filePath.endsWith(".jsonl"));
-  const requireActor = context.config.trace_policy?.require_actor !== false;
-  for (const filePath of files) {
-    const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
-    const fileName = path.basename(filePath, ".jsonl");
-    const expectedStoryId = fileName === "project" ? null : fileName;
-    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-    const latestOutcomeEvents = new Map();
-    lines.forEach((line, index) => {
-      if (!line.trim()) {
-        return;
-      }
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        report.errors.push(`${label}:${index + 1} is not valid JSON`);
-        return;
-      }
-      if (!TRACE_TYPES.has(event.type)) {
-        report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
-      }
-      if ((event.story_id || null) !== expectedStoryId) {
-        report.errors.push(`${label}:${index + 1} story_id must match ${expectedStoryId || "project trace"}`);
-      }
-      if (event.story_id && !readStory(context, event.story_id)) {
-        report.errors.push(`${label}:${index + 1} references missing story ${event.story_id}`);
-      }
-      if (!event.summary || typeof event.summary !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing summary`);
-      }
-      if (!event.created_at || typeof event.created_at !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing created_at`);
-      }
-      if (requireActor && !hasTraceActor(event)) {
-        report.errors.push(`${label}:${index + 1} is missing actor attribution`);
-      }
-      if (event.requested_by !== undefined && event.requested_by !== null && !hasActorAttribution(event.requested_by)) {
-        report.errors.push(`${label}:${index + 1} has invalid requested_by attribution`);
-      }
-      if (event.authorized_by !== undefined && event.authorized_by !== null && !hasActorAttribution(event.authorized_by)) {
-        report.errors.push(`${label}:${index + 1} has invalid authorized_by attribution`);
-      }
-      if (!event.action || typeof event.action !== "string") {
-        report.errors.push(`${label}:${index + 1} is missing action`);
-      }
-      if (!event.git || typeof event.git !== "object") {
-        report.errors.push(`${label}:${index + 1} is missing git metadata`);
-      }
-      if (!event.run || typeof event.run !== "object") {
-        report.errors.push(`${label}:${index + 1} is missing run metadata`);
-      }
-      validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
-      if (report.strict && ["test", "release"].includes(event.type)) {
-        validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
-        latestOutcomeEvents.set(event.type, { event, line: index + 1 });
-      }
-    });
-    for (const [type, latest] of latestOutcomeEvents) {
-      const acceptableOutcomes = type === "test" ? ["passed"] : ["ready", "passed"];
-      if (!acceptableOutcomes.includes(latest.event.outcome)) {
-        report.errors.push(
-          `${label}:${latest.line} latest ${type} trace outcome must be ${acceptableOutcomes.join(" or ")}, found '${latest.event.outcome || "missing"}'`,
-        );
+  const candidates = new Map();
+  const addCandidate = (filePath, required = false) => {
+    const resolved = path.resolve(filePath);
+    candidates.set(resolved, Boolean(candidates.get(resolved)) || required);
+  };
+  if (storyId) {
+    addCandidate(
+      path.join(tracesRoot, `${storyId}.jsonl`),
+      options.required === true || storyTraceIsExpected(context, storyId),
+    );
+  } else if (options.projectOnly) {
+    const projectTrace = path.join(tracesRoot, "project.jsonl");
+    const projectCheckpoint = traceIntegrityCheckpointPath(projectTrace);
+    if (fs.existsSync(projectTrace) || fs.existsSync(projectCheckpoint)) {
+      addCandidate(projectTrace);
+    }
+  } else {
+    for (const filePath of walkFiles(tracesRoot).filter((candidate) => candidate.endsWith(".jsonl"))) {
+      addCandidate(filePath);
+    }
+    const integrityRoot = path.join(tracesRoot, ".integrity");
+    for (const checkpointPath of walkFiles(integrityRoot).filter((candidate) => candidate.endsWith(".jsonl.checkpoint.json"))) {
+      const traceName = path.basename(checkpointPath, ".checkpoint.json");
+      addCandidate(path.join(tracesRoot, traceName));
+    }
+    const storiesRoot = path.join(context.sdlcRoot, "stories");
+    for (const candidateStoryId of safeReadDir(storiesRoot)) {
+      if (storyTraceIsExpected(context, candidateStoryId)) {
+        addCandidate(path.join(tracesRoot, `${candidateStoryId}.jsonl`), true);
       }
     }
+  }
+  const files = [...candidates.keys()].sort();
+  const requireActor = context.config.trace_policy?.require_actor !== false;
+  for (const filePath of files) {
+    // CLI diagnostics are a portable public contract. Do not leak the host
+    // path separator into JSON reports or human-readable gate output.
+    const relativeTracePath = path.relative(context.sdlcRoot, filePath).split(path.sep).join("/");
+    const label = `trace ${relativeTracePath}`;
+    const traceExists = fs.existsSync(filePath);
+    const checkpointExists = fs.existsSync(traceIntegrityCheckpointPath(filePath));
+    if (!traceExists && !checkpointExists) {
+      if (candidates.get(filePath)) {
+        report.errors.push(`${label} is missing for a story whose governed work has started`);
+      }
+      continue;
+    }
+    let snapshotPresent = traceExists;
+    try {
+      withTraceIntegritySnapshot({
+        boundaryRoot: context.sdlcRoot,
+        tracePath: filePath,
+        hooks: traceGateSnapshotTestHooks(filePath),
+      }, ({ integrity, records, present }) => {
+        snapshotPresent = present;
+        if (!integrity.valid) {
+          const entries = Array.isArray(integrity.errors) ? integrity.errors : [];
+          if (entries.length === 0) {
+            report.errors.push(`${label} failed local integrity verification`);
+          }
+          for (const entry of entries) {
+            report.errors.push(`${label} integrity ${entry.code || "invalid"} at ${entry.scope || "trace"}`);
+          }
+        }
+        if (integrity.initialized) report.checked.push(`${label} local integrity checkpoint`);
+        if (present) {
+          validateTraceSnapshotRecords(context, report, filePath, label, records, requireActor);
+        }
+      });
+    } catch (error) {
+      const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
+        ? error.code
+        : "verification_failed";
+      report.errors.push(`${label} local integrity verification failed (${code})`);
+    }
+    if (!snapshotPresent) continue;
     report.checked.push(label);
   }
+}
+
+function validateTraceSnapshotRecords(context, report, filePath, label, records, requireActor) {
+  const fileName = path.basename(filePath, ".jsonl");
+  const expectedStoryId = fileName === "project" ? null : fileName;
+  const latestOutcomeEvents = new Map();
+  const evidencePolicyBindings = collectTraceEvidencePolicyBindings(context, report, records, label);
+  for (const record of records) {
+    const index = record.line - 1;
+    if (!record.valid) {
+      report.errors.push(`${label}:${record.line} is not valid JSON`);
+      continue;
+    }
+    const event = record.event;
+    if (!TRACE_TYPES.has(event.type)) {
+      report.errors.push(`${label}:${index + 1} has unknown type '${event.type}'`);
+    }
+    if ((event.story_id || null) !== expectedStoryId) {
+      report.errors.push(`${label}:${index + 1} story_id must match ${expectedStoryId || "project trace"}`);
+    }
+    if (event.story_id && !readStory(context, event.story_id)) {
+      report.errors.push(`${label}:${index + 1} references missing story ${event.story_id}`);
+    }
+    if (!event.summary || typeof event.summary !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing summary`);
+    }
+    if (!event.created_at || typeof event.created_at !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing created_at`);
+    }
+    if (requireActor && !hasTraceActor(event)) {
+      report.errors.push(`${label}:${index + 1} is missing actor attribution`);
+    }
+    if (event.requested_by !== undefined && event.requested_by !== null && !hasActorAttribution(event.requested_by)) {
+      report.errors.push(`${label}:${index + 1} has invalid requested_by attribution`);
+    }
+    if (event.authorized_by !== undefined && event.authorized_by !== null && !hasActorAttribution(event.authorized_by)) {
+      report.errors.push(`${label}:${index + 1} has invalid authorized_by attribution`);
+    }
+    if (!event.action || typeof event.action !== "string") {
+      report.errors.push(`${label}:${index + 1} is missing action`);
+    }
+    if (!event.git || typeof event.git !== "object") {
+      report.errors.push(`${label}:${index + 1} is missing git metadata`);
+    }
+    if (!event.run || typeof event.run !== "object") {
+      report.errors.push(`${label}:${index + 1} is missing run metadata`);
+    }
+    validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
+    if (report.strict && event._trace_integrity) {
+      validateTraceEvidenceRefs(
+        context,
+        report,
+        event,
+        `${label}:${index + 1}`,
+        evidencePolicyBindings,
+      );
+    }
+    if (report.strict && ["test", "release"].includes(event.type)) {
+      validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
+      latestOutcomeEvents.set(event.type, { event, line: index + 1 });
+    }
+  }
+  for (const [type, latest] of latestOutcomeEvents) {
+    const acceptableOutcomes = type === "test" ? ["passed"] : ["ready", "passed"];
+    if (!acceptableOutcomes.includes(latest.event.outcome)) {
+      report.errors.push(
+        `${label}:${latest.line} latest ${type} trace outcome must be ${acceptableOutcomes.join(" or ")}, found '${latest.event.outcome || "missing"}'`,
+      );
+    }
+  }
+}
+
+function traceGateSnapshotTestHooks(filePath) {
+  if (process.env.NODE_ENV !== "test") return {};
+  const traceName = path.basename(filePath);
+  const requested = process.env.AGENTIC_SDLC_TEST_TRACE_GATE_SWAP;
+  const targetPath = requested === traceName
+    ? filePath
+    : requested === `${traceName}.checkpoint`
+      ? traceIntegrityCheckpointPath(filePath)
+      : null;
+  if (!targetPath) return {};
+  return {
+    after_snapshot_verified() {
+      const bytes = fs.readFileSync(targetPath);
+      if (process.platform === "win32") {
+        fs.appendFileSync(targetPath, " ");
+        return;
+      }
+      const replacement = `${targetPath}.test-semantic-swap`;
+      fs.writeFileSync(replacement, bytes);
+      fs.renameSync(replacement, targetPath);
+    },
+  };
+}
+
+function traceIntegrityCheckpointPath(tracePath) {
+  return path.join(
+    path.dirname(tracePath),
+    ".integrity",
+    `${path.basename(tracePath)}.checkpoint.json`,
+  );
+}
+
+function storyTraceIsExpected(context, storyId) {
+  return fs.existsSync(path.join(context.sdlcRoot, "stories", storyId, "task-start.json"));
 }
 
 function validateProtectedAutonomyTrace(context, report, event, label) {
@@ -31075,6 +32053,196 @@ function validateTraceEvidence(context, report, event, label) {
       report.errors.push(`${label} uses derived cache/index evidence ${evidencePathValue}`);
     }
   }
+}
+
+function collectTraceEvidencePolicyBindings(context, report, records, label) {
+  const result = new Map();
+  if (!report.strict) return result;
+  const eventRecords = new Map();
+  for (const record of records) {
+    if (!record.valid || !record.event?.id) continue;
+    const entries = eventRecords.get(record.event.id) || [];
+    entries.push({ event: record.event, line: record.line });
+    eventRecords.set(record.event.id, entries);
+  }
+  for (const record of records) {
+    if (!record.valid) continue;
+    const event = record.event;
+    if (
+      event.evidence_policy_bindings !== undefined
+      && !Array.isArray(event.evidence_policy_bindings)
+    ) {
+      report.errors.push(`${label}:${record.line} evidence policy bindings must be an array`);
+      continue;
+    }
+    const bindings = Array.isArray(event.evidence_policy_bindings)
+      ? event.evidence_policy_bindings
+      : [];
+    if (bindings.length === 0) {
+      if (event.action === "trace.evidence-policy.bind") {
+        report.errors.push(`${label}:${record.line} evidence policy binding event has no bindings`);
+      }
+      continue;
+    }
+    if (event.action !== "trace.evidence-policy.bind") {
+      report.errors.push(`${label}:${record.line} evidence policy bindings require action trace.evidence-policy.bind`);
+      continue;
+    }
+    for (const binding of bindings) {
+      const bindingLabel = `${label}:${record.line} evidence policy binding`;
+      if (
+        !binding
+        || typeof binding !== "object"
+        || Array.isArray(binding)
+        || Object.keys(binding).sort().join("\u0000")
+          !== ["policy_source_ref", "schema_version", "target"].sort().join("\u0000")
+        || binding.schema_version !== TRACE_EVIDENCE_POLICY_BINDING_SCHEMA
+      ) {
+        report.errors.push(`${bindingLabel} is malformed`);
+        continue;
+      }
+      const target = binding.target;
+      if (
+        !target
+        || typeof target !== "object"
+        || Array.isArray(target)
+        || Object.keys(target).sort().join("\u0000") !== [
+          "event_hash",
+          "event_id",
+          "evidence_path",
+          "evidence_ref_sha256",
+          "evidence_sha256",
+        ].sort().join("\u0000")
+        || !/^[a-f0-9]{64}$/u.test(String(target.event_hash || ""))
+        || !/^[a-f0-9]{64}$/u.test(String(target.evidence_sha256 || ""))
+        || !/^[a-f0-9]{64}$/u.test(String(target.evidence_ref_sha256 || ""))
+      ) {
+        report.errors.push(`${bindingLabel} target is malformed`);
+        continue;
+      }
+      const targetRecords = eventRecords.get(target.event_id) || [];
+      if (targetRecords.length !== 1 || targetRecords[0].line >= record.line) {
+        report.errors.push(`${bindingLabel} target must be one earlier sealed event`);
+        continue;
+      }
+      const targetEvent = targetRecords[0].event;
+      if (targetEvent?._trace_integrity?.event_hash !== target.event_hash) {
+        report.errors.push(`${bindingLabel} target event hash does not match`);
+        continue;
+      }
+      const refs = (Array.isArray(targetEvent.evidence_refs) ? targetEvent.evidence_refs : [])
+        .filter((ref) => (
+          ref?.representation === "redacted_utf8_v1"
+          && ref.path === target.evidence_path
+          && ref.sha256 === target.evidence_sha256
+          && traceEvidenceRefHash(ref) === target.evidence_ref_sha256
+        ));
+      if (refs.length !== 1) {
+        report.errors.push(`${bindingLabel} does not identify one exact historical v1 ref`);
+        continue;
+      }
+      const key = traceEvidencePolicyBindingKey(target);
+      if (!key || result.has(key)) {
+        report.errors.push(`${bindingLabel} conflicts with another binding for the same historical ref`);
+        if (key) result.set(key, null);
+        continue;
+      }
+      try {
+        result.set(key, {
+          binding,
+          policy: loadTraceEvidencePolicySource(context, binding.policy_source_ref),
+        });
+      } catch {
+        report.errors.push(`${bindingLabel} policy source cannot be verified`);
+        result.set(key, null);
+      }
+    }
+  }
+  return result;
+}
+
+function validateTraceEvidenceRefs(context, report, event, label, evidencePolicyBindings = new Map()) {
+  const refs = Array.isArray(event.evidence_refs) ? event.evidence_refs : [];
+  const evidence = Array.isArray(event.evidence) ? event.evidence.filter(Boolean) : [];
+  const byPath = new Map();
+  for (const ref of refs) {
+    if (!ref || typeof ref !== "object" || Array.isArray(ref) || typeof ref.path !== "string") {
+      report.errors.push(`${label} contains an invalid evidence integrity reference`);
+      continue;
+    }
+    if (byPath.has(ref.path)) {
+      report.errors.push(`${label} contains duplicate evidence integrity reference ${ref.path}`);
+      continue;
+    }
+    byPath.set(ref.path, ref);
+    if (!evidence.includes(ref.path)) {
+      report.errors.push(`${label} evidence integrity reference ${ref.path} is not listed as evidence`);
+    }
+    if (
+      !["redacted_utf8_v1", "redacted_utf8_v2"].includes(ref.representation)
+      || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))
+      || !Number.isSafeInteger(ref.size_bytes)
+      || ref.size_bytes < 0
+      || !["snapshot_only", "current_content"].includes(ref.verification)
+      || (ref.representation === "redacted_utf8_v1" && ref.policy_source_ref !== undefined)
+      || Object.keys(ref).sort().join("\u0000") !== (
+        ref.representation === "redacted_utf8_v2"
+          ? ["path", "policy_source_ref", "representation", "sha256", "size_bytes", "verification"]
+          : ["path", "representation", "sha256", "size_bytes", "verification"]
+      ).sort().join("\u0000")
+    ) {
+      report.errors.push(`${label} evidence integrity reference ${ref.path} is malformed`);
+      continue;
+    }
+    let policy;
+    if (ref.representation === "redacted_utf8_v2") {
+      try {
+        policy = loadTraceEvidencePolicySource(context, ref.policy_source_ref, {
+          allowedAlgorithms: ["operational_v2"],
+        });
+      } catch {
+        report.errors.push(`${label} evidence policy source cannot be verified for ${ref.path}`);
+        continue;
+      }
+    } else {
+      const target = {
+        event_id: event.id,
+        event_hash: event?._trace_integrity?.event_hash,
+        evidence_path: ref.path,
+        evidence_sha256: ref.sha256,
+        evidence_ref_sha256: traceEvidenceRefHash(ref),
+      };
+      const resolution = evidencePolicyBindings.get(traceEvidencePolicyBindingKey(target));
+      if (!resolution?.policy) {
+        report.errors.push(`${label} historical v1 evidence ${ref.path} requires one exact append-only policy binding`);
+        continue;
+      }
+      policy = resolution.policy;
+    }
+    if (ref.verification !== "current_content") continue;
+    try {
+      const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+      const currentRepresentation = redactedEvidenceRepresentation(filePath, policy);
+      const matches = evidenceRepresentationMatchesRef(currentRepresentation, ref);
+      if (!matches) {
+        report.errors.push(`${label} evidence content drift detected for ${ref.path}`);
+      }
+    } catch {
+      report.errors.push(`${label} cannot verify evidence content for ${ref.path}`);
+    }
+  }
+  if (["test", "release"].includes(event.type)) {
+    for (const evidencePath of evidence) {
+      if (byPath.get(evidencePath)?.verification !== "current_content") {
+        report.errors.push(`${label} requires a current-content integrity reference for ${evidencePath}`);
+      }
+    }
+  }
+}
+
+function evidenceRepresentationMatchesRef(representation, ref) {
+  const bytes = Buffer.from(representation, "utf8");
+  return bytes.length === ref.size_bytes && hashBuffer(bytes) === ref.sha256;
 }
 
 function hasTraceActor(event) {
@@ -31547,6 +32715,25 @@ function readProjectJson(context, filePath) {
   }
 }
 
+function readProjectJsonBounded(context, filePath, maxBytes) {
+  try {
+    resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
+    assertNoSymlinkPathSegments(filePath);
+    const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+    const realRoot = fs.realpathSync.native(context.root);
+    if (!isInsidePath(realRoot, parentIdentity.realpath)) {
+      fail(`Project file parent resolves outside the target project root: ${filePath}`);
+    }
+    return JSON.parse(readFileFromStableParent(filePath, parentIdentity, {
+      maxBytes,
+      tooLargeMessage: "Project privacy configuration exceeds its safe read limit.",
+    }));
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    fail(`Unable to read bounded JSON project file: ${error.message}`);
+  }
+}
+
 function readProjectText(context, filePath) {
   resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
   assertNoSymlinkPathSegments(filePath);
@@ -31585,8 +32772,16 @@ function writeTextFile(filePath, content, options = {}) {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
       fail(`Refusing to write through symlink: ${filePath}`);
     }
-    const existing = readFileFromStableParent(filePath, parentIdentity);
+    const existing = readFileFromStableParent(filePath, parentIdentity, {
+      ...(options.maxExistingBytes === undefined
+        ? {}
+        : {
+            maxBytes: options.maxExistingBytes,
+            tooLargeMessage: `Existing immutable file exceeds its expected size: ${filePath}`,
+          }),
+    });
     if (existing === content) {
+      if (options.durable) syncWorkflowFile(filePath);
       return false;
     }
     fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
@@ -31597,7 +32792,7 @@ function writeTextFile(filePath, content, options = {}) {
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity);
+      writeFileToStableParent(tempPath, content, parentIdentity, options);
       assertDirectoryIdentity(parentPath, parentIdentity);
       try {
         fs.linkSync(tempPath, filePath);
@@ -31607,6 +32802,7 @@ function writeTextFile(filePath, content, options = {}) {
         }
         throw error;
       }
+      if (options.durable) syncWorkflowDirectory(parentPath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
         fs.rmSync(tempPath, { force: true });
@@ -31679,14 +32875,44 @@ function verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity) {
   if (pathStat.isSymbolicLink() || pathStat.dev !== descriptorStat.dev || pathStat.ino !== descriptorStat.ino) {
     fail(`File changed while opening it: ${filePath}`);
   }
+  return descriptorStat;
 }
 
-function readFileFromStableParent(filePath, parentIdentity) {
+function readFileFromStableParent(filePath, parentIdentity, options = {}) {
   let descriptor;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (options.maxBytes === undefined) return fs.readFileSync(descriptor, "utf8");
+    const maxBytes = options.maxBytes;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail("Stable read maxBytes must be a positive safe integer.");
+    if (before.size > maxBytes) fail(options.tooLargeMessage || "Project file exceeds its safe read limit.");
+    const chunks = [];
+    let total = 0;
+    let position = 0;
+    while (total <= maxBytes) {
+      const remaining = maxBytes + 1 - total;
+      if (remaining <= 0) break;
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, position);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+      position += bytesRead;
+    }
+    if (total > maxBytes) fail(options.tooLargeMessage || "Project file exceeds its safe read limit.");
+    const after = fs.fstatSync(descriptor);
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
-    return fs.readFileSync(descriptor, "utf8");
+    if (
+      !sameStableFileIdentity(before, after)
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || total !== after.size
+    ) {
+      fail(`File changed while reading it: ${filePath}`);
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
   } finally {
     if (descriptor !== undefined) {
       fs.closeSync(descriptor);
@@ -31694,7 +32920,12 @@ function readFileFromStableParent(filePath, parentIdentity) {
   }
 }
 
-function writeFileToStableParent(filePath, content, parentIdentity) {
+function sameStableFileIdentity(left, right) {
+  if (Number(left.ino) === 0 || Number(right.ino) === 0) return true;
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function writeFileToStableParent(filePath, content, parentIdentity, options = {}) {
   assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
   let descriptor;
   let created = false;
@@ -31708,6 +32939,7 @@ function writeFileToStableParent(filePath, content, parentIdentity) {
     created = true;
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     fs.writeFileSync(descriptor, content);
+    if (options.durable) fs.fsyncSync(descriptor);
     complete = true;
   } finally {
     if (descriptor !== undefined) {
@@ -32158,14 +33390,21 @@ function uniqueRecordSuffix() {
 
 function output(options, jsonPayload, lines) {
   if (options.json) {
-    console.log(JSON.stringify(jsonPayload, null, 2));
+    const payload = jsonPayload && typeof jsonPayload === "object" && !Array.isArray(jsonPayload)
+      ? { ...jsonPayload, correlation_id: jsonPayload.correlation_id ?? CLI_OPERATION_CONTEXT.correlation_id }
+      : { status: "ok", value: jsonPayload, correlation_id: CLI_OPERATION_CONTEXT.correlation_id };
+    console.log(JSON.stringify(payload, null, 2));
     return;
   }
   const requestedLines = Array.isArray(lines) ? lines.map((line) => String(line)) : [String(lines ?? "")];
   const renderedLines = isHumanGuidanceOutput(requestedLines)
     ? requestedLines
     : humanGuidanceLines(legacyOutputGuidance(jsonPayload, options), requestedLines, options);
-  for (const line of renderedLines) {
+  const correlationLabel = humanGuidanceLocale(options) === "it" ? "ID correlazione" : "Correlation ID";
+  const finalLines = renderedLines.some((line) => line.includes(CLI_OPERATION_CONTEXT.correlation_id))
+    ? renderedLines
+    : [...renderedLines, `- ${correlationLabel}: ${CLI_OPERATION_CONTEXT.correlation_id}`];
+  for (const line of finalLines) {
     console.log(line);
   }
 }
@@ -32461,6 +33700,7 @@ Usage:
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
+  agentic-sdlc trace evidence bind --target-event TR-... --redaction-policy <legacy_evidence_v1|operational_evidence_v1|operational_v2> [--story ST-001]
       [--outcome passed|failed|blocked|skipped|ready]
       [--actor id] [--requested-by id] [--authorized-by id]
       [--request-summary text] [--git-event push|commit|merge|pull|rebase]

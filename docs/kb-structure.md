@@ -129,6 +129,66 @@ flowchart LR
   Manifest --> Cache["cache rebuild"]
 ```
 
+## Observability Policy In `.sdlc/config.json`
+
+The default policy keeps diagnostics local and safe to read. Redaction happens
+before trace persistence and again before Observatory presentation; metrics
+have fixed labels and no exporter; SLO results are advisory; and support
+bundles contain only redacted allowlisted sections.
+
+Custom redaction regular expressions must use bounded repetition with an
+explicit maximum of 256 characters and at most one variable-width field. The
+built-in email and credential detectors use separately audited bounded forms.
+Unsafe patterns make readiness fail closed instead of running on the CLI or
+Observatory event loop.
+
+```json
+{
+  "observability": {
+    "enabled": true,
+    "external_sinks": "disabled",
+    "redaction": {
+      "mode": "before_persistence_and_presentation",
+      "secret_patterns": [],
+      "pii_patterns": [],
+      "identifier_allow_patterns": []
+    },
+    "correlation": {
+      "enabled": true,
+      "format": "corr-uuid"
+    },
+    "metrics": {
+      "enabled": true,
+      "cardinality": "closed",
+      "external_sinks": "disabled"
+    },
+    "readiness": {
+      "liveness_is_shallow": true,
+      "warm_before_ready": true
+    },
+    "slo": {
+      "mode": "advisory",
+      "availability_target": 0.99,
+      "readiness_target": 0.99,
+      "minimum_samples": 20
+    },
+    "support_bundle": {
+      "enabled": true,
+      "max_recent_requests": 50,
+      "integrity": "sha256_of_redacted_canonical_content",
+      "authenticity_claimed": false
+    }
+  }
+}
+```
+
+Each custom detector or identifier allow entry may be a regular-expression
+string or `{ "name": "...", "pattern": "..." }`. Allow patterns should be
+narrow contracts for known identifiers, not broad bypasses. Built-in allow
+rules already cover SHA digests, UUIDs, `corr-<uuid>`, and exact `AUT-ACT-...`
+action IDs. `external_sinks` accepts only `disabled`; this version has no
+background telemetry or support-bundle export.
+
 ## `project.json`
 
 Project metadata and KB policy.
@@ -703,12 +763,17 @@ admission, token savings, authorization, phase completion, or verification.
 
 ## `traces/`
 
-Append-only JSONL event logs. Traces show what agents did, what they decided, and what evidence they produced.
+Append-only JSONL event logs. In ordinary language, traces show what agents did,
+what they decided, and what evidence they produced. New events are redacted
+before they are written and linked to a local integrity checkpoint so later
+validation can detect an unexpected edit, reorder, truncation, or checkpoint
+mismatch.
 
-Example:
+Example paths:
 
 ```text
 .sdlc/traces/ST-001.jsonl
+.sdlc/traces/.integrity/ST-001.jsonl.checkpoint.json
 ```
 
 Example event:
@@ -726,6 +791,7 @@ Example event:
   },
   "action": "decision",
   "evidence": [],
+  "evidence_refs": [],
   "related": ["ADR-0002", "REQ-003"],
   "git": {
     "branch": "feature/ST-001",
@@ -735,9 +801,106 @@ Example event:
     "thread_id": "codex-thread-id",
     "tool": "agentic-sdlc-cli"
   },
+  "correlation_id": "corr-9ee90d8d-6ad3-4471-89fd-237f4f2d9417",
+  "_trace_integrity": {
+    "schema_version": "trace-integrity-event:v1",
+    "mode": "local_tamper_evidence",
+    "authenticity_claimed": false,
+    "hash_algorithm": "sha256",
+    "sequence": 1,
+    "previous_hash": "<sha256>",
+    "event_hash": "<sha256>"
+  },
   "created_at": "2026-07-01T08:48:28.935Z"
 }
 ```
+
+The first sealed write records the existing JSONL bytes as an immutable legacy
+prefix in the checkpoint; it does not rewrite old events. Each later event
+stores the previous event hash. Appends and checkpoint replacement are durable
+and locally locked, and recovery is limited to valid complete appends or an
+interrupted partial tail.
+
+This chain is local tamper evidence, not authenticity. It cannot prove the
+actor, origin, or timestamp, and someone able to replace both JSONL and
+checkpoint can create another internally consistent history. Independent
+authenticity requires a separately trusted signed or append-only anchor.
+
+When an `evidence` path resolves to a supported file, new `evidence_refs` record
+its size and SHA-256 over `redacted_utf8_v2`, plus either `snapshot_only` or
+`current_content` verification. The hash is intentionally calculated after
+redaction so secret bytes are not preserved as a hidden fingerprint. Every v2
+reference also points to an immutable, content-addressed policy source under
+`.sdlc/evidence-redaction-policies/`. That source contains the exact algorithm,
+detectors and flags, sensitive keys, replacement, and safety limits that
+determined the bytes. Verification checks the source path and hash and rebuilds
+that recorded policy; it never substitutes the project's current configuration.
+
+Historical `redacted_utf8_v1` references are intentionally fail-closed because
+the old format did not identify which of two writer policies produced a hash.
+Run `agentic-sdlc trace evidence bind --target-event <TR-ID>
+--redaction-policy <legacy_evidence_v1|operational_evidence_v1|operational_v2>`
+after reviewing the
+historical event. The command appends (without rewriting history) one binding
+covering the sealed event hash and every exact v1 reference hash. A gate rejects
+a missing, malformed, duplicate, conflicting, or later-policy-substituted
+binding. It never tries both policies for the same reference. The legacy engine
+replays the frozen v1 writer semantics, including historical `__proto__`
+omission, through bounded code that does not mutate object prototypes.
+
+For an SBOM or report that exceeds the safe evidence redaction limits, store a
+small reference record and link that record from the trace:
+
+```text
+.sdlc/stories/ST-001/evidence/large-report.manifest.json
+```
+
+```json
+{
+  "kind": "trace_evidence_manifest",
+  "schema_version": "trace-evidence-manifest:v1",
+  "version": 1,
+  "id": "EVIDENCE-MANIFEST-ST-001-TEST",
+  "artifact": {
+    "location": {
+      "kind": "project_path",
+      "path": ".sdlc/stories/ST-001/evidence/large-test-report.json"
+    },
+    "media_type": "application/json",
+    "size_bytes": 33554432,
+    "digest": {
+      "algorithm": "sha256",
+      "value": "<producer-supplied-sha256>",
+      "source": "producer_supplied",
+      "verified_by_agentic_sdlc": false
+    }
+  },
+  "content_handling": {
+    "mode": "manifest_only",
+    "manifest_redaction_required": true,
+    "raw_content_read_by_agentic_sdlc": false,
+    "raw_content_hashed_by_agentic_sdlc": false
+  },
+  "created_at": "2026-07-18T12:00:00.000Z"
+}
+```
+
+Use the manifest path, not the large artifact path, as `--evidence`. The trace
+then protects the canonical redacted manifest. The artifact digest and size
+are declarations supplied by its producer or by an independent verifier;
+Agentic SDLC does not infer them by ingesting sensitive bytes. Consequently,
+manifest integrity is not evidence that the referenced artifact was
+independently verified. Use a separate trusted verification receipt for that
+claim. The schema is `schemas/trace-evidence-manifest.schema.json`; the starter
+is `templates/trace-evidence-manifest-template.json`.
+
+Operational redaction recognizes sensitive keys and configured secret/PII
+patterns, known credential forms and contexts, email addresses, bearer values,
+and private-key blocks. Entropy alone never classifies a value as a secret, so
+exact authorization action IDs (`AUT-ACT-...`), SHA digests, UUIDs, correlation
+IDs, and other opaque audit references remain readable unless an explicit rule
+matches them. Identifier allow rules cannot override credential or configured
+privacy detectors.
 
 Valid trace types:
 

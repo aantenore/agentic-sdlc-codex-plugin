@@ -13,6 +13,7 @@ import { rawTargetFor, recordSelectionKey } from "./model.js";
 import {
   applyDocumentLocale,
   localeFromLocation,
+  localizedErrorGuidance,
   setLocale,
   t,
 } from "./i18n.js";
@@ -265,8 +266,24 @@ async function openRaw(href, path) {
     elements.rawCode.textContent = await api.loadRaw(href, { signal: controller.signal });
   } catch (error) {
     if (error?.name === "AbortError") return;
-    elements.rawCode.textContent = `${t("Raw source unavailable")}\n\n${error.message}`;
+    elements.rawCode.textContent = rawSourceErrorText(error);
   }
+}
+
+function rawSourceErrorText(error) {
+  const guidance = localizedErrorGuidance(error);
+  return [
+    t("Raw source unavailable"),
+    "",
+    `${t("Outcome")}: ${guidance.outcome}`,
+    `${t("Impact")}: ${guidance.impact}`,
+    `${t("Decision")}: ${guidance.decision}`,
+    `${t("Protection")}: ${guidance.protection}`,
+    `${t("Next action")}: ${guidance.nextAction}`,
+    "",
+    `${t("Technical details (optional)")}:`,
+    guidance.technical,
+  ].join("\n");
 }
 
 function openFirstRaw() {

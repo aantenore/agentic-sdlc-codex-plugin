@@ -255,6 +255,15 @@ test("cold model oracle rejects hollow retained evidence and dossier lane items"
     );
 
     model.dossiers[0].lanes.done.items[0] = doneItem;
+    const legacyInline = JSON.parse(JSON.stringify(model));
+    legacyInline.iterations[1].dossier = JSON.parse(JSON.stringify(legacyInline.dossiers[1]));
+    legacyInline.iterations[1].dossier.status = "complete";
+    fs.writeFileSync(artifactPath, JSON.stringify(legacyInline), "utf8");
+    assert.throws(
+      () => validateObservatoryModelArtifact(artifactPath, fixture.manifest),
+      /different legacy inline dossier/u,
+    );
+
     const nonTargetDossier = model.dossiers[1];
     for (const laneName of ["asked", "decided", "contract", "done", "verified"]) {
       nonTargetDossier.lanes[laneName].items = [];
@@ -393,6 +402,10 @@ test("benchmark validates one canonical catalog and conditional Observatory cach
   assert.equal(report.workloads.canonical_query.dependency_edges, SMALL_SCALE.dependency_edges);
   assert.equal(report.workloads.canonical_query.trace_events, SMALL_SCALE.trace_events);
   assert.equal(report.workloads.canonical_query.session_metrics.catalog_builds, 1);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_json_lines_calls, 2);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_files_scanned, 21);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_records_retained, 1);
+  assert.equal(report.workloads.canonical_query.session_metrics.read_json_lines_calls, 0);
   assert.equal(
     report.workloads.canonical_query.manifest_sha256,
     report.fixture.manifest_sha256,
@@ -617,6 +630,10 @@ test("canonical query worker protocol is machine-readable and complete", () => {
       sequence: 4,
     });
     assert.equal(envelope.result.session_metrics.catalog_builds, 1);
+    assert.equal(envelope.result.session_metrics.aggregate_json_lines_calls, 2);
+    assert.equal(envelope.result.session_metrics.aggregate_files_scanned, 5);
+    assert.equal(envelope.result.session_metrics.aggregate_records_retained, 1);
+    assert.equal(envelope.result.session_metrics.read_json_lines_calls, 0);
     assert.ok(envelope.result.memory.max_rss_bytes > 0);
   } finally {
     fixture.cleanup();
@@ -1640,9 +1657,7 @@ async function assertSignalSupervisorCase({
   });
   let workerPid = null;
   try {
-    await waitForFile(markerPath, 10_000);
-    workerPid = Number(fs.readFileSync(markerPath, "utf8"));
-    assert.ok(Number.isSafeInteger(workerPid) && workerPid > 0);
+    [workerPid] = await waitForProcessIds(markerPath, 1, 10_000);
     if (process.platform === "win32") {
       parent.send({ type: "emit-signal", signal });
     } else {
@@ -1849,15 +1864,6 @@ function collectChildTermination(child, timeoutMs) {
       resolve({ code, signal, stdout, stderr });
     });
   });
-}
-
-async function waitForFile(filePath, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) return;
-    await delay(10);
-  }
-  throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 async function waitForProcessIds(filePath, expectedCount, timeoutMs) {

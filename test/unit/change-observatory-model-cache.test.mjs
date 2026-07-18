@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,36 @@ import test from "node:test";
 import {
   computeCanonicalRevision,
   createObservatoryModelCache,
+  shouldUseSynchronousMetadataValidation,
 } from "../../lib/change-observatory/model-cache.mjs";
+import { OBSERVATORY_WORKER_MARKER } from "../../lib/change-observatory/runtime.mjs";
+
+test("synchronous metadata validation is restricted to the dedicated Windows worker", () => {
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  }), true);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: {},
+  }), false);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "darwin",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  }), false);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: Object.create({ [OBSERVATORY_WORKER_MARKER]: "1" }),
+  }), false);
+  assert.throws(
+    () => shouldUseSynchronousMetadataValidation(null),
+    /runtime override must be an object/u,
+  );
+  assert.throws(
+    () => shouldUseSynchronousMetadataValidation({ platform: "win32", environment: [] }),
+    /runtime environment must be an object/u,
+  );
+});
 
 test("canonical revisions track source bytes but ignore derived cache and index data", async (t) => {
   const fixture = await createCacheFixture(t);
@@ -141,6 +171,26 @@ test("ordered directory snapshots reject add, remove, rename, or type-change rac
   }
 });
 
+test("canonical hashing stops when a file grows beyond its captured signature", async (t) => {
+  const fixture = await createCacheFixture(t);
+  let target = path.join(fixture.projectRoot, ".sdlc", "growing.json");
+  await fs.writeFile(target, `{"value":"${"A".repeat(130_000)}"}\n`, "utf8");
+  target = await fs.realpath(target);
+  let appended = false;
+
+  await assert.rejects(
+    () => computeCanonicalRevision(fixture.projectRoot, {
+      async onFileReadChunk(event) {
+        if (event.path !== target || appended) return;
+        appended = true;
+        await fs.appendFile(target, "B".repeat(130_000), "utf8");
+      },
+    }),
+    (error) => error?.code === "canonical_revision_changed" && error?.statusCode === 409,
+  );
+  assert.equal(appended, true);
+});
+
 test("revision markers stop at maxFiles and maxTotalBytes", async (t) => {
   const fixture = await createCacheFixture(t);
   const projectPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
@@ -172,6 +222,50 @@ test("revision markers stop at maxFiles and maxTotalBytes", async (t) => {
     }),
     totalLimited,
   );
+});
+
+test("aggregate maxEntries bounds wide directories and invalidates overflow snapshots", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const wideDirectory = path.join(fixture.projectRoot, ".sdlc", "z-wide");
+  await fs.mkdir(wideDirectory);
+  const ignored = [];
+  for (let index = 0; index < 3; index += 1) {
+    const target = path.join(wideDirectory, `ignored-${index}.bin`);
+    ignored.push(target);
+    await fs.writeFile(target, "x\n", "utf8");
+  }
+
+  const limits = { maxEntries: 4 };
+  const limitedRevision = await computeCanonicalRevision(fixture.projectRoot, { limits });
+  assert.equal(
+    await computeCanonicalRevision(fixture.projectRoot, { limits }),
+    limitedRevision,
+  );
+
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    limits,
+    validationRuntime: {
+      platform: "win32",
+      environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+    },
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  await cache.get();
+  await cache.get();
+  assert.equal(builds, 1);
+
+  await fs.rm(ignored.at(-1));
+  assert.notEqual(
+    await computeCanonicalRevision(fixture.projectRoot, { limits }),
+    limitedRevision,
+  );
+  await cache.get();
+  assert.equal(builds, 2);
 });
 
 test("unreadable canonical entries use a stable marker and recover when readable", async (t) => {
@@ -256,6 +350,41 @@ test("same-size canonical mutations invalidate a cached model", async (t) => {
   assert.notEqual(refreshed, initial);
   assert.notEqual(refreshed.etag, initial.etag);
   assert.equal(JSON.parse(refreshed.body.toString("utf8")).version, 2);
+});
+
+test("same-inode rewrites invalidate a cached model when size and mtime are restored", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const recordPath = path.join(fixture.projectRoot, ".sdlc", "same-size.json");
+  const fixedTime = new Date("2024-01-02T03:04:05.000Z");
+  await fs.writeFile(recordPath, '{"value":"AAAA"}\n', "utf8");
+  await fs.utimes(recordPath, fixedTime, fixedTime);
+  const before = await fs.stat(recordPath, { bigint: true });
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    async buildModel() {
+      builds += 1;
+      return JSON.parse(await fs.readFile(recordPath, "utf8"));
+    },
+  });
+  const initial = await cache.get();
+  assert.equal(JSON.parse(initial.body.toString("utf8")).value, "AAAA");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await fs.writeFile(recordPath, '{"value":"BBBB"}\n', "utf8");
+  await fs.utimes(recordPath, fixedTime, fixedTime);
+  const after = await fs.stat(recordPath, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  assert.notEqual(after.ctimeNs, before.ctimeNs);
+
+  const refreshed = await cache.get();
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed, initial);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(JSON.parse(refreshed.body.toString("utf8")).value, "BBBB");
 });
 
 test("metadata-only drift refreshes signatures without changing content revision", async (t) => {
@@ -426,6 +555,124 @@ test("fast validation invalidates add, remove, rename, content, and symlink chan
   });
 });
 
+test("dedicated Windows sync validation preserves file and directory invalidation", async (t) => {
+  const runtime = {
+    platform: "win32",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  };
+  const scenarios = [
+    {
+      name: "file-content",
+      async mutate(fixture) {
+        await writeProjectRecord(fixture.projectRoot, { version: 400 });
+      },
+    },
+    {
+      name: "nested-directory-entry",
+      async prepare(fixture) {
+        const directory = path.join(fixture.projectRoot, ".sdlc", "nested");
+        await fs.mkdir(directory);
+        await fs.writeFile(path.join(directory, "first.json"), "{}\n", "utf8");
+      },
+      async mutate(fixture) {
+        await fs.writeFile(
+          path.join(fixture.projectRoot, ".sdlc", "nested", "added.json"),
+          "{}\n",
+          "utf8",
+        );
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (scenarioTest) => {
+      const fixture = await createCacheFixture(scenarioTest);
+      await scenario.prepare?.(fixture);
+      let builds = 0;
+      const cache = createObservatoryModelCache({
+        projectRoot: fixture.projectRoot,
+        validationRuntime: runtime,
+        buildModel() {
+          builds += 1;
+          return { builds };
+        },
+      });
+      const initial = await cache.get();
+      assert.equal(await cache.get(), initial);
+      await scenario.mutate(fixture);
+      const refreshed = await cache.get();
+      assert.equal(builds, 2);
+      assert.notEqual(refreshed.etag, initial.etag);
+      assert.equal(await cache.get(), refreshed);
+    });
+  }
+
+  await t.test("symlink-fallback", async (scenarioTest) => {
+    if (process.platform === "win32") {
+      scenarioTest.skip("Symlink retargeting requires Unix semantics");
+      return;
+    }
+    const fixture = await createCacheFixture(scenarioTest);
+    await fs.writeFile(path.join(fixture.projectRoot, "target-a.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(fixture.projectRoot, "target-b.json"), "{}\n", "utf8");
+    const link = path.join(fixture.projectRoot, ".sdlc", "linked.json");
+    await fs.symlink("../target-a.json", link, "file");
+    let builds = 0;
+    const cache = createObservatoryModelCache({
+      projectRoot: fixture.projectRoot,
+      validationRuntime: runtime,
+      buildModel() {
+        builds += 1;
+        return { builds };
+      },
+    });
+    const initial = await cache.get();
+    assert.equal(await cache.get(), initial);
+    await fs.rm(link);
+    await fs.symlink("../target-b.json", link, "file");
+    const refreshed = await cache.get();
+    assert.equal(builds, 2);
+    assert.notEqual(refreshed.etag, initial.etag);
+  });
+});
+
+test("dedicated Windows sync validation detects a file removed between start and check", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const racePath = path.join(fixture.projectRoot, ".sdlc", "sync-race.json");
+  await fs.writeFile(racePath, "{}\n", "utf8");
+  const events = [];
+  let removed = false;
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    validationRuntime: {
+      platform: "win32",
+      environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+    },
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+    onFastPathCheck(event) {
+      if (path.basename(event.path) !== path.basename(racePath)) return;
+      events.push(event.event);
+      if (event.event === "start" && !removed) {
+        removed = true;
+        rmSync(racePath);
+      }
+    },
+  });
+
+  const initial = await cache.get();
+  const refreshed = await cache.get();
+  assert.equal(removed, true);
+  assert.deepEqual(events, ["start", "end"]);
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(await cache.get(), refreshed);
+  assert.equal(builds, 2);
+});
+
 test("warm validation without a hook does not freeze instrumentation events", async (t) => {
   const fixture = await createCacheFixture(t);
   const cache = createObservatoryModelCache({
@@ -505,9 +752,9 @@ test("direct snapshot budget charges two retained cells per entry and one per di
 
   assert.equal(await countWarmHashes(), 0);
   await fs.writeFile(path.join(cellsDirectory, "two.bin"), "x\n", "utf8");
-  assert.equal(await cache.get(), cold);
+  assert.ok(await countWarmHashes() >= 1);
   assert.equal(builds, 1);
-  assert.equal(await countWarmHashes(), 1);
+  assert.equal(await countWarmHashes(), process.platform === "win32" ? 1 : 0);
 });
 
 test("wide and long-name directories use bounded digest snapshots and still invalidate", async (t) => {
@@ -559,7 +806,7 @@ test("wide and long-name directories use bounded digest snapshots and still inva
       } finally {
         crypto.createHash = nativeCreateHash;
       }
-      assert.equal(hashes, 2);
+      assert.equal(hashes, process.platform === "win32" ? 2 : 0);
 
       await scenario.mutate(fixture);
       const refreshed = await cache.get();
@@ -638,6 +885,28 @@ test("async validation rescans after an entry disappears during a pooled check",
   assert.equal(builds, 2);
 });
 
+test("project root removal during fast validation preserves the boundary error", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const movedRoot = `${fixture.projectRoot}-moved`;
+  let moved = false;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ stable: true }),
+    async onFastPathCheck(event) {
+      if (event.event !== "start" || moved) return;
+      moved = true;
+      await fs.rename(fixture.projectRoot, movedRoot);
+    },
+  });
+
+  await cache.get();
+  await assert.rejects(
+    () => cache.get(),
+    (error) => error?.code === "project_boundary_changed" && error?.statusCode === 409,
+  );
+  assert.equal(moved, true);
+});
+
 test("fast validation enforces bounded concurrency", async (t) => {
   const fixture = await createCacheFixture(t);
   for (let index = 0; index < 12; index += 1) {
@@ -689,6 +958,42 @@ test("fast validation enforces bounded concurrency", async (t) => {
   for (const sequence of eventsByPath.values()) {
     assert.deepEqual(sequence, ["start", "end"]);
   }
+});
+
+test("default fast validation uses the bounded platform filesystem pool", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const expectedConcurrency = process.platform === "win32" ? 64 : 8;
+  for (let index = 0; index < expectedConcurrency + 8; index += 1) {
+    await fs.writeFile(
+      path.join(fixture.projectRoot, ".sdlc", `default-bound-${String(index).padStart(2, "0")}.json`),
+      `${JSON.stringify({ index })}\n`,
+      "utf8",
+    );
+  }
+
+  let active = 0;
+  let maximum = 0;
+  let starts = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ stable: true }),
+    async onFastPathCheck(event) {
+      if (event.event === "start") {
+        active += 1;
+        starts += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      } else {
+        active -= 1;
+      }
+    },
+  });
+
+  const cold = await cache.get();
+  assert.equal(await cache.get(), cold);
+  assert.ok(starts > expectedConcurrency);
+  assert.equal(maximum, expectedConcurrency);
+  assert.equal(active, 0);
 });
 
 test("model cache is single-flight, reuses serialized bytes, and invalidates by revision", async (t) => {

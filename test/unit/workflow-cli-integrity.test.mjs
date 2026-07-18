@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+import { verifyTraceIntegrity } from "../../lib/trace-integrity.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
@@ -174,6 +175,183 @@ test("trace ownership does not confuse an instance id with a definition id", () 
   ], project);
   assert.equal(status.status, "ready");
   assert.equal(status.current_state, "intake");
+});
+
+test("sealed trace append, workflow start and transition remain one strict chain before another append", () => {
+  const project = temporaryProject("sealed-writer-chain");
+  const instanceId = "change-sealed-writer-chain";
+  mustRun(["init", "--root", project, "--project-name", "Sealed writer chain"], project);
+  const first = mustRunJson([
+    "trace", "append",
+    "--root", project,
+    "--type", "decision",
+    "--summary", "Initial sealed audit event",
+  ], project);
+  assert.equal(first.event._trace_integrity.sequence, 1);
+
+  mustRunJson([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", instanceId,
+    "--definition", "change-request",
+    "--definition-version", "1",
+  ], project);
+  const secret = `github_pat_${"A".repeat(32)}`;
+  const moved = mustRunJson([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", instanceId,
+    "--to", "impact-review",
+    "--request-id", "sealed-writer-transition",
+    "--summary", `credential=${secret}`,
+  ], project);
+  assert.equal(moved.status, "transitioned");
+
+  const files = instanceFiles(project, instanceId);
+  const integrityOptions = {
+    boundaryRoot: path.join(project, ".sdlc"),
+    tracePath: files.trace,
+  };
+  assert.equal(verifyTraceIntegrity(integrityOptions).valid, true);
+  let traces = projectTraceEvents(project);
+  assert.deepEqual(traces.map((event) => event._trace_integrity?.sequence), [1, 2, 3]);
+  assert.equal(traces.some((event) => JSON.stringify(event).includes(secret)), false);
+  assert.equal(
+    traces.find((event) => event.action === "workflow.instance.transition").summary,
+    "[REDACTED]",
+  );
+
+  const strictGate = run(["gate", "check", "--root", project, "--strict", "--json"], project);
+  const strictReport = JSON.parse(strictGate.stdout);
+  assert.equal(strictReport.checked.includes("trace traces/project.jsonl local integrity checkpoint"), true);
+  assert.equal(strictReport.errors.some((error) => /trace traces\/project\.jsonl integrity/u.test(error)), false);
+
+  const last = mustRunJson([
+    "trace", "append",
+    "--root", project,
+    "--type", "decision",
+    "--summary", "Post-workflow sealed audit event",
+  ], project);
+  assert.equal(last.event._trace_integrity.sequence, 4);
+  assert.equal(verifyTraceIntegrity(integrityOptions).valid, true);
+  traces = projectTraceEvents(project);
+  assert.deepEqual(traces.map((event) => event._trace_integrity?.sequence), [1, 2, 3, 4]);
+});
+
+test("completed 0.11 workflow traces remain immutable as a verified legacy prefix", () => {
+  const project = temporaryProject("legacy-completed-trace");
+  const instanceId = "change-legacy-completed-trace";
+  startChangeRequest(project, instanceId);
+  assert.equal(transition(project, instanceId, "legacy-completed-transition", ["--json"]).status, 0);
+  const files = instanceFiles(project, instanceId);
+  const legacyEvents = projectTraceEvents(project).map((event) => {
+    const { _trace_integrity: _integrityEnvelope, ...legacyEvent } = event;
+    return legacyEvent;
+  });
+  const legacyBytes = Buffer.from(`${legacyEvents.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  fs.writeFileSync(files.trace, legacyBytes);
+  fs.rmSync(path.join(project, ".sdlc", "traces", ".integrity"), { recursive: true, force: true });
+
+  const status = mustRunJson([
+    "workflow", "instance", "status", "--root", project, "--id", instanceId,
+  ], project);
+  assert.equal(status.status, "ready");
+  assert.equal(status.current_state, "impact-review");
+  assert.deepEqual(fs.readFileSync(files.trace), legacyBytes);
+
+  const integrityOptions = {
+    boundaryRoot: path.join(project, ".sdlc"),
+    tracePath: files.trace,
+  };
+  const legacyIntegrity = verifyTraceIntegrity(integrityOptions);
+  assert.equal(legacyIntegrity.valid, true);
+  assert.equal(legacyIntegrity.initialized, false);
+  const appended = mustRunJson([
+    "trace", "append",
+    "--root", project,
+    "--type", "decision",
+    "--summary", "Seal after the verified workflow legacy prefix",
+  ], project);
+  assert.equal(appended.event._trace_integrity.sequence, 1);
+  assert.deepEqual(fs.readFileSync(files.trace).subarray(0, legacyBytes.length), legacyBytes);
+  assert.equal(verifyTraceIntegrity(integrityOptions).valid, true);
+  assert.equal(mustRunJson([
+    "workflow", "instance", "status", "--root", project, "--id", instanceId,
+  ], project).current_state, "impact-review");
+});
+
+test("a pending 0.11 raw trace suffix is replaced by one sealed record only when it is exact", () => {
+  const project = temporaryProject("legacy-pending-exact");
+  const instanceId = "change-legacy-pending-exact";
+  startChangeRequest(project, instanceId);
+  const files = instanceFiles(project, instanceId);
+  const startTrace = projectTraceEvents(project)[0];
+  const { _trace_integrity: _startIntegrity, ...legacyStartTrace } = startTrace;
+  fs.writeFileSync(files.trace, `${JSON.stringify(legacyStartTrace)}\n`);
+  fs.rmSync(path.join(project, ".sdlc", "traces", ".integrity"), { recursive: true, force: true });
+  const requestId = "legacy-pending-exact";
+  const interrupted = run([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", instanceId,
+    "--to", "impact-review",
+    "--request-id", requestId,
+    "--json",
+  ], project, {
+    NODE_ENV: "test",
+    AGENTIC_SDLC_TEST_WORKFLOW_FAILURE_PHASE: "after-checkpoint-before-trace",
+  });
+  assert.equal(interrupted.status, 1, interrupted.stderr);
+  const journal = JSON.parse(fs.readFileSync(files.pending, "utf8"));
+  fs.appendFileSync(files.trace, `${JSON.stringify(journal.trace_event)}\n`);
+
+  const recovered = transition(project, instanceId, requestId, ["--json"]);
+  assert.equal(recovered.status, 0, `${recovered.stdout}\n${recovered.stderr}`);
+  assert.equal(JSON.parse(recovered.stdout).idempotent, true);
+  assert.equal(fs.existsSync(files.pending), false);
+  const workflowTraces = projectTraceEvents(project).filter((event) =>
+    event.action === "workflow.instance.transition" && event.related?.[0] === instanceId);
+  assert.equal(workflowTraces.length, 1);
+  assert.equal(workflowTraces[0]._trace_integrity.schema_version, "trace-integrity-event:v1");
+  assert.equal(projectTraceEvents(project)[0]._trace_integrity, undefined);
+  assert.equal(verifyTraceIntegrity({
+    boundaryRoot: path.join(project, ".sdlc"),
+    tracePath: files.trace,
+  }).valid, true);
+});
+
+test("a pending 0.11 raw trace with later records is preserved and blocked", () => {
+  const project = temporaryProject("legacy-pending-later-record");
+  const instanceId = "change-legacy-pending-later-record";
+  startChangeRequest(project, instanceId);
+  const files = instanceFiles(project, instanceId);
+  const requestId = "legacy-pending-later-record";
+  const interrupted = run([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", instanceId,
+    "--to", "impact-review",
+    "--request-id", requestId,
+    "--json",
+  ], project, {
+    NODE_ENV: "test",
+    AGENTIC_SDLC_TEST_WORKFLOW_FAILURE_PHASE: "after-checkpoint-before-trace",
+  });
+  assert.equal(interrupted.status, 1, interrupted.stderr);
+  const journal = JSON.parse(fs.readFileSync(files.pending, "utf8"));
+  fs.appendFileSync(files.trace, [
+    JSON.stringify(journal.trace_event),
+    JSON.stringify({ id: "TR-LATER-LEGACY", type: "decision", summary: "must be preserved" }),
+    "",
+  ].join("\n"));
+  const traceBytes = fs.readFileSync(files.trace);
+  const pendingBytes = fs.readFileSync(files.pending);
+
+  const retry = transition(project, instanceId, requestId, ["--json"]);
+  assert.equal(retry.status, 1, `${retry.stdout}\n${retry.stderr}`);
+  assert.deepEqual(fs.readFileSync(files.trace), traceBytes);
+  assert.deepEqual(fs.readFileSync(files.pending), pendingBytes);
+  assert.match(JSON.parse(retry.stderr).error.message, /later audit records must be preserved/u);
 });
 
 test("start refuses a pre-existing audit trace that already claims the instance id", () => {

@@ -412,7 +412,7 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
   }
 });
 
-test("preserves the representative v1 model byte-for-byte after bounded indexing", async (t) => {
+test("keeps the representative v1 wire model deterministic with one dossier copy", async (t) => {
   const root = await createProject(t);
   const writeCompactJson = (relativePath, value) =>
     writeText(root, relativePath, `${JSON.stringify(value)}\n`);
@@ -474,7 +474,7 @@ test("preserves the representative v1 model byte-for-byte after bounded indexing
   });
   const digest = crypto.createHash("sha256").update(JSON.stringify(model)).digest("hex");
 
-  assert.equal(digest, "f00db93ad53210f26e7c302e18f1f2a6de6cdeef6e452715ae94d5c77be5277e");
+  assert.equal(digest, "e6f77daeaf0856b58539f7a52210541a490a7293204857b3746c50f64d082337");
 });
 
 test("builds proof-bound dossiers without cross-story, shared, or ambiguous lineage", async (t) => {
@@ -631,10 +631,15 @@ test("builds proof-bound dossiers without cross-story, shared, or ambiguous line
   assert.equal(dossierA.iterationId, "ST-A");
   assert.equal(dossierA.title, "Story ST-A");
   assert.equal(dossierA.summary, "Summary ST-A");
-  assert.deepEqual(
-    model.iterations.find((iteration) => iteration.id === "ST-A").dossier,
-    dossierA,
+  const iterationA = model.iterations.find((iteration) => iteration.id === "ST-A");
+  assert.deepEqual(iterationA.dossier, dossierA);
+  assert.equal(Object.getOwnPropertyDescriptor(iterationA, "dossier").enumerable, false);
+  const serializedModel = JSON.parse(JSON.stringify(model));
+  assert.equal(
+    Object.hasOwn(serializedModel.iterations.find((iteration) => iteration.id === "ST-A"), "dossier"),
+    false,
   );
+  assert.equal(serializedModel.dossiers.some((dossier) => dossier.storyId === "ST-A"), true);
   assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
   assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "ST-A"), true);
   assert.equal(dossierB.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
@@ -1517,6 +1522,56 @@ test("returns bounded missing-state diagnostics for empty and absent knowledge b
   assert.equal(emptyModel.records.some((record) => /\/(?:cache|indexes)\//i.test(record.path)), false);
   assert.equal(emptyModel.diagnostics.some((diagnostic) => diagnostic.code === "project_record_missing"), true);
   assert.ok(emptyModel.diagnostics.every((diagnostic) => diagnostic.sourceRefs.every((ref) => !path.isAbsolute(ref.path))));
+});
+
+test("bounds aggregate traversal across many empty directories", async (t) => {
+  const root = await createProject(t);
+  for (let index = 0; index < 6; index += 1) {
+    await fs.mkdir(path.join(root, ".sdlc", `empty-${index}`));
+  }
+
+  const options = { clock: () => FIXED_TIME, limits: { maxEntries: 4 } };
+  const first = await buildObservatoryViewModel(root, options);
+  const second = await buildObservatoryViewModel(root, options);
+
+  assert.deepEqual(second, first);
+  assert.equal(first.records.length, 0);
+  assert.equal(
+    first.diagnostics.some((diagnostic) => (
+      diagnostic.code === "max_entries_exceeded"
+      && diagnostic.sourceRefs[0]?.path === ".sdlc"
+    )),
+    true,
+  );
+});
+
+test("skips an oversized directory atomically at the aggregate entry limit", async (t) => {
+  const root = await createProject(t);
+  await writeJson(root, ".sdlc/project.json", {
+    schema_version: "0.1.0",
+    project_id: "entry-limit",
+    project_name: "Entry Limit",
+  });
+  const wide = path.join(root, ".sdlc", "z-wide");
+  await fs.mkdir(wide);
+  for (let index = 0; index < 3; index += 1) {
+    await fs.writeFile(path.join(wide, `ignored-${index}.bin`), "x\n", "utf8");
+  }
+
+  const model = await buildObservatoryViewModel(root, {
+    clock: () => FIXED_TIME,
+    limits: { maxEntries: 4 },
+  });
+
+  assert.equal(model.project.id, "entry-limit");
+  assert.deepEqual(model.records.map((record) => record.path), [".sdlc/project.json"]);
+  assert.equal(
+    model.diagnostics.some((diagnostic) => (
+      diagnostic.code === "max_entries_exceeded"
+      && diagnostic.sourceRefs[0]?.path === ".sdlc/z-wide"
+    )),
+    true,
+  );
 });
 
 test("tolerates legacy records and isolates malformed JSON and JSONL", async (t) => {

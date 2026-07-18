@@ -88,6 +88,7 @@ function normalizeSourceRef(value) {
     path,
     pointer: readable(source.pointer, "") || null,
   };
+  if (source.rawAvailable === false) normalized.rawAvailable = false;
   if (Number.isSafeInteger(source.line) && source.line > 0) normalized.line = source.line;
   return normalized;
 }
@@ -236,6 +237,8 @@ export function normalizeSemanticObservation(value) {
 export function normalizeItem(value) {
   const item = objectOrEmpty(value);
   const sourceRefs = arrayOrEmpty(item.sourceRefs).map(normalizeSourceRef).filter(Boolean);
+  const rawAvailable = item.rawAvailable !== false
+    && sourceRefs.every((source) => source.rawAvailable !== false);
   const narrative = normalizeNarrative(item.narrative);
   const explanation = objectOrEmpty(item.explanation);
   const rationale = objectOrEmpty(item.rationale);
@@ -279,7 +282,8 @@ export function normalizeItem(value) {
     timestamp: readable(item.timestamp, "") || null,
     provenance: normalizeProvenance(item.provenance),
     sourceRefs,
-    rawHref: safeRawHref(item.rawHref),
+    rawHref: rawAvailable ? safeRawHref(item.rawHref) : null,
+    ...(rawAvailable ? {} : { rawAvailable: false }),
     intent: readable(item.intent, "") || null,
     storyId: readable(item.storyId ?? item.story_id, "") || null,
     requirementId: readable(item.requirementId ?? item.requirement_id, "") || null,
@@ -463,11 +467,13 @@ function normalizeIteration(value, index, dossier = null) {
 function normalizeRecord(value) {
   const record = objectOrEmpty(value);
   const path = readable(record.path, "");
+  const rawAvailable = record.rawAvailable !== false && isCanonicalEvidencePath(path);
   return {
     path,
     kind: readable(record.kind, "record"),
     provenance: normalizeProvenance(record.provenance),
-    rawHref: safeRawHref(record.rawHref) ?? rawHrefForPath(path),
+    rawHref: rawAvailable ? safeRawHref(record.rawHref) ?? rawHrefForPath(path) : null,
+    ...(rawAvailable ? {} : { rawAvailable: false }),
   };
 }
 
@@ -736,13 +742,15 @@ export function safeRawHref(value) {
 
 export function rawTargetFor(item) {
   if (!item) return null;
+  if (item.rawAvailable === false) return null;
   if (safeRawHref(item.rawHref)) {
     return {
       href: safeRawHref(item.rawHref),
       path: new URL(item.rawHref, "http://observatory.local").searchParams.get("path"),
     };
   }
-  const source = arrayOrEmpty(item.sourceRefs).find((ref) => isCanonicalEvidencePath(ref.path));
+  const source = arrayOrEmpty(item.sourceRefs).find((ref) =>
+    ref.rawAvailable !== false && isCanonicalEvidencePath(ref.path));
   if (!source) return null;
   return { href: rawHrefForPath(source.path), path: source.path };
 }
@@ -750,6 +758,7 @@ export function rawTargetFor(item) {
 export function isCanonicalEvidencePath(path) {
   if (typeof path !== "string" || !path.startsWith(".sdlc/")) return false;
   if (path.includes("\0") || path.includes("\\")) return false;
+  if (path.includes("[REDACTED")) return false;
   return !path.split("/").some((segment) => segment === ".." || segment === ".");
 }
 
