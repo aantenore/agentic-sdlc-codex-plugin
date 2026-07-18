@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trace-integrity-checkpoint.schema.json",
+  "title": "Agentic SDLC Local Trace Integrity Checkpoint",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "mode",
+    "authenticity_claimed",
+    "hash_algorithm",
+    "trace_file",
+    "legacy_prefix",
+    "new_writes",
+    "committed_offset",
+    "updated_at",
+    "checkpoint_hash"
+  ],
+  "properties": {
+    "kind": { "const": "trace_integrity_checkpoint" },
+    "schema_version": { "const": "trace-integrity-checkpoint:v1" },
+    "mode": { "const": "local_tamper_evidence" },
+    "authenticity_claimed": { "const": false },
+    "hash_algorithm": { "const": "sha256" },
+    "trace_file": { "type": "string", "minLength": 1 },
+    "legacy_prefix": {
+      "type": "object",
+      "required": ["line_count", "byte_length", "sha256"],
+      "properties": {
+        "line_count": { "type": "integer", "minimum": 0 },
+        "byte_length": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "new_writes": {
+      "type": "object",
+      "required": [
+        "count",
+        "first_sequence",
+        "last_sequence",
+        "last_event_hash",
+        "rolling_hash"
+      ],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "first_sequence": { "type": ["integer", "null"], "minimum": 1 },
+        "last_sequence": { "type": ["integer", "null"], "minimum": 1 },
+        "last_event_hash": { "$ref": "#/$defs/sha256" },
+        "rolling_hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "committed_offset": { "type": "integer", "minimum": 0 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "checkpoint_hash": { "$ref": "#/$defs/sha256" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}
