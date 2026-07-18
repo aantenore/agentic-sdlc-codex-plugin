@@ -103,7 +103,8 @@ test("builds one deterministic catalog and serves orchestration, report, trace, 
   const metrics = session.metrics();
   assert.equal(metrics.catalog_builds, 1);
   assert.ok(metrics.catalog_reuses >= 5);
-  assert.equal(metrics.store.walk_calls, 1);
+  assert.equal(metrics.store.walk_calls, 3);
+  assert.equal(metrics.read_json_lines_calls, 0);
   assert.equal(events.filter((event) => event.type === "catalog_build").length, 1);
   assert.throws(() => { firstCatalog.files.push("mutate"); }, TypeError);
   assert.throws(() => { metrics.catalog_builds = 99; }, TypeError);
@@ -149,6 +150,390 @@ test("parses each canonical snapshot with one read and one post-parse integrity 
   assert.equal(metrics.read_json_calls, 1);
   assert.equal(metrics.read_text_calls, 1);
   assert.equal(metrics.json_parses, 1);
+});
+
+test("aggregates JSONL declaratively without retaining every parsed record", (t) => {
+  const { root } = fixture(t);
+  const session = openCanonicalQuerySession({ root });
+
+  const aggregate = session.aggregateJsonLines({
+    under: "traces",
+    onInvalid: "skip",
+    operations: [
+      { id: "all_records", operation: "count" },
+      {
+        id: "story_records",
+        operation: "count",
+        where: { field: "story_id", equals: "ST-1" },
+      },
+      {
+        id: "first_story_record",
+        operation: "first",
+        where: { field: "story_id", equals: "ST-1" },
+        project: ["id", "type"],
+        includeSource: true,
+      },
+      {
+        id: "last_story_record",
+        operation: "last",
+        where: { field: "story_id", equals: "ST-1" },
+        project: ["id", "type"],
+        includeSource: true,
+      },
+    ],
+  });
+
+  assert.equal(aggregate.schema_version, "canonical-json-lines-aggregate:v1");
+  assert.equal(aggregate.files_scanned, 2);
+  assert.equal(aggregate.valid_records, 4);
+  assert.equal(aggregate.invalid_records, 1);
+  assert.equal(aggregate.results.all_records, 4);
+  assert.equal(aggregate.results.story_records, 2);
+  assert.deepEqual(aggregate.results.first_story_record, {
+    matches: 2,
+    value: { id: "TR-1", type: "decision" },
+    source: { path: ".sdlc/traces/ST-1.jsonl", line: 1 },
+  });
+  assert.deepEqual(aggregate.results.last_story_record, {
+    matches: 2,
+    value: { id: "TR-2", type: "test" },
+    source: { path: ".sdlc/traces/ST-1.jsonl", line: 4 },
+  });
+  assert.ok(Object.isFrozen(aggregate));
+  assert.ok(Object.isFrozen(aggregate.results));
+  assert.ok(Object.isFrozen(aggregate.results.first_story_record));
+  assert.ok(Object.isFrozen(aggregate.results.first_story_record.value));
+  assert.ok(Object.isFrozen(aggregate.results.first_story_record.source));
+
+  const metrics = session.metrics();
+  assert.equal(metrics.aggregate_json_lines_calls, 1);
+  assert.equal(metrics.aggregate_files_scanned, 2);
+  assert.equal(metrics.aggregate_json_line_parses, 5);
+  assert.equal(metrics.aggregate_valid_records, 4);
+  assert.equal(metrics.aggregate_invalid_records, 1);
+  assert.equal(metrics.aggregate_records_retained, 2);
+  assert.equal(metrics.parsed_cache_entries, 0);
+});
+
+test("JSONL aggregates skip or reject invalid canonical JSON explicitly", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/traces/invalid-aggregate.jsonl", [
+    '{"id":"valid-before"}',
+    "{broken",
+    '{"id":"non-finite","value":1e400}',
+    '{"id":"valid-after"}',
+    "",
+  ].join("\n"));
+  const session = openCanonicalQuerySession({ root });
+
+  const skipped = session.aggregateJsonLines({
+    under: "traces/invalid-aggregate.jsonl",
+    onInvalid: "skip",
+    operations: [{ id: "valid", operation: "count" }],
+  });
+  assert.equal(skipped.results.valid, 2);
+  assert.equal(skipped.valid_records, 2);
+  assert.equal(skipped.invalid_records, 2);
+
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/invalid-aggregate.jsonl",
+      onInvalid: "throw",
+      operations: [{ id: "valid", operation: "count" }],
+    }),
+    (error) => error instanceof CanonicalStoreError
+      && error.code === "invalid_json"
+      && /invalid-aggregate\.jsonl:2/u.test(error.message),
+  );
+});
+
+test("JSONL aggregate predicates and projections use own prototype-named fields safely", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/traces/prototype-fields.jsonl", [
+    '{"id":"first","__proto__":"safe","constructor":"built"}',
+    '{"id":"last","__proto__":"safe","constructor":"done"}',
+    "",
+  ].join("\n"));
+  const session = openCanonicalQuerySession({ root });
+
+  const aggregate = session.aggregateJsonLines({
+    under: "traces/prototype-fields.jsonl",
+    operations: [{
+      id: "last_safe",
+      operation: "last",
+      where: { field: "__proto__", equals: "safe" },
+      project: ["id", "__proto__", "constructor"],
+      includeSource: true,
+    }],
+  });
+  const value = aggregate.results.last_safe.value;
+
+  assert.equal(aggregate.results.last_safe.matches, 2);
+  assert.equal(Object.getPrototypeOf(value), Object.prototype);
+  assert.equal(Object.hasOwn(value, "__proto__"), true);
+  assert.equal(Object.hasOwn(value, "constructor"), true);
+  assert.deepEqual(value, JSON.parse('{"id":"last","__proto__":"safe","constructor":"done"}'));
+  assert.deepEqual(aggregate.results.last_safe.source, {
+    path: ".sdlc/traces/prototype-fields.jsonl",
+    line: 2,
+  });
+  assert.equal({}.safe, undefined);
+});
+
+test("JSONL aggregate projections and operation plans are strictly bounded", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/traces/bounded-aggregate.jsonl", '{"id":"one","nested":{"kept":false}}\n');
+  const session = openCanonicalQuerySession({ root });
+
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/bounded-aggregate.jsonl",
+      operations: [{ id: 1, operation: "count" }],
+    }),
+    /operations\[0\]\.id is invalid/u,
+  );
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/bounded-aggregate.jsonl",
+      operations: [{
+        id: "too_wide",
+        operation: "first",
+        project: Array.from({ length: 17 }, (_, index) => `field_${index}`),
+      }],
+    }),
+    /at most 16 fields/u,
+  );
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/bounded-aggregate.jsonl",
+      operations: Array.from({ length: 33 }, (_, index) => ({
+        id: `count_${index}`,
+        operation: "count",
+      })),
+    }),
+    /between 1 and 32 items/u,
+  );
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/bounded-aggregate.jsonl",
+      operations: [{ id: "nested", operation: "first", project: ["nested"] }],
+    }),
+    /can project only scalar field 'nested'/u,
+  );
+  assert.equal(session.metrics().aggregate_records_retained, 0);
+});
+
+test("JSONL aggregate plans ignore inherited options and operation fields", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/cache/inherited.jsonl", '{"id":"derived"}\n');
+  const descriptors = new Map();
+  for (const [key, value] of Object.entries({
+    includeDerived: true,
+    includeSource: true,
+    project: ["id"],
+  })) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(Object.prototype, key));
+    Object.defineProperty(Object.prototype, key, { configurable: true, value });
+  }
+  t.after(() => {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(Object.prototype, key, descriptor);
+      else delete Object.prototype[key];
+    }
+  });
+
+  const session = openCanonicalQuerySession({ root });
+  const aggregate = session.aggregateJsonLines({
+    under: "traces",
+    onInvalid: "skip",
+    operations: [{ id: "records", operation: "count" }],
+  });
+
+  assert.equal(aggregate.files_scanned, 2);
+  assert.equal(aggregate.results.records, 4);
+});
+
+test("JSONL scan limits are restrictive, explicit, and cannot be widened per query", (t) => {
+  const { root } = fixture(t);
+  const cases = [
+    ["maxFiles", 1, "traces"],
+    ["maxTotalBytes", 1, "traces/ST-1.jsonl"],
+    ["maxFileBytes", 1, "traces/ST-1.jsonl"],
+    ["maxLines", 1, "traces/ST-1.jsonl"],
+    ["maxLineBytes", 8, "traces/ST-1.jsonl"],
+    ["maxJsonDepth", 1, "traces/ST-1.jsonl"],
+    ["maxRetainedBytes", 1, "traces/ST-1.jsonl"],
+  ];
+  for (const [limit, value, under] of cases) {
+    const session = openCanonicalQuerySession({ root, jsonLinesLimits: { [limit]: value } });
+    assert.throws(
+      () => session.aggregateJsonLines({
+        under,
+        onInvalid: "skip",
+        operations: [{
+          id: "selected",
+          operation: "first",
+          project: ["id"],
+        }],
+      }),
+      (error) => error instanceof CanonicalStoreError
+        && error.code === "json_lines_limit_exceeded"
+        && error.message.includes(limit),
+      limit,
+    );
+  }
+
+  const session = openCanonicalQuerySession({ root });
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces",
+      limits: { maxFiles: 1 },
+      onInvalid: "skip",
+      operations: [{ id: "records", operation: "count" }],
+    }),
+    (error) => error instanceof CanonicalStoreError
+      && error.code === "json_lines_limit_exceeded"
+      && error.message.includes("maxFiles"),
+  );
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces",
+      limits: { maxFiles: 2_049 },
+      operations: [{ id: "records", operation: "count" }],
+    }),
+    /cannot exceed the session limit/u,
+  );
+});
+
+test("JSONL aggregate distinguishes an explicit null from a missing projected field", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/traces/projection-presence.jsonl", [
+    '{"id":"explicit-null","value":null}',
+    '{"id":"missing"}',
+    "",
+  ].join("\n"));
+  const session = openCanonicalQuerySession({ root });
+
+  const selected = session.aggregateJsonLines({
+    under: "traces/projection-presence.jsonl",
+    operations: [{
+      id: "explicit_null",
+      operation: "first",
+      where: { field: "id", equals: "explicit-null" },
+      project: ["value"],
+    }],
+  });
+  assert.deepEqual(selected.results.explicit_null.value, { value: null });
+
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/projection-presence.jsonl",
+      operations: [{ id: "missing", operation: "last", project: ["value"] }],
+    }),
+    (error) => error instanceof CanonicalStoreError
+      && error.code === "json_lines_projection_missing",
+  );
+});
+
+test("JSONL aggregation rejects drift in an earlier shard and file-set changes", async (t) => {
+  await t.test("earlier shard changes while a later shard is read", (childTest) => {
+    const { root, write } = fixture(childTest);
+    write(".sdlc/aggregate-shards/a.jsonl", '{"id":"a"}\n');
+    write(".sdlc/aggregate-shards/b.jsonl", '{"id":"b"}\n');
+    const baseStore = openCanonicalStore({ root });
+    const store = {
+      ...baseStore,
+      snapshot(input) {
+        const snapshot = baseStore.snapshot(input);
+        if (!String(input).endsWith("aggregate-shards/b.jsonl")) return snapshot;
+        return Object.freeze({
+          ...snapshot,
+          readText(options) {
+            const raw = snapshot.readText(options);
+            write(".sdlc/aggregate-shards/a.jsonl", '{"id":"changed"}\n');
+            return raw;
+          },
+        });
+      },
+    };
+    const session = openCanonicalQuerySession({ root, store });
+    assert.throws(
+      () => session.aggregateJsonLines({
+        under: "aggregate-shards",
+        operations: [{ id: "records", operation: "count" }],
+      }),
+      (error) => error instanceof CanonicalStoreError
+        && ["source_changed", "file_changed"].includes(error.code),
+    );
+  });
+
+  await t.test("a shard is added during the scan", (childTest) => {
+    const { root, write } = fixture(childTest);
+    write(".sdlc/aggregate-shards/a.jsonl", '{"id":"a"}\n');
+    const baseStore = openCanonicalStore({ root });
+    const store = {
+      ...baseStore,
+      snapshot(input) {
+        const snapshot = baseStore.snapshot(input);
+        if (!String(input).endsWith("aggregate-shards/a.jsonl")) return snapshot;
+        return Object.freeze({
+          ...snapshot,
+          readText(options) {
+            const raw = snapshot.readText(options);
+            write(".sdlc/aggregate-shards/b.jsonl", '{"id":"b"}\n');
+            return raw;
+          },
+        });
+      },
+    };
+    const session = openCanonicalQuerySession({ root, store });
+    assert.throws(
+      () => session.aggregateJsonLines({
+        under: "aggregate-shards",
+        operations: [{ id: "records", operation: "count" }],
+      }),
+      (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
+    );
+  });
+});
+
+test("production trace scans preserve CRLF order, source authority, and invalid filtering", (t) => {
+  const { root, write } = fixture(t);
+  write(".sdlc/traces/ST-CRLF.jsonl", [
+    '{"id":"one","story_id":"ST-CRLF","type":"decision","source":"forged"}',
+    "",
+    "{broken",
+    '{"id":"two","story_id":"ST-CRLF","type":"test"}',
+    "",
+  ].join("\r\n"));
+  const session = openCanonicalQuerySession({ root });
+
+  const included = session.traceEvents({ storyId: "ST-CRLF" });
+  assert.deepEqual(included.map((event) => event.id || event.type), ["one", "invalid", "two"]);
+  assert.deepEqual(included[0].source, { path: ".sdlc/traces/ST-CRLF.jsonl", line: 1 });
+  assert.deepEqual(included[1].source, { path: ".sdlc/traces/ST-CRLF.jsonl", line: 3 });
+  assert.deepEqual(included[2].source, { path: ".sdlc/traces/ST-CRLF.jsonl", line: 4 });
+  assert.deepEqual(
+    session.traceEvents({ storyId: "ST-CRLF", includeInvalid: false }).map((event) => event.id),
+    ["one", "two"],
+  );
+  assert.equal(session.metrics().read_json_lines_calls, 0);
+});
+
+test("story-filtered production trace scans preserve recursive basename matching", (t) => {
+  const { root, write } = fixture(t);
+  write(
+    ".sdlc/traces/nested/ST-1.jsonl",
+    '{"id":"TR-NESTED","story_id":"ST-1","type":"decision"}\n',
+  );
+  const session = openCanonicalQuerySession({ root });
+
+  const events = session.traceEvents({ storyId: "ST-1", includeInvalid: false });
+  assert.deepEqual(events.map((event) => event.id), ["TR-1", "TR-2", "TR-NESTED"]);
+  assert.deepEqual(events[2].source, {
+    path: ".sdlc/traces/nested/ST-1.jsonl",
+    line: 1,
+  });
 });
 
 test("canonicalizes parsed JSON without changing immutable JSON semantics", (t) => {
@@ -239,6 +624,45 @@ test("does not cache parsed JSON when its verified source changes during parsing
     () => session.readJson(sourcePath),
     (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
   );
+  assert.equal(session.metrics().parsed_cache_entries, 0);
+});
+
+test("does not return a JSONL aggregate when its verified source drifts during scanning", (t) => {
+  const { root, write } = fixture(t);
+  const sourcePath = ".sdlc/traces/aggregate-drift.jsonl";
+  write(sourcePath, '{"id":"before","story_id":"ST-1"}\n');
+  const baseStore = openCanonicalStore({ root });
+  const store = {
+    ...baseStore,
+    snapshot(input) {
+      const snapshot = baseStore.snapshot(input);
+      if (!String(input).endsWith("aggregate-drift.jsonl")) return snapshot;
+      return Object.freeze({
+        ...snapshot,
+        readText(options) {
+          const value = snapshot.readText(options);
+          write(sourcePath, '{"id":"after","story_id":"ST-1"}\n');
+          return value;
+        },
+      });
+    },
+  };
+  const session = openCanonicalQuerySession({ root, store });
+
+  assert.throws(
+    () => session.aggregateJsonLines({
+      under: "traces/aggregate-drift.jsonl",
+      operations: [{
+        id: "selected",
+        operation: "last",
+        where: { field: "story_id", equals: "ST-1" },
+        project: ["id"],
+        includeSource: true,
+      }],
+    }),
+    (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
+  );
+  assert.equal(session.metrics().aggregate_records_retained, 0);
   assert.equal(session.metrics().parsed_cache_entries, 0);
 });
 
