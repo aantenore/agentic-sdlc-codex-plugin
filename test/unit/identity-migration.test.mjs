@@ -38,8 +38,13 @@ test("identity migration routes every physical mutation through the injected gat
   });
   const mutations = [];
   const revalidated = [];
+  let preparedDescriptor = null;
   const mutationGateway = (request, effect) => {
     mutations.push(request);
+    return effect();
+  };
+  mutationGateway.prepare = (descriptor, effect) => {
+    preparedDescriptor = descriptor;
     return effect();
   };
   mutationGateway.revalidate = (request) => {
@@ -74,6 +79,18 @@ test("identity migration routes every physical mutation through the injected gat
     assert.ok(operations.has(operation), `missing governed identity operation ${operation}`);
   }
   assert.ok(mutations.every(({ path: mutationPath }) => path.isAbsolute(mutationPath)));
+  assert.ok(preparedDescriptor, "prepared gateway must receive the reviewed execution descriptor");
+  const canonicalRoot = fs.realpathSync.native(project);
+  const exact = new Set(preparedDescriptor.exact_mutations.map(({ operation, path: mutationPath }) =>
+    `${operation}\0${mutationPath}`));
+  for (const request of mutations) {
+    const projectPath = path.relative(canonicalRoot, request.path).split(path.sep).join("/");
+    assert.ok(exact.has(`${request.operation}\0${projectPath}`), `unprepared physical mutation ${request.operation} ${projectPath}`);
+    if (projectPath.endsWith(".tmp")) {
+      assert.match(projectPath, /\.identity-[a-f0-9]{24}\.tmp$|identity-migration-(?:lock|journal)[.-]/u);
+      assert.doesNotMatch(projectPath, /\.\d+\.[a-f0-9]{12}\.tmp$/u);
+    }
+  }
   for (const operation of [
     "path.link.source",
     "path.link.target",
@@ -164,6 +181,30 @@ test("identity migration gateway denial happens before the first physical byte",
     },
   }), /gateway denied before effect/u);
   assert.equal(denied[0].operation, "file.write");
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
+test("identity migration rejects a tampered execution descriptor before its first byte", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const tamperedDescriptor = structuredClone(plan.execution_descriptor);
+  tamperedDescriptor.lock_temporary_path = ".tampered-identity-lock.tmp";
+  const tamperedPlan = { ...plan, execution_descriptor: tamperedDescriptor };
+  const mutationGateway = (request, effect) => effect();
+  mutationGateway.prepare = (_descriptor, effect) => effect();
+
+  assert.throws(
+    () => applyIdentityMigration(tamperedPlan, { mutationGateway }),
+    /execution descriptor is missing or changed/u,
+  );
   assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
   assert.deepEqual(
     fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
@@ -337,6 +378,11 @@ test("identity migration refuses a stale plan without overwriting the newer proj
   assert.throws(() => applyIdentityMigration(plan), /changed after planning/u);
   assert.equal(fs.readFileSync(projectPath, "utf8"), changed);
   assert.equal(fs.existsSync(path.join(project, plan.receipt_path)), false);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+    "stale state must fail before the deterministic lock temp is created",
+  );
 });
 
 test("identity migration fails closed on unsupported matches and pre-existing hash corruption", (t) => {

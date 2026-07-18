@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createGovernancePolicy } from "../../lib/governance/policy-engine.mjs";
+import { planIdentityMigration } from "../../lib/identity-migration.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
@@ -53,6 +54,30 @@ function denyAllPolicy() {
     decision_ttl_seconds: 60,
     role_bindings: [],
     rules: [],
+  });
+}
+
+function identityExecutionPolicy(descriptor, omittedKey = null) {
+  const action = "migration.identity";
+  const exact = descriptor.exact_mutations.filter(({ operation, path: projectPath }) =>
+    `${operation}\0${projectPath}` !== omittedKey);
+  return createGovernancePolicy({
+    id: "POLICY-IDENTITY-EXACT",
+    valid_from: "2026-01-01T00:00:00.000Z",
+    expires_at: "2030-01-01T00:00:00.000Z",
+    decision_ttl_seconds: 60,
+    role_bindings: [{ id: "BIND-HOST-IDENTITY", role: "runner", actor: verifiedCliActor() }],
+    rules: exact.map(({ operation, path: projectPath }, index) => ({
+      id: `ALLOW-IDENTITY-${index + 1}`,
+      effect: "allow",
+      action,
+      scope_refs: [
+        { kind: "mutation_operation", id: operation },
+        { kind: "project_path", id: projectPath },
+      ],
+      evidence_refs: [],
+      actor_roles: ["runner"],
+    })),
   });
 }
 
@@ -269,6 +294,129 @@ test("identity dual-path revalidation remains non-blocking in audit and fail-clo
   assert.deepEqual(fs.readFileSync(enforceProjectPath), enforceBefore);
   assert.deepEqual(
     fs.readdirSync(enforceProject).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
+test("identity migration applies under an exact inline enforce descriptor", (t) => {
+  const project = projectFixture(t, "identity-inline-enforce");
+  const sourceEmail = "legacy-inline-governance@example.invalid";
+  const targetEmail = "current-inline-governance@example.test";
+  initialize(project);
+  const projectPath = path.join(project, ".sdlc", "project.json");
+  const projectRecord = JSON.parse(fs.readFileSync(projectPath, "utf8"));
+  projectRecord.owner_email = sourceEmail;
+  fs.writeFileSync(projectPath, `${JSON.stringify(projectRecord, null, 2)}\n`);
+  unpinWithGovernance(project, denyAllPolicy());
+
+  const firstPlan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: sourceEmail }, target: { email: targetEmail } },
+  });
+  const firstDescriptor = firstPlan.execution_descriptor;
+  const omitted = firstDescriptor.exact_mutations.find(({ operation, path: mutationPath }) =>
+    operation === "file.write" && mutationPath === firstDescriptor.lock_temporary_path);
+  assert.ok(omitted, "descriptor must bind the physical lock temp write");
+
+  unpinWithGovernance(project, identityExecutionPolicy(
+    firstDescriptor,
+    `${omitted.operation}\0${omitted.path}`,
+  ));
+  const deniedPreview = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  ]);
+  assert.equal(deniedPreview.status, 0, deniedPreview.stderr);
+  const deniedPlan = JSON.parse(deniedPreview.stdout);
+  assert.deepEqual(
+    deniedPlan.execution_descriptor.exact_mutations,
+    firstDescriptor.exact_mutations,
+    "policy review must not randomize physical execution paths",
+  );
+  const beforeDenied = fs.readFileSync(projectPath);
+  const denied = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+    "--apply",
+    "--plan-hash", deniedPlan.plan_hash,
+  ]);
+  assert.notEqual(denied.status, 0, denied.stdout);
+  assert.match(denied.stderr, /no approval for this exact action and file/u);
+  assert.deepEqual(fs.readFileSync(projectPath), beforeDenied);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+    "a missing batch tuple must deny before the lock temp is created",
+  );
+
+  unpinWithGovernance(project, identityExecutionPolicy(firstDescriptor));
+  const preview = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  ]);
+  assert.equal(preview.status, 0, preview.stderr);
+  const reviewed = JSON.parse(preview.stdout);
+  assert.deepEqual(reviewed.execution_descriptor.exact_mutations, firstDescriptor.exact_mutations);
+  const applied = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+    "--apply",
+    "--plan-hash", reviewed.plan_hash,
+  ]);
+  assert.equal(applied.status, 0, applied.stderr);
+  assert.equal(JSON.parse(applied.stdout).status, "applied");
+  assert.equal(JSON.parse(fs.readFileSync(projectPath, "utf8")).owner_email, targetEmail);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
+test("identity migration rejects enforce pointer receipts before any write", (t) => {
+  const project = projectFixture(t, "identity-pointer-enforce");
+  const sourceEmail = "legacy-pointer-governance@example.invalid";
+  const targetEmail = "current-pointer-governance@example.test";
+  initialize(project);
+  const projectPath = path.join(project, ".sdlc", "project.json");
+  const projectRecord = JSON.parse(fs.readFileSync(projectPath, "utf8"));
+  projectRecord.owner_email = sourceEmail;
+  fs.writeFileSync(projectPath, `${JSON.stringify(projectRecord, null, 2)}\n`);
+  const governanceRoot = path.join(project, ".sdlc", "governance");
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.writeFileSync(path.join(governanceRoot, "policy.json"), `${JSON.stringify(denyAllPolicy(), null, 2)}\n`);
+  unpinWithGovernance(project, {
+    mode: "enforce",
+    policy_file: ".sdlc/governance/policy.json",
+    decision_receipts_root: ".sdlc/governance/decisions",
+    use_receipts_root: ".sdlc/governance/uses",
+    revocations_root: ".sdlc/governance/revocations",
+    fail_closed: true,
+  });
+  const preview = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  ]);
+  assert.equal(preview.status, 0, preview.stderr);
+  const before = fs.readFileSync(projectPath);
+  const rejected = run(project, [
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+    "--apply",
+    "--plan-hash", JSON.parse(preview.stdout).plan_hash,
+  ]);
+  assert.notEqual(rejected.status, 0, rejected.stdout);
+  assert.match(rejected.stderr, /receipts live inside the tree being replaced/u);
+  assert.deepEqual(fs.readFileSync(projectPath), before);
+  assert.equal(fs.existsSync(path.join(governanceRoot, "decisions")), false);
+  assert.equal(fs.existsSync(path.join(governanceRoot, "uses")), false);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
     [],
   );
 });

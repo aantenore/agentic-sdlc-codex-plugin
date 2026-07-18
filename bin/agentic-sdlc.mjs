@@ -192,6 +192,7 @@ import {
   createProjectMutationGovernance,
   runWithMutationGovernance,
   withGovernedMutation,
+  withGovernedMutationBatch,
 } from "../lib/governance/mutation-guard.mjs";
 import {
   CliPresetError,
@@ -27439,6 +27440,17 @@ function migrateIdentity(context, options) {
   }
 
   try {
+    const governancePolicy = context.config?.governance_policy;
+    if (
+      options.apply
+      && governancePolicy?.kind !== "governance_policy"
+      && governancePolicy?.mode === "enforce"
+    ) {
+      fail(
+        "Identity migration cannot yet run with enforced pointer-policy receipts because those receipts live inside the tree being replaced. "
+        + "No files were changed. Use a reviewed inline policy for this migration, or keep pointer governance in audit mode.",
+      );
+    }
     const plan = planIdentityMigration({
       projectRoot: context.root,
       mapping,
@@ -27454,15 +27466,32 @@ function migrateIdentity(context, options) {
     }
     const result = options.apply
       ? applyIdentityMigration(plan, {
-          mutationGateway: executeIdentityMutation,
-          rebuildDerived: ({ projectRoot, sdlcRoot }) => {
+          mutationGateway: governancePolicy?.kind === "governance_policy"
+            ? executePreparedIdentityMutation
+            : executeIdentityMutation,
+          rebuildDerived: ({
+            projectRoot,
+            sdlcRoot,
+            logicalProjectRoot,
+            execution_descriptor: executionDescriptor,
+          }) => {
             const stagedContext = { ...context, root: projectRoot, sdlcRoot };
             const cache = buildCache(stagedContext);
             const index = buildIndex(stagedContext);
             cache.root = context.root;
             index.root = context.root;
-            writeJsonFile(path.join(sdlcRoot, "cache", CACHE_FILE_NAME), cache, { force: true });
-            writeJsonFile(path.join(sdlcRoot, "indexes", "kb-index.json"), index, { force: true });
+            const cachePath = path.join(sdlcRoot, "cache", CACHE_FILE_NAME);
+            const indexPath = path.join(sdlcRoot, "indexes", "kb-index.json");
+            writeJsonFile(cachePath, cache, {
+              force: true,
+              preparedTempPath: preparedIdentityWritePath(logicalProjectRoot, executionDescriptor, cachePath),
+              preauthorizedMutation: governancePolicy?.kind === "governance_policy",
+            });
+            writeJsonFile(indexPath, index, {
+              force: true,
+              preparedTempPath: preparedIdentityWritePath(logicalProjectRoot, executionDescriptor, indexPath),
+              preauthorizedMutation: governancePolicy?.kind === "governance_policy",
+            });
           },
           validateAfter: ({ projectRoot, sdlcRoot }) => {
             const stagedContext = { ...context, root: projectRoot, sdlcRoot };
@@ -33411,6 +33440,39 @@ executeIdentityMutation.revalidate = function revalidateIdentityMutation(request
   return true;
 };
 
+function executePreparedIdentityMutation(request, effect) {
+  assertMutationExecutionAuthorized(request);
+  return effect();
+}
+
+executePreparedIdentityMutation.revalidate = function revalidatePreparedIdentityMutation(request) {
+  assertMutationExecutionAuthorized(request);
+  return true;
+};
+
+executePreparedIdentityMutation.prepare = function prepareIdentityMutationBatch(descriptor, effect) {
+  if (!descriptor || !Array.isArray(descriptor.exact_mutations)) {
+    throw new MutationGovernanceError(
+      "Identity migration is missing its reviewed exact mutation descriptor",
+      "MUTATION_BATCH_INVALID",
+    );
+  }
+  return withGovernedMutationBatch(descriptor.exact_mutations, effect);
+};
+
+function preparedIdentityWritePath(projectRoot, descriptor, targetPath) {
+  const projectPath = path.relative(projectRoot, targetPath).split(path.sep).join("/");
+  const prepared = descriptor?.prepared_writes?.find((entry) => entry.target_path === projectPath);
+  if (!prepared) {
+    throw new MutationGovernanceError(
+      `Identity migration tried to write '${projectPath}' outside its reviewed execution descriptor`,
+      "MUTATION_BATCH_MISS",
+      { project_path: projectPath },
+    );
+  }
+  return path.join(projectRoot, ...prepared.temporary_path.split("/"));
+}
+
 function removePathGoverned(filePath, options = {}) {
   const operation = options.recursive ? "directory.remove" : "file.remove";
   return withGovernedMutation({ operation, path: filePath }, () => {
@@ -33439,6 +33501,10 @@ function renamePathGoverned(sourcePath, targetPath) {
 }
 
 function writeTextFile(filePath, content, options = {}) {
+  if (options.preauthorizedMutation) {
+    assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+    return writeTextFileAuthorized(filePath, content, options);
+  }
   return withGovernedMutation({ operation: "file.write", path: filePath }, () =>
     writeTextFileAuthorized(filePath, content, options));
 }
@@ -33447,7 +33513,7 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
   assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
-  ensureDir(parentPath);
+  ensureDir(parentPath, { preauthorizedMutation: options.preauthorizedMutation });
   const parentIdentity = captureDirectoryIdentity(parentPath);
   if (fs.existsSync(filePath) && !options.force) {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
@@ -33497,21 +33563,52 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
     return true;
   }
   if (options.force) {
-    const tempPath = path.join(
+    const tempPath = options.preparedTempPath ?? path.join(
       parentPath,
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
-    try {
-      writeFileToStableParent(tempPath, content, parentIdentity, {
-        governanceTargetPath: filePath,
+    if (options.preparedTempPath && path.dirname(path.resolve(tempPath)) !== path.resolve(parentPath)) {
+      fail(`Prepared identity migration temp path must stay beside its target: ${filePath}`);
+    }
+    const executePhysical = (request, callback) => {
+      if (options.preauthorizedMutation) {
+        assertMutationExecutionAuthorized(request);
+        return callback();
+      }
+      return withGovernedMutation(request, () => {
+        assertMutationExecutionAuthorized(request);
+        return callback();
       });
+    };
+    try {
+      if (options.preparedTempPath) {
+        executePhysical({ operation: "file.write", path: tempPath }, () =>
+          writeFileToStableParent(tempPath, content, parentIdentity, {
+            governanceTargetPath: tempPath,
+          }));
+      } else {
+        writeFileToStableParent(tempPath, content, parentIdentity, {
+          governanceTargetPath: filePath,
+        });
+      }
       assertDirectoryIdentity(parentPath, parentIdentity);
-      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
-      fs.renameSync(tempPath, filePath);
+      if (options.preparedTempPath) {
+        executePhysical({ operation: "path.rename.source", path: tempPath }, () =>
+          executePhysical({ operation: "path.rename.target", path: filePath }, () =>
+            fs.renameSync(tempPath, filePath)));
+      } else {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+        fs.renameSync(tempPath, filePath);
+      }
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
-        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
-        fs.rmSync(tempPath, { force: true });
+        if (options.preparedTempPath) {
+          executePhysical({ operation: "file.remove", path: tempPath }, () =>
+            fs.rmSync(tempPath, { force: true }));
+        } else {
+          assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+          fs.rmSync(tempPath, { force: true });
+        }
       }
     }
     return true;
@@ -33844,7 +33941,7 @@ function assertNoSymlinkPathSegments(filePath) {
   }
 }
 
-function ensureDir(dirPath) {
+function ensureDir(dirPath, options = {}) {
   if (fs.existsSync(dirPath)) {
     const entry = fs.lstatSync(dirPath);
     if (entry.isSymbolicLink() || !entry.isDirectory()) {
@@ -33853,7 +33950,12 @@ function ensureDir(dirPath) {
     return false;
   }
   const parentPath = path.dirname(dirPath);
-  ensureDir(parentPath);
+  ensureDir(parentPath, options);
+  if (options.preauthorizedMutation) {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
+    fs.mkdirSync(dirPath);
+    return true;
+  }
   return withGovernedMutation({ operation: "directory.create", path: dirPath }, () => {
     assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
     fs.mkdirSync(dirPath);
