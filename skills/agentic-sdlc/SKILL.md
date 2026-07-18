@@ -163,7 +163,29 @@ Never store project contracts or project KB state inside the plugin installation
      --requirement REQ-001
    ```
 
-13. Before every delivery, propose and obtain explicit approval for one delivery execution profile. Ask even when another PR or local release already implemented the same requirement. A delivery profile is deliberately one implementation lane: exactly one story and its one approved contract, for exactly one PR or local release. If several stories must ship together, agree an aggregation story/contract first instead of placing unrelated contracts in one profile. Show the requirement ceiling, recommended and requested level, effective cap, exact target, canonical actions, write paths, automatic phases, checkpoints, exclusions, and what would require another decision. The user chooses `supervised`, `checkpointed`, or `bounded-autonomous`; history may inform the recommendation but never grant the choice. Use `--json` when presenting the proposed record so the reviewer can inspect the complete hash-bound subject, not only a prose summary.
+13. Before every delivery, ask for and obtain one fresh working-mode choice. Never inherit, infer, or reuse the choice from an earlier delivery, even when it implements the same approved requirement. First show only the concrete destination, files that may change, actions that remain protected, expiry, and material risks in normal product language. Do not lead with internal levels, policy modes, record IDs, hashes, or approval-evidence terminology. A delivery execution profile remains deliberately exact and non-reusable: one story, its one approved contract, and one concrete delivery. If several stories must ship together, agree an aggregation story and contract first.
+
+   For a pull request, ask in the user's language. In Italian, use this copy:
+
+   > Per questa PR, quanto vuoi che lavori in autonomia?
+   >
+   > 1. Guidato: ti chiedo conferma prima dei passaggi importanti.
+   > 2. Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate.
+   > 3. Autonomia completa entro questi limiti: completo questa PR senza pause ordinarie.
+   >
+   > Questa scelta vale solo per questa PR e non sarà riutilizzata.
+
+   For a local release, use a separate question; never combine the two destinations in one autonomy question:
+
+   > Per questo rilascio locale, quanto vuoi che lavori in autonomia?
+   >
+   > 1. Guidato: ti chiedo conferma prima dei passaggi importanti.
+   > 2. Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate.
+   > 3. Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie.
+   >
+   > Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata.
+
+   Map the explicit answer internally only after the plain-language choice: `Guidato` → `supervised`, `Autonomia con controlli` → `checkpointed`, and `Autonomia completa entro questi limiti` → `bounded-autonomous`. The `--level` value is mandatory for every proposal and must come from this delivery's current answer; past choices may inform a recommendation but never supply the value. Keep the complete JSON record for machine processing and place its IDs, codes, hashes, exact actions, and policy calculations only after `Technical details (optional):` or `Dettagli tecnici (facoltativi):`.
 
    For a pull request:
 
@@ -226,7 +248,11 @@ Never store project contracts or project KB state inside the plugin installation
      --id AUT-PR-184
    ```
 
-   In the default `audit_only` authority mode, any requested `bounded-autonomous` level is intentionally narrowed to effective `checkpointed`, including for a local-only release. Do not describe that as bounded execution. To obtain effective `bounded-autonomous`, an external trusted host or CI must first issue an Ed25519-signed receipt for the exact delivery-profile approval subject. Configure `authority_policy.mode: host_verified` and the matching public key in `authority_policy.trusted_host_keys`, then pass that external receipt with `autonomy delivery approve --host-receipt-file <path.json>`. The CLI validates the receipt; it does not mint trusted authority for itself.
+   When the user chooses the most independent option but this installation cannot digitally verify the approver, use this primary explanation in Italian:
+
+   > Hai scelto autonomia completa entro i limiti concordati. In questa installazione posso però usare soltanto autonomia con controlli, perché il sistema registra l'approvazione ma non può verificare digitalmente chi l'ha data.
+
+   Only after the optional technical-details divider, explain that `audit_only` narrows requested `bounded-autonomous` to effective `checkpointed`. Explain the practical effect and how to enable verification: a trusted external host or CI issues an Ed25519-signed receipt for the exact delivery-profile approval subject; configure `authority_policy.mode: host_verified` and the matching public key in `authority_policy.trusted_host_keys`, then pass it with `autonomy delivery approve --host-receipt-file <path.json>`. The CLI validates external authority and never mints trusted authority for itself.
 
    Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Then evaluate task start with that profile. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. Otherwise the command returns the exact confirmation checkpoint; follow step 3 and rerun with `--confirm-start` or a matching authorization. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
 
@@ -241,7 +267,7 @@ Never store project contracts or project KB state inside the plugin installation
 
    The effective level is the minimum of host, project, requirement, delivery, contract, capability, environment, and budget. The profile is non-reusable, permits one concurrent run, and closes when terminal. Protected-branch merge, remote deployment, production access, destructive work, and material drift are explicit exceptions.
 
-   Every state-changing delivery action uses an authorize → execute → complete sequence. First request an authorization receipt for the exact canonical action and runtime target. If the command reports `checkpoint_required`, show that subject and rerun with `--confirm-action` plus formal approval attribution. Under `authority_policy.mode: host_verified`, this rerun must also supply `--host-receipt-file`; the external Ed25519 receipt signs action `autonomy.delivery.action.<canonical-action>` and the exact subject containing the profile, delivery, runtime target, and action details. In `audit_only`, the explicit approval is recorded but does not become host-verified authority. Then execute exactly the recorded operation through the host/tooling. Finally report `--outcome` with immutable evidence. For `git.commit`, bind the exact changed files with repeatable `--scope-path`; for `git.push`, bind the matching remote; for merge, bind the exact PR URL:
+   Every state-changing delivery action uses an authorize → execute → complete sequence. In the primary explanation say what operation is paused, its concrete target, what the person must decide, and what remains untouched. Put the internal receipt, canonical action, policy mode, codes, hashes, and command only after the optional technical-details divider. First request an authorization receipt for the exact canonical action and runtime target. If the command reports `checkpoint_required`, show the plain-language decision and rerun with `--confirm-action` plus formal approval attribution. Under `authority_policy.mode: host_verified`, this rerun must also supply `--host-receipt-file`; the external Ed25519 receipt signs action `autonomy.delivery.action.<canonical-action>` and the exact subject containing the profile, delivery, runtime target, and action details. In `audit_only`, the explicit approval is recorded but does not become host-verified authority. Then execute exactly the recorded operation through the host/tooling. Finally report `--outcome` with immutable evidence. For `git.commit`, bind the exact changed files with repeatable `--scope-path`; for `git.push`, bind the matching remote; for merge, bind the exact PR URL:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \

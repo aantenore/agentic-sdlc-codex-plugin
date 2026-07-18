@@ -5512,6 +5512,7 @@ function buildTaskStartDecision(context, options) {
     delivery_profile_id: getOptionString(options, "delivery-profile")
       ? normalizeId(getOptionString(options, "delivery-profile"))
       : null,
+    delivery_kind: null,
     delivery_profile_path: null,
     autonomy_decision: null,
     autonomy_decision_path: null,
@@ -5823,6 +5824,16 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
   const explicitProfileId = getOptionString(options, "delivery-profile")
     ? normalizeId(getOptionString(options, "delivery-profile"))
     : null;
+  let plannedProfile = null;
+  try {
+    plannedProfile = contract.delivery_execution_profile_id
+      ? readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id, { missingOk: true })
+      : null;
+  } catch {
+    // The normal validation path below reports an invalid selected record.
+    plannedProfile = null;
+  }
+  result.delivery_kind = plannedProfile?.delivery_kind || null;
   if (policy.mode === "observe" && !explicitProfileId) {
     result.autonomy = {
       mode: "observe",
@@ -5836,8 +5847,11 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
     result.execution_allowed = false;
     result.contract_action = "select_delivery_autonomy";
     pushAllUnique(result.blocking_reasons, ["autonomy_selection_required"]);
+    const exactDeliveryLabel = result.delivery_kind === "local_release"
+      ? "this exact local release"
+      : result.delivery_kind === "pull_request" ? "this exact pull request" : "this exact delivery";
     pushAllUnique(result.questions, [
-      `Select the already reviewed autonomy profile for this exact pull request or local release. Contract ${contract.id} expects ${contract.delivery_execution_profile_id || "a new profile"}; the choice is never inferred from a previous delivery.`,
+      `Select the already reviewed autonomy profile for ${exactDeliveryLabel}. Contract ${contract.id} expects ${contract.delivery_execution_profile_id || "a new profile"}; the choice is never inferred from a previous delivery.`,
     ]);
     pushAllUnique(result.next_commands, [
       `agentic-sdlc autonomy delivery status${contract.delivery_execution_profile_id ? ` --id ${contract.delivery_execution_profile_id}` : ""}`,
@@ -5856,6 +5870,7 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
   }
   try {
     const profile = readDeliveryAutonomyProfile(context, explicitProfileId);
+    result.delivery_kind = profile.delivery_kind;
     const actualStory = result.story_id ? readStory(context, result.story_id) : null;
     const exactStoryRef = profile.story_refs.length === 1 ? profile.story_refs[0] : null;
     const exactContractRef = profile.contract_refs.length === 1 ? profile.contract_refs[0] : null;
@@ -6187,7 +6202,7 @@ function renderTaskStartAssistantMessage(decision) {
     ].filter(Boolean).join("\n");
   }
   const explanations = Array.from(new Set(
-    (decision.blocking_reasons || []).map((reason) => userFriendlyBlockingReason(reason, locale)),
+    (decision.blocking_reasons || []).map((reason) => userFriendlyBlockingReason(reason, locale, decision)),
   )).filter(Boolean);
   const lines = [
     italian ? "Mi serve una decisione rapida prima di continuare." : "I need one quick decision before I continue.",
@@ -6218,6 +6233,42 @@ function renderTaskStartAssistantMessage(decision) {
   return lines.filter(Boolean).join("\n");
 }
 
+function taskStartAutonomyCopy(deliveryKind, locale = "en") {
+  const italian = locale === "it";
+  const localRelease = deliveryKind === "local_release";
+  return italian
+    ? {
+        question: localRelease
+          ? "Per questo rilascio locale, quanto vuoi che lavori in autonomia?"
+          : "Per questa PR, quanto vuoi che lavori in autonomia?",
+        choices: [
+          "Guidato: ti chiedo conferma prima dei passaggi importanti.",
+          "Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate.",
+          localRelease
+            ? "Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie."
+            : "Autonomia completa entro questi limiti: completo questa PR senza pause ordinarie.",
+        ],
+        scope: localRelease
+          ? "Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata."
+          : "Questa scelta vale solo per questa PR e non sarà riutilizzata.",
+      }
+    : {
+        question: localRelease
+          ? "For this local release, how independently should I work?"
+          : "For this pull request, how independently should I work?",
+        choices: [
+          "Guided: I ask for confirmation before important steps.",
+          "Autonomy with checks: I proceed independently, but stop before the sensitive actions we agree.",
+          localRelease
+            ? "Full autonomy within these limits: I complete this local release without routine pauses."
+            : "Full autonomy within these limits: I complete this pull request without routine pauses.",
+        ],
+        scope: localRelease
+          ? "This choice applies only to this local release and will not be reused."
+          : "This choice applies only to this pull request and will not be reused.",
+      };
+}
+
 function taskDecisionExampleAnswer(decision, locale = "en") {
   const italian = locale === "it";
   switch (decision.contract_action) {
@@ -6240,9 +6291,12 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
         ? `“Avvia ${decision.story_id || "questa attività"} secondo ${decision.contract_id || "l’incarico approvato"}; fermati se devono cambiare ambito o budget.”`
         : `“Start ${decision.story_id || "this task"} under ${decision.contract_id || "the approved brief"}; stop and ask if scope or budget must change.”`;
     case "select_delivery_autonomy":
-      return italian
-        ? "“Per questa attività, chiedimi conferma a ogni passaggio importante / procedi da solo tra i momenti di revisione ma fermati prima dei passaggi delicati / completa questa pull request da solo entro i limiti mostrati.”"
-        : "“For this work, ask before every important step / work independently between review moments but pause before sensitive steps / complete this pull request independently within the displayed limits.”";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "“Indica prima la destinazione di questa consegna; poi scegli Guidato, Autonomia con controlli oppure Autonomia completa entro i limiti mostrati.”"
+          : "“Name this delivery's destination first, then choose Guided, Autonomy with checks, or Full autonomy within the displayed limits.”";
+      }
+      return `“${taskStartAutonomyCopy(decision.delivery_kind, locale).choices.join(" / ")}”`;
     case "repair_delivery_autonomy":
       return italian
         ? '“Mantieni separata questa consegna, correggi repository, branch, ambito o checkpoint esatti e rivalutala senza riutilizzare un’approvazione precedente.”'
@@ -6258,9 +6312,12 @@ function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
   const italian = locale === "it";
   switch (decision.contract_action) {
     case "select_delivery_autonomy":
-      return italian
-        ? "Quanto vuoi che proceda in autonomia per questa singola pull request o questo singolo rilascio locale?"
-        : "How independently should I work on this one pull request or local release?";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "Qual è la destinazione di questa consegna? Dopo averla definita, scegli quanto vuoi che lavori in autonomia."
+          : "What is this delivery's destination? Once it is defined, choose how independently I should work.";
+      }
+      return taskStartAutonomyCopy(decision.delivery_kind, locale).question;
     case "repair_delivery_autonomy":
       return italian
         ? "Confermi di correggere i limiti esatti di questa consegna e di rivalutarla senza riusare approvazioni precedenti?"
@@ -6278,25 +6335,25 @@ function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
 
 function taskStartAutonomyChoiceLines(decision, italian) {
   if (decision.contract_action !== "select_delivery_autonomy") return [];
-  return italian
-    ? [
-        "",
-        "Scelta per questa consegna:",
-        "- Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale?",
-        "  1. Chiedimi conferma prima di ogni passaggio importante.",
-        "  2. Procedi da solo tra un momento di revisione e l’altro, ma fermati prima dei passaggi delicati concordati.",
-        "  3. Completa questa consegna da solo entro i limiti mostrati; fermati se cambiano ambito, destinazione o rischio.",
-        "La scelta vale soltanto per questa consegna e non sarà riutilizzata per la successiva.",
-      ]
-    : [
-        "",
-        "Choice for this delivery:",
-        "- How independently should I work on this pull request or local release?",
-        "  1. Ask before every important step.",
-        "  2. Work independently between review moments, but pause before the sensitive steps we agree.",
-        "  3. Complete this delivery independently within the displayed limits; stop if scope, target, or risk changes.",
-        "This choice applies only to this delivery and will not be reused for the next one.",
-      ];
+  const locale = italian ? "it" : "en";
+  const choiceLines = (kind) => {
+    const copy = taskStartAutonomyCopy(kind, locale);
+    return [
+      copy.question,
+      ...copy.choices.map((choice, index) => `${index + 1}. ${choice}`),
+      copy.scope,
+    ];
+  };
+  if (decision.delivery_kind) return ["", ...choiceLines(decision.delivery_kind)];
+  return [
+    "",
+    italian
+      ? "Definisci prima la destinazione della consegna; la domanda applicabile sarà una delle due seguenti."
+      : "Define the delivery destination first; the applicable question will be one of the following.",
+    ...choiceLines("pull_request"),
+    "",
+    ...choiceLines("local_release"),
+  ];
 }
 
 function userFriendlyTaskStartIntro(decision, locale = "en") {
@@ -6328,9 +6385,18 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
         ? "Il lavoro è definito, ma prima di iniziare serve la tua conferma esplicita."
         : "The work is defined, but I need your explicit go-ahead before starting it.";
     case "select_delivery_autonomy":
-      return italian
-        ? "Il lavoro è definito, ma questa pull request o questo rilascio locale deve ancora avere una propria scelta del livello di autonomia."
-        : "The work is defined, but this pull request or local release still needs its own choice of how independently the agent may proceed.";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "Il lavoro è definito, ma la destinazione di questa consegna e il relativo modo di lavorare devono ancora essere scelti."
+          : "The work is defined, but this delivery's destination and working mode still need to be chosen.";
+      }
+      return decision.delivery_kind === "local_release"
+        ? (italian
+            ? "Il lavoro è definito, ma questo rilascio locale deve ancora avere una scelta propria che non sarà riutilizzata."
+            : "The work is defined, but this local release still needs its own choice, which will not be reused.")
+        : (italian
+            ? "Il lavoro è definito, ma questa PR deve ancora avere una scelta propria che non sarà riutilizzata."
+            : "The work is defined, but this pull request still needs its own choice, which will not be reused.");
     case "repair_delivery_autonomy":
       return italian
         ? "La scelta di autonomia non corrisponde più al perimetro o allo stato esatto della consegna e deve essere corretta prima di continuare."
@@ -6346,7 +6412,22 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
   }
 }
 
-function userFriendlyBlockingReason(code, locale = "en") {
+function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
+  if (code === "autonomy_selection_required") {
+    if (decision.delivery_kind === "local_release") {
+      return locale === "it"
+        ? "Scegli quanto posso lavorare in autonomia per questo solo rilascio locale; nessuna scelta precedente viene riutilizzata."
+        : "Choose how independently I may work for this local release only; no earlier choice is reused.";
+    }
+    if (decision.delivery_kind === "pull_request") {
+      return locale === "it"
+        ? "Scegli quanto posso lavorare in autonomia per questa sola PR; nessuna scelta precedente viene riutilizzata."
+        : "Choose how independently I may work for this pull request only; no earlier choice is reused.";
+    }
+    return locale === "it"
+      ? "Definisci la destinazione di questa consegna e scegli un modo di lavorare valido soltanto per essa."
+      : "Define this delivery's destination and choose a working mode that applies only to it.";
+  }
   if (locale === "it") {
     const italianExplanations = {
       autonomy_checkpoint_required: "La consegna può procedere da sola tra i momenti di revisione concordati, ma ora ha raggiunto un passaggio che richiede una nuova conferma.",
@@ -11379,6 +11460,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
         : profile.local_release_target.root_path}`,
       `Requested technical level: ${requestedLevel}`,
       `Highest currently enforceable level: ${guidance.details.effective_level}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       `Allowed actions: ${review.allowed_actions.join(", ")}`,
       `Allowed write paths: ${review.allowed_write_paths.join(", ")}`,
       `Checkpoints: ${review.checkpoints.join(", ") || "global exceptions only"}`,
@@ -11716,6 +11798,7 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
       `Requested technical level: ${active.requested_level}`,
       `Effective technical level: ${decision.effective_level}`,
       `Approval evidence: ${active.authority_assurance?.verified ? "trusted signature verified" : "recorded and hash-bound; identity not independently verified"}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       ...(decision.reason_codes.length > 0 ? [`Technical reason codes: ${decision.reason_codes.join(", ")}`] : []),
     ], options),
   ]);
@@ -13606,7 +13689,7 @@ function showDeliveryAutonomy(context, options) {
   const activeProfiles = profiles.filter((profile) => profile.lifecycle_status === "started").length;
   const listGuidance = profiles.length === 0
     ? {
-        result: italian ? "Non esistono ancora scelte di lavoro per una pull request o un rilascio locale." : "There are no working choices for a pull request or local release yet.",
+        result: italian ? "Non esistono ancora scelte di lavoro per consegne concrete." : "There are no working choices for concrete deliveries yet.",
         impact: italian ? "Nessuna consegna può ereditare automaticamente un livello di autonomia." : "No delivery can inherit a level of autonomy automatically.",
         required_decision: italian ? "Non devi decidere nulla finché non viene preparata una consegna concreta." : "You do not need to decide anything until a concrete delivery is prepared.",
         protection_boundary: italian ? "Il requisito da solo non autorizza lavoro, merge, rilasci, produzione, segreti o modifiche." : "The requirement alone authorizes no work, merge, release, production, secrets, or changes.",
@@ -13628,8 +13711,8 @@ function showDeliveryAutonomy(context, options) {
             ? (italian ? "Esamina separatamente ogni scelta ancora in attesa prima di iniziare quella consegna." : "Review each pending choice separately before starting that delivery.")
             : (italian ? "In questo momento non serve una nuova decisione per le consegne già concordate." : "No new decision is needed now for deliveries already agreed."),
         protection_boundary: italian
-          ? "Nessuna scelta vale per un’altra pull request o rilascio locale; merge, distribuzione, produzione, segreti e file non concordati restano separati."
-          : "No choice applies to another pull request or local release; merges, deployment, production, secrets, and unagreed files remain separate.",
+          ? "Nessuna scelta vale per un’altra consegna; merge, distribuzione, produzione, segreti e file non concordati restano separati."
+          : "No choice applies to another delivery; merges, deployment, production, secrets, and unagreed files remain separate.",
         next_action: profilesNeedingRepair > 0
           ? (italian ? "Apri i dettagli facoltativi della scelta non verificabile e correggila prima di continuare." : "Open the optional details for the unverifiable choice and correct it before continuing.")
           : profilesNeedingDecision > 0
@@ -13650,6 +13733,7 @@ function showDeliveryAutonomy(context, options) {
         `Requested technical level: ${profiles[0].requested_level}`,
         `Effective technical level: ${profiles[0].human_guidance.details.effective_level}`,
         `Lifecycle: ${profiles[0].lifecycle_status}`,
+        ...autonomyVerificationTechnicalLines(profiles[0].human_guidance, options),
         ...(profiles[0].human_guidance.details.reason_codes.length > 0
           ? [`Technical reason codes: ${profiles[0].human_guidance.details.reason_codes.join(", ")}`]
           : []),
@@ -13685,6 +13769,7 @@ function explainDeliveryAutonomy(context, options) {
       ...humanGuidanceLines(guidance, [
         `Profile: ${profileId}`,
         `Profile status: ${profile.status}`,
+        ...autonomyVerificationTechnicalLines(guidance, options),
       ], options),
     ]);
     return;
@@ -13715,6 +13800,7 @@ function explainDeliveryAutonomy(context, options) {
       `Requested technical level: ${decision.requested_level}`,
       `Effective technical level: ${decision.effective_level}`,
       `Execution status: ${decision.execution_status}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       ...(decision.reason_codes.length > 0 ? [`Technical reason codes: ${decision.reason_codes.join(", ")}`] : []),
     ], options),
   ]);
@@ -34148,6 +34234,19 @@ function humanGuidanceLines(guidance, detailLines = [], options = {}, summaryLin
     italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
     ...detailLines.map((line) => String(line).trim()).filter(Boolean).map((line) => `- ${line}`),
   ];
+}
+
+function autonomyVerificationTechnicalLines(guidance, options = {}) {
+  if (!guidance?.details?.digital_approver_verification) return [];
+  return humanGuidanceLocale(options) === "it"
+    ? [
+        "Verifica digitale dell'approvatore: non attiva; l'esecuzione effettiva resta checkpointed.",
+        "Per abilitarla: imposta authority_policy.mode=host_verified, configura la chiave pubblica Ed25519 in authority_policy.trusted_host_keys e fornisci l'approvazione esterna firmata con --host-receipt-file.",
+      ]
+    : [
+        "Digital approver verification: not active; effective execution remains checkpointed.",
+        "To enable it: set authority_policy.mode=host_verified, configure the Ed25519 public key in authority_policy.trusted_host_keys, and supply the externally signed approval with --host-receipt-file.",
+      ];
 }
 
 function compactIndexEntry(entry, sourceHash = null) {

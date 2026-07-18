@@ -400,6 +400,11 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   mustGit(project, ["remote", "set-url", "origin", "https://github.com/example/unapproved-repository.git"]);
   mustGit(project, ["remote", "set-url", "--add", "origin", expectedRemoteUrl]);
   mustGit(project, ["remote", "set-url", "--push", "--add", "origin", expectedRemoteUrl]);
+  const levelOptionIndex = proposalArgs.indexOf("--level");
+  mustFail([
+    ...proposalArgs.slice(0, levelOptionIndex),
+    ...proposalArgs.slice(levelOptionIndex + 2),
+  ], /Missing required option --level/u);
   mustFail([...proposalArgs, "--git-provider", "github-cli"], /cannot verify git\.push/u);
   const proposalResponse = mustRunJson([
     ...proposalArgs,
@@ -421,8 +426,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(proposed.use_policy.reusable_across_deliveries, false);
   assert.equal(proposed.pull_request_target.merge_allowed, false);
   assert.match(proposalResponse.human_guidance.impact, /project “Autonomy E2E”/u);
+  assert.match(proposalResponse.human_guidance.impact, /^You chose full autonomy within the agreed limits/u);
+  assert.match(proposalResponse.human_guidance.impact, /cannot digitally verify who gave it/u);
   assert.match(proposalResponse.human_guidance.impact, /destination is “codex\/pr-1” in repository “github\.com\/aantenore\/agentic-sdlc-codex-plugin”, starting from “main”/u);
   assert.match(proposalResponse.human_guidance.impact, /change only “src”/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /For this pull request, how independently should I work\?/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /2\. Autonomy with checks: I proceed independently/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /3\. Full autonomy within these limits: I complete this pull request/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /applies only to this pull request and will not be reused/u);
   assert.match(proposalResponse.human_guidance.required_decision, /before anything is deployed outside the local machine and before the pull request is merged/u);
   assert.match(proposalResponse.human_guidance.required_decision, /no separate calendar deadline.*ends when the pull request is merged, closed, or cancelled/u);
   assert.equal(proposalResponse.human_guidance.details.project_name, "Autonomy E2E");
@@ -452,7 +464,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   const deliveryGuidance = splitHumanGuidance(humanStatus.stdout);
   assert.match(deliveryGuidance.firstLine, /^Outcome: The working choice is active for one pull request/u);
-  assert.match(deliveryGuidance.primary, /What this changes in practice: .*continue between the review moments we agreed/u);
+  assert.match(deliveryGuidance.primary, /What this changes in practice: You chose full autonomy within the agreed limits/u);
+  assert.match(deliveryGuidance.primary, /cannot digitally verify who gave it/u);
   assert.match(deliveryGuidance.primary, /Next step: .*approved limits.*review moment/u);
   assert.match(deliveryGuidance.technical, /Profile: AUT-PR-1/u);
   assert.match(deliveryGuidance.technical, /Requested technical level: bounded-autonomous/u);
@@ -467,7 +480,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   const deliveryGuidanceItalian = splitHumanGuidance(humanExplainItalian.stdout, "it");
   assert.match(deliveryGuidanceItalian.firstLine, /^Risultato: La scelta del modo di lavorare è attiva per una sola pull request/u);
-  assert.match(deliveryGuidanceItalian.primary, /Cosa cambia in pratica: .*proseguire tra i momenti di revisione che abbiamo concordato/u);
+  assert.match(deliveryGuidanceItalian.primary, /Cosa cambia in pratica: Hai scelto autonomia completa entro i limiti concordati/u);
+  assert.match(deliveryGuidanceItalian.primary, /non può verificare digitalmente chi l'ha data/u);
   assert.match(deliveryGuidanceItalian.primary, /Prossimo passo: .*limiti approvati.*momento di revisione/u);
   assert.match(deliveryGuidanceItalian.technical, /Profile: AUT-PR-1/u);
   assert.match(deliveryGuidanceItalian.technical, /bounded-autonomous/u);
@@ -495,6 +509,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(profileMissing.execution_allowed, false);
   assert.equal(profileMissing.contract_action, "select_delivery_autonomy");
+  assert.equal(profileMissing.delivery_kind, "pull_request");
   assert.ok(profileMissing.blocking_reasons.includes("autonomy_selection_required"));
   const profileMissingHuman = mustRun([
     "task", "start",
@@ -502,14 +517,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--intent-json", intent,
   ]);
   const profileMissingGuidance = splitHumanGuidance(profileMissingHuman.stdout);
-  assert.match(profileMissingGuidance.primary, /How independently should I work on this pull request or local release/u);
-  assert.match(profileMissingGuidance.primary, /Ask before every important step/u);
-  assert.match(profileMissingGuidance.primary, /Work independently between review moments, but pause before the sensitive steps we agree/u);
-  assert.match(profileMissingGuidance.primary, /Complete this delivery independently within the displayed limits/u);
-  assert.match(profileMissingGuidance.primary, /choice applies only to this delivery and will not be reused/u);
+  assert.match(profileMissingGuidance.primary, /For this pull request, how independently should I work\?/u);
+  assert.match(profileMissingGuidance.primary, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(profileMissingGuidance.primary, /2\. Autonomy with checks: I proceed independently, but stop before the sensitive actions we agree/u);
+  assert.match(profileMissingGuidance.primary, /3\. Full autonomy within these limits: I complete this pull request without routine pauses/u);
+  assert.match(profileMissingGuidance.primary, /This choice applies only to this pull request and will not be reused/u);
+  assert.doesNotMatch(profileMissingGuidance.primary, /pull request or local release/u);
   assert.doesNotMatch(profileMissingGuidance.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
-  assert.match(profileMissingGuidance.technical, /this pull request or local release still needs its own choice/u);
-  assert.match(profileMissingGuidance.technical, /choice is never inherited from an earlier delivery/u);
+  assert.match(profileMissingGuidance.technical, /this pull request still needs its own choice/u);
+  assert.match(profileMissingGuidance.technical, /choice is never inferred from a previous delivery/u);
   const profileMissingItalian = mustRun([
     "task", "start",
     "--root", project,
@@ -520,13 +536,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(missingGuidanceItalian.firstLine, /^Risultato: Il lavoro non è ancora iniziato/u);
   assert.match(missingGuidanceItalian.primary, /Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa/u);
   assert.match(missingGuidanceItalian.primary, /Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare/u);
-  assert.match(missingGuidanceItalian.primary, /Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale/u);
-  assert.match(missingGuidanceItalian.primary, /Chiedimi conferma prima di ogni passaggio importante/u);
-  assert.match(missingGuidanceItalian.primary, /Procedi da solo tra un momento di revisione e l’altro/u);
-  assert.match(missingGuidanceItalian.primary, /Completa questa consegna da solo entro i limiti mostrati/u);
+  assert.match(missingGuidanceItalian.primary, /Per questa PR, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(missingGuidanceItalian.primary, /1\. Guidato: ti chiedo conferma prima dei passaggi importanti/u);
+  assert.match(missingGuidanceItalian.primary, /2\. Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate/u);
+  assert.match(missingGuidanceItalian.primary, /3\. Autonomia completa entro questi limiti: completo questa PR senza pause ordinarie/u);
+  assert.match(missingGuidanceItalian.primary, /Questa scelta vale solo per questa PR e non sarà riutilizzata/u);
+  assert.doesNotMatch(missingGuidanceItalian.primary, /PR o rilascio locale/u);
   assert.doesNotMatch(missingGuidanceItalian.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
-  assert.match(missingGuidanceItalian.technical, /questa pull request .* propria scelta del livello di autonomia/u);
-  assert.match(missingGuidanceItalian.technical, /Quanto vuoi che proceda in autonomia/u);
+  assert.match(missingGuidanceItalian.technical, /questa PR deve ancora avere una scelta propria/u);
+  assert.match(missingGuidanceItalian.technical, /Per questa PR, quanto vuoi che lavori in autonomia/u);
   assert.match(missingGuidanceItalian.technical, /autonomy_selection_required/u);
 
   const automatic = mustRunJson([
@@ -1061,7 +1079,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--root", project,
   ]).stdout);
   assert.match(multiDeliveryGuidance.firstLine, /^Outcome: I found 2 separate working choices for concrete deliveries/u);
-  assert.match(multiDeliveryGuidance.primary, /No choice applies to another pull request or local release/u);
+  assert.match(multiDeliveryGuidance.primary, /No choice applies to another delivery/u);
   assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-1/u);
   assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-2/u);
 
@@ -1633,10 +1651,11 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     "--write-path", outsideRoot,
   ], /must be a strict child of root_path/u);
 
-  const proposed = mustRunJson([
+  const proposalResponse = mustRunJson([
     ...baseArgs,
     "--write-path", releaseOutput,
-  ]).delivery_profile;
+  ]);
+  const proposed = proposalResponse.delivery_profile;
   assert.equal(proposed.delivery_kind, "local_release");
   assert.equal(proposed.local_release_target.environment, "local");
   assert.equal(proposed.local_release_target.root_path, releaseRoot);
@@ -1650,6 +1669,24 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(proposed.local_release_target.external_access_allowed, false);
   assert.equal(proposed.local_release_target.production_access_allowed, false);
   assert.equal(proposed.local_release_target.destructive_actions_allowed, false);
+  assert.match(proposalResponse.human_guidance.required_decision, /Per questo rilascio locale|For this local release/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /Full autonomy within these limits: I complete this local release/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /applies only to this local release and will not be reused/u);
+  assert.doesNotMatch(proposalResponse.human_guidance.required_decision, /pull request or local release/u);
+
+  const missingLocalSelection = mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LOCAL-1"),
+    "--locale", "it",
+  ]);
+  const missingLocalGuidance = splitHumanGuidance(missingLocalSelection.stdout, "it");
+  assert.match(missingLocalGuidance.primary, /Per questo rilascio locale, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(missingLocalGuidance.primary, /1\. Guidato: ti chiedo conferma prima dei passaggi importanti/u);
+  assert.match(missingLocalGuidance.primary, /2\. Autonomia con controlli: procedo da solo/u);
+  assert.match(missingLocalGuidance.primary, /3\. Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie/u);
+  assert.match(missingLocalGuidance.primary, /Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata/u);
+  assert.doesNotMatch(missingLocalGuidance.primary, /Per questa PR|PR o rilascio locale/u);
 
   const activated = mustRunJson([
     "autonomy", "delivery", "approve",
