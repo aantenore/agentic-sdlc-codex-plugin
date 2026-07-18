@@ -4,7 +4,7 @@
   "schema_version": "0.1.0",
   "status": "draft",
   "phase": "implementation",
-  "contract_id": "contract-ST-ENT-UX-implementation",
+  "contract_id": "contract-ST-ENT-UX-implementation-v3",
   "work_breakdown_id": null,
   "acceptance": [
     "Every user-facing message explains the outcome, practical impact, required decision, protection boundary, and next action in plain language before technical details.",
@@ -35,7 +35,7 @@
     "tests": []
   },
   "created_at": "2026-07-17T14:40:59.146Z",
-  "updated_at": "2026-07-18T00:22:45.234Z",
+  "updated_at": "2026-07-18T02:15:09.951Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -49,12 +49,12 @@
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "cli"
+      "source": "default"
     },
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-UX",
-      "head_sha": "7465944ac2f22b335fafdae9a006d338509c31fc",
+      "head_sha": "e947338d3af0580bfc87e3540f2d899ae100b329",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
