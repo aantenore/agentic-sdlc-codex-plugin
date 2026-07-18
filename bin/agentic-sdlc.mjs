@@ -981,6 +981,11 @@ async function main() {
       );
     }
     if (isIdentityRecovery) {
+      // Deliberate bootstrap exception: the identity module must restore the
+      // shadowed .sdlc tree before project config can be trusted or dispatched.
+      // Its transaction is independently bound to the exact journal, nonce,
+      // plan hash, canonical roots, and recovery claim; no other command enters
+      // this branch. createBootstrapMutationGrant tests the same exact boundary.
       await registry.dispatch(resolution, { ...invocation, context: { root: resolvedRoot } });
       return;
     }
@@ -2696,6 +2701,12 @@ function prepareWorkflowStartStaging(context, journal) {
 }
 
 function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName) {
+  return withGovernedMutation({ operation: "file.write", path: filePath }, () =>
+    writeWorkflowStartStagingFileDurablyAuthorized(filePath, expectedBytes, fileName));
+}
+
+function writeWorkflowStartStagingFileDurablyAuthorized(filePath, expectedBytes, fileName) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
   const parentIdentity = captureDirectoryIdentity(parentPath);
@@ -2720,6 +2731,7 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
         fail(`Workflow start staging entry differs from its durable journal: ${fileName}`);
       }
     } else {
+      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
       descriptor = fs.openSync(
         filePath,
         fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
@@ -2728,17 +2740,22 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
       verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     }
     if (writeRequired) {
+      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
       fs.ftruncateSync(descriptor, 0);
       if (
         process.env.NODE_ENV === "test"
         && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE === `during-staging-${fileName}`
         && expectedBytes.length > 1
       ) {
-        writeWorkflowBufferAtStart(descriptor, expectedBytes.subarray(0, Math.floor(expectedBytes.length / 2)));
+        writeWorkflowBufferAtStart(
+          descriptor,
+          expectedBytes.subarray(0, Math.floor(expectedBytes.length / 2)),
+          filePath,
+        );
         fs.fsyncSync(descriptor);
         process.kill(process.pid, "SIGKILL");
       }
-      writeWorkflowBufferAtStart(descriptor, expectedBytes);
+      writeWorkflowBufferAtStart(descriptor, expectedBytes, filePath);
       fs.fsyncSync(descriptor);
     }
   } finally {
@@ -2747,9 +2764,11 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
   syncWorkflowDirectory(parentPath);
 }
 
-function writeWorkflowBufferAtStart(descriptor, bytes) {
+function writeWorkflowBufferAtStart(descriptor, bytes, filePath) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   let offset = 0;
   while (offset < bytes.length) {
+    assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
     const written = fs.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
     if (written <= 0) fail("Workflow staging write made no progress.");
     offset += written;
@@ -3631,9 +3650,12 @@ function ensureWorkflowDirectoryDurably(directoryPath) {
   }
   const parentPath = path.dirname(directoryPath);
   ensureWorkflowDirectoryDurably(parentPath);
-  fs.mkdirSync(directoryPath);
-  syncWorkflowDirectory(parentPath);
-  return true;
+  return withGovernedMutation({ operation: "directory.create", path: directoryPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: directoryPath });
+    fs.mkdirSync(directoryPath);
+    syncWorkflowDirectory(parentPath);
+    return true;
+  });
 }
 
 function workflowTraceBytes(filePath) {
@@ -3734,12 +3756,19 @@ function workflowEventRecordStateLocked(filePath, value, anchor) {
 }
 
 function truncateWorkflowFileDurably(filePath, size) {
+  return withGovernedMutation({ operation: "file.truncate", path: filePath }, () =>
+    truncateWorkflowFileDurablyAuthorized(filePath, size));
+}
+
+function truncateWorkflowFileDurablyAuthorized(filePath, size) {
+  assertMutationExecutionAuthorized({ operation: "file.truncate", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   let descriptor;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDWR | NO_FOLLOW_FLAG);
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    assertMutationExecutionAuthorized({ operation: "file.truncate", path: filePath });
     fs.ftruncateSync(descriptor, size);
     fs.fsyncSync(descriptor);
   } finally {
@@ -3749,6 +3778,12 @@ function truncateWorkflowFileDurably(filePath, size) {
 }
 
 function appendWorkflowJsonLineUnlocked(filePath, value) {
+  return withGovernedMutation({ operation: "file.append", path: filePath }, () =>
+    appendWorkflowJsonLineUnlockedAuthorized(filePath, value));
+}
+
+function appendWorkflowJsonLineUnlockedAuthorized(filePath, value) {
+  assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   ensureWorkflowDirectoryDurably(path.dirname(filePath));
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
@@ -3760,6 +3795,7 @@ function appendWorkflowJsonLineUnlocked(filePath, value) {
       0o600,
     );
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
     fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
     fs.fsyncSync(descriptor);
   } finally {
@@ -4197,7 +4233,13 @@ function buildCliErrorPayload(
         required_decision: italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected.",
         protection_boundary: italian ? "Le regole di sicurezza e i limiti già concordati restano invariati." : "Existing safety rules and agreed limits remain unchanged.",
         next_action: italian ? "Correggi il problema descritto nella diagnosi e riprova." : "Correct the problem described in the diagnosis and try again.",
-        details: { code, message },
+        details: {
+          code,
+          message,
+          ...(error instanceof MutationGovernanceError
+            ? { mutation: redactValue(error.details, errorRedactionPolicy) }
+            : {}),
+        },
       };
   return {
     schema_version: "agentic-sdlc-cli-error:v1",
@@ -11742,7 +11784,7 @@ function validateDeliveryCheckpointPolicySource(context, source, expectedRef = n
 }
 
 function persistDeliveryCheckpointPolicySource(context, preparedSource) {
-  fs.mkdirSync(deliveryCheckpointPolicySourcesRoot(context), { recursive: true });
+  ensureDir(deliveryCheckpointPolicySourcesRoot(context));
   const releaseLock = acquireFileLock(`${preparedSource.sourcePath}.lock`);
   try {
     if (fs.existsSync(preparedSource.sourcePath)) {
@@ -28750,7 +28792,135 @@ function sealPreparedTraceEventLocked(context, tracePath, preparedEvent) {
 }
 
 function traceIntegrityOptions(context, tracePath) {
-  return { boundaryRoot: context.sdlcRoot, tracePath };
+  return {
+    boundaryRoot: context.sdlcRoot,
+    tracePath,
+    dependencies: traceIntegrityGovernanceDependencies(tracePath),
+  };
+}
+
+function traceIntegrityGovernanceDependencies(tracePath) {
+  const canonicalTracePath = fs.existsSync(tracePath)
+    ? fs.realpathSync.native(tracePath)
+    : path.join(fs.realpathSync.native(path.dirname(tracePath)), path.basename(tracePath));
+  const checkpointPath = traceIntegrityCheckpointPath(canonicalTracePath);
+  const lockPath = `${checkpointPath}.lock`;
+  const descriptorMutations = new Map();
+
+  const logicalPath = (candidate) => {
+    const resolved = path.resolve(candidate);
+    const checkpointDirectory = path.dirname(checkpointPath);
+    const name = path.basename(resolved);
+    const temporaryPrefix = `.${path.basename(checkpointPath)}.`;
+    if (
+      path.dirname(resolved) === checkpointDirectory
+      && name.startsWith(temporaryPrefix)
+      && name.endsWith(".tmp")
+    ) {
+      // Same-directory random temp names implement one exact checkpoint write;
+      // they never widen the policy path beyond the canonical checkpoint.
+      return checkpointPath;
+    }
+    return resolved;
+  };
+  const requestForOpen = (filePath, flags) => {
+    const resolved = path.resolve(filePath);
+    const mapped = logicalPath(resolved);
+    if (resolved === lockPath) return { operation: "lock.acquire", path: lockPath };
+    const append = typeof flags === "number" && (flags & fs.constants.O_APPEND) !== 0;
+    if (append) return { operation: "file.append", path: mapped };
+    if (mapped === canonicalTracePath) return { operation: "file.truncate", path: mapped };
+    return { operation: "file.write", path: mapped };
+  };
+  const mutatingOpen = (flags) => {
+    if (typeof flags === "string") return /[+awx]/u.test(flags);
+    return (flags & (
+      fs.constants.O_WRONLY
+      | fs.constants.O_RDWR
+      | fs.constants.O_APPEND
+      | fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_TRUNC
+    )) !== 0;
+  };
+  const guardedDescriptorMutation = (descriptor, callback) => {
+    const request = descriptorMutations.get(descriptor);
+    if (!request) {
+      throw new MutationGovernanceError(
+        "A trace writer tried to use a descriptor without an exact file authorization",
+        "MUTATION_GOVERNANCE_DESCRIPTOR_UNBOUND",
+      );
+    }
+    return withGovernedMutation(request, () => {
+      assertMutationExecutionAuthorized(request);
+      return callback();
+    });
+  };
+
+  return {
+    openSync(filePath, flags, mode) {
+      if (!mutatingOpen(flags)) return fs.openSync(filePath, flags, mode);
+      const request = requestForOpen(filePath, flags);
+      return withGovernedMutation(request, () => {
+        assertMutationExecutionAuthorized(request);
+        const descriptor = fs.openSync(filePath, flags, mode);
+        descriptorMutations.set(descriptor, request);
+        return descriptor;
+      });
+    },
+    closeSync(descriptor) {
+      try {
+        return fs.closeSync(descriptor);
+      } finally {
+        descriptorMutations.delete(descriptor);
+      }
+    },
+    writeSync(descriptor, buffer, offset, length, position) {
+      return guardedDescriptorMutation(
+        descriptor,
+        () => fs.writeSync(descriptor, buffer, offset, length, position),
+      );
+    },
+    appendWriteSync(descriptor, buffer, offset, length, position) {
+      return guardedDescriptorMutation(
+        descriptor,
+        () => fs.writeSync(descriptor, buffer, offset, length, position),
+      );
+    },
+    ftruncateSync(descriptor, length) {
+      return guardedDescriptorMutation(descriptor, () => fs.ftruncateSync(descriptor, length));
+    },
+    mkdirSync(directoryPath, options) {
+      return withGovernedMutation({ operation: "directory.create", path: directoryPath }, () => {
+        assertMutationExecutionAuthorized({ operation: "directory.create", path: directoryPath });
+        return fs.mkdirSync(directoryPath, options);
+      });
+    },
+    chmodSync(filePath, mode) {
+      return withGovernedMutation({ operation: "path.chmod", path: filePath }, () => {
+        assertMutationExecutionAuthorized({ operation: "path.chmod", path: filePath });
+        return fs.chmodSync(filePath, mode);
+      });
+    },
+    renameSync(sourcePath, targetPath) {
+      const source = logicalPath(sourcePath);
+      const target = logicalPath(targetPath);
+      return withGovernedMutation({ operation: "path.rename.source", path: source }, () =>
+        withGovernedMutation({ operation: "path.rename.target", path: target }, () => {
+          assertMutationExecutionAuthorized({ operation: "path.rename.source", path: source });
+          assertMutationExecutionAuthorized({ operation: "path.rename.target", path: target });
+          return fs.renameSync(sourcePath, targetPath);
+        }));
+    },
+    unlinkSync(filePath) {
+      const target = logicalPath(filePath);
+      const operation = path.resolve(filePath) === lockPath ? "lock.remove" : "file.remove";
+      return withGovernedMutation({ operation, path: target }, () => {
+        assertMutationExecutionAuthorized({ operation, path: target });
+        return fs.unlinkSync(filePath);
+      });
+    },
+  };
 }
 
 function workflowTraceSealTestHooks(event) {
@@ -28769,6 +28939,7 @@ function workflowTraceSealTestHooks(event) {
 }
 
 function failTraceIntegrityWrite(error) {
+  if (error instanceof MutationGovernanceError) throw error;
   const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
     ? error.code
     : "trace_integrity_failed";
@@ -32123,6 +32294,8 @@ function traceGateSnapshotTestHooks(filePath) {
   if (!targetPath) return {};
   return {
     after_snapshot_verified() {
+      // Deliberate NODE_ENV=test-only adversarial mutation. Production trace
+      // writes use traceIntegrityGovernanceDependencies above.
       const bytes = fs.readFileSync(targetPath);
       if (process.platform === "win32") {
         fs.appendFileSync(targetPath, " ");
@@ -33023,6 +33196,7 @@ function writeTextFileAuthorized(filePath, content, options = {}) {
       });
       assertDirectoryIdentity(parentPath, parentIdentity);
       try {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
         fs.linkSync(tempPath, filePath);
       } catch (error) {
         if (error?.code === "EEXIST") {
@@ -33250,6 +33424,7 @@ function acquireFileLockAuthorized(lockPath) {
   let descriptor;
   while (true) {
     try {
+      assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
       descriptor = fs.openSync(lockPath, "wx");
       break;
     } catch (error) {
