@@ -1203,6 +1203,8 @@ test("isolated Observatory model verifier has its own bounded timeout", {
 test("worker timeout kills descendants that keep inherited output handles open", {
   timeout: 10_000,
 }, async () => {
+  const workerTimeoutMs = 2_000;
+  const descendantMarkerTimeoutMs = 1_500;
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-worker-tree-timeout-"));
   const fakeWorker = path.join(temporary, "worker-with-descendant.mjs");
   const descendantMarker = path.join(temporary, "descendant-pid.txt");
@@ -1220,18 +1222,27 @@ test("worker timeout kills descendants that keep inherited output handles open",
   let descendantPid = null;
   try {
     const startedAt = Date.now();
-    await assert.rejects(
-      runEnterprisePerformanceBenchmark({
-        parentDirectory: temporary,
-        scale: SMALL_SCALE,
-        warmIterations: 2,
-        canonicalWorkerScriptPath: fakeWorker,
-        canonicalWorkerTimeoutMs: 100,
-      }),
-      /timed out after 100ms/u,
-    );
+    const [markerOutcome, timeoutOutcome] = await Promise.allSettled([
+      waitForProcessIds(
+        descendantMarker,
+        1,
+        descendantMarkerTimeoutMs,
+      ),
+      assert.rejects(
+        runEnterprisePerformanceBenchmark({
+          parentDirectory: temporary,
+          scale: SMALL_SCALE,
+          warmIterations: 2,
+          canonicalWorkerScriptPath: fakeWorker,
+          canonicalWorkerTimeoutMs: workerTimeoutMs,
+        }),
+        new RegExp(`timed out after ${workerTimeoutMs}ms`, "u"),
+      ),
+    ]);
+    if (timeoutOutcome.status === "rejected") throw timeoutOutcome.reason;
+    if (markerOutcome.status === "rejected") throw markerOutcome.reason;
+    [descendantPid] = markerOutcome.value;
     assert.ok(Date.now() - startedAt < 5_000, "tree termination exceeded its secondary deadline");
-    descendantPid = Number(fs.readFileSync(descendantMarker, "utf8"));
     await waitForProcessExit(descendantPid, 2_000);
     assert.equal(isProcessAlive(descendantPid), false, "worker descendant survived tree termination");
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
