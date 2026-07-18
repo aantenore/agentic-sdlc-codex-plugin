@@ -602,6 +602,41 @@ test("bootstrap grants are exact and limited to first init or bound recovery mat
   assert.equal(detachedError?.code, "MUTATION_GOVERNANCE_DENIED");
   assert.equal(fs.existsSync(detachedTarget), false);
 
+  const throwingThenTarget = path.join(root, ".sdlc", "throwing-then.json");
+  const throwingThen = createBootstrapMutationGrant({
+    root,
+    canonical_action: "init",
+    first_time: true,
+    exact_mutations: [{ operation: "file.write", path: throwingThenTarget }],
+  });
+  let throwingThenDetachedError = null;
+  let resolveThrowingThenDetached;
+  const throwingThenDetached = new Promise((resolve) => {
+    resolveThrowingThenDetached = resolve;
+  });
+  assert.throws(() => consumeBootstrapMutationGrant(throwingThen, () => {
+    setImmediate(() => {
+      try {
+        withGovernedMutation({ operation: "file.write", path: throwingThenTarget }, () => {
+          assertMutationExecutionAuthorized({ operation: "file.write", path: throwingThenTarget });
+          fs.writeFileSync(throwingThenTarget, "must-not-exist");
+        });
+      } catch (error) {
+        throwingThenDetachedError = error;
+      } finally {
+        resolveThrowingThenDetached();
+      }
+    });
+    return Object.defineProperty({}, "then", {
+      get() {
+        throw new Error("bootstrap then getter failed");
+      },
+    });
+  }), /bootstrap then getter failed/u);
+  await throwingThenDetached;
+  assert.equal(throwingThenDetachedError?.code, "MUTATION_GOVERNANCE_DENIED");
+  assert.equal(fs.existsSync(throwingThenTarget), false);
+
   const replayTarget = path.join(root, ".sdlc", "replay.json");
   const replay = createBootstrapMutationGrant({
     root,
