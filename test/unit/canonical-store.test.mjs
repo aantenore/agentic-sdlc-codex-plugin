@@ -344,3 +344,26 @@ test("rejects a symbolic-link project root", (t) => {
     (error) => error instanceof CanonicalStoreError && error.code === "invalid_root",
   );
 });
+
+test("full missing-path inspection detects an ancestor symlink swap", (t) => {
+  if (process.platform === "win32") return;
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "canonical-store-ancestor-"));
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true, maxRetries: 3 }));
+  const parent = path.join(outer, "parent");
+  const root = path.join(parent, "project");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, "record.json"), '{"stable":true}\n');
+  const store = openCanonicalStore({ root });
+  const movedParent = path.join(outer, "parent-original");
+  fs.renameSync(parent, movedParent);
+  fs.symlinkSync(movedParent, parent, "dir");
+
+  assert.throws(
+    () => store.inspect("missing.json"),
+    (error) => error instanceof CanonicalStoreError && error.code === "root_changed",
+  );
+  assert.throws(
+    () => store.readJson("record.json"),
+    (error) => error instanceof CanonicalStoreError && error.code === "path_outside_root",
+  );
+});

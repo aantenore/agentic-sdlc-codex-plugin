@@ -140,7 +140,10 @@ test("dedicated launch uses argv without a shell and keeps an IPC parent boundar
   assert.equal(Object.hasOwn(calls[0].options, "shell"), false);
   assert.deepEqual(calls[0].options.stdio, ["inherit", "inherit", "inherit", "ipc"]);
   assert.equal(calls[0].options.env.SENTINEL, "kept");
-  assert.equal(calls[0].options.env.UV_THREADPOOL_SIZE, "16");
+  assert.equal(
+    calls[0].options.env.UV_THREADPOOL_SIZE,
+    String(DEFAULT_WINDOWS_OBSERVATORY_THREADPOOL_SIZE),
+  );
   assert.equal(calls[0].options.env[OBSERVATORY_WORKER_MARKER], "1");
 
   child.emit("close", 0, null);
