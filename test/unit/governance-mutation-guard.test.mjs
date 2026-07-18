@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -453,6 +455,7 @@ test("audit pointer persists bounded immutable deny and error events but no allo
   const eventNames = fs.readdirSync(auditRoot).sort();
   assert.equal(eventNames.length, 2);
   assert.equal(eventNames.some((name) => name.endsWith(".lock")), false);
+  assert.equal(fs.existsSync(`${auditRoot}.lock`), false);
   const events = eventNames.map((name) => {
     assert.match(name, /^event-[a-f0-9]{64}\.json$/u);
     const eventPath = path.join(auditRoot, name);
@@ -485,6 +488,233 @@ test("audit pointer persists bounded immutable deny and error events but no allo
     2,
     "an identical immutable event must be idempotent instead of creating a duplicate",
   );
+});
+
+test("audit store lock contention is bounded and fail-open without reclaiming unknown ownership", (t) => {
+  const root = fixture(t, "audit-lock-contention");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+  const lockPath = `${auditRoot}.lock`;
+  const target = path.join(root, ".sdlc", "story-denied.json");
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.mkdirSync(auditRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(governanceRoot, "policy.json"),
+    `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+  );
+  fs.writeFileSync(lockPath, "owned by another process", { mode: 0o600 });
+  const governance = createProjectMutationGovernance({
+    root,
+    governance_policy: {
+      mode: "audit",
+      policy_file: ".sdlc/governance/policy.json",
+      decision_receipts_root: ".sdlc/governance/decisions",
+      use_receipts_root: ".sdlc/governance/uses",
+      revocations_root: ".sdlc/governance/revocations",
+      fail_closed: false,
+    },
+    canonical_action: "story.update",
+    command_path: "story update",
+    actor: ACTOR,
+    now: () => NOW,
+  });
+
+  runWithMutationGovernance(governance, () => withGovernedMutation({
+    operation: "file.write",
+    path: target,
+    evidence_refs: EXACT_EVIDENCE,
+  }, () => fs.writeFileSync(target, "audit continued during contention")));
+
+  assert.equal(fs.readFileSync(target, "utf8"), "audit continued during contention");
+  assert.equal(fs.readFileSync(lockPath, "utf8"), "owned by another process");
+  assert.deepEqual(fs.readdirSync(auditRoot), []);
+  assert.equal(governance.observations.filter((outcome) =>
+    outcome.reason_codes?.includes("mutation.audit_sink_unavailable")).length, 1);
+});
+
+test("audit lock cleanup preserves a replacement and the primary persistence error", (t) => {
+  const root = fixture(t, "audit-lock-release-tamper");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+  const lockPath = `${auditRoot}.lock`;
+  const target = path.join(root, ".sdlc", "story-denied.json");
+  const primaryMessage = "primary audit persistence failure";
+  const replacementBytes = "replacement owned elsewhere";
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.mkdirSync(auditRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(governanceRoot, "policy.json"),
+    `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+  );
+  const governance = createProjectMutationGovernance({
+    root,
+    governance_policy: {
+      mode: "audit",
+      policy_file: ".sdlc/governance/policy.json",
+      decision_receipts_root: ".sdlc/governance/decisions",
+      use_receipts_root: ".sdlc/governance/uses",
+      revocations_root: ".sdlc/governance/revocations",
+      fail_closed: false,
+    },
+    canonical_action: "story.update",
+    command_path: "story update",
+    actor: ACTOR,
+    now: () => NOW,
+  });
+
+  const originalOpenSync = fs.openSync;
+  const originalCloseSync = fs.closeSync;
+  let originalLockDescriptor;
+  let eventCreateIntercepted = false;
+  let lockCloseFailureInjected = false;
+  fs.openSync = function tamperedAuditLockOpen(filePath, ...args) {
+    const resolved = typeof filePath === "string" ? path.resolve(filePath) : "";
+    if (!eventCreateIntercepted && resolved.startsWith(`${auditRoot}${path.sep}event-`)) {
+      eventCreateIntercepted = true;
+      fs.unlinkSync(lockPath);
+      fs.writeFileSync(lockPath, replacementBytes, { mode: 0o600 });
+      throw new Error(primaryMessage);
+    }
+    const descriptor = originalOpenSync.call(fs, filePath, ...args);
+    if (resolved === lockPath && originalLockDescriptor === undefined) {
+      originalLockDescriptor = descriptor;
+    }
+    return descriptor;
+  };
+  fs.closeSync = function failingOriginalLockClose(descriptor) {
+    if (descriptor === originalLockDescriptor && !lockCloseFailureInjected) {
+      lockCloseFailureInjected = true;
+      originalCloseSync.call(fs, descriptor);
+      throw new Error("secondary lock close failure");
+    }
+    return originalCloseSync.call(fs, descriptor);
+  };
+  try {
+    runWithMutationGovernance(governance, () => withGovernedMutation({
+      operation: "file.write",
+      path: target,
+      evidence_refs: EXACT_EVIDENCE,
+    }, () => fs.writeFileSync(target, "audit continued after lock tamper")));
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.closeSync = originalCloseSync;
+  }
+
+  assert.equal(eventCreateIntercepted, true);
+  assert.equal(lockCloseFailureInjected, true);
+  assert.equal(fs.readFileSync(target, "utf8"), "audit continued after lock tamper");
+  assert.equal(fs.readFileSync(lockPath, "utf8"), replacementBytes);
+  assert.deepEqual(fs.readdirSync(auditRoot), []);
+  const sinkFailure = governance.observations.find((outcome) =>
+    outcome.reason_codes?.includes("mutation.audit_sink_unavailable"));
+  assert.ok(sinkFailure);
+  assert.equal(
+    sinkFailure.error_digest,
+    crypto.createHash("sha256").update(primaryMessage).digest("hex"),
+  );
+});
+
+test("concurrent audit writers cannot race past the hard event-count bound", async (t) => {
+  const root = fixture(t, "audit-concurrent-capacity");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
+  const barrierRoot = path.join(root, "writer-barrier");
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.mkdirSync(auditRoot, { recursive: true });
+  fs.mkdirSync(barrierRoot);
+  fs.writeFileSync(
+    path.join(governanceRoot, "policy.json"),
+    `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+  );
+  for (let index = 0; index < MAX_GOVERNANCE_AUDIT_EVENT_FILES - 1; index += 1) {
+    fs.writeFileSync(path.join(auditRoot, `event-${index.toString(16).padStart(64, "0")}.json`), "");
+  }
+
+  const writerCount = 8;
+  const guardModuleUrl = new URL("../../lib/governance/mutation-guard.mjs", import.meta.url).href;
+  const childSource = String.raw`
+    import fs from "node:fs";
+    import path from "node:path";
+    const [root, index, moduleUrl, evidenceJson] = process.argv.slice(1);
+    const { createProjectMutationGovernance, runWithMutationGovernance, withGovernedMutation } = await import(moduleUrl);
+    const auditRoot = path.join(root, ".sdlc-governance", "audit-events");
+    const barrierRoot = path.join(root, "writer-barrier");
+    const originalOpenSync = fs.openSync;
+    let delayedEventCreate = false;
+    fs.openSync = function delayedAuditEventCreate(filePath, ...args) {
+      const resolved = typeof filePath === "string" ? path.resolve(filePath) : "";
+      if (!delayedEventCreate && resolved.startsWith(auditRoot + path.sep + "event-")) {
+        delayedEventCreate = true;
+        const releaseAt = Date.now() + 250;
+        while (Date.now() < releaseAt) { /* make an unlocked check/create race deterministic */ }
+      }
+      return originalOpenSync.call(fs, filePath, ...args);
+    };
+    fs.writeFileSync(path.join(barrierRoot, "ready-" + index), "");
+    while (!fs.existsSync(path.join(barrierRoot, "go"))) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    const evidenceRefs = JSON.parse(evidenceJson);
+    const governance = createProjectMutationGovernance({
+      root,
+      governance_policy: {
+        mode: "audit",
+        policy_file: ".sdlc/governance/policy.json",
+        decision_receipts_root: ".sdlc/governance/decisions",
+        use_receipts_root: ".sdlc/governance/uses",
+        revocations_root: ".sdlc/governance/revocations",
+        fail_closed: false,
+      },
+      canonical_action: "story.update",
+      command_path: "story update",
+      actor: { type: "agent", id: "writer-1" },
+      now: () => "2026-07-18T12:00:00." + String(index).padStart(3, "0") + "Z",
+    });
+    runWithMutationGovernance(governance, () => withGovernedMutation({
+      operation: "file.write",
+      path: path.join(root, ".sdlc", "concurrent-denied-" + index + ".json"),
+      evidence_refs: evidenceRefs,
+    }, () => {}));
+  `;
+  const children = [];
+  t.after(() => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+  });
+  const childRuns = Array.from({ length: writerCount }, (_, index) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      childSource,
+      root,
+      String(index),
+      guardModuleUrl,
+      JSON.stringify(EXACT_EVIDENCE),
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    children.push(child);
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`audit writer ${index} exited with ${code ?? signal}: ${stderr}`));
+    });
+  }));
+
+  const readyDeadline = Date.now() + 15_000;
+  while (fs.readdirSync(barrierRoot).filter((name) => name.startsWith("ready-")).length < writerCount) {
+    if (Date.now() >= readyDeadline) throw new Error("concurrent audit writers did not reach the start barrier");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  fs.writeFileSync(path.join(barrierRoot, "go"), "go");
+  await Promise.all(childRuns);
+
+  const eventNames = fs.readdirSync(auditRoot);
+  assert.equal(eventNames.length, MAX_GOVERNANCE_AUDIT_EVENT_FILES);
+  assert.equal(eventNames.every((name) => /^event-[a-f0-9]{64}\.json$/u.test(name)), true);
+  assert.equal(fs.existsSync(`${auditRoot}.lock`), false);
 });
 
 test("receipt persistence refuses a configured directory renamed behind an exact symlink", (t) => {
