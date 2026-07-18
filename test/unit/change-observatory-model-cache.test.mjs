@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,36 @@ import test from "node:test";
 import {
   computeCanonicalRevision,
   createObservatoryModelCache,
+  shouldUseSynchronousMetadataValidation,
 } from "../../lib/change-observatory/model-cache.mjs";
+import { OBSERVATORY_WORKER_MARKER } from "../../lib/change-observatory/runtime.mjs";
+
+test("synchronous metadata validation is restricted to the dedicated Windows worker", () => {
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  }), true);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: {},
+  }), false);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "darwin",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  }), false);
+  assert.equal(shouldUseSynchronousMetadataValidation({
+    platform: "win32",
+    environment: Object.create({ [OBSERVATORY_WORKER_MARKER]: "1" }),
+  }), false);
+  assert.throws(
+    () => shouldUseSynchronousMetadataValidation(null),
+    /runtime override must be an object/u,
+  );
+  assert.throws(
+    () => shouldUseSynchronousMetadataValidation({ platform: "win32", environment: [] }),
+    /runtime environment must be an object/u,
+  );
+});
 
 test("canonical revisions track source bytes but ignore derived cache and index data", async (t) => {
   const fixture = await createCacheFixture(t);
@@ -216,6 +246,10 @@ test("aggregate maxEntries bounds wide directories and invalidates overflow snap
   const cache = createObservatoryModelCache({
     projectRoot: fixture.projectRoot,
     limits,
+    validationRuntime: {
+      platform: "win32",
+      environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+    },
     buildModel() {
       builds += 1;
       return { builds };
@@ -519,6 +553,124 @@ test("fast validation invalidates add, remove, rename, content, and symlink chan
     assert.equal(builds, 2);
     assert.notEqual(refreshed.etag, initial.etag);
   });
+});
+
+test("dedicated Windows sync validation preserves file and directory invalidation", async (t) => {
+  const runtime = {
+    platform: "win32",
+    environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+  };
+  const scenarios = [
+    {
+      name: "file-content",
+      async mutate(fixture) {
+        await writeProjectRecord(fixture.projectRoot, { version: 400 });
+      },
+    },
+    {
+      name: "nested-directory-entry",
+      async prepare(fixture) {
+        const directory = path.join(fixture.projectRoot, ".sdlc", "nested");
+        await fs.mkdir(directory);
+        await fs.writeFile(path.join(directory, "first.json"), "{}\n", "utf8");
+      },
+      async mutate(fixture) {
+        await fs.writeFile(
+          path.join(fixture.projectRoot, ".sdlc", "nested", "added.json"),
+          "{}\n",
+          "utf8",
+        );
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (scenarioTest) => {
+      const fixture = await createCacheFixture(scenarioTest);
+      await scenario.prepare?.(fixture);
+      let builds = 0;
+      const cache = createObservatoryModelCache({
+        projectRoot: fixture.projectRoot,
+        validationRuntime: runtime,
+        buildModel() {
+          builds += 1;
+          return { builds };
+        },
+      });
+      const initial = await cache.get();
+      assert.equal(await cache.get(), initial);
+      await scenario.mutate(fixture);
+      const refreshed = await cache.get();
+      assert.equal(builds, 2);
+      assert.notEqual(refreshed.etag, initial.etag);
+      assert.equal(await cache.get(), refreshed);
+    });
+  }
+
+  await t.test("symlink-fallback", async (scenarioTest) => {
+    if (process.platform === "win32") {
+      scenarioTest.skip("Symlink retargeting requires Unix semantics");
+      return;
+    }
+    const fixture = await createCacheFixture(scenarioTest);
+    await fs.writeFile(path.join(fixture.projectRoot, "target-a.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(fixture.projectRoot, "target-b.json"), "{}\n", "utf8");
+    const link = path.join(fixture.projectRoot, ".sdlc", "linked.json");
+    await fs.symlink("../target-a.json", link, "file");
+    let builds = 0;
+    const cache = createObservatoryModelCache({
+      projectRoot: fixture.projectRoot,
+      validationRuntime: runtime,
+      buildModel() {
+        builds += 1;
+        return { builds };
+      },
+    });
+    const initial = await cache.get();
+    assert.equal(await cache.get(), initial);
+    await fs.rm(link);
+    await fs.symlink("../target-b.json", link, "file");
+    const refreshed = await cache.get();
+    assert.equal(builds, 2);
+    assert.notEqual(refreshed.etag, initial.etag);
+  });
+});
+
+test("dedicated Windows sync validation detects a file removed between start and check", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const racePath = path.join(fixture.projectRoot, ".sdlc", "sync-race.json");
+  await fs.writeFile(racePath, "{}\n", "utf8");
+  const events = [];
+  let removed = false;
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    validationRuntime: {
+      platform: "win32",
+      environment: { [OBSERVATORY_WORKER_MARKER]: "1" },
+    },
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+    onFastPathCheck(event) {
+      if (path.basename(event.path) !== path.basename(racePath)) return;
+      events.push(event.event);
+      if (event.event === "start" && !removed) {
+        removed = true;
+        rmSync(racePath);
+      }
+    },
+  });
+
+  const initial = await cache.get();
+  const refreshed = await cache.get();
+  assert.equal(removed, true);
+  assert.deepEqual(events, ["start", "end"]);
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(await cache.get(), refreshed);
+  assert.equal(builds, 2);
 });
 
 test("warm validation without a hook does not freeze instrumentation events", async (t) => {
