@@ -1,0 +1,288 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  createPortfolioRuntime,
+} from "../../lib/change-observatory/portfolio-runtime.mjs";
+
+test("serves compact summaries, lazy project detail, and project-scoped sources", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    clock: () => new Date("2026-07-19T10:00:00Z"),
+  });
+
+  const first = await runtime.getSummaryRepresentation();
+  const second = await runtime.getSummaryRepresentation();
+  const summary = JSON.parse(first.body);
+
+  assert.equal(first.etag, second.etag);
+  assert.equal(summary.schemaVersion, "change-observatory:portfolio:v1");
+  assert.equal(summary.status, "degraded");
+  assert.deepEqual(summary.projects.map((project) => project.id), ["alpha", "beta", "broken"]);
+  assert.deepEqual(summary.projects.map((project) => project.status), [
+    "available",
+    "available",
+    "unavailable",
+  ]);
+  assert.match(summary.projects[2].message, /privacy settings/u);
+  assert.doesNotMatch(first.body.toString("utf8"), new RegExp(escapeRegExp(fixture.root), "u"));
+  assert.equal(first.body.includes("DETAIL-ONLY-MARKER"), false);
+
+  const detailRepresentation = await runtime.getProjectDetailRepresentation("alpha");
+  const detail = JSON.parse(detailRepresentation.body);
+  const rawHrefs = collectStringFields(detail, "rawHref").filter(Boolean);
+  assert.equal(detail.schemaVersion, "change-observatory:view:v1");
+  assert.ok(rawHrefs.length > 0);
+  assert.ok(rawHrefs.every((href) => href.startsWith(
+    "/api/v1/portfolio/source?project=alpha&path=",
+  )));
+  assert.match(detailRepresentation.body.toString("utf8"), /DETAIL-ONLY-MARKER/u);
+
+  const sourceRepresentation = await runtime.getSourceRepresentation("alpha", ".sdlc/project.json");
+  const source = JSON.parse(sourceRepresentation.body);
+  assert.equal(source.data.project_id, "alpha-project");
+  assert.match(sourceRepresentation.etag, /^"sha256-[A-Za-z0-9_-]+"$/u);
+
+  await assert.rejects(
+    () => runtime.getSourceRepresentation("alpha", ".sdlc/beta-only.json"),
+    (error) => error.code === "source_not_found" && error.statusCode === 404,
+  );
+  assert.equal(
+    JSON.parse((await runtime.getSourceRepresentation("beta", ".sdlc/beta-only.json")).body).data.owner,
+    "beta",
+  );
+});
+
+test("degrades a swapped project independently while direct access fails closed", async (t) => {
+  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix rename semantics");
+  const fixture = await createPortfolioFixture(t);
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+  });
+  const original = path.join(fixture.root, "projects", "beta-original");
+  await fs.rename(path.join(fixture.root, "projects", "beta"), original);
+  await fs.mkdir(path.join(fixture.root, "projects", "beta", ".sdlc"), { recursive: true });
+  await fs.writeFile(
+    path.join(fixture.root, "projects", "beta", ".sdlc", "project.json"),
+    '{"project_id":"ATTACKER-REPLACEMENT"}\n',
+    "utf8",
+  );
+
+  const summary = JSON.parse((await runtime.getSummaryRepresentation()).body);
+  assert.deepEqual(summary.projects.map((project) => project.status), [
+    "available",
+    "unavailable",
+    "unavailable",
+  ]);
+  assert.doesNotMatch(JSON.stringify(summary), /ATTACKER-REPLACEMENT/u);
+  assert.match(summary.projects[1].message, /changed while they were being read/u);
+  await assert.rejects(
+    () => runtime.getProjectDetailRepresentation("beta"),
+    (error) => error.code === "portfolio_project_root_changed" && error.statusCode === 409,
+  );
+});
+
+test("pins the manifest envelope and rejects unknown project identifiers", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+  });
+  await assert.rejects(
+    () => runtime.getProjectDetailRepresentation("missing"),
+    (error) => error.code === "portfolio_project_not_found" && error.statusCode === 404,
+  );
+  await assert.rejects(
+    () => runtime.getProjectDetailRepresentation("../alpha"),
+    (error) => error.code === "invalid_portfolio_project" && error.statusCode === 400,
+  );
+
+  await fs.writeFile(path.join(fixture.root, "portfolio.json"), `${JSON.stringify({
+    schema_version: "portfolio-manifest:v1",
+    projects: [{ id: "alpha", path: "projects/alpha" }],
+  })}\n`, "utf8");
+  await assert.rejects(
+    () => runtime.getSummaryRepresentation(),
+    (error) => error.code === "portfolio_manifest_changed" && error.statusCode === 409,
+  );
+});
+
+test("revalidates a project root after runtime creation and isolates a construction race", async (t) => {
+  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix rename semantics");
+  const fixture = await createPortfolioFixture(t);
+  let swapped = false;
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    async createProjectRuntime({ projectRoot, projectId }) {
+      if (projectId === "alpha" && !swapped) {
+        swapped = true;
+        await fs.rename(projectRoot, `${projectRoot}-original`);
+        await fs.mkdir(path.join(projectRoot, ".sdlc"), { recursive: true });
+        await fs.writeFile(
+          path.join(projectRoot, ".sdlc", "project.json"),
+          '{"project_id":"RACE-ATTACKER"}\n',
+          "utf8",
+        );
+      }
+      return fakeProjectRuntime(projectId);
+    },
+  });
+
+  const summary = JSON.parse((await runtime.getSummaryRepresentation()).body);
+  assert.equal(swapped, true);
+  assert.equal(summary.projects[0].status, "unavailable");
+  assert.equal(summary.projects[1].status, "available");
+  assert.doesNotMatch(JSON.stringify(summary), /RACE-ATTACKER/u);
+});
+
+test("retries rejected runtime initialization and never reads sources for summary or detail", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  let alphaAttempts = 0;
+  let sourceReads = 0;
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    createProjectRuntime({ projectId }) {
+      if (projectId === "alpha") {
+        alphaAttempts += 1;
+        if (alphaAttempts === 1) {
+          const error = new Error("temporary failure must not become sticky");
+          error.code = "project_temporarily_unavailable";
+          throw error;
+        }
+      }
+      return fakeProjectRuntime(projectId, {
+        readSource() {
+          sourceReads += 1;
+          return { schemaVersion: "change-observatory:source:v1", data: { projectId } };
+        },
+      });
+    },
+  });
+
+  const first = JSON.parse((await runtime.getSummaryRepresentation()).body);
+  assert.equal(first.projects[0].status, "unavailable");
+  assert.equal(sourceReads, 0);
+  const second = JSON.parse((await runtime.getSummaryRepresentation()).body);
+  assert.equal(second.projects[0].status, "available");
+  assert.equal(alphaAttempts, 2);
+  assert.equal(sourceReads, 0);
+
+  await runtime.getProjectDetailRepresentation("alpha");
+  assert.equal(sourceReads, 0);
+  await runtime.getSourceRepresentation("alpha", ".sdlc/project.json");
+  assert.equal(sourceReads, 1);
+});
+
+async function createPortfolioFixture(t) {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-portfolio-runtime-"));
+  const root = await fs.realpath(temporary);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const [directory, projectId, projectName] of [
+    ["alpha", "alpha-project", "Alpha Project"],
+    ["beta", "beta-project", "Beta Project"],
+    ["broken", "broken-project", "Broken Project"],
+  ]) {
+    await fs.mkdir(path.join(root, "projects", directory, ".sdlc"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "projects", directory, ".sdlc", "project.json"),
+      `${JSON.stringify({
+        schema_version: "0.1.0",
+        project_id: projectId,
+        project_name: projectName,
+      })}\n`,
+      "utf8",
+    );
+  }
+  await fs.mkdir(path.join(root, "projects", "alpha", ".sdlc", "requirements"));
+  await fs.writeFile(
+    path.join(root, "projects", "alpha", ".sdlc", "requirements", "REQ-ALPHA.json"),
+    `${JSON.stringify({
+      id: "REQ-ALPHA",
+      title: "Alpha requirement",
+      summary: "Alpha portfolio requirement",
+      status: "approved",
+    })}\n`,
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(root, "projects", "alpha", ".sdlc", "detail-only.json"),
+    `${JSON.stringify({ id: "DETAIL-ONLY-MARKER", title: "Detail only" })}\n`,
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(root, "projects", "beta", ".sdlc", "beta-only.json"),
+    '{"owner":"beta"}\n',
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(root, "projects", "broken", ".sdlc", "config.json"),
+    '{"observability":{"redaction":{"secret_pattern":["not-allowed"]}}}\n',
+    "utf8",
+  );
+  await fs.writeFile(path.join(root, "portfolio.json"), `${JSON.stringify({
+    schema_version: "portfolio-manifest:v1",
+    projects: [
+      { id: "alpha", path: "projects/alpha" },
+      { id: "beta", path: "projects/beta" },
+      { id: "broken", path: "projects/broken" },
+    ],
+  })}\n`, "utf8");
+  return { root };
+}
+
+function collectStringFields(value, field) {
+  const results = [];
+  const pending = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object") continue;
+    for (const [key, child] of Object.entries(current)) {
+      if (key === field && typeof child === "string") results.push(child);
+      pending.push(child);
+    }
+  }
+  return results;
+}
+
+function fakeProjectRuntime(projectId, overrides = {}) {
+  const model = {
+    schemaVersion: "change-observatory:view:v1",
+    project: { id: projectId, name: `${projectId} project`, branch: "main" },
+    summary: { asked: [], changed: [], decided: [] },
+    iterations: [],
+    contracts: [],
+    decisions: [],
+    changes: [],
+    verification: [],
+    records: [{
+      id: `${projectId}-record`,
+      rawHref: `/api/v1/source?path=${encodeURIComponent(".sdlc/project.json")}`,
+    }],
+    diagnostics: [],
+  };
+  return {
+    redactionPolicy: Object.freeze({}),
+    async getRepresentation() {
+      return {
+        body: Buffer.from(`${JSON.stringify(model)}\n`, "utf8"),
+        etag: '"sha256-fake"',
+      };
+    },
+    async readSource(relativePath) {
+      if (overrides.readSource) return overrides.readSource(relativePath);
+      return { schemaVersion: "change-observatory:source:v1", data: { projectId } };
+    },
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
