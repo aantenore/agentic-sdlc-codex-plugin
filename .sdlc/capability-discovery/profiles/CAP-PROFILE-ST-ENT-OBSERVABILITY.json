@@ -32,6 +32,14 @@
   "integrations": [],
   "evidence": [
     {
+      "type": "context_file",
+      "path": "package.json",
+      "sha256": "7f367daa19a4d7b3970cfe87884d904c3c13f23da5ca373e2d5309e1db636ee2",
+      "size_bytes": 2859,
+      "excerpt": "name agentic-sdlc-codex-plugin version 0.11.0 description Codex plugin for contract-driven delivery verified assessments and visual project lineage. type module bin agentic-sdlc ./bin/agentic-sdlc.mjs engines node >=18.18 files .codex-plugin/ assets/ bin/ docs/ lib/ schemas/ scripts/ skills/ templates/ ui/ scripts benchmark enterprise node scripts/benchmark-enterprise-performance.mjs --enforce check node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --c",
+      "trust": "untrusted_project_evidence"
+    },
+    {
       "type": "detected_stack",
       "path": "package.json",
       "summary": "node:package-json"
@@ -47,14 +55,14 @@
     "package.json"
   ],
   "source_hashes": {
-    "package.json": "45a274477a20d1716e1780a7691c6d74c3089d48c21256dbb6328af91e375342"
+    "package.json": "7f367daa19a4d7b3970cfe87884d904c3c13f23da5ca373e2d5309e1db636ee2"
   },
   "approvals": [
     {
-      "id": "APR-20260718113056-f66091",
+      "id": "APR-20260718154645-a5ddfe",
       "profile_id": "CAP-PROFILE-ST-ENT-OBSERVABILITY",
       "status": "approved",
-      "summary": "Approve the repository capability snapshot for the observability story under the delegated enterprise program; use only the detected Node.js, npm, Git, repository and Agentic SDLC capabilities.",
+      "summary": "Refresh only the existing local Node, npm, Agentic SDLC, and repository test boundary after adding observability files to the current syntax checks; no new tool, install, permission, external access, secret access, or scope.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "CAP-PROFILE-ST-ENT-OBSERVABILITY",
@@ -65,39 +73,33 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-        "approval_level": "Autonomous completion of approved requirement REQ-ENTERPRISE-CONTROL-PLANE-001-R2 through the eight reserved local delivery stories only.",
+        "authorization_ref": "AUTH-ENT-OBSERVABILITY-CAPABILITY-REFRESH-001",
+        "approval_level": "Refresh and reapprove only the existing local Node and npm test boundary for ST-ENT-OBSERVABILITY after package.json added observability files to the existing syntax-check script; no new capability, install, permission, external access, secret access, contract change, merge, release, or deployment.",
         "allowed_actions": [
-          "task.start.confirm",
-          "capability.approve",
-          "autonomy.delivery.approve",
-          "capability.profile.approve",
-          "dependency.approve",
-          "contract.approve",
-          "breakdown.approve"
+          "capability.profile.approve"
         ],
         "subject_scope": "capability-profile"
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-ENTERPRISE-PROGRAM-001",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENTERPRISE-PROGRAM-001/AUSE-AUTH-ENTERPRISE-PROGRAM-001-20260718113056035-4a8436.json",
+      "authorization_ref": "AUTH-ENT-OBSERVABILITY-CAPABILITY-REFRESH-001",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-OBSERVABILITY-CAPABILITY-REFRESH-001/AUSE-AUTH-ENT-OBSERVABILITY-CAPABILITY-REFRESH-001-20260718154645082-f17eaf.json",
       "authorization_action": "capability.profile.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "0017e91c342284669e0b886c88238b6118592451eca23a1cdc89747b88c6498f",
+      "approved_content_hash": "8cd743a8ae29768f8bcca8d7d2c7a3abee9d4c3d8fff73d433fb52de67a89552",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
         "type": "agent",
         "name": "Codex",
         "email": null,
-        "source": "default"
+        "source": "cli"
       },
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-OBSERVABILITY",
-        "head_sha": "35868d26c667dcbc22e61277bc25c26869595191",
+        "head_sha": "54ce89df788b2b1fff4460b3d7e64b70b81a23f0",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -114,23 +116,23 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-18T11:30:56.036Z"
+      "created_at": "2026-07-18T15:46:45.084Z"
     }
   ],
-  "created_at": "2026-07-18T11:28:31.537Z",
-  "updated_at": "2026-07-18T11:30:56.036Z",
+  "created_at": "2026-07-18T15:46:35.571Z",
+  "updated_at": "2026-07-18T15:46:45.084Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "default"
+      "source": "cli"
     },
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-OBSERVABILITY",
-      "head_sha": "35868d26c667dcbc22e61277bc25c26869595191",
+      "head_sha": "54ce89df788b2b1fff4460b3d7e64b70b81a23f0",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -152,7 +154,7 @@
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "default"
+      "source": "cli"
     }
   }
 }
