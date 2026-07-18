@@ -388,6 +388,75 @@ test("pointer governance persists exact receipts and reloads revocations before 
   assert.equal(fs.existsSync(deniedTarget), false);
 });
 
+test("receipt persistence refuses a configured directory renamed behind an exact symlink", (t) => {
+  const root = fixture(t, "receipt-parent-race");
+  const governanceRoot = path.join(root, ".sdlc", "governance");
+  const decisionsPath = path.join(governanceRoot, "decisions");
+  const target = path.join(root, ".sdlc", "story.json");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-sdlc-receipt-outside-"));
+  const outsideDecisions = path.join(outside, "decisions");
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.mkdirSync(governanceRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(governanceRoot, "policy.json"),
+    `${JSON.stringify(policyFor(mutationSubject()))}\n`,
+  );
+  const governance = createProjectMutationGovernance({
+    root,
+    governance_policy: {
+      mode: "enforce",
+      policy_file: ".sdlc/governance/policy.json",
+      decision_receipts_root: ".sdlc/governance/decisions",
+      use_receipts_root: ".sdlc/governance/uses",
+      revocations_root: ".sdlc/governance/revocations",
+      fail_closed: true,
+    },
+    canonical_action: "story.update",
+    command_path: "story update",
+    verified_actor: { verified: true, assurance: "host_verified", actor: ACTOR },
+    evidence_paths: [],
+    now: () => NOW,
+  });
+
+  const originalOpenSync = fs.openSync;
+  let raced = false;
+  let callbackRan = false;
+  fs.openSync = function racedReceiptOpen(filePath, ...args) {
+    const resolved = typeof filePath === "string" ? path.resolve(filePath) : "";
+    if (!raced && resolved.startsWith(`${decisionsPath}${path.sep}`)) {
+      fs.renameSync(decisionsPath, outsideDecisions);
+      fs.symlinkSync(outsideDecisions, decisionsPath, "dir");
+      raced = true;
+    }
+    return originalOpenSync.call(fs, filePath, ...args);
+  };
+  try {
+    assert.throws(
+      () => runWithMutationGovernance(governance, () => withGovernedMutation({
+        operation: "file.write",
+        path: target,
+        evidence_refs: EXACT_EVIDENCE,
+      }, () => {
+        callbackRan = true;
+        fs.writeFileSync(target, "must-not-exist");
+      })),
+      (error) => error.code === "MUTATION_GOVERNANCE_DENIED"
+        && error.details.reason_codes.includes("mutation.decision_receipt_persistence_failed"),
+    );
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+
+  assert.equal(raced, true);
+  assert.equal(callbackRan, false);
+  assert.equal(fs.existsSync(target), false);
+  assert.equal(fs.lstatSync(decisionsPath).isSymbolicLink(), true);
+  const outsideFiles = fs.readdirSync(outsideDecisions)
+    .map((name) => path.join(outsideDecisions, name));
+  assert.ok(outsideFiles.length <= 1);
+  assert.equal(outsideFiles.some((filePath) => fs.statSync(filePath).size > 0), false);
+});
+
 test("enforce rejects a self-asserted actor without verified host or CI identity", () => {
   const root = fixture(test, "unverified-identity");
   const subject = mutationSubject({ evidence: [] });
