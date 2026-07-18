@@ -4614,6 +4614,35 @@ test("cache rebuild includes capability discovery sources", () => {
   assert.equal(cacheFile.source_paths.some((sourcePath) => sourcePath.includes("capability-discovery/profiles/CAP-PROJECT.json")), true);
 });
 
+test("configured derived directories stay out of cache, index, and manifest sources", () => {
+  const project = tmpProject("configured-derived-sources");
+  initProject(project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.cache_policy.derived_directories.push("generated");
+  config.cache_policy.source_of_truth_dirs.push("generated");
+  writeJson(configPath, config);
+  pinProjectConfig(project);
+  fs.mkdirSync(path.join(project, ".sdlc", "generated"), { recursive: true });
+  writeJson(path.join(project, ".sdlc", "generated", "trap.json"), {
+    id: "DERIVED-TRAP",
+    summary: "This derived record must never become canonical evidence",
+  });
+
+  mustRun(["cache", "rebuild", "--root", project]);
+  mustRun(["index", "rebuild", "--root", project]);
+  mustRun(["manifest", "rebuild", "--root", project]);
+
+  const sourceCollections = [
+    readJson(path.join(project, ".sdlc", "cache", "kb-cache.json")).source_paths,
+    readJson(path.join(project, ".sdlc", "indexes", "kb-index.json")).source_paths,
+    readJson(path.join(project, ".sdlc", "manifests", "kb-manifest.json")).source_paths,
+  ];
+  for (const sourcePaths of sourceCollections) {
+    assert.equal(sourcePaths.some((sourcePath) => sourcePath.startsWith(".sdlc/generated/")), false);
+  }
+});
+
 test("KB search and cache status compact derived JSON without hiding retrievable sources", () => {
   const project = tmpProject("compact-derived-json");
   initProject(project);
@@ -4691,6 +4720,48 @@ test("dependency graph blocks orchestration and strict gate until upstream is sa
   mustFail(["gate", "check", "--root", project, "--story", "ST-002", "--strict"], /depends on ST-001/);
 });
 
+test("orchestration never satisfies a dependency from a story whose folder and ID differ", () => {
+  const project = tmpProject("dependency-story-folder-mismatch");
+  initProject(project);
+  story(project, "ST-UPSTREAM");
+  story(project, "ST-DOWNSTREAM");
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-FOLDER-MISMATCH",
+    "--edge",
+    "ST-DOWNSTREAM:ST-UPSTREAM:blocks:implementation:done",
+  ]);
+  mustRun([
+    "dependency",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "DEP-FOLDER-MISMATCH",
+    ...humanApproval("Approved folder mismatch regression dependency"),
+  ]);
+
+  const upstreamFolder = path.join(project, ".sdlc", "stories", "ST-UPSTREAM");
+  const upstreamPath = path.join(upstreamFolder, "story.json");
+  writeJson(upstreamPath, {
+    ...readJson(upstreamPath),
+    status: "done",
+    phase: "release",
+  });
+  fs.renameSync(upstreamFolder, path.join(project, ".sdlc", "stories", "WRONG-FOLDER"));
+
+  const status = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const downstream = status.stories.find((item) => item.id === "ST-DOWNSTREAM");
+  const mismatched = status.stories.find((item) => item.id === "ST-UPSTREAM");
+  assert.equal(downstream.orchestration_state, "blocked");
+  assert.ok(downstream.blockers.some((blocker) => blocker.includes("depends on ST-UPSTREAM")));
+  assert.ok(mismatched.blockers.some((blocker) => blocker.includes("does not match folder WRONG-FOLDER")));
+});
+
 test("soft dependency is visible but does not block orchestration", () => {
   const project = tmpProject("dependencies-soft");
   initProject(project);
@@ -4765,6 +4836,63 @@ test("downstream dependency becomes stale when upstream artifact changes until r
   ]);
   const revalidated = JSON.parse(mustRun(["dependency", "status", "--root", project, "--story", "ST-002", "--json"]).stdout);
   assert.equal(revalidated.blockers.some((blocker) => blocker.includes("requires revalidation")), false);
+});
+
+test("orchestration hashes dependency artifacts outside .sdlc without using a shadow path", () => {
+  const project = tmpProject("dependency-artifact-outside-sdlc");
+  initProject(project);
+  story(project, "ST-UPSTREAM");
+  createApprovedTemplate(project);
+  createApprovedStoryContract(project, "ST-UPSTREAM");
+  const artifact = writeArtifact(project, "docs/ST-UPSTREAM-functional-analysis.md");
+  writeArtifact(project, ".sdlc/docs/ST-UPSTREAM-functional-analysis.md", "# Stale shadow artifact\n");
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-UPSTREAM",
+    "--type",
+    "functional-analysis",
+    "--artifact",
+    artifact,
+    "--template",
+    "functional-analysis-v1",
+    "--mode",
+    "new",
+    "--requirement",
+    "REQ-001",
+  ]);
+  story(project, "ST-DOWNSTREAM");
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-EXTERNAL-ARTIFACT",
+    "--edge",
+    "ST-DOWNSTREAM:ST-UPSTREAM:requires_artifact:validation:artifact_linked",
+  ]);
+  mustRun([
+    "dependency",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "DEP-EXTERNAL-ARTIFACT",
+    ...humanApproval("Approved external artifact dependency"),
+  ]);
+
+  const initial = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const initialDownstream = initial.stories.find((item) => item.id === "ST-DOWNSTREAM");
+  assert.equal(initialDownstream.blockers.some((blocker) => blocker.includes("requires revalidation")), false);
+
+  fs.appendFileSync(path.join(project, artifact), "\nchanged upstream\n");
+  const changed = JSON.parse(mustRun(["orchestrate", "status", "--root", project, "--json"]).stdout);
+  const changedDownstream = changed.stories.find((item) => item.id === "ST-DOWNSTREAM");
+  assert.ok(changedDownstream.blockers.some((blocker) => blocker.includes("requires revalidation")));
 });
 
 test("route decide returns init_project when canonical intent arrives before KB initialization", () => {
@@ -5345,6 +5473,53 @@ test("story step completion requires linked outputs and prepares releasable hand
   assert.ok(handoff.handoff.required_artifacts.some((artifact) => artifact.endsWith("-package.json")));
 });
 
+test("manifest and report queries ignore nested story step records", () => {
+  const project = tmpProject("story-steps-direct-only");
+  initProject(project);
+  story(project, "ST-STEPS");
+  const stepsRoot = path.join(project, ".sdlc", "stories", "ST-STEPS", "steps");
+  fs.mkdirSync(path.join(stepsRoot, "archive"), { recursive: true });
+  writeJson(path.join(stepsRoot, "design.json"), {
+    id: "STEP-DIRECT",
+    story_id: "ST-STEPS",
+    step: "design",
+    status: "completed",
+    phase: "design",
+    completed_at: "2026-07-17T12:00:00.000Z",
+  });
+  writeJson(path.join(stepsRoot, "archive", "ghost.json"), {
+    id: "STEP-NESTED",
+    story_id: "ST-STEPS",
+    step: "ghost",
+    status: "completed",
+    phase: "release",
+    completed_at: "2026-07-17T13:00:00.000Z",
+  });
+
+  mustRun(["manifest", "rebuild", "--root", project]);
+  const manifest = readJson(path.join(project, ".sdlc", "manifests", "kb-manifest.json"));
+  const manifestStory = manifest.stories.find((item) => item.id === "ST-STEPS");
+  assert.deepEqual(manifestStory.completed_steps.map((step) => step.step), ["design"]);
+
+  const query = JSON.stringify({
+    intent: "find_completed_steps",
+    confidence: 1,
+    subjects: ["story_steps"],
+    filters: { story_id: ["ST-STEPS"] },
+    sort: "created_at_asc",
+  });
+  const report = JSON.parse(mustRun([
+    "report",
+    "query",
+    "--root",
+    project,
+    "--query-json",
+    query,
+    "--json",
+  ]).stdout);
+  assert.deepEqual(report.results.map((item) => item.id), ["STEP-DIRECT"]);
+});
+
 test("activity reports summarize only canonical trace events inside the selected window", () => {
   const project = tmpProject("activity-report");
   initProject(project);
@@ -5471,6 +5646,31 @@ test("report query filters canonical records by actor and source", () => {
   fs.mkdirSync(path.dirname(queryPath), { recursive: true });
   fs.writeFileSync(queryPath, query);
   mustFail(["report", "query", "--root", project, "--query-file", ".sdlc/cache/report-query.json"], /derived artifacts/);
+});
+
+test("report query does not inherit output types from links owned by another story", () => {
+  const project = tmpProject("report-query-story-output-ownership");
+  initProject(project);
+  createStrictReadyStory(project, "ST-LINKED");
+  story(project, "ST-UNLINKED");
+  const query = JSON.stringify({
+    intent: "find_stories_by_output_type",
+    confidence: 1,
+    subjects: ["stories"],
+    filters: { artifact_type: ["functional-analysis"] },
+    sort: "kind_asc",
+  });
+
+  const report = JSON.parse(mustRun([
+    "report",
+    "query",
+    "--root",
+    project,
+    "--query-json",
+    query,
+    "--json",
+  ]).stdout);
+  assert.deepEqual(report.results.map((item) => item.id), ["ST-LINKED"]);
 });
 
 test("contract create asks before missing guidance or story output agreement", () => {

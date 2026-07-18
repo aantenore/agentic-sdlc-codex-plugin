@@ -97,6 +97,27 @@ test("discovery is deterministic and reports bounded truncation", (t) => {
   assert.equal(first.discovered_count, 2);
 });
 
+test("discovery keeps distinct native file identities and deduplicates hard links", (t) => {
+  const project = fixture();
+  t.after(() => fs.rmSync(project.root, { recursive: true, force: true }));
+  const first = project.write("src/first.mjs", "first\n");
+  project.write("src/second.mjs", "second\n");
+  try {
+    fs.linkSync(first, path.join(project.root, "src", "first-alias.mjs"));
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error?.code)) return;
+    throw error;
+  }
+
+  const result = discoverBaselineSourcePaths({
+    projectRoot: project.root,
+    requestedPaths: ["src"],
+  });
+
+  assert.equal(result.discovered_count, 2);
+  assert.deepEqual(result.paths, ["src/first-alias.mjs", "src/second.mjs"]);
+});
+
 test("source policy validates extensions, directory names, and limits", () => {
   assert.throws(
     () => normalizeBaselineSourcePolicy({ source_extensions: ["mjs"] }),

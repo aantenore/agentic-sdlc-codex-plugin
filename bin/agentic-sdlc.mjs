@@ -101,6 +101,7 @@ import {
 } from "../lib/identity-migration.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { computeStableHash } from "../lib/canonical.mjs";
+import { openCanonicalQuerySession } from "../lib/canonical-query-session.mjs";
 import {
   buildConfigMigrationApplyData,
   buildEffectiveConfigLock,
@@ -6505,6 +6506,24 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     if (missing.length > 0) {
       fail(`git.commit --scope-path is not currently changed or untracked: ${missing.join(", ")}.`);
     }
+    const stagedPaths = [...new Set(String(
+      execGit(context.root, ["diff", "--cached", "--name-only", "--no-renames", "HEAD", "--"]) || "",
+    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+    if (stableJson(stagedPaths) !== stableJson(changedPaths)) {
+      fail("git.commit requires the staged file set to match the exact --scope-path set before authorization.");
+    }
+    const unstagedScopePaths = [...new Set(String(
+      execGit(context.root, ["diff", "--name-only", "--no-renames", "--", ...changedPaths]) || "",
+    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
+    if (unstagedScopePaths.length > 0) {
+      fail(`git.commit scope has unstaged changes after staging: ${unstagedScopePaths.join(", ")}.`);
+    }
+    const unmergedScope = String(
+      execGit(context.root, ["ls-files", "--unmerged", "--", ...changedPaths]) || "",
+    ).trim();
+    if (unmergedScope) {
+      fail("git.commit scope contains unmerged index entries.");
+    }
   }
   const allowedPaths = profile.constraints?.allowed_write_paths || [];
   const outOfScope = changedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
@@ -6519,6 +6538,20 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     changed_paths: changedPaths,
     allowed_write_paths: allowedPaths,
   };
+  if (action === "git.commit") {
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    const indexTreeOid = String(execGit(context.root, ["write-tree"]) || "").trim();
+    if (!/^(?:sha1|sha256)$/u.test(objectFormat) || !/^[a-f0-9]{40,64}$/u.test(indexTreeOid)) {
+      fail("git.commit could not bind the staged index to a canonical Git tree.");
+    }
+    details.commit_snapshot = {
+      schema_version: "git-commit-index-snapshot:v1",
+      object_format: objectFormat,
+      source_head_sha: runtimeTarget.head_sha,
+      index_tree_oid: indexTreeOid,
+      staged_paths: changedPaths,
+    };
+  }
   if (action === "git.push") {
     const remote = getOptionString(options, "remote") || (runtimeTarget.matching_remotes.length === 1
       ? runtimeTarget.matching_remotes[0]
@@ -6588,6 +6621,26 @@ function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
   const authorizedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
   if (committedPaths.length === 0 || stableJson(committedPaths) !== stableJson(authorizedPaths)) {
     fail("git.commit completion file set differs from the exact authorized --scope-path set.");
+  }
+  const commitSnapshot = authorization.action_details?.commit_snapshot;
+  const requiresCommitSnapshot = Boolean(authorization.action_details?.checkpoint_policy?.policy_source_ref);
+  if (requiresCommitSnapshot && !commitSnapshot) {
+    fail("git.commit authorization is missing its required staged index snapshot.");
+  }
+  if (commitSnapshot) {
+    const committedTreeOid = String(
+      execGit(context.root, ["rev-parse", `${afterSha}^{tree}`]) || "",
+    ).trim();
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    if (
+      commitSnapshot.schema_version !== "git-commit-index-snapshot:v1"
+      || commitSnapshot.object_format !== objectFormat
+      || commitSnapshot.source_head_sha !== beforeSha
+      || stableJson(commitSnapshot.staged_paths) !== stableJson(authorizedPaths)
+      || commitSnapshot.index_tree_oid !== committedTreeOid
+    ) {
+      fail("git.commit commit tree differs from the exact staged index authorized at the checkpoint.");
+    }
   }
   const allowedPaths = authorization.action_details?.allowed_write_paths || [];
   const outOfScope = committedPaths.filter((filePath) => !pathMatchesApprovedWriteScope(filePath, allowedPaths));
@@ -6809,19 +6862,21 @@ function observeGitHubMergePrecondition(profile, actionDetails) {
 }
 
 function remoteAuthorizationProjection(action, actionDetails) {
+  const { checkpoint_policy: _checkpointPolicy, ...operationDetails } = actionDetails || {};
   if (action === "git.push") {
     const {
       push_precondition: _pushPrecondition,
       base_precondition: _basePrecondition,
+      commit_coverage: _commitCoverage,
       ...projection
-    } = actionDetails || {};
+    } = operationDetails;
     return projection;
   }
   if (action === "pull_request.merge") {
-    const { merge_precondition: _precondition, ...projection } = actionDetails || {};
+    const { merge_precondition: _precondition, ...projection } = operationDetails;
     return projection;
   }
-  return actionDetails;
+  return operationDetails;
 }
 
 function normalizeSmokeTestCommand(value) {
@@ -6945,23 +7000,59 @@ function validateLocalReleaseFilesystemBoundary(target) {
   }
 }
 
-function localReleaseBoundaryRequiresCheckpoint(context, target) {
+function localReleaseGlobalRoots(platform = process.platform) {
+  return platform === "win32"
+    ? [process.env.ProgramFiles, process.env.ProgramData]
+        .filter(Boolean)
+        .map((item) => path.resolve(item))
+        .sort()
+    : ["/Applications", "/Library", "/usr", "/opt"].map((item) => path.resolve(item)).sort();
+}
+
+function localReleaseBoundarySource(context, target) {
   validateLocalReleaseFilesystemBoundary(target);
   const realWorkspace = fs.realpathSync.native(context.root);
   const realTarget = fs.realpathSync.native(path.resolve(target.root_path));
   const policy = context.config.autonomy_policy?.local_release || {};
-  if (policy.writes_outside_workspace_require_checkpoint !== false && !isInsidePath(realWorkspace, realTarget)) {
-    return true;
-  }
-  if (policy.machine_global_changes_require_checkpoint !== false) {
-    const globalRoots = process.platform === "win32"
-      ? [process.env.ProgramFiles, process.env.ProgramData].filter(Boolean).map((item) => path.resolve(item))
-      : ["/Applications", "/Library", "/usr", "/opt"].map((item) => path.resolve(item));
-    if (globalRoots.some((rootPath) => isInsidePath(rootPath, realTarget))) {
-      return true;
-    }
-  }
-  return false;
+  const globalRoots = localReleaseGlobalRoots();
+  return {
+    schema_version: "delivery-local-boundary-source:v1",
+    target_hash: hashApprovalSubject(target),
+    platform: process.platform,
+    workspace_real_path: realWorkspace,
+    target_real_path: realTarget,
+    global_roots: globalRoots,
+    target_outside_workspace: !isInsidePath(realWorkspace, realTarget),
+    target_machine_global: globalRoots.some((rootPath) => isInsidePath(rootPath, realTarget)),
+    writes_outside_workspace_require_checkpoint:
+      policy.writes_outside_workspace_require_checkpoint !== false,
+    machine_global_changes_require_checkpoint:
+      policy.machine_global_changes_require_checkpoint !== false,
+  };
+}
+
+function recordedPathInside(platform, parent, child) {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const relative = pathApi.relative(pathApi.resolve(parent), pathApi.resolve(child));
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${pathApi.sep}`)
+    && !pathApi.isAbsolute(relative)
+  );
+}
+
+function localReleaseBoundaryCheckpointFromSource(source) {
+  return (
+    source.writes_outside_workspace_require_checkpoint === true
+    && source.target_outside_workspace === true
+  ) || (
+    source.machine_global_changes_require_checkpoint === true
+    && source.target_machine_global === true
+  );
+}
+
+function localReleaseBoundaryRequiresCheckpoint(context, target) {
+  return localReleaseBoundaryCheckpointFromSource(localReleaseBoundarySource(context, target));
 }
 
 function normalizeGitRepositoryIdentity(value) {
@@ -7770,35 +7861,749 @@ function deliveryTargetAllowedActions(profile) {
     : profile.local_release_target?.allowed_actions || [];
 }
 
-function deliveryActionCheckpointRequired(context, profile, effectiveLevel, action) {
-  const preset = context.config.autonomy_policy?.presets?.[effectiveLevel] || {};
-  const checkpoints = new Set([
-    ...normalizeListValue(preset.checkpoints, []),
-    ...(profile.checkpoints || []),
-  ]);
-  const localBoundaryCheckpoint = profile.delivery_kind === "local_release"
-    && localReleaseBoundaryRequiresCheckpoint(context, profile.local_release_target);
+const DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS = Object.freeze(["deploy.remote", "pull_request.merge"]);
+
+function deliveryCheckpointPolicySourcesRoot(context) {
+  return path.join(context.sdlcRoot, "autonomy", "policy-sources");
+}
+
+function buildDeliveryCheckpointPolicySource(context) {
+  const effectiveConfig = structuredClone(context.config);
+  const effectiveConfigHash = hashApprovalSubject(effectiveConfig);
+  if (effectiveConfigHash !== context.configState.effective_config_hash) {
+    fail("Effective configuration changed while preparing the delivery checkpoint policy source.");
+  }
+  const sourceBase = {
+    kind: "delivery_checkpoint_policy_source",
+    schema_version: "delivery-checkpoint-policy-source:v1",
+    config: {
+      status: context.configState.status,
+      path: context.configState.config_path || `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      raw_hash: context.configState.raw_config_hash || null,
+      effective_hash: effectiveConfigHash,
+      defaults_profile: context.configState.defaults_profile
+        ? structuredClone(context.configState.defaults_profile)
+        : null,
+      inherited_paths: [...(context.configState.inherited_paths || [])],
+    },
+    effective_config: effectiveConfig,
+  };
+  const source = {
+    ...sourceBase,
+    source_hash: hashApprovalSubject(sourceBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  const sourcePath = path.join(deliveryCheckpointPolicySourcesRoot(context), `${source.source_hash}.json`);
   return {
-    required: effectiveLevel === "supervised"
-      || checkpoints.has(action)
-      || ["pull_request.merge", "deploy.remote"].includes(action)
-      || localBoundaryCheckpoint,
-    checkpoints: [...checkpoints].sort(),
+    source,
+    sourcePath,
+    ref: {
+      path: toProjectPath(context, sourcePath),
+      hash: source.source_hash,
+      effective_config_hash: effectiveConfigHash,
+    },
   };
 }
 
-function deliveryActionReceipts(context, profileId) {
+function validateDeliveryCheckpointPolicySource(context, source, expectedRef = null) {
+  const errors = [];
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return { valid: false, errors: ["checkpoint policy source is not an object"] };
+  }
+  if (source.kind !== "delivery_checkpoint_policy_source") {
+    errors.push("checkpoint policy source kind is invalid");
+  }
+  if (source.schema_version !== "delivery-checkpoint-policy-source:v1") {
+    errors.push("checkpoint policy source schema version is unsupported");
+  }
+  if (source.hash_algorithm !== "sha256:stable-json:v1") {
+    errors.push("checkpoint policy source hash algorithm is invalid");
+  }
+  const { source_hash: storedHash, hash_algorithm: _hashAlgorithm, ...sourceBase } = source;
+  const expectedSourceHash = hashApprovalSubject(sourceBase);
+  if (storedHash !== expectedSourceHash) {
+    errors.push("checkpoint policy source hash is invalid");
+  }
+  const effectiveConfigHash = source.effective_config
+    && typeof source.effective_config === "object"
+    && !Array.isArray(source.effective_config)
+    ? hashApprovalSubject(source.effective_config)
+    : null;
+  if (!effectiveConfigHash || source.config?.effective_hash !== effectiveConfigHash) {
+    errors.push("checkpoint policy source does not reproduce its effective config hash");
+  }
+  if (
+    !source.config
+    || typeof source.config !== "object"
+    || Array.isArray(source.config)
+    || typeof source.config.path !== "string"
+    || source.config.path.length === 0
+    || !Array.isArray(source.config.inherited_paths)
+    || stableJson(source.config.inherited_paths) !== stableJson([...new Set(source.config.inherited_paths)].sort())
+  ) {
+    errors.push("checkpoint policy source config identity is invalid");
+  }
+  const defaultsProfile = source.config?.defaults_profile;
+  if (defaultsProfile !== null && (
+    !defaultsProfile
+    || typeof defaultsProfile !== "object"
+    || Array.isArray(defaultsProfile)
+    || typeof defaultsProfile.id !== "string"
+    || defaultsProfile.id.length === 0
+    || !/^[a-f0-9]{64}$/u.test(defaultsProfile.sha256 || "")
+  )) {
+    errors.push("checkpoint policy source defaults profile is invalid");
+  }
+  if (expectedRef && (
+    expectedRef.hash !== storedHash
+    || expectedRef.effective_config_hash !== effectiveConfigHash
+  )) {
+    errors.push("checkpoint policy source reference is stale");
+  }
+  return { valid: errors.length === 0, errors, effectiveConfigHash };
+}
+
+function persistDeliveryCheckpointPolicySource(context, preparedSource) {
+  fs.mkdirSync(deliveryCheckpointPolicySourcesRoot(context), { recursive: true });
+  const releaseLock = acquireFileLock(`${preparedSource.sourcePath}.lock`);
+  try {
+    if (fs.existsSync(preparedSource.sourcePath)) {
+      const existing = readProjectJson(context, preparedSource.sourcePath);
+      const validation = validateDeliveryCheckpointPolicySource(context, existing, preparedSource.ref);
+      if (!validation.valid || stableJson(existing) !== stableJson(preparedSource.source)) {
+        fail(`Delivery checkpoint policy source ${preparedSource.ref.path} is stale or tampered.`);
+      }
+      return preparedSource.ref;
+    }
+    writeJsonFile(preparedSource.sourcePath, preparedSource.source, { atomicCreate: true });
+    return preparedSource.ref;
+  } finally {
+    releaseLock();
+  }
+}
+
+function readDeliveryCheckpointPolicySource(context, sourceRef) {
+  if (!sourceRef?.path || !sourceRef?.hash || !sourceRef?.effective_config_hash) {
+    throw new Error("checkpoint policy source reference is incomplete");
+  }
+  const sourcePath = resolveProjectFilePath(context, sourceRef.path, { mustExist: true, fileOnly: true });
+  const sourcesRoot = path.resolve(deliveryCheckpointPolicySourcesRoot(context));
+  const relative = path.relative(sourcesRoot, sourcePath);
+  if (
+    !relative
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+    || path.dirname(relative) !== "."
+    || path.basename(relative, ".json") !== sourceRef.hash
+  ) {
+    throw new Error("checkpoint policy source reference escapes its content-addressed store");
+  }
+  const source = readProjectJson(context, sourcePath);
+  const validation = validateDeliveryCheckpointPolicySource(context, source, sourceRef);
+  if (!validation.valid) {
+    throw new Error(validation.errors.join("; "));
+  }
+  return source;
+}
+
+function deliveryActionCheckpointRequired(context, profile, effectiveLevel, action) {
+  const presetCheckpoints = [...new Set(normalizeListValue(
+    context.config.autonomy_policy?.presets?.[effectiveLevel]?.checkpoints,
+    [],
+  ))].sort();
+  const profileCheckpoints = [...new Set(profile.checkpoints || [])].sort();
+  const checkpoints = new Set([...presetCheckpoints, ...profileCheckpoints]);
+  const boundaryActions = [...DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS];
+  const localBoundarySource = profile.delivery_kind === "local_release"
+    ? localReleaseBoundarySource(context, profile.local_release_target)
+    : null;
+  const localBoundaryCheckpoint = profile.delivery_kind === "local_release"
+    && localReleaseBoundaryCheckpointFromSource(localBoundarySource);
+  return {
+    required: effectiveLevel === "supervised"
+      || checkpoints.has(action)
+      || boundaryActions.includes(action)
+      || localBoundaryCheckpoint,
+    checkpoints: [...checkpoints].sort(),
+    preset_checkpoints: presetCheckpoints,
+    profile_checkpoints: profileCheckpoints,
+    boundary_actions: boundaryActions,
+    local_boundary_checkpoint: localBoundaryCheckpoint,
+    local_boundary_source: localBoundarySource,
+  };
+}
+
+function deliveryActionCheckpointPolicySnapshot(
+  context,
+  profile,
+  effectiveLevel,
+  action,
+  actionPolicy,
+  policySourceRef = buildDeliveryCheckpointPolicySource(context).ref,
+) {
+  const snapshot = {
+    schema_version: "delivery-action-checkpoint-policy:v1",
+    action,
+    delivery_kind: profile.delivery_kind,
+    effective_level: effectiveLevel,
+    profile_ref: { id: profile.id, hash: profile.profile_hash },
+    preset_checkpoints: actionPolicy.preset_checkpoints,
+    policy_source_ref: policySourceRef,
+    profile_checkpoints: actionPolicy.profile_checkpoints,
+    boundary_actions: actionPolicy.boundary_actions,
+    local_boundary_checkpoint: actionPolicy.local_boundary_checkpoint,
+    local_boundary_source: actionPolicy.local_boundary_source,
+    local_boundary_source_hash: actionPolicy.local_boundary_source
+      ? hashApprovalSubject(actionPolicy.local_boundary_source)
+      : null,
+    required: actionPolicy.required,
+  };
+  return { ...snapshot, policy_hash: hashApprovalSubject(snapshot) };
+}
+
+function validateDeliveryActionCheckpointPolicySnapshot(context, snapshot, profile, effectiveLevel, action) {
+  const errors = [];
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return { valid: false, required: null, errors: ["checkpoint policy snapshot is missing"] };
+  }
+  const { policy_hash: policyHash, ...subject } = snapshot;
+  const sortedUnique = (values) => Array.isArray(values)
+    && values.every((value) => typeof value === "string" && value.length > 0)
+    && stableJson(values) === stableJson([...new Set(values)].sort());
+  if (snapshot.schema_version !== "delivery-action-checkpoint-policy:v1") {
+    errors.push("checkpoint policy snapshot has an unsupported schema version");
+  }
+  if (policyHash !== hashApprovalSubject(subject)) {
+    errors.push("checkpoint policy snapshot hash is invalid");
+  }
+  if (
+    snapshot.action !== action
+    || snapshot.delivery_kind !== profile.delivery_kind
+    || snapshot.effective_level !== effectiveLevel
+  ) {
+    errors.push("checkpoint policy snapshot is bound to a different action boundary");
+  }
+  if (snapshot.profile_ref?.id !== profile.id || snapshot.profile_ref?.hash !== profile.profile_hash) {
+    errors.push("checkpoint policy snapshot is bound to a different delivery profile");
+  }
+  if (
+    !sortedUnique(snapshot.preset_checkpoints)
+    || !sortedUnique(snapshot.profile_checkpoints)
+    || !sortedUnique(snapshot.boundary_actions)
+  ) {
+    errors.push("checkpoint policy snapshot contains a non-canonical action set");
+  }
+  const immutableProfileCheckpoints = [...new Set(profile.checkpoints || [])].sort();
+  if (stableJson(snapshot.profile_checkpoints) !== stableJson(immutableProfileCheckpoints)) {
+    errors.push("checkpoint policy snapshot disagrees with immutable profile checkpoints");
+  }
+  if (stableJson(snapshot.boundary_actions) !== stableJson(DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS)) {
+    errors.push("checkpoint policy snapshot disagrees with protected boundary actions");
+  }
+  let policySource = null;
+  try {
+    policySource = readDeliveryCheckpointPolicySource(context, snapshot.policy_source_ref);
+  } catch (error) {
+    errors.push(`checkpoint policy snapshot source is invalid: ${error.message}`);
+  }
+  const sourcePresetCheckpoints = policySource
+    ? [...new Set(normalizeListValue(
+        policySource.effective_config?.autonomy_policy?.presets?.[effectiveLevel]?.checkpoints,
+        [],
+      ))].sort()
+    : null;
+  if (sourcePresetCheckpoints && stableJson(sourcePresetCheckpoints) !== stableJson(snapshot.preset_checkpoints)) {
+    errors.push("checkpoint policy snapshot disagrees with its content-addressed preset source");
+  }
+  if (profile.delivery_kind === "local_release") {
+    const localSource = snapshot.local_boundary_source;
+    const recordedGlobalRoots = Array.isArray(localSource?.global_roots)
+      ? [...new Set(localSource.global_roots)].sort()
+      : null;
+    const expectedOutsideWorkspace = localSource
+      && typeof localSource.workspace_real_path === "string"
+      && typeof localSource.target_real_path === "string"
+      && typeof localSource.platform === "string"
+      ? !recordedPathInside(
+          localSource.platform,
+          localSource.workspace_real_path,
+          localSource.target_real_path,
+        )
+      : null;
+    const expectedMachineGlobal = recordedGlobalRoots && typeof localSource?.target_real_path === "string"
+      ? recordedGlobalRoots.some((rootPath) => recordedPathInside(
+          localSource.platform,
+          rootPath,
+          localSource.target_real_path,
+        ))
+      : null;
+    const sourceLocalPolicy = policySource?.effective_config?.autonomy_policy?.local_release || null;
+    if (
+      !localSource
+      || typeof localSource !== "object"
+      || Array.isArray(localSource)
+      || localSource.schema_version !== "delivery-local-boundary-source:v1"
+      || localSource.target_hash !== hashApprovalSubject(profile.local_release_target)
+      || !["aix", "darwin", "freebsd", "linux", "openbsd", "sunos", "win32"].includes(localSource.platform)
+      || typeof localSource.workspace_real_path !== "string"
+      || localSource.workspace_real_path.length === 0
+      || typeof localSource.target_real_path !== "string"
+      || localSource.target_real_path.length === 0
+      || !recordedGlobalRoots
+      || stableJson(localSource.global_roots) !== stableJson(recordedGlobalRoots)
+      || typeof localSource.target_outside_workspace !== "boolean"
+      || localSource.target_outside_workspace !== expectedOutsideWorkspace
+      || typeof localSource.target_machine_global !== "boolean"
+      || localSource.target_machine_global !== expectedMachineGlobal
+      || typeof localSource.writes_outside_workspace_require_checkpoint !== "boolean"
+      || typeof localSource.machine_global_changes_require_checkpoint !== "boolean"
+      || localSource.writes_outside_workspace_require_checkpoint
+        !== (sourceLocalPolicy?.writes_outside_workspace_require_checkpoint !== false)
+      || localSource.machine_global_changes_require_checkpoint
+        !== (sourceLocalPolicy?.machine_global_changes_require_checkpoint !== false)
+      || snapshot.local_boundary_source_hash !== hashApprovalSubject(localSource)
+    ) {
+      errors.push("checkpoint policy snapshot has an invalid local-boundary source binding");
+    } else if (
+      snapshot.local_boundary_checkpoint !== localReleaseBoundaryCheckpointFromSource(localSource)
+    ) {
+      errors.push("checkpoint policy snapshot local-boundary flag is not derived from its recorded source");
+    }
+  } else if (
+    snapshot.local_boundary_checkpoint !== false
+    || snapshot.local_boundary_source !== null
+    || snapshot.local_boundary_source_hash !== null
+  ) {
+    errors.push("checkpoint policy snapshot unexpectedly records a local-boundary source");
+  }
+  if (typeof snapshot.local_boundary_checkpoint !== "boolean" || typeof snapshot.required !== "boolean") {
+    errors.push("checkpoint policy snapshot has invalid checkpoint flags");
+  }
+  const checkpoints = new Set([
+    ...(Array.isArray(snapshot.preset_checkpoints) ? snapshot.preset_checkpoints : []),
+    ...(Array.isArray(snapshot.profile_checkpoints) ? snapshot.profile_checkpoints : []),
+  ]);
+  const expectedRequired = effectiveLevel === "supervised"
+    || checkpoints.has(action)
+    || (Array.isArray(snapshot.boundary_actions) && snapshot.boundary_actions.includes(action))
+    || snapshot.local_boundary_checkpoint === true;
+  if (snapshot.required !== expectedRequired) {
+    errors.push("checkpoint policy snapshot does not reproduce its required flag");
+  }
+  return { valid: errors.length === 0, required: expectedRequired, errors };
+}
+
+function allDeliveryActionReceipts(context) {
   return safeReadDir(autonomyActionsRoot(context))
     .filter((name) => name.endsWith(".json"))
     .map((name) => readDeliveryLifecycleReceipt(
       context,
       path.join(autonomyActionsRoot(context), name),
       "delivery-action-receipt.schema.json",
-    ))
+    ));
+}
+
+function deliveryActionReceipts(context, profileId) {
+  return allDeliveryActionReceipts(context)
     .filter((record) => record.profile_ref?.id === profileId);
 }
 
-function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions = null) {
+function pullRequestCommitLineage(profile) {
+  return {
+    schema_version: "pull-request-commit-lineage:v1",
+    delivery_kind: profile.delivery_kind,
+    repository: normalizeGitRepositoryIdentity(profile.pull_request_target?.repository),
+    base_branch: profile.pull_request_target?.base_branch || null,
+    head_branch: profile.pull_request_target?.head_branch || null,
+    story_ids: [...new Set((profile.story_refs || []).map((item) => item.id).filter(Boolean))].sort(),
+    requirement_profile_ids: [...new Set(
+      (profile.requirement_profile_refs || []).map((item) => item.id).filter(Boolean),
+    )].sort(),
+  };
+}
+
+function deliveryActionReceiptRef(context, receipt) {
+  return {
+    id: receipt.id,
+    path: toProjectPath(
+      context,
+      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+    ),
+    hash: receipt.receipt_hash,
+  };
+}
+
+function deliveryStartReceiptRef(context, profile, receipt) {
+  return {
+    id: receipt.id,
+    path: toProjectPath(context, deliveryStartReceiptPath(context, profile.id)),
+    hash: receipt.receipt_hash,
+  };
+}
+
+function validateCommitCoverageProfileRef(context, profile, profileRef, label) {
+  const expectedPath = toProjectPath(context, deliveryAutonomyPath(context, profile.id));
+  if (
+    profileRef?.id !== profile.id
+    || profileRef?.path !== expectedPath
+    || profileRef?.hash !== profile.profile_hash
+  ) {
+    return [`${label} profile reference is stale or non-canonical`];
+  }
+  return [];
+}
+
+function validateCommitMediationCandidate(
+  context,
+  currentProfile,
+  commitSha,
+  completion,
+  authorization,
+  candidateProfile,
+) {
+  const errors = [];
+  const label = `Commit ${commitSha}`;
+  if (stableJson(pullRequestCommitLineage(candidateProfile)) !== stableJson(pullRequestCommitLineage(currentProfile))) {
+    return { compatible: false, errors: [] };
+  }
+  if (candidateProfile.status !== "active") {
+    errors.push(`${label} mediation profile is not approved and active`);
+  }
+  try {
+    validateAutonomyApprovalRef(context, candidateProfile, `${label} mediation profile`);
+  } catch (error) {
+    errors.push(`${label} mediation profile approval is invalid: ${error.message}`);
+  }
+  let executionState = null;
+  try {
+    executionState = currentDeliveryExecutionState(context, candidateProfile);
+  } catch (error) {
+    errors.push(`${label} mediation execution state is invalid: ${error.message}`);
+  }
+  const startReceipt = executionState?.start_receipt || null;
+  const profileStoryRef = (candidateProfile.story_refs || []).find((ref) => ref.id === startReceipt?.story_ref?.id);
+  const profileContractRef = (candidateProfile.contract_refs || []).find((ref) => ref.id === startReceipt?.contract_ref?.id);
+  if (
+    !startReceipt
+    || !profileStoryRef
+    || !profileContractRef
+    || stableJson(startReceipt.story_ref) !== stableJson(profileStoryRef)
+    || stableJson(startReceipt.contract_ref) !== stableJson(profileContractRef)
+  ) {
+    errors.push(`${label} mediation profile has no matching immutable delivery start`);
+  } else {
+    try {
+      const decisionPath = resolveProjectFilePath(
+        context,
+        startReceipt.autonomy_decision_ref.path,
+        { mustExist: true, fileOnly: true },
+      );
+      const startDecision = readProjectJson(context, decisionPath);
+      const integrity = validateAutonomyDecisionIntegrity(startDecision);
+      if (
+        !integrity.valid
+        || startDecision.id !== startReceipt.autonomy_decision_ref.id
+        || startDecision.decision_hash !== startReceipt.autonomy_decision_ref.hash
+        || startDecision.delivery?.profile_id !== candidateProfile.id
+        || startDecision.delivery?.profile_hash !== candidateProfile.profile_hash
+        || startDecision.effective_level !== startReceipt.effective_level
+      ) {
+        errors.push(`${label} mediation delivery start decision is stale or invalid`);
+      }
+    } catch (error) {
+      errors.push(`${label} mediation delivery start decision is unavailable: ${error.message}`);
+    }
+  }
+  errors.push(...validateCommitCoverageProfileRef(context, candidateProfile, completion.profile_ref, label));
+  errors.push(...validateCommitCoverageProfileRef(context, candidateProfile, authorization?.profile_ref, label));
+  if (
+    !authorization
+    || authorization.action !== "git.commit"
+    || authorization.status !== "authorized"
+    || authorization.receipt_hash !== completion.authorization_receipt_ref?.hash
+    || authorization.id !== completion.authorization_receipt_ref?.id
+    || completion.action !== "git.commit"
+    || completion.status !== "completed"
+    || completion.outcome !== "passed"
+    || completion.delivery?.id !== candidateProfile.delivery_id
+    || authorization.delivery?.id !== candidateProfile.delivery_id
+    || completion.delivery?.kind !== candidateProfile.delivery_kind
+    || authorization.delivery?.kind !== candidateProfile.delivery_kind
+    || completion.effective_level !== authorization.effective_level
+    || completion.action_details?.commit?.after_sha !== commitSha
+  ) {
+    errors.push(`${label} receipt pair is not an exact passing git.commit mediation`);
+  }
+  const checkpointPolicy = authorization?.action_details?.checkpoint_policy || null;
+  if (checkpointPolicy) {
+    const checkpointValidation = validateDeliveryActionCheckpointPolicySnapshot(
+      context,
+      checkpointPolicy,
+      candidateProfile,
+      authorization.effective_level,
+      "git.commit",
+    );
+    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointValidation.required) {
+      errors.push(`${label} authorization has an invalid immutable checkpoint policy`);
+    }
+  }
+  if (authorization?.checkpoint_required === true) {
+    const approvalReport = { strict: true, errors: [], warnings: [], checked: [] };
+    validateFormalApprovalRecord(
+      context,
+      approvalReport,
+      authorization.approval,
+      `${label} authorization approval`,
+      authorization.approval?.approved_by,
+      { subject_id: candidateProfile.id },
+    );
+    const approvalSubject = {
+      profile_id: candidateProfile.id,
+      profile_hash: candidateProfile.profile_hash,
+      delivery_id: candidateProfile.delivery_id,
+      action: authorization.action,
+      runtime_target: authorization.runtime_target,
+      action_details: authorization.action_details,
+    };
+    if (
+      authorization.approval?.status !== "approved"
+      || authorization.approval?.approved_content_hash !== hashApprovalSubject(approvalSubject)
+    ) {
+      approvalReport.errors.push(`${label} authorization approval is missing or bound to a different action`);
+    }
+    try {
+      validateApprovalEvidenceIntegrity(context, authorization.approval, `${label} authorization approval`);
+      validateDeliveryActionHostAuthority(context, candidateProfile, authorization);
+    } catch (error) {
+      approvalReport.errors.push(`${label} authorization approval evidence is invalid: ${error.message}`);
+    }
+    errors.push(...approvalReport.errors);
+  }
+  const startAt = Date.parse(startReceipt?.started_at || "");
+  const authorizedAt = Date.parse(authorization?.authorized_at || "");
+  const completedAt = Date.parse(completion?.authorized_at || "");
+  const closedAt = executionState?.close_receipt
+    ? Date.parse(executionState.close_receipt.closed_at || "")
+    : Number.POSITIVE_INFINITY;
+  const effectiveProfileStatus = effectiveDeliveryProfileStatus(context, candidateProfile);
+  const revokedAt = effectiveProfileStatus.revocation
+    ? Date.parse(effectiveProfileStatus.revocation.created_at || "")
+    : Number.POSITIVE_INFINITY;
+  if (
+    !Number.isFinite(startAt)
+    || !Number.isFinite(authorizedAt)
+    || !Number.isFinite(completedAt)
+    || (executionState?.close_receipt && !Number.isFinite(closedAt))
+    || (effectiveProfileStatus.revocation && !Number.isFinite(revokedAt))
+    || authorizedAt < startAt
+    || completedAt < authorizedAt
+    || completedAt > closedAt
+    || completedAt > revokedAt
+  ) {
+    errors.push(`${label} mediation receipts fall outside the immutable delivery execution window`);
+  }
+  const target = candidateProfile.pull_request_target || {};
+  for (const receipt of [authorization, completion].filter(Boolean)) {
+    if (
+      normalizeGitRepositoryIdentity(receipt.action_details?.repository) !== normalizeGitRepositoryIdentity(target.repository)
+      || receipt.action_details?.base_branch !== target.base_branch
+      || receipt.action_details?.head_branch !== target.head_branch
+    ) {
+      errors.push(`${label} receipt pair is bound to a different pull-request target`);
+      break;
+    }
+  }
+  if (authorization && errors.length === 0) {
+    const validation = { errors: [], warnings: [] };
+    validateCompletedGitCommitReceipt(context, validation, completion, authorization, label);
+    errors.push(...validation.errors);
+  }
+  return { compatible: true, errors, startReceipt };
+}
+
+function buildGitCommitCoverageProof(context, profile, runtimeTarget) {
+  const errors = [];
+  const baseSha = runtimeTarget?.base_sha;
+  const headSha = runtimeTarget?.head_sha;
+  if (!baseSha || !headSha) {
+    return { errors: ["Git commit coverage requires exact base and head SHAs."], proof: null };
+  }
+  if (execGit(context.root, ["merge-base", baseSha, headSha]) !== baseSha) {
+    return { errors: [`Git head ${headSha} is not descended from the approved base ${baseSha}.`], proof: null };
+  }
+  const rangeOutput = execGit(context.root, ["rev-list", "--reverse", "--topo-order", `${baseSha}..${headSha}`]);
+  const commitShas = String(rangeOutput || "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  const receipts = allDeliveryActionReceipts(context);
+  const receiptById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+  const profileCache = new Map();
+  const entries = [];
+  for (const commitSha of commitShas) {
+    const candidates = [];
+    const invalidCandidates = [];
+    for (const completion of receipts.filter((receipt) =>
+      receipt.action === "git.commit"
+      && receipt.status === "completed"
+      && receipt.outcome === "passed"
+      && receipt.action_details?.commit?.after_sha === commitSha)) {
+      const profileId = completion.profile_ref?.id;
+      if (!profileId) continue;
+      let candidateProfile = profileCache.get(profileId);
+      if (!candidateProfile) {
+        candidateProfile = readDeliveryAutonomyProfile(context, profileId);
+        profileCache.set(profileId, candidateProfile);
+      }
+      const authorization = receiptById.get(completion.authorization_receipt_ref?.id) || null;
+      const validation = validateCommitMediationCandidate(
+        context,
+        profile,
+        commitSha,
+        completion,
+        authorization,
+        candidateProfile,
+      );
+      if (!validation.compatible) continue;
+      if (validation.errors.length > 0) {
+        invalidCandidates.push(...validation.errors);
+        continue;
+      }
+      candidates.push({
+        completion,
+        authorization,
+        candidateProfile,
+        startReceipt: validation.startReceipt,
+      });
+    }
+    if (candidates.length !== 1) {
+      errors.push(
+        candidates.length === 0 && invalidCandidates.length > 0
+          ? `${labelForCommit(commitSha)} has invalid mediation: ${invalidCandidates.join("; ")}`
+          : `Commit ${commitSha} requires exactly one passing completed git.commit receipt from the same pull-request lineage before git.push.`,
+      );
+      continue;
+    }
+    const { completion, authorization, candidateProfile, startReceipt } = candidates[0];
+    entries.push({
+      commit_sha: commitSha,
+      profile_ref: {
+        id: candidateProfile.id,
+        path: toProjectPath(context, deliveryAutonomyPath(context, candidateProfile.id)),
+        hash: candidateProfile.profile_hash,
+      },
+      start_receipt_ref: deliveryStartReceiptRef(context, candidateProfile, startReceipt),
+      authorization_receipt_ref: deliveryActionReceiptRef(context, authorization),
+      completion_receipt_ref: deliveryActionReceiptRef(context, completion),
+    });
+  }
+  if (errors.length > 0) return { errors, proof: null };
+  const proofBase = {
+    schema_version: "git-commit-coverage:v1",
+    base_sha: baseSha,
+    head_sha: headSha,
+    lineage_hash: hashApprovalSubject(pullRequestCommitLineage(profile)),
+    entries,
+  };
+  return {
+    errors: [],
+    proof: { ...proofBase, coverage_hash: hashApprovalSubject(proofBase) },
+  };
+}
+
+function labelForCommit(commitSha) {
+  return `Commit ${commitSha}`;
+}
+
+function validateGitCommitCoverageProof(context, profile, runtimeTarget, proof) {
+  const errors = [];
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
+    return ["Git commit coverage proof is missing."];
+  }
+  const { coverage_hash: coverageHash, ...proofBase } = proof;
+  if (
+    proof.schema_version !== "git-commit-coverage:v1"
+    || coverageHash !== hashApprovalSubject(proofBase)
+    || proof.base_sha !== runtimeTarget?.base_sha
+    || proof.head_sha !== runtimeTarget?.head_sha
+    || proof.lineage_hash !== hashApprovalSubject(pullRequestCommitLineage(profile))
+    || !Array.isArray(proof.entries)
+  ) {
+    return ["Git commit coverage proof is stale or invalid."];
+  }
+  if (!proof.entries.every((entry) =>
+    entry
+    && typeof entry === "object"
+    && !Array.isArray(entry)
+    && /^[a-f0-9]{40,64}$/u.test(entry.commit_sha || "")
+    && typeof entry.profile_ref?.id === "string"
+    && typeof entry.start_receipt_ref?.id === "string"
+    && typeof entry.authorization_receipt_ref?.id === "string"
+    && typeof entry.completion_receipt_ref?.id === "string")) {
+    return ["Git commit coverage proof contains an invalid entry."];
+  }
+  if (execGit(context.root, ["merge-base", proof.base_sha, proof.head_sha]) !== proof.base_sha) {
+    return [`Git head ${proof.head_sha} is not descended from the approved base ${proof.base_sha}.`];
+  }
+  const expectedCommits = String(execGit(
+    context.root,
+    ["rev-list", "--reverse", "--topo-order", `${proof.base_sha}..${proof.head_sha}`],
+  ) || "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  if (stableJson(proof.entries.map((entry) => entry.commit_sha)) !== stableJson(expectedCommits)) {
+    errors.push("Git commit coverage proof does not cover the exact ordered commit range.");
+  }
+  const receipts = allDeliveryActionReceipts(context);
+  const receiptById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+  for (const entry of proof.entries) {
+    let candidateProfile;
+    try {
+      candidateProfile = readDeliveryAutonomyProfile(context, entry.profile_ref.id);
+    } catch (error) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage profile is unavailable: ${error.message}`);
+      continue;
+    }
+    const authorization = receiptById.get(entry.authorization_receipt_ref?.id) || null;
+    const completion = receiptById.get(entry.completion_receipt_ref?.id) || null;
+    errors.push(...validateCommitCoverageProfileRef(
+      context,
+      candidateProfile,
+      entry.profile_ref,
+      labelForCommit(entry.commit_sha),
+    ));
+    if (
+      !authorization
+      || !completion
+      || stableJson(deliveryActionReceiptRef(context, authorization)) !== stableJson(entry.authorization_receipt_ref)
+      || stableJson(deliveryActionReceiptRef(context, completion)) !== stableJson(entry.completion_receipt_ref)
+    ) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage references are missing or stale`);
+      continue;
+    }
+    const validation = validateCommitMediationCandidate(
+      context,
+      profile,
+      entry.commit_sha,
+      completion,
+      authorization,
+      candidateProfile,
+    );
+    if (
+      !validation.startReceipt
+      || stableJson(deliveryStartReceiptRef(context, candidateProfile, validation.startReceipt))
+        !== stableJson(entry.start_receipt_ref)
+    ) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage start receipt is missing or stale`);
+    }
+    if (!validation.compatible) {
+      errors.push(`${labelForCommit(entry.commit_sha)} coverage comes from a different pull-request lineage`);
+    } else {
+      errors.push(...validation.errors);
+    }
+  }
+  return errors;
+}
+
+function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions = null, coverageProof = null) {
+  if (coverageProof) {
+    return validateGitCommitCoverageProof(context, profile, runtimeTarget, coverageProof);
+  }
   const errors = [];
   const baseSha = runtimeTarget?.base_sha;
   const headSha = runtimeTarget?.head_sha;
@@ -7849,10 +8654,11 @@ function gitCommitReceiptCoverageErrors(context, profile, runtimeTarget, actions
 }
 
 function assertGitCommitReceiptCoverage(context, profile, runtimeTarget) {
-  const errors = gitCommitReceiptCoverageErrors(context, profile, runtimeTarget);
+  const { errors, proof } = buildGitCommitCoverageProof(context, profile, runtimeTarget);
   if (errors.length > 0) {
     fail(`git.push cannot authorize unmediated commits: ${errors.join("; ")}`);
   }
+  return proof;
 }
 
 function buildActionEvidence(context, values) {
@@ -7914,6 +8720,47 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     || authorization.checkpoint_required !== actionPolicy.required
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
+  }
+  const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
+  if (checkpointSnapshot) {
+    const snapshotValidation = validateDeliveryActionCheckpointPolicySnapshot(
+      context,
+      checkpointSnapshot,
+      profile,
+      decision.effective_level,
+      authorization.action,
+    );
+    const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+      context,
+      profile,
+      decision.effective_level,
+      authorization.action,
+      actionPolicy,
+    );
+    if (!snapshotValidation.valid || stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+      fail(`Delivery action authorization ${authorization.id} has a stale or invalid checkpoint policy snapshot.`);
+    }
+  }
+  if (authorization.action === "git.push") {
+    const coverageProof = authorization.action_details?.commit_coverage || null;
+    const requiresCoverageProof = Boolean(checkpointSnapshot?.policy_source_ref);
+    if (requiresCoverageProof && !coverageProof) {
+      fail(`Delivery action authorization ${authorization.id} is missing its required git-commit coverage proof.`);
+    }
+    if (coverageProof) {
+      const coverageErrors = validateGitCommitCoverageProof(
+        context,
+        profile,
+        {
+          ...authorization.runtime_target,
+          base_sha: authorization.action_details?.base_precondition?.observed_sha,
+        },
+        coverageProof,
+      );
+      if (coverageErrors.length > 0) {
+        fail(`Delivery action authorization ${authorization.id} has invalid git-commit coverage: ${coverageErrors.join("; ")}`);
+      }
+    }
   }
   if (!actionPolicy.required) return;
   if (authorization.approval?.status !== "approved") {
@@ -8137,23 +8984,38 @@ function evaluateDeliveryAction(context, options) {
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
       fail("Delivery action completion --outcome must be passed or failed.");
     }
+    const preparedPolicySource = completingAction ? null : buildDeliveryCheckpointPolicySource(context);
     let actionDetails = completingAction
       ? null
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
     if (!completingAction && action === "git.push") {
       const basePrecondition = observeGitRemoteBasePrecondition(context, profile, actionDetails);
-      assertGitCommitReceiptCoverage(context, profile, {
+      const commitCoverage = assertGitCommitReceiptCoverage(context, profile, {
         ...runtimeTarget,
         base_sha: basePrecondition.observed_sha,
       });
       actionDetails = {
         ...actionDetails,
         base_precondition: basePrecondition,
+        commit_coverage: commitCoverage,
         push_precondition: observeGitPushPrecondition(context, actionDetails),
       };
     }
     if (!completingAction && action === "pull_request.merge") {
       actionDetails = { ...actionDetails, merge_precondition: observeGitHubMergePrecondition(profile, actionDetails) };
+    }
+    if (!completingAction) {
+      actionDetails = {
+        ...actionDetails,
+        checkpoint_policy: deliveryActionCheckpointPolicySnapshot(
+          context,
+          profile,
+          decision.effective_level,
+          action,
+          actionPolicy,
+          preparedPolicySource.ref,
+        ),
+      };
     }
     if (!completingAction && checkpointRequired && options["confirm-action"] !== true) {
       const guidance = actionCheckpointGuidance({
@@ -8342,6 +9204,9 @@ function evaluateDeliveryAction(context, options) {
       hash_algorithm: "sha256:stable-json:v1",
     };
     assertRecordSchema(receipt, "delivery-action-receipt.schema.json", `Delivery action receipt ${receipt.id}`);
+    if (!completingAction) {
+      persistDeliveryCheckpointPolicySource(context, preparedPolicySource);
+    }
     const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
     writeJsonFile(receiptPath, receipt, { atomicCreate: true });
     const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
@@ -18565,9 +19430,11 @@ function dependencyEdgeKey(edge) {
   return [edge.from, edge.to, edge.type, edge.blocks].join("::");
 }
 
-function buildDependencyStatus(context, storyId = null) {
-  const graph = readDependencyGraph(context, { missingOk: true });
-  const edges = (graph.edges || []).filter((edge) => !storyId || edge.from === storyId || edge.to === storyId);
+function buildDependencyStatus(context, storyId = null, query = null) {
+  const graph = query?.graph || readDependencyGraph(context, { missingOk: true });
+  const edges = query?.edges_by_story && storyId
+    ? query.edges_by_story.get(storyId) || []
+    : (graph.edges || []).filter((edge) => !storyId || edge.from === storyId || edge.to === storyId);
   const blockers = [];
   const warnings = [];
   for (const edge of edges) {
@@ -18577,7 +19444,7 @@ function buildDependencyStatus(context, storyId = null) {
     }
     // Status and orchestration expose blockers for upcoming phases. Phase-aware
     // enforcement is applied by the story gate, which passes the current story.
-    const state = inspectDependencyEdge(context, edge);
+    const state = inspectDependencyEdge(context, edge, null, query);
     if (state.blocking && !state.satisfied) {
       blockers.push(state.message);
     } else if (!state.satisfied) {
@@ -18586,7 +19453,7 @@ function buildDependencyStatus(context, storyId = null) {
       warnings.push(state.message);
     }
   }
-  const cycles = findBlockingDependencyCycles(graph.edges || []);
+  const cycles = query?.cycles || findBlockingDependencyCycles(graph.edges || []);
   for (const cycle of cycles) {
     blockers.push(`blocking dependency cycle: ${cycle.join(" -> ")}`);
   }
@@ -18600,15 +19467,15 @@ function buildDependencyStatus(context, storyId = null) {
   };
 }
 
-function inspectDependencyEdge(context, edge, story = null) {
+function inspectDependencyEdge(context, edge, story = null, query = null) {
   const blocking = isHardDependencyEdge(edge) && shouldDependencyBlockStory(edge, story);
-  const satisfied = isDependencySatisfied(context, edge);
+  const satisfied = isDependencySatisfied(context, edge, query);
   const message = `${edge.from} depends on ${edge.to} (${edge.type}, ${edge.blocks}, requires ${edge.required_state})`;
   if (!satisfied) {
     return { blocking, satisfied, message };
   }
-  const stale = dependencyUpstreamArtifactChanged(context, edge);
-  if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since)) {
+  const stale = dependencyUpstreamArtifactChanged(context, edge, query);
+  if (stale && !hasDependencyRevalidationTrace(context, edge.from, edge, stale.since, query)) {
     return {
       blocking,
       satisfied: false,
@@ -18646,18 +19513,22 @@ function phaseRank(value) {
   return index >= 0 ? index : order.indexOf("design");
 }
 
-function isDependencySatisfied(context, edge) {
-  const upstream = readStory(context, edge.to);
+function isDependencySatisfied(context, edge, query = null) {
+  const upstream = query?.stories_by_id?.get(edge.to) || readStory(context, edge.to);
   if (!upstream) {
     return false;
   }
   const state = String(edge.required_state || "").toLowerCase();
   if (edge.type === "requires_contract" || state === "contract_approved") {
-    const contractState = inspectStoryContract(context, upstream);
+    let contractState = query?.contract_state_by_story?.get(upstream.id);
+    if (!contractState) {
+      contractState = inspectStoryContract(context, upstream);
+      query?.contract_state_by_story?.set(upstream.id, contractState);
+    }
     return contractState.exists && contractState.approved;
   }
   if (edge.type === "requires_artifact" || state === "artifact_linked") {
-    return storyHasOutputLink(context, edge.to);
+    return storyHasOutputLink(context, edge.to, query);
   }
   if (["exists", "none"].includes(state)) {
     return true;
@@ -18674,23 +19545,29 @@ function isDependencySatisfied(context, edge) {
   return upstream.status === state || upstream.phase === state;
 }
 
-function storyHasOutputLink(context, storyId) {
+function storyHasOutputLink(context, storyId, query = null) {
+  if (query?.registry_index) {
+    return (query.registry_index.links_by_story.get(storyId) || []).length > 0;
+  }
   const registry = readOutputRegistry(context, { missingOk: true });
   return (registry?.links || []).some((link) => link.story_id === storyId);
 }
 
-function dependencyUpstreamArtifactChanged(context, edge) {
+function dependencyUpstreamArtifactChanged(context, edge, query = null) {
   if (!["requires_artifact", "blocks"].includes(edge.type)) {
     return null;
   }
-  const registry = readOutputRegistry(context, { missingOk: true });
-  const links = (registry?.links || []).filter((link) => link.story_id === edge.to);
+  const registry = query?.registry || readOutputRegistry(context, { missingOk: true });
+  const links = query?.registry_index
+    ? query.registry_index.links_by_story.get(edge.to) || []
+    : (registry?.links || []).filter((link) => link.story_id === edge.to);
   for (const link of links) {
     if (!link.artifact_path || !link.fingerprints?.artifact_sha256) {
       continue;
     }
     const artifactPath = resolveProjectFilePath(context, link.artifact_path, { mustExist: false });
-    if (fs.existsSync(artifactPath) && hashFile(artifactPath) !== link.fingerprints.artifact_sha256) {
+    const currentHash = fs.existsSync(artifactPath) ? hashFile(artifactPath) : null;
+    if (currentHash && currentHash !== link.fingerprints.artifact_sha256) {
       return {
         artifact_path: link.artifact_path,
         since: link.updated_at || link.created_at || null,
@@ -18700,9 +19577,10 @@ function dependencyUpstreamArtifactChanged(context, edge) {
   return null;
 }
 
-function hasDependencyRevalidationTrace(context, storyId, edge, since) {
+function hasDependencyRevalidationTrace(context, storyId, edge, since, query = null) {
   const sinceTime = since ? Date.parse(since) : 0;
-  return readTraceEvents(context, storyId).some((event) => {
+  const events = query?.traces_by_story?.get(storyId) || readTraceEvents(context, storyId);
+  return events.some((event) => {
     const eventTime = Date.parse(String(event.created_at || ""));
     return (
       event.action === "dependency.revalidate" &&
@@ -18747,6 +19625,42 @@ function findBlockingDependencyCycles(edges) {
     visit(node);
   }
   return cycles;
+}
+
+function buildDependencyQuery(context, { stories = [], traceEvents = [], session = null } = {}) {
+  const graph = readDependencyGraph(context, { missingOk: true });
+  const edgesByStory = new Map();
+  for (const edge of graph.edges || []) {
+    for (const storyId of new Set([edge.from, edge.to])) {
+      if (!storyId) continue;
+      const edges = edgesByStory.get(storyId) || [];
+      edges.push(edge);
+      edgesByStory.set(storyId, edges);
+    }
+  }
+  const tracesByStory = new Map();
+  for (const event of traceEvents) {
+    if (!event.story_id) continue;
+    const events = tracesByStory.get(event.story_id) || [];
+    events.push(event);
+    tracesByStory.set(event.story_id, events);
+  }
+  const registry = readOutputRegistry(context, { missingOk: true });
+  return {
+    graph,
+    edges_by_story: edgesByStory,
+    cycles: findBlockingDependencyCycles(graph.edges || []),
+    stories_by_id: new Map(
+      stories
+        .filter((story) => story?.id && story.__folder_id === story.id)
+        .map((story) => [story.id, story]),
+    ),
+    traces_by_story: tracesByStory,
+    registry,
+    registry_index: createOutputRegistryQueryIndex(registry),
+    contract_state_by_story: new Map(),
+    session,
+  };
 }
 
 function claimStory(context, options) {
@@ -20074,7 +20988,8 @@ function buildReportQueryNormalizationGuidance(options, queryLoad) {
 
 function buildReportQueryResult(context, rawQuery, options = {}) {
   const query = normalizeReportQuery(rawQuery, options);
-  const allRecords = collectReportQueryRecords(context);
+  const session = openProjectQuerySession(context);
+  const allRecords = collectReportQueryRecords(context, session);
   const filtered = allRecords
     .filter((record) => reportQuerySubjectMatches(record, query))
     .filter((record) => reportQueryTimeMatches(record, query))
@@ -20107,7 +21022,7 @@ function buildReportQueryResult(context, rawQuery, options = {}) {
     },
     results: filtered,
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     source_policy: "Query results cite canonical .sdlc files. Cache and indexes are never query evidence.",
   };
 }
@@ -20171,23 +21086,25 @@ function normalizeReportQueryFilters(filters) {
   };
 }
 
-function collectReportQueryRecords(context) {
+function collectReportQueryRecords(context, session = openProjectQuerySession(context)) {
   const registry = readOutputRegistry(context, { missingOk: true });
+  const registryIndex = createOutputRegistryQueryIndex(registry);
+  const stories = readAllStories(context, session);
   return [
-    ...collectTraceQueryRecords(context),
-    ...collectStoryQueryRecords(context, registry),
-    ...collectStoryStepQueryRecords(context),
+    ...collectTraceQueryRecords(context, session),
+    ...collectStoryQueryRecords(context, registry, registryIndex, stories),
+    ...collectStoryStepQueryRecords(context, stories, session),
     ...collectOutputQueryRecords(context, registry),
-    ...collectContractQueryRecords(context),
+    ...collectContractQueryRecords(context, session),
     ...collectHandoffQueryRecords(context),
-    ...collectWorkItemQueryRecords(context),
-    ...collectApprovalQueryRecords(context),
-    ...collectTestQueryRecords(context),
+    ...collectWorkItemQueryRecords(context, session),
+    ...collectApprovalQueryRecords(context, session),
+    ...collectTestQueryRecords(context, session),
   ];
 }
 
-function collectTraceQueryRecords(context) {
-  return readAllTraceEvents(context)
+function collectTraceQueryRecords(context, session = null) {
+  return readAllTraceEvents(context, { session })
     .filter((event) => event.type !== "invalid")
     .map((event) => ({
       kind: "activity",
@@ -20212,10 +21129,13 @@ function collectTraceQueryRecords(context) {
     }));
 }
 
-function collectStoryQueryRecords(context, registry = null) {
-  return readAllStories(context).map((story) => {
-    const storyOutputTypes = (registry?.links || [])
-      .filter((link) => link.story_id === story.id && link.artifact_type)
+function collectStoryQueryRecords(context, registry = null, registryIndex = null, stories = null) {
+  return (stories || readAllStories(context)).map((story) => {
+    const storyLinks = registryIndex
+      ? registryIndex.links_by_story.get(story.id) || []
+      : (registry?.links || []).filter((link) => link.story_id === story.id);
+    const storyOutputTypes = storyLinks
+      .filter((link) => link.artifact_type)
       .map((link) => link.artifact_type);
     return {
       kind: "stories",
@@ -20242,10 +21162,10 @@ function collectStoryQueryRecords(context, registry = null) {
   });
 }
 
-function collectStoryStepQueryRecords(context) {
+function collectStoryStepQueryRecords(context, stories = null, session = null) {
   const records = [];
-  for (const story of readAllStories(context)) {
-    for (const step of readStoryStepRecords(context, story.id)) {
+  for (const story of stories || readAllStories(context)) {
+    for (const step of readStoryStepRecords(context, story.id, session)) {
       records.push({
         kind: "story_steps",
         id: step.id || `${story.id}:${step.step}`,
@@ -20320,8 +21240,8 @@ function collectOutputQueryRecords(context, registry = null) {
   return [...templateRecords, ...linkRecords];
 }
 
-function collectContractQueryRecords(context) {
-  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+function collectContractQueryRecords(context, session = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"), session).map((contract) => ({
     kind: "contracts",
     id: contract.id || path.basename(contract.__path, ".json"),
     summary: `${contract.phase || "unknown"} contract ${contract.id || path.basename(contract.__path, ".json")}`,
@@ -20369,10 +21289,10 @@ function collectHandoffQueryRecords(context) {
   }));
 }
 
-function collectWorkItemQueryRecords(context) {
+function collectWorkItemQueryRecords(context, session = null) {
   const roots = [path.join(workItemsRoot(context), "epics"), path.join(workItemsRoot(context), "tasks")];
   return roots.flatMap((root) =>
-    collectJsonFiles(context, root).map((item) => ({
+    collectJsonFiles(context, root, session).map((item) => ({
       kind: "work_items",
       id: item.id || path.basename(item.__path, ".json"),
       summary: item.title || item.summary || item.id || path.basename(item.__path, ".json"),
@@ -20396,8 +21316,8 @@ function collectWorkItemQueryRecords(context) {
   );
 }
 
-function collectApprovalQueryRecords(context) {
-  return collectApprovalManifestEntries(context).map((approval) => ({
+function collectApprovalQueryRecords(context, session = null) {
+  return collectApprovalManifestEntries(context, session).map((approval) => ({
     kind: "approvals",
     id: approval.approval_id || `${approval.subject_id}:approval`,
     summary: `${approval.subject_id} approval ${approval.status || "unknown"}`,
@@ -20420,8 +21340,8 @@ function collectApprovalQueryRecords(context) {
   }));
 }
 
-function collectTestQueryRecords(context) {
-  return collectJsonFiles(context, path.join(context.sdlcRoot, "tests")).map((testRecord) => ({
+function collectTestQueryRecords(context, session = null) {
+  return collectJsonFiles(context, path.join(context.sdlcRoot, "tests"), session).map((testRecord) => ({
     kind: "tests",
     id: testRecord.id || path.basename(testRecord.__path, ".json"),
     summary: testRecord.summary || testRecord.id || path.basename(testRecord.__path, ".json"),
@@ -20608,6 +21528,7 @@ function renderReportQueryMarkdown(report) {
 }
 
 function buildActivityReport(context, options = {}) {
+  const session = openProjectQuerySession(context);
   const view = normalizeActivityReportView(options.view || "business");
   const untilDate = parseDateBoundary(options.until || "now", "until", { defaultNow: true });
   const sinceDate = parseDateBoundary(options.since || "3d", "since", { relativeTo: untilDate });
@@ -20616,7 +21537,7 @@ function buildActivityReport(context, options = {}) {
   }
   const storyFilter = options.story ? normalizeId(options.story) : null;
   const actorFilter = getOptionString(options, "actor") || null;
-  const allEvents = readAllTraceEvents(context, { story: storyFilter });
+  const allEvents = readAllTraceEvents(context, { story: storyFilter, session });
   const filteredEvents = allEvents
     .filter((event) => event.type !== "invalid")
     .filter((event) => isEventInsideWindow(event, sinceDate, untilDate))
@@ -20642,7 +21563,7 @@ function buildActivityReport(context, options = {}) {
     items,
     parse_errors: allEvents.filter((event) => event.type === "invalid").map((event) => event.source),
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     source_policy: "Only canonical .sdlc trace files are summarized; cache and indexes are not cited as evidence.",
   };
 }
@@ -20658,6 +21579,24 @@ function normalizeActivityReportView(value) {
 function readAllTraceEvents(context, options = {}) {
   const tracesRoot = path.join(context.sdlcRoot, "traces");
   const storyFilter = options.story ? normalizeId(options.story) : null;
+  if (options.session) {
+    return options.session.traceEvents({ storyId: storyFilter, includeInvalid: true }).map((event) => {
+      if (event.type === "invalid") {
+        return {
+          type: "invalid",
+          summary: event.error?.message || "Invalid canonical trace event",
+          source: event.source,
+        };
+      }
+      const sourceFile = event.source?.path
+        ? path.basename(event.source.path.replaceAll("/", path.sep))
+        : null;
+      return {
+        ...event,
+        story_id: event.story_id || (sourceFile ? inferStoryIdFromTraceFile(sourceFile) : null),
+      };
+    });
+  }
   const files = walkFiles(tracesRoot)
     .filter((filePath) => filePath.endsWith(".jsonl"))
     .filter((filePath) => !storyFilter || path.basename(filePath) === `${storyFilter}.jsonl`);
@@ -20882,13 +21821,19 @@ function rebuildManifests(context, options) {
 
 function buildKnowledgeManifest(context, options = {}) {
   const generatedAt = now();
-  const sourceFiles = collectManifestSourceFiles(context);
+  const session = openProjectQuerySession(context);
+  const sourceFiles = collectManifestSourceFiles(context, session);
   const sourcePaths = sourceFiles.map((filePath) => toProjectPath(context, filePath)).sort();
-  const stories = readAllStories(context);
+  const stories = readAllStories(context, session);
   const registry = readOutputRegistry(context, { missingOk: true });
-  const traceEvents = readAllTraceEvents(context).filter((event) => event.type !== "invalid");
-  const approvals = collectApprovalManifestEntries(context);
-  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts")).map((contract) => ({
+  const registryIndex = createOutputRegistryQueryIndex(registry);
+  const traceEvents = readAllTraceEvents(context, { session }).filter((event) => event.type !== "invalid");
+  const lastTraceByStory = new Map();
+  for (const event of traceEvents) {
+    if (event.story_id) lastTraceByStory.set(event.story_id, event);
+  }
+  const approvals = collectApprovalManifestEntries(context, session);
+  const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"), session).map((contract) => ({
     id: contract.id || path.basename(contract.__path, ".json"),
     phase: contract.phase || null,
     story_id: contract.story_id || null,
@@ -20920,13 +21865,12 @@ function buildKnowledgeManifest(context, options = {}) {
         contract_id: story.contract_id || null,
         requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
         active_claim: claim?.status === "active" ? { agent: claim.agent, branch: claim.branch, expires_at: claim.expires_at || null } : null,
-        completed_steps: readStoryStepRecords(context, story.id).map((record) => ({
+        completed_steps: readStoryStepRecords(context, story.id, session).map((record) => ({
           step: record.step,
           completed_at: record.completed_at,
           output_types: record.output_types || [],
         })),
-        output_links: (registry?.links || [])
-          .filter((link) => link.story_id === story.id)
+        output_links: (registryIndex.links_by_story.get(story.id) || [])
           .map((link) => ({
             id: link.id,
             artifact_type: link.artifact_type,
@@ -20934,7 +21878,7 @@ function buildKnowledgeManifest(context, options = {}) {
             mode: link.mode,
             template_id: link.template_id,
           })),
-        last_trace: readLastTraceEvent(context, story.id),
+        last_trace: lastTraceByStory.get(story.id) || null,
       };
     }),
     contracts,
@@ -20959,7 +21903,7 @@ function buildKnowledgeManifest(context, options = {}) {
     activity: summarizeActivityEvents(traceEvents),
     approvals,
     source_paths: sourcePaths,
-    source_hashes: buildSourceHashMap(context, sourcePaths),
+    source_hashes: buildSourceHashMap(context, sourcePaths, session),
     audit: {
       generated_by: buildAttribution(context, options, "manifest.rebuild").actor,
       git: buildGitMetadata(context.root),
@@ -20968,14 +21912,21 @@ function buildKnowledgeManifest(context, options = {}) {
   };
 }
 
-function collectManifestSourceFiles(context) {
-  return collectKnowledgeSourceFiles(context).filter((filePath) => {
+function collectManifestSourceFiles(context, session = null) {
+  return collectKnowledgeSourceFiles(context, session).filter((filePath) => {
     const relative = path.relative(context.sdlcRoot, filePath);
     return !relative.startsWith(`manifests${path.sep}`);
   });
 }
 
-function collectJsonFiles(context, root) {
+function collectJsonFiles(context, root, session = null) {
+  if (session) {
+    return session.jsonRecords({ under: toProjectPath(context, root) }).map((record) => ({
+      ...record.value,
+      __path: path.join(context.root, ...record.path.split("/")),
+      __relative_path: record.path,
+    }));
+  }
   return walkFiles(root)
     .filter((filePath) => filePath.endsWith(".json"))
     .map((filePath) => {
@@ -20986,12 +21937,12 @@ function collectJsonFiles(context, root) {
     });
 }
 
-function collectApprovalManifestEntries(context) {
+function collectApprovalManifestEntries(context, session = null) {
   const entries = [];
-  for (const filePath of collectManifestSourceFiles(context).filter((candidate) => candidate.endsWith(".json"))) {
+  for (const filePath of collectManifestSourceFiles(context, session).filter((candidate) => candidate.endsWith(".json"))) {
     let data;
     try {
-      data = readProjectJson(context, filePath);
+      data = session ? session.readJson(toProjectPath(context, filePath)) : readProjectJson(context, filePath);
     } catch {
       continue;
     }
@@ -22002,26 +22953,33 @@ function buildOutputTemplateContent(context, options, artifactType, id) {
 }
 
 function buildOutputResolution(context, storyId, artifactType, options = {}) {
-  const story = readStory(context, storyId);
+  const story = options.story || readStory(context, storyId);
   if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
   const registry = options.registry || readOutputRegistry(context, { missingOk: true });
+  const registryIndex = options.registry_index || null;
   const storyRequirements = Array.isArray(story.links?.requirements) ? story.links.requirements : [];
   const requirements = options.requirements?.length > 0 ? options.requirements : storyRequirements;
-  const templates = registry ? registry.templates.filter((template) => template.type === artifactType) : [];
+  const templates = registryIndex
+    ? registryIndex.templates_by_type.get(artifactType) || []
+    : registry ? registry.templates.filter((template) => template.type === artifactType) : [];
   const approvedTemplates = templates.filter((template) => template.status === "approved");
-  const existingLinks = registry
-    ? registry.links.filter((link) => link.story_id === storyId && link.artifact_type === artifactType)
-    : [];
-  const relatedLinks = registry
-    ? registry.links.filter(
-        (link) =>
-          link.story_id !== storyId &&
-          link.artifact_type === artifactType &&
-          overlaps(link.requirements || [], requirements),
-      )
-    : [];
+  const existingLinks = registryIndex
+    ? registryIndex.links_by_story_and_type.get(outputRegistryPairKey(storyId, artifactType)) || []
+    : registry
+      ? registry.links.filter((link) => link.story_id === storyId && link.artifact_type === artifactType)
+      : [];
+  const relatedLinks = registryIndex
+    ? relatedOutputLinksFromIndex(registryIndex, storyId, artifactType, requirements)
+    : registry
+      ? registry.links.filter(
+          (link) =>
+            link.story_id !== storyId &&
+            link.artifact_type === artifactType &&
+            overlaps(link.requirements || [], requirements),
+        )
+      : [];
   const preferredRelated = relatedLinks[0] || null;
   const preferredTemplate = approvedTemplates.find((template) => template.id === preferredRelated?.template_id) || approvedTemplates[0] || null;
   const delivery = preferredTemplate ? effectiveOutputDelivery(preferredTemplate) : null;
@@ -22065,16 +23023,72 @@ function buildOutputResolution(context, storyId, artifactType, options = {}) {
   };
 }
 
+function createOutputRegistryQueryIndex(registry) {
+  const templatesByType = new Map();
+  const linksByStory = new Map();
+  const linksByStoryAndType = new Map();
+  const linksByRequirementAndType = new Map();
+  const linkOrder = new Map();
+
+  for (const template of registry?.templates || []) {
+    const templates = templatesByType.get(template.type) || [];
+    templates.push(template);
+    templatesByType.set(template.type, templates);
+  }
+  for (let index = 0; index < (registry?.links || []).length; index += 1) {
+    const link = registry.links[index];
+    linkOrder.set(link, index);
+    const linksForStory = linksByStory.get(link.story_id) || [];
+    linksForStory.push(link);
+    linksByStory.set(link.story_id, linksForStory);
+    const storyKey = outputRegistryPairKey(link.story_id, link.artifact_type);
+    const storyLinks = linksByStoryAndType.get(storyKey) || [];
+    storyLinks.push(link);
+    linksByStoryAndType.set(storyKey, storyLinks);
+    for (const requirement of new Set(link.requirements || [])) {
+      const requirementKey = outputRegistryPairKey(requirement, link.artifact_type);
+      const requirementLinks = linksByRequirementAndType.get(requirementKey) || [];
+      requirementLinks.push(link);
+      linksByRequirementAndType.set(requirementKey, requirementLinks);
+    }
+  }
+
+  return {
+    templates_by_type: templatesByType,
+    links_by_story: linksByStory,
+    links_by_story_and_type: linksByStoryAndType,
+    links_by_requirement_and_type: linksByRequirementAndType,
+    link_order: linkOrder,
+  };
+}
+
+function relatedOutputLinksFromIndex(index, storyId, artifactType, requirements) {
+  const related = new Set();
+  for (const requirement of new Set(requirements || [])) {
+    const key = outputRegistryPairKey(requirement, artifactType);
+    for (const link of index.links_by_requirement_and_type.get(key) || []) {
+      if (link.story_id !== storyId) related.add(link);
+    }
+  }
+  return [...related].sort((left, right) => index.link_order.get(left) - index.link_order.get(right));
+}
+
+function outputRegistryPairKey(left, right) {
+  return `${left ?? ""}\u0000${right ?? ""}`;
+}
+
 function buildCache(context) {
   const generatedAt = now();
-  const sourceFiles = collectKnowledgeSourceFiles(context);
-  const sourceHashes = {};
+  const session = openProjectQuerySession(context);
+  const sourceSnapshot = collectKnowledgeSourceSnapshot(context, session);
+  const sourceFiles = sourceSnapshot.source_paths
+    .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  const sourceHashes = { ...sourceSnapshot.source_hashes };
   const fullTextIndex = [];
   for (const filePath of sourceFiles) {
     const relativePath = toProjectPath(context, filePath);
-    const raw = fs.readFileSync(filePath, "utf8");
-    const sourceHash = hashBuffer(Buffer.from(raw, "utf8"));
-    sourceHashes[relativePath] = sourceHash;
+    const sourceHash = sourceHashes[relativePath];
+    const raw = session.readTextAtHash(relativePath, sourceHash);
     fullTextIndex.push({
       path: relativePath,
       title: inferTitle(filePath, raw),
@@ -22092,7 +23106,8 @@ function buildCache(context) {
   }
 
   const registry = readOutputRegistry(context, { missingOk: true });
-  const stories = readAllStories(context);
+  const stories = readAllStories(context, session);
+  const registryIndex = createOutputRegistryQueryIndex(registry);
   const templateResolution = buildTemplateResolution(registry);
   const storyRequirementGraph = buildStoryRequirementGraph(stories);
   const dependencyGraph = {
@@ -22106,6 +23121,8 @@ function buildCache(context) {
     for (const artifactType of artifactTypes) {
       outputResolutions[outputResolutionKey(story.id, artifactType)] = buildOutputResolution(context, story.id, artifactType, {
         registry,
+        registry_index: registryIndex,
+        story,
         cache_used: false,
       });
     }
@@ -22170,11 +23187,10 @@ function getCacheStatus(context) {
       cache: null,
     };
   }
-  const currentSourceFiles = collectKnowledgeSourceFiles(context);
-  const currentHashes = {};
-  for (const filePath of currentSourceFiles) {
-    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
-  }
+  const currentHashes = collectKnowledgeSourceSnapshot(
+    context,
+    openProjectQuerySession(context),
+  ).source_hashes;
   const cachedHashes = cache.source_hashes || {};
   const currentPaths = new Set(Object.keys(currentHashes));
   const cachedPaths = new Set(Object.keys(cachedHashes));
@@ -23123,7 +24139,15 @@ function outputResolutionKey(storyId, artifactType) {
   return `${storyId}::${artifactType}`;
 }
 
-function collectKnowledgeSourceFiles(context) {
+function openProjectQuerySession(context) {
+  return openCanonicalQuerySession({
+    root: context.root,
+    canonicalRoot: SDLC_DIR,
+    derivedDirectories: context.config.cache_policy?.derived_directories,
+  });
+}
+
+function knowledgeSourceRoots(context) {
   const sourceDirs = context.config.cache_policy?.source_of_truth_dirs || [
     "contracts",
     "requirements",
@@ -23145,6 +24169,22 @@ function collectKnowledgeSourceFiles(context) {
     "archive",
     "reports",
   ];
+  return ["project.json", ...sourceDirs];
+}
+
+function collectKnowledgeSourceSnapshot(context, session = openProjectQuerySession(context)) {
+  return session.sourceSnapshot({
+    under: knowledgeSourceRoots(context),
+    extensions: context.config.indexable_extensions,
+  });
+}
+
+function collectKnowledgeSourceFiles(context, session = null) {
+  if (session) {
+    return collectKnowledgeSourceSnapshot(context, session).source_paths
+      .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  }
+  const sourceDirs = knowledgeSourceRoots(context).filter((directory) => directory !== "project.json");
   const files = [];
   const rootFiles = [path.join(context.sdlcRoot, "project.json")].filter((filePath) => fs.existsSync(filePath));
   files.push(...rootFiles);
@@ -23170,7 +24210,12 @@ function shouldIndexFile(context, filePath) {
   return context.config.indexable_extensions.includes(extension);
 }
 
-function readAllStories(context) {
+function readAllStories(context, session = null) {
+  if (session) {
+    return session.stories()
+      .map(normalizeStoryRecord)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
   const storiesRoot = path.join(context.sdlcRoot, "stories");
   return safeReadDir(storiesRoot)
     .map((entry) => {
@@ -23209,22 +24254,57 @@ function buildStoryRequirementGraph(stories) {
 
 function buildStoryDependencyGraph(stories) {
   const nodes = stories.map((story) => story.id);
-  const edges = [];
-  for (let left = 0; left < stories.length; left += 1) {
-    for (let right = left + 1; right < stories.length; right += 1) {
-      const leftReqs = stories[left].links?.requirements || [];
-      const rightReqs = stories[right].links?.requirements || [];
-      const shared = leftReqs.filter((requirement) => rightReqs.includes(requirement));
-      if (shared.length > 0) {
-        edges.push({
-          from: stories[left].id,
-          to: stories[right].id,
-          reason: "shared_requirements",
-          requirements: shared,
-        });
+  const storyIndexesByRequirement = new Map();
+  for (let storyIndex = 0; storyIndex < stories.length; storyIndex += 1) {
+    const requirements = new Set(stories[storyIndex].links?.requirements || []);
+    for (const requirement of requirements) {
+      const indexes = storyIndexesByRequirement.get(requirement) || [];
+      indexes.push(storyIndex);
+      storyIndexesByRequirement.set(requirement, indexes);
+    }
+  }
+
+  // Build only pairs that actually share a requirement. The previous
+  // implementation compared every story with every other story even when the
+  // graph was sparse, which became the dominant cache-build cost at scale.
+  const sharedByPair = new Map();
+  for (const [requirement, indexes] of storyIndexesByRequirement) {
+    for (let leftOffset = 0; leftOffset < indexes.length; leftOffset += 1) {
+      for (let rightOffset = leftOffset + 1; rightOffset < indexes.length; rightOffset += 1) {
+        const left = indexes[leftOffset];
+        const right = indexes[rightOffset];
+        const key = `${left}\u0000${right}`;
+        const shared = sharedByPair.get(key) || new Set();
+        shared.add(requirement);
+        sharedByPair.set(key, shared);
       }
     }
   }
+
+  const edges = [...sharedByPair.entries()]
+    .map(([key, shared]) => {
+      const [left, right] = key.split("\u0000").map(Number);
+      const requirements = [];
+      const emitted = new Set();
+      for (const requirement of stories[left].links?.requirements || []) {
+        if (shared.has(requirement) && !emitted.has(requirement)) {
+          requirements.push(requirement);
+          emitted.add(requirement);
+        }
+      }
+      return {
+        left,
+        right,
+        edge: {
+          from: stories[left].id,
+          to: stories[right].id,
+          reason: "shared_requirements",
+          requirements,
+        },
+      };
+    })
+    .sort((first, second) => first.left - second.left || first.right - second.right)
+    .map(({ edge }) => edge);
   return { nodes, edges };
 }
 
@@ -23788,19 +24868,38 @@ function showOrchestrationPlan(context, options) {
 }
 
 function buildOrchestrationSnapshot(context) {
-  const storiesRoot = path.join(context.sdlcRoot, "stories");
-  const stories = safeReadDir(storiesRoot)
-    .map((entry) => {
-      const storyPath = path.join(storiesRoot, entry, "story.json");
-      if (!fs.existsSync(storyPath)) {
-        return null;
-      }
-      const story = readProjectJson(context, storyPath);
-      story.__folder_id = entry;
-      const claimPath = path.join(storiesRoot, entry, "claim.json");
-      const claim = fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
-      const lastTrace = readLastTraceEvent(context, entry);
-      const dependencyStatus = buildDependencyStatus(context, story.id || entry);
+  const session = openProjectQuerySession(context);
+  const storyRecords = session.listFiles({
+    under: "stories",
+    extensions: [".json"],
+    names: ["story.json"],
+  })
+    .filter((file) => file.canonical_path.split("/").length === 3)
+    .map((file) => {
+      const entry = file.canonical_path.split("/")[1];
+      return normalizeStoryRecord({ ...session.readJson(file.path), __folder_id: entry });
+    });
+  const claimByStory = new Map(
+    session.listFiles({ under: "stories", extensions: [".json"], names: ["claim.json"] })
+      .filter((file) => file.canonical_path.split("/").length === 3)
+      .map((file) => [file.canonical_path.split("/")[1], session.readJson(file.path)]),
+  );
+  const traceEvents = readAllTraceEvents(context, { session }).filter((event) => event.type !== "invalid");
+  const lastTraceByStory = new Map();
+  for (const event of traceEvents) {
+    if (event.story_id) lastTraceByStory.set(event.story_id, event);
+  }
+  const dependencyQuery = buildDependencyQuery(context, {
+    stories: storyRecords,
+    traceEvents,
+    session,
+  });
+  const stories = storyRecords
+    .map((story) => {
+      const entry = story.__folder_id;
+      const claim = claimByStory.get(entry) || null;
+      const lastTrace = lastTraceByStory.get(story.id || entry) || null;
+      const dependencyStatus = buildDependencyStatus(context, story.id || entry, dependencyQuery);
       const blockers = inferStoryBlockers(context, story, claim, dependencyStatus);
       return {
         id: story.id || entry,
@@ -23816,8 +24915,10 @@ function buildOrchestrationSnapshot(context) {
         blockers,
       };
     })
-    .filter(Boolean)
     .sort((a, b) => a.id.localeCompare(b.id));
+
+  const locks = readLocks(context);
+  const handoffs = readHandoffs(context);
 
   const summary = {
     total: stories.length,
@@ -23826,7 +24927,7 @@ function buildOrchestrationSnapshot(context) {
     blocked: stories.filter((story) => story.orchestration_state === "blocked").length,
     stale: stories.filter((story) => story.orchestration_state === "stale").length,
     terminal: stories.filter((story) => story.orchestration_state === "terminal").length,
-    active_locks: readActiveLocks(context).length,
+    active_locks: locks.filter((lock) => lock.status === "active" && !isExpired(lock.expires_at)).length,
   };
 
   return {
@@ -23834,8 +24935,8 @@ function buildOrchestrationSnapshot(context) {
     root: context.root,
     summary,
     stories,
-    locks: readLocks(context),
-    handoffs: readHandoffs(context),
+    locks,
+    handoffs,
   };
 }
 
@@ -23959,7 +25060,16 @@ function assertReleaseClaimPrecondition(context, storyId, options) {
   }
 }
 
-function readStoryStepRecords(context, storyId) {
+function readStoryStepRecords(context, storyId, session = null) {
+  if (session) {
+    return session.listFiles({
+      under: `stories/${storyId}/steps`,
+      extensions: [".json"],
+      recursive: false,
+    })
+      .map((file) => session.readJson(file.path))
+      .sort((a, b) => String(a.completed_at || "").localeCompare(String(b.completed_at || "")));
+  }
   const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
   return safeReadDir(stepsRoot)
     .filter((name) => name.endsWith(".json"))
@@ -24057,9 +25167,17 @@ function collectStoryHandoffSourceFiles(context, storyId) {
   return Array.from(new Set(files)).sort((a, b) => a.localeCompare(b));
 }
 
-function buildSourceHashMap(context, relativePaths) {
+function buildSourceHashMap(context, relativePaths, session = null) {
   const result = {};
   for (const relativePath of relativePaths) {
+    if (session) {
+      try {
+        result[relativePath] = session.hash(relativePath);
+      } catch (error) {
+        if (error?.code !== "path_missing") throw error;
+      }
+      continue;
+    }
     const filePath = resolveProjectFilePath(context, relativePath, { mustExist: false });
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       result[relativePath] = hashFile(filePath);
@@ -24907,14 +26025,34 @@ function validateCompletedGitCommitReceipt(context, report, receipt, authorizati
     execGit(context.root, ["diff", "--name-only", "--no-renames", commit.before_sha, commit.after_sha]) || "",
   ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
   const expectedPaths = [...(authorization.action_details?.changed_paths || [])].sort();
+  const commitSnapshot = authorization.action_details?.commit_snapshot;
+  const requiresCommitSnapshot = Boolean(authorization.action_details?.checkpoint_policy?.policy_source_ref);
+  let snapshotValid = true;
+  if (requiresCommitSnapshot && !commitSnapshot) {
+    snapshotValid = false;
+  } else if (commitSnapshot) {
+    const committedTreeOid = String(
+      execGit(context.root, ["rev-parse", `${commit.after_sha}^{tree}`]) || "",
+    ).trim();
+    const objectFormat = String(execGit(context.root, ["rev-parse", "--show-object-format"]) || "").trim();
+    snapshotValid = commitSnapshot.schema_version === "git-commit-index-snapshot:v1"
+      && commitSnapshot.object_format === objectFormat
+      && commitSnapshot.source_head_sha === commit.before_sha
+      && stableJson(commitSnapshot.staged_paths) === stableJson(expectedPaths)
+      && commitSnapshot.index_tree_oid === committedTreeOid;
+  } else {
+    const warning = `${label} uses a legacy git.commit authorization without a staged index snapshot`;
+    if (!report.warnings.includes(warning)) report.warnings.push(warning);
+  }
   if (
     commitAndParents.length !== 2
     || commitAndParents[0] !== commit.after_sha
     || commitAndParents[1] !== commit.before_sha
     || stableJson(commit.committed_paths) !== stableJson(expectedPaths)
     || stableJson(committedPaths) !== stableJson(expectedPaths)
+    || !snapshotValid
   ) {
-    report.errors.push(`${label} does not prove one exact non-merge commit for its authorized file set`);
+    report.errors.push(`${label} does not prove one exact non-merge commit with the authorized staged tree and file set`);
   }
 }
 
@@ -24980,6 +26118,8 @@ function validateCompletedRemoteActionReceipt(report, receipt, authorization, la
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  const historical = state.lifecycle_status === "terminal"
+    || effectiveDeliveryProfileStatus(context, profile).status === "revoked";
   let expectedEffectiveLevel = "supervised";
   try {
     const start = state.start_receipt;
@@ -24996,29 +26136,38 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     ) {
       report.errors.push(`${label} immutable start receipt has a stale or tampered autonomy decision`);
     } else {
-      const { decision: freshStartDecision } = evaluateDeliveryAutonomy(context, profile, {
-        id: startDecision.id,
-        phase: startDecision.phase || undefined,
-        evaluated_at: startDecision.evaluated_at,
-        allowHistorical: true,
-        deliveryStateOverride: {
-          delivery_id: profile.delivery_id,
-          status: "open",
-          active_run_count: 1,
-        },
-      });
-      if (stableJson(autonomyDecisionSemanticProjection(startDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshStartDecision))) {
-        report.errors.push(`${label} immutable start decision is not reproducible from its exact profile inputs`);
+      expectedEffectiveLevel = startDecision.effective_level;
+      if (!historical) {
+        const { decision: freshStartDecision } = evaluateDeliveryAutonomy(context, profile, {
+          id: startDecision.id,
+          phase: startDecision.phase || undefined,
+          evaluated_at: startDecision.evaluated_at,
+          allowHistorical: true,
+          deliveryStateOverride: {
+            delivery_id: profile.delivery_id,
+            status: "open",
+            active_run_count: 1,
+          },
+        });
+        if (stableJson(autonomyDecisionSemanticProjection(startDecision)) !== stableJson(autonomyDecisionSemanticProjection(freshStartDecision))) {
+          report.errors.push(`${label} immutable start decision is not reproducible from its exact profile inputs`);
+        }
+        expectedEffectiveLevel = freshStartDecision.effective_level;
       }
-      expectedEffectiveLevel = freshStartDecision.effective_level;
     }
     const currentContract = readContractById(context, start.contract_ref.id, { missingOk: true });
     const currentStory = readStory(context, start.story_ref.id);
+    const profileContractRef = (profile.contract_refs || []).find((ref) => ref.id === start.contract_ref.id);
+    const profileStoryRef = (profile.story_refs || []).find((ref) => ref.id === start.story_ref.id);
     if (
       !currentContract
       || !currentStory
+      || !profileContractRef
+      || !profileStoryRef
+      || start.contract_ref.hash !== profileContractRef.hash
+      || start.story_ref.hash !== profileStoryRef.hash
       || start.contract_ref.hash !== hashApprovalSubject(currentContract)
-      || start.story_ref.hash !== hashApprovalSubject(currentStory)
+      || (!historical && start.story_ref.hash !== hashApprovalSubject(currentStory))
       || start.contract_approval_hash !== latestContractApproval(currentContract)?.approved_content_hash
       || start.delivery?.id !== profile.delivery_id
       || start.delivery?.kind !== profile.delivery_kind
@@ -25030,12 +26179,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     const taskReceiptPath = path.join(context.sdlcRoot, "stories", start.story_ref.id, "task-start.json");
     if (fs.existsSync(taskReceiptPath)) {
       const taskReceipt = readProjectJson(context, taskReceiptPath);
-      if (
+      const belongsToThisExecution = taskReceipt.delivery_start_receipt_ref?.id === start.id
+        || taskReceipt.delivery_profile_ref?.id === profile.id;
+      if ((!historical || belongsToThisExecution) && (
         taskReceipt.delivery_start_receipt_ref?.id !== start.id
         || taskReceipt.delivery_start_receipt_ref?.hash !== start.receipt_hash
         || taskReceipt.route !== start.route
         || taskReceipt.phase !== start.phase
-      ) {
+      )) {
         report.errors.push(`${label} immutable start receipt disagrees with its task-start receipt`);
       }
     }
@@ -25062,19 +26213,55 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
-    const actionPolicy = deliveryActionCheckpointRequired(
-      context,
-      profile,
-      expectedEffectiveLevel,
-      receipt.action,
-    );
+    const actionPolicy = historical
+      ? null
+      : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
     if (receipt.effective_level !== expectedEffectiveLevel) {
       report.errors.push(`${actionLabel} effective level differs from the immutable delivery start decision`);
     }
-    if (receipt.checkpoint_required !== actionPolicy.required) {
-      report.errors.push(`${actionLabel} checkpoint flag does not match the current exact profile policy`);
+    const checkpointSnapshot = receipt.action_details?.checkpoint_policy;
+    const snapshotValidation = checkpointSnapshot
+      ? validateDeliveryActionCheckpointPolicySnapshot(
+          context,
+          checkpointSnapshot,
+          profile,
+          expectedEffectiveLevel,
+          receipt.action,
+        )
+      : null;
+    if (snapshotValidation && !snapshotValidation.valid) {
+      report.errors.push(`${actionLabel} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
     }
-    if (actionPolicy.required && receipt.status === "authorized") {
+    let checkpointRequired = actionPolicy?.required ?? false;
+    if (historical && snapshotValidation?.valid) {
+      checkpointRequired = snapshotValidation.required;
+    } else if (historical) {
+      const immutableLegacyCheckpoint = expectedEffectiveLevel === "supervised"
+        || (profile.checkpoints || []).includes(receipt.action)
+        || DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS.includes(receipt.action)
+        || receipt.action === "release.local";
+      if (immutableLegacyCheckpoint && receipt.checkpoint_required !== true) {
+        report.errors.push(`${actionLabel} omits a checkpoint required by its immutable legacy boundary`);
+      }
+      checkpointRequired = receipt.checkpoint_required === true;
+      const legacyWarning = `${label} uses legacy action receipts without an event-time checkpoint policy snapshot; immutable boundaries and recorded approvals were verified`;
+      if (!report.warnings.includes(legacyWarning)) report.warnings.push(legacyWarning);
+    } else if (checkpointSnapshot && snapshotValidation?.valid) {
+      const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+        context,
+        profile,
+        expectedEffectiveLevel,
+        receipt.action,
+        actionPolicy,
+      );
+      if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+        report.errors.push(`${actionLabel} checkpoint policy snapshot is stale for the current exact policy source`);
+      }
+    }
+    if (receipt.checkpoint_required !== checkpointRequired) {
+      report.errors.push(`${actionLabel} checkpoint flag does not match its exact action policy`);
+    }
+    if (checkpointRequired && receipt.status === "authorized") {
       if (receipt.approval?.status !== "approved") {
         report.errors.push(`${actionLabel} is missing its required formal checkpoint approval`);
       }
@@ -25185,7 +26372,19 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       ...authorization.runtime_target,
       base_sha: basePrecondition?.observed_sha,
     };
-    const coverageErrors = gitCommitReceiptCoverageErrors(context, profile, coverageRuntime, actions);
+    const coverageProof = authorization.action_details?.commit_coverage || null;
+    const requiresCoverageProof = Boolean(
+      authorization.action_details?.checkpoint_policy?.policy_source_ref,
+    );
+    const coverageErrors = requiresCoverageProof && !coverageProof
+      ? ["Push authorization is missing its required immutable git-commit coverage proof."]
+      : gitCommitReceiptCoverageErrors(
+          context,
+          profile,
+          coverageRuntime,
+          actions,
+          coverageProof,
+        );
     if (
       basePrecondition?.provider !== "git-remote"
       || basePrecondition.remote !== authorization.action_details?.push?.remote
@@ -25384,17 +26583,13 @@ function validateAutonomyRecords(context, report, storyId = null) {
       report.errors.push(`${label} references a missing or stale delivery profile`);
     } else {
       const executionState = currentDeliveryExecutionState(context, profile);
-      if (executionState.lifecycle_status !== "terminal") {
+      const revoked = effectiveDeliveryProfileStatus(context, profile).status === "revoked";
+      if (executionState.lifecycle_status !== "terminal" && !revoked) {
         try {
-          const revoked = effectiveDeliveryProfileStatus(context, profile).status === "revoked";
           const { decision: freshDecision } = evaluateDeliveryAutonomy(context, profile, {
             id: decision.id,
             phase: decision.phase || undefined,
             evaluated_at: decision.evaluated_at,
-            allowHistorical: revoked,
-            deliveryStateOverride: revoked
-              ? { delivery_id: profile.delivery_id, status: "open", active_run_count: 0 }
-              : undefined,
           });
           if (stableJson(autonomyDecisionSemanticProjection(decision)) !== stableJson(autonomyDecisionSemanticProjection(freshDecision))) {
             report.errors.push(`${label} does not match a fresh deterministic evaluation of its bound profile`);
@@ -25873,41 +27068,71 @@ function validateProtectedAutonomyTrace(context, report, event, label) {
     "release.local": "release.local",
   }[event.action];
   if (!mappedAction) return;
-  const story = readStory(context, event.story_id);
-  const contract = story?.contract_id
-    ? readContractById(context, story.contract_id, { missingOk: true })
-    : null;
-  const profileId = contract?.delivery_execution_profile_id;
-  if (!profileId) return;
-  let receipts;
-  try {
-    receipts = deliveryActionReceipts(context, profileId).filter((receipt) => receipt.action === mappedAction);
-  } catch (error) {
-    report.errors.push(`${label} cannot validate protected action receipts: ${error.message}`);
-    return;
-  }
   const requiredStatus = event.action === mappedAction && event.outcome === "ready"
     ? "authorized"
     : "completed";
   const evidence = new Set(Array.isArray(event.evidence) ? event.evidence : []);
-  const matching = receipts.filter((receipt) => {
-    const receiptPath = toProjectPath(
-      context,
-      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
-    );
-    if (receipt.status !== requiredStatus || !evidence.has(receiptPath)) return false;
-    if (event.action === "sync.commit" && event.git?.after_sha) {
-      return receipt.action_details?.commit?.after_sha === event.git.after_sha;
+  const related = new Set(Array.isArray(event.related) ? event.related : []);
+  const actionsRoot = path.resolve(autonomyActionsRoot(context));
+  const matching = [];
+  for (const evidencePath of evidence) {
+    try {
+      const resolved = resolveProjectFilePath(context, evidencePath, { mustExist: true, fileOnly: true });
+      const relative = path.relative(actionsRoot, resolved);
+      if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || path.dirname(relative) !== ".") {
+        continue;
+      }
+      const receipt = readDeliveryLifecycleReceipt(
+        context,
+        resolved,
+        "delivery-action-receipt.schema.json",
+      );
+      const profile = readDeliveryAutonomyProfile(context, receipt.profile_ref?.id || "missing", { missingOk: true });
+      const executionState = profile ? currentDeliveryExecutionState(context, profile) : null;
+      const start = executionState?.start_receipt;
+      const startStoryRef = (profile?.story_refs || []).find((ref) => ref.id === start?.story_ref?.id);
+      if (
+        !profile
+        || !start
+        || receipt.profile_ref?.hash !== profile.profile_hash
+        || receipt.delivery?.id !== profile.delivery_id
+        || receipt.delivery?.kind !== profile.delivery_kind
+        || start.profile_ref?.id !== profile.id
+        || start.profile_ref?.hash !== profile.profile_hash
+        || start.delivery?.id !== profile.delivery_id
+        || start.delivery?.kind !== profile.delivery_kind
+        || start.story_ref?.id !== event.story_id
+        || !startStoryRef
+        || start.story_ref?.hash !== startStoryRef.hash
+        || !related.has(profile.id)
+        || !related.has(profile.delivery_id)
+        || receipt.action !== mappedAction
+        || receipt.status !== requiredStatus
+        || path.basename(resolved) !== `${normalizeId(receipt.id)}.json`
+      ) {
+        continue;
+      }
+      if (event.action === "sync.commit" && event.git?.after_sha
+        && receipt.action_details?.commit?.after_sha !== event.git.after_sha) {
+        continue;
+      }
+      if (event.action === "sync.push" && (
+        (event.git?.after_sha && receipt.action_details?.push?.source_sha !== event.git.after_sha)
+        || (event.git?.remote && receipt.action_details?.push?.remote !== event.git.remote)
+      )) {
+        continue;
+      }
+      if (event.action === "sync.merge" && event.git?.pr_url
+        && canonicalAbsoluteUrl(receipt.action_details?.merge?.pr_url) !== canonicalAbsoluteUrl(event.git.pr_url)) {
+        continue;
+      }
+      matching.push(receipt);
+    } catch (error) {
+      if (String(evidencePath).replace(/\\/gu, "/").startsWith(`${SDLC_DIR}/autonomy/actions/`)) {
+        report.errors.push(`${label} cannot validate protected action receipt ${evidencePath}: ${error.message}`);
+      }
     }
-    if (event.action === "sync.push") {
-      return (!event.git?.after_sha || receipt.action_details?.push?.source_sha === event.git.after_sha)
-        && (!event.git?.remote || receipt.action_details?.push?.remote === event.git.remote);
-    }
-    if (event.action === "sync.merge" && event.git?.pr_url) {
-      return canonicalAbsoluteUrl(receipt.action_details?.merge?.pr_url) === canonicalAbsoluteUrl(event.git.pr_url);
-    }
-    return true;
-  });
+  }
   if (matching.length !== 1) {
     report.errors.push(
       `${label} protected action ${event.action} requires one exact ${requiredStatus} ${mappedAction} receipt in trace evidence`,
@@ -26273,15 +27498,17 @@ function latestTraceEvent(events, type) {
 }
 
 function buildIndex(context) {
-  const sourceFiles = collectKnowledgeSourceFiles(context);
-  const sourceHashes = {};
+  const session = openProjectQuerySession(context);
+  const sourceSnapshot = collectKnowledgeSourceSnapshot(context, session);
+  const sourceFiles = sourceSnapshot.source_paths
+    .map((relativePath) => path.join(context.root, ...relativePath.split("/")));
+  const sourceHashes = { ...sourceSnapshot.source_hashes };
   const entries = [];
   for (const filePath of sourceFiles) {
     const relativePath = toProjectPath(context, filePath);
     const extension = path.extname(filePath);
-    const raw = fs.readFileSync(filePath, "utf8");
+    const raw = session.readTextAtHash(relativePath, sourceHashes[relativePath]);
     const text = normalizeText(raw);
-    sourceHashes[relativePath] = hashBuffer(Buffer.from(raw, "utf8"));
     entries.push({
       path: relativePath,
       title: inferTitle(filePath, raw),
@@ -26312,10 +27539,10 @@ function getIndexStatus(context) {
   } catch {
     return { exists: true, valid: false, index_path: indexPath, index: null };
   }
-  const currentHashes = {};
-  for (const filePath of collectKnowledgeSourceFiles(context)) {
-    currentHashes[toProjectPath(context, filePath)] = hashFile(filePath);
-  }
+  const currentHashes = collectKnowledgeSourceSnapshot(
+    context,
+    openProjectQuerySession(context),
+  ).source_hashes;
   const cachedHashes = index.source_hashes || {};
   const valid =
     index.schema_version === context.config.schema_version &&

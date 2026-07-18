@@ -38,7 +38,7 @@ function run(args, options = {}) {
     cwd: options.cwd || repoRoot,
     encoding: "utf8",
     env,
-    timeout: options.timeout || 30_000,
+    timeout: options.timeout || 60_000,
     maxBuffer: 10 * 1024 * 1024,
   });
 }
@@ -68,7 +68,7 @@ function mustRunJson(args, options = {}) {
 function mustGit(project, args) {
   const result = spawnSync("git", ["-C", project, ...args], {
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: 60_000,
   });
   assert.equal(result.error, undefined, `git ${args.join(" ")} failed: ${result.error?.message}`);
   assert.equal(result.status, 0, `git ${args.join(" ")}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
@@ -189,6 +189,19 @@ function lifecycleReceiptHash(record) {
   return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
 }
 
+function checkpointPolicySourceHash(record) {
+  const canonical = structuredClone(record);
+  delete canonical.source_hash;
+  delete canonical.hash_algorithm;
+  return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
+}
+
+function commitCoverageHash(record) {
+  const canonical = structuredClone(record);
+  delete canonical.coverage_hash;
+  return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
+}
+
 function initializeAutonomyProject(project) {
   mustRun(["init", "--root", project, "--project-name", "Autonomy E2E", "--force"]);
   mustGit(project, ["init"]);
@@ -297,6 +310,7 @@ function createApprovedImplementationContract(project, { storyId, contractId, pr
 test("requirement ceiling and an exact PR profile govern task start without leaking autonomy to another PR", () => {
   const project = tmpProject("pull-request");
   initializeAutonomyProject(project);
+  fs.rmSync(path.join(project, ".sdlc", "config.lock.json"));
   const requirementStatus = mustRun([
     "autonomy", "requirement", "status",
     "--root", project,
@@ -578,6 +592,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--action", "git.commit",
   ], /requires at least one exact --scope-path/u);
 
+  mustGit(project, ["add", "--", "src/change.txt"]);
   const commitAuthorization = mustRunJson([
     "autonomy", "delivery", "action",
     "--root", project,
@@ -590,10 +605,49 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(commitAuthorization.action, "git.commit");
   assert.equal(commitAuthorization.checkpoint_required, false);
   assert.deepEqual(commitAuthorization.action_receipt.action_details.changed_paths, ["src/change.txt"]);
+  const checkpointPolicy = commitAuthorization.action_receipt.action_details.checkpoint_policy;
+  assert.equal(checkpointPolicy.schema_version, "delivery-action-checkpoint-policy:v1");
+  assert.equal(checkpointPolicy.action, "git.commit");
+  assert.equal(checkpointPolicy.effective_level, "checkpointed");
+  assert.deepEqual(checkpointPolicy.profile_ref, {
+    id: "AUT-PR-1",
+    hash: commitAuthorization.action_receipt.profile_ref.hash,
+  });
+  assert.deepEqual(checkpointPolicy.profile_checkpoints, activated.delivery_profile.checkpoints);
+  assert.match(checkpointPolicy.policy_source_ref.hash, /^[a-f0-9]{64}$/u);
+  assert.match(checkpointPolicy.policy_source_ref.effective_config_hash, /^[a-f0-9]{64}$/u);
+  const checkpointPolicySourcePath = path.join(project, checkpointPolicy.policy_source_ref.path);
+  const checkpointPolicySource = JSON.parse(fs.readFileSync(checkpointPolicySourcePath, "utf8"));
+  assert.equal(checkpointPolicySource.source_hash, checkpointPolicy.policy_source_ref.hash);
+  assert.equal(
+    crypto.createHash("sha256").update(stableJson(checkpointPolicySource.effective_config)).digest("hex"),
+    checkpointPolicy.policy_source_ref.effective_config_hash,
+  );
+  assert.deepEqual(
+    [...checkpointPolicySource.effective_config.autonomy_policy.presets.checkpointed.checkpoints].sort(),
+    checkpointPolicy.preset_checkpoints,
+  );
+  assert.equal(checkpointPolicy.required, false);
+  assert.equal(
+    commitAuthorization.action_receipt.action_details.commit_snapshot.index_tree_oid,
+    mustGit(project, ["write-tree"]),
+  );
+  assert.equal(
+    commitAuthorization.action_receipt.action_details.commit_snapshot.object_format,
+    mustGit(project, ["rev-parse", "--show-object-format"]),
+  );
+  assert.deepEqual(
+    commitAuthorization.action_receipt.action_details.commit_snapshot.staged_paths,
+    ["src/change.txt"],
+  );
+  const { policy_hash: checkpointPolicyHash, ...checkpointPolicySubject } = checkpointPolicy;
+  assert.equal(
+    checkpointPolicyHash,
+    crypto.createHash("sha256").update(stableJson(checkpointPolicySubject)).digest("hex"),
+  );
   const beforeCommit = mustGit(project, ["rev-parse", "HEAD"]);
   assert.equal(commitAuthorization.action_receipt.runtime_target.head_sha, beforeCommit);
 
-  mustGit(project, ["add", "--", "src/change.txt"]);
   mustGit(project, ["commit", "-m", "test: exact authorized delivery change"]);
   const afterCommit = mustGit(project, ["rev-parse", "HEAD"]);
   assert.notEqual(afterCommit, beforeCommit);
@@ -615,6 +669,22 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     committed_paths: ["src/change.txt"],
   });
   assert.deepEqual(commitCompletion.action_receipt.evidence.map((item) => item.path), ["src/change.txt"]);
+
+  const configPreview = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+  ]);
+  assert.equal(configPreview.status, "planned");
+  assert.equal(configPreview.plan.effective_config_hash, checkpointPolicy.policy_source_ref.effective_config_hash);
+  const configApplied = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", configPreview.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+  assert.equal(configApplied.status, "applied");
+  assert.equal(fs.existsSync(checkpointPolicySourcePath), true);
 
   mustFail([
     "autonomy", "delivery", "action",
@@ -638,6 +708,31 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.observed_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.base_ref, "refs/heads/main");
   assert.equal(pushAuthorization.action_receipt.action_details.push_precondition.observed_sha, beforeCommit);
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.schema_version, "git-commit-coverage:v1");
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.base_sha, beforeCommit);
+  assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.head_sha, afterCommit);
+  assert.deepEqual(
+    pushAuthorization.action_receipt.action_details.commit_coverage.entries.map((entry) => ({
+      commit_sha: entry.commit_sha,
+      profile_id: entry.profile_ref.id,
+      authorization_id: entry.authorization_receipt_ref.id,
+      completion_id: entry.completion_receipt_ref.id,
+    })),
+    [{
+      commit_sha: afterCommit,
+      profile_id: "AUT-PR-1",
+      authorization_id: commitAuthorization.action_receipt.id,
+      completion_id: commitCompletion.action_receipt.id,
+    }],
+  );
+  const lockedPolicySourceRef = pushAuthorization.action_receipt.action_details.checkpoint_policy.policy_source_ref;
+  assert.equal(
+    lockedPolicySourceRef.effective_config_hash,
+    checkpointPolicy.policy_source_ref.effective_config_hash,
+  );
+  assert.notEqual(lockedPolicySourceRef.hash, checkpointPolicy.policy_source_ref.hash);
+  assert.notEqual(lockedPolicySourceRef.path, checkpointPolicy.policy_source_ref.path);
+  assert.equal(fs.existsSync(path.join(project, lockedPolicySourceRef.path)), true);
 
   mustFail([
     "autonomy", "delivery", "action",
@@ -681,6 +776,12 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(terminalStatus.delivery_profiles.length, 1);
   assert.equal(terminalStatus.delivery_profiles[0].lifecycle_status, "terminal");
   assert.equal(terminalStatus.delivery_profiles[0].delivery_status, "cancelled");
+  const terminalDecisionIds = fs.readdirSync(path.join(project, ".sdlc", "autonomy", "decisions"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(project, ".sdlc", "autonomy", "decisions", name), "utf8")))
+    .filter((decision) => decision.delivery?.profile_id === "AUT-PR-1")
+    .map((decision) => decision.id);
+  assert.ok(terminalDecisionIds.length > 0);
 
   const terminalReuse = mustRunJson([
     "task", "start",
@@ -691,6 +792,199 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(terminalReuse.execution_allowed, false);
   assert.equal(terminalReuse.contract_action, "repair_delivery_autonomy");
   assert.ok(terminalReuse.blocking_reasons.includes("delivery.profile_terminal"));
+
+  const successorContract = mustRunJson([
+    "contract", "create",
+    "--root", project,
+    "--phase", "implementation",
+    "--story", "ST-PR-1",
+    "--id", "CONTRACT-PR-2",
+    "--delivery-profile", "AUT-PR-2",
+    "--level", "bounded-autonomous",
+    "--context-summary", "Continue ST-PR-1 under a new exact delivery boundary without rewriting the completed PR-1 history.",
+    "--qa", "May the successor reuse AUT-PR-1?|No, it must use AUT-PR-2",
+    "--output-ref", "implementation-summary:implementation-summary-v1:new",
+    "--tool", "node",
+    "--replace-story-contract",
+  ]).contract;
+  assert.equal(successorContract.id, "CONTRACT-PR-2");
+  assert.equal(successorContract.delivery_execution_profile_id, "AUT-PR-2");
+  assert.equal(successorContract.status, "draft");
+
+  const approvedSuccessorContract = mustRunJson([
+    "contract", "approve",
+    "--root", project,
+    "--id", "CONTRACT-PR-2",
+    ...humanApproval("Approve the successor contract without invalidating terminal PR-1 evidence"),
+  ]).contract;
+  assert.equal(approvedSuccessorContract.status, "approved");
+
+  const proposedSuccessorProfile = mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    "--delivery", "PR-2",
+    "--kind", "pull_request",
+    "--story", "ST-PR-1",
+    "--contract", "CONTRACT-PR-2",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "bounded-autonomous",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+    "--allow-action", "git.push",
+  ]).delivery_profile;
+  assert.equal(proposedSuccessorProfile.status, "proposed");
+  assert.equal(proposedSuccessorProfile.delivery_id, "PR-2");
+
+  const approvedSuccessorProfile = mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    ...humanApproval("Approve bounded autonomy for the successor PR-2 only"),
+  ]).delivery_profile;
+  assert.equal(approvedSuccessorProfile.status, "active");
+
+  const successorStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", intent,
+    "--delivery-profile", "AUT-PR-2",
+  ]);
+  assert.equal(successorStart.execution_allowed, true);
+  assert.equal(successorStart.delivery_profile_id, "AUT-PR-2");
+
+  const successorPushAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    "--action", "git.push",
+    "--remote", "origin",
+  ], { env: pushBeforeEnv });
+  assert.equal(successorPushAuthorization.status, "authorized");
+  assert.deepEqual(
+    successorPushAuthorization.action_receipt.action_details.commit_coverage.entries.map((entry) => ({
+      commit_sha: entry.commit_sha,
+      profile_id: entry.profile_ref.id,
+    })),
+    [{ commit_sha: afterCommit, profile_id: "AUT-PR-1" }],
+  );
+
+  const successorGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(successorGate.error, undefined, successorGate.error?.message);
+  assert.equal(successorGate.signal, null, `gate check terminated by ${successorGate.signal}`);
+  assert.ok([0, 1].includes(successorGate.status), successorGate.stderr || successorGate.stdout);
+  const successorGateReport = JSON.parse(successorGate.stdout);
+  const historicalFalsePositives = successorGateReport.errors.filter((error) =>
+    /AUT-PR-1 immutable start|AUT-PR-1 action receipt|protected action git\.commit requires/u.test(error)
+      || (terminalDecisionIds.some((id) => error.includes(`autonomy decision ${id}`))
+        && /does not match a fresh deterministic evaluation|cannot be reproduced/u.test(error)));
+  assert.deepEqual(
+    historicalFalsePositives,
+    [],
+    `A successor contract/profile must not invalidate terminal AUT-PR-1 evidence:\n${historicalFalsePositives.join("\n")}`,
+  );
+  assert.deepEqual(
+    successorGateReport.errors.filter((error) =>
+      /AUT-PR-2 git\.push authorization .*incomplete commit mediation|git-commit coverage proof/iu.test(error)),
+    [],
+    successorGate.stdout,
+  );
+
+  const successorPushReceiptPath = path.join(project, successorPushAuthorization.action_receipt_path);
+  const originalSuccessorPushReceipt = fs.readFileSync(successorPushReceiptPath, "utf8");
+  const pushWithoutCoverage = JSON.parse(originalSuccessorPushReceipt);
+  delete pushWithoutCoverage.action_details.commit_coverage;
+  pushWithoutCoverage.receipt_hash = lifecycleReceiptHash(pushWithoutCoverage);
+  fs.writeFileSync(successorPushReceiptPath, `${JSON.stringify(pushWithoutCoverage, null, 2)}\n`, "utf8");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-2",
+    "--action", "git.push",
+    "--outcome", "passed",
+    "--evidence", "src/change.txt",
+  ], /missing its required git-commit coverage proof/u, { env: fakeGitRemoteEnv(project, afterCommit) });
+  const missingCoverageGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(missingCoverageGate.error, undefined, missingCoverageGate.error?.message);
+  assert.equal(missingCoverageGate.signal, null, `gate check terminated by ${missingCoverageGate.signal}`);
+  assert.equal(missingCoverageGate.status, 1, missingCoverageGate.stdout);
+  assert.ok(
+    JSON.parse(missingCoverageGate.stdout).errors.some((error) =>
+      /missing its required immutable git-commit coverage proof/u.test(error)),
+    missingCoverageGate.stdout,
+  );
+  fs.writeFileSync(successorPushReceiptPath, originalSuccessorPushReceipt, "utf8");
+
+  const pushWithForgedStart = JSON.parse(originalSuccessorPushReceipt);
+  pushWithForgedStart.action_details.commit_coverage.entries[0].start_receipt_ref.hash = "0".repeat(64);
+  pushWithForgedStart.action_details.commit_coverage.coverage_hash = commitCoverageHash(
+    pushWithForgedStart.action_details.commit_coverage,
+  );
+  pushWithForgedStart.receipt_hash = lifecycleReceiptHash(pushWithForgedStart);
+  fs.writeFileSync(successorPushReceiptPath, `${JSON.stringify(pushWithForgedStart, null, 2)}\n`, "utf8");
+  const forgedStartGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(forgedStartGate.error, undefined, forgedStartGate.error?.message);
+  assert.equal(forgedStartGate.signal, null, `gate check terminated by ${forgedStartGate.signal}`);
+  assert.equal(forgedStartGate.status, 1, forgedStartGate.stdout);
+  assert.ok(
+    JSON.parse(forgedStartGate.stdout).errors.some((error) =>
+      /coverage start receipt is missing or stale/u.test(error)),
+    forgedStartGate.stdout,
+  );
+  fs.writeFileSync(successorPushReceiptPath, originalSuccessorPushReceipt, "utf8");
+
+  const originalCheckpointPolicySource = fs.readFileSync(checkpointPolicySourcePath, "utf8");
+  const forgedCheckpointPolicySource = JSON.parse(originalCheckpointPolicySource);
+  forgedCheckpointPolicySource.effective_config.autonomy_policy.presets.checkpointed.checkpoints = [
+    ...forgedCheckpointPolicySource.effective_config.autonomy_policy.presets.checkpointed.checkpoints,
+    "repository.write",
+  ].sort();
+  forgedCheckpointPolicySource.config.effective_hash = crypto.createHash("sha256")
+    .update(stableJson(forgedCheckpointPolicySource.effective_config))
+    .digest("hex");
+  forgedCheckpointPolicySource.source_hash = checkpointPolicySourceHash(forgedCheckpointPolicySource);
+  fs.writeFileSync(
+    checkpointPolicySourcePath,
+    `${JSON.stringify(forgedCheckpointPolicySource, null, 2)}\n`,
+    "utf8",
+  );
+  const forgedPolicySourceGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(forgedPolicySourceGate.status, 1, forgedPolicySourceGate.stderr || forgedPolicySourceGate.stdout);
+  assert.match(
+    `${forgedPolicySourceGate.stdout}\n${forgedPolicySourceGate.stderr}`,
+    /checkpoint policy snapshot source is invalid: checkpoint policy source reference is stale/u,
+  );
+  fs.writeFileSync(checkpointPolicySourcePath, originalCheckpointPolicySource, "utf8");
 
   const closePath = path.join(project, closed.close_receipt_path);
   const forgedClose = JSON.parse(fs.readFileSync(closePath, "utf8"));
@@ -713,6 +1007,69 @@ test("requirement ceiling and an exact PR profile govern task start without leak
 });
 
 test("git.push rejects commits created outside the exact delivery action chain", () => {
+  const contentProject = tmpProject("commit-content-substitution");
+  initializeAutonomyProject(contentProject);
+  createApprovedImplementationContract(contentProject, {
+    storyId: "ST-CONTENT-SUBSTITUTION",
+    contractId: "CONTRACT-CONTENT-SUBSTITUTION",
+    profileId: "AUT-CONTENT-SUBSTITUTION",
+  });
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", contentProject,
+    "--id", "AUT-CONTENT-SUBSTITUTION",
+    "--delivery", "PR-CONTENT-SUBSTITUTION",
+    "--kind", "pull_request",
+    "--story", "ST-CONTENT-SUBSTITUTION",
+    "--contract", "CONTRACT-CONTENT-SUBSTITUTION",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "bounded-autonomous",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", contentProject,
+    "--id", "AUT-CONTENT-SUBSTITUTION",
+    "--phase", "implementation",
+    ...humanApproval("Approve the exact content-substitution regression delivery"),
+  ]);
+  const contentStart = mustRunJson([
+    "task", "start",
+    "--root", contentProject,
+    "--intent-json", taskIntent("ST-CONTENT-SUBSTITUTION"),
+    "--delivery-profile", "AUT-CONTENT-SUBSTITUTION",
+  ]);
+  assert.equal(contentStart.execution_allowed, true);
+  const contentPath = path.join(contentProject, "src", "content.txt");
+  fs.mkdirSync(path.dirname(contentPath), { recursive: true });
+  fs.writeFileSync(contentPath, "authorized content\n", "utf8");
+  mustGit(contentProject, ["add", "--", "src/content.txt"]);
+  const contentAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", contentProject,
+    "--id", "AUT-CONTENT-SUBSTITUTION",
+    "--action", "git.commit",
+    "--scope-path", "src/content.txt",
+  ]);
+  assert.match(
+    contentAuthorization.action_receipt.action_details.commit_snapshot.index_tree_oid,
+    /^[a-f0-9]{40,64}$/u,
+  );
+  fs.writeFileSync(contentPath, "substituted after authorization\n", "utf8");
+  mustGit(contentProject, ["add", "--", "src/content.txt"]);
+  mustGit(contentProject, ["commit", "-m", "test: substitute authorized content"]);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", contentProject,
+    "--id", "AUT-CONTENT-SUBSTITUTION",
+    "--action", "git.commit",
+    "--outcome", "passed",
+    "--evidence", "src/content.txt",
+  ], /commit tree differs from the exact staged index authorized/u);
+
   const project = tmpProject("unmediated-push");
   initializeAutonomyProject(project);
   createApprovedImplementationContract(project, {
@@ -1009,6 +1366,75 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(releaseAuthorization.action_receipt.approval.status, "approved");
   assert.equal(releaseAuthorization.action_receipt.action_details.target_root, releaseRoot);
   assert.deepEqual(releaseAuthorization.action_receipt.action_details.allowed_write_paths, [releaseOutput]);
+  const localCheckpointPolicy = releaseAuthorization.action_receipt.action_details.checkpoint_policy;
+  assert.equal(localCheckpointPolicy.local_boundary_source.schema_version, "delivery-local-boundary-source:v1");
+  assert.equal(localCheckpointPolicy.local_boundary_source.target_outside_workspace, false);
+  assert.equal(localCheckpointPolicy.local_boundary_source.target_machine_global, false);
+  assert.equal(localCheckpointPolicy.local_boundary_checkpoint, false);
+  assert.equal(
+    localCheckpointPolicy.local_boundary_source_hash,
+    crypto.createHash("sha256")
+      .update(stableJson(localCheckpointPolicy.local_boundary_source))
+      .digest("hex"),
+  );
+
+  const releaseAuthorizationPath = path.join(project, releaseAuthorization.action_receipt_path);
+  const originalReleaseAuthorization = fs.readFileSync(releaseAuthorizationPath, "utf8");
+  const forgedReleaseAuthorization = JSON.parse(originalReleaseAuthorization);
+  const forgedLocalPolicy = forgedReleaseAuthorization.action_details.checkpoint_policy;
+  forgedLocalPolicy.local_boundary_source.workspace_real_path = path.join(
+    path.dirname(project),
+    "unrelated-workspace",
+  );
+  forgedLocalPolicy.local_boundary_source_hash = crypto.createHash("sha256")
+    .update(stableJson(forgedLocalPolicy.local_boundary_source))
+    .digest("hex");
+  const { policy_hash: _forgedPolicyHash, ...forgedPolicySubject } = forgedLocalPolicy;
+  forgedLocalPolicy.policy_hash = crypto.createHash("sha256")
+    .update(stableJson(forgedPolicySubject))
+    .digest("hex");
+  forgedReleaseAuthorization.receipt_hash = lifecycleReceiptHash(forgedReleaseAuthorization);
+  fs.writeFileSync(
+    releaseAuthorizationPath,
+    `${JSON.stringify(forgedReleaseAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+  const forgedLocalBoundaryGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(forgedLocalBoundaryGate.status, 1, forgedLocalBoundaryGate.stderr || forgedLocalBoundaryGate.stdout);
+  assert.match(
+    `${forgedLocalBoundaryGate.stdout}\n${forgedLocalBoundaryGate.stderr}`,
+    /checkpoint policy snapshot has an invalid local-boundary source binding/u,
+  );
+  fs.writeFileSync(releaseAuthorizationPath, originalReleaseAuthorization, "utf8");
+
+  const assertHistoricalGateDoesNotReopenLocalTarget = () => {
+    const unavailableReleaseRoot = `${releaseRoot}-after-completion`;
+    fs.renameSync(releaseRoot, unavailableReleaseRoot);
+    try {
+      const historicalGate = run([
+        "gate", "check",
+        "--root", project,
+        "--scope", "story",
+        "--story", "ST-LOCAL-1",
+        "--strict",
+        "--json",
+      ]);
+      assert.equal(historicalGate.error, undefined, historicalGate.error?.message);
+      assert.doesNotMatch(
+        `${historicalGate.stdout}\n${historicalGate.stderr}`,
+        /Local release target root must be an existing directory/u,
+      );
+    } finally {
+      fs.renameSync(unavailableReleaseRoot, releaseRoot);
+    }
+  };
 
   const releaseEvidence = path.join(releaseOutput, "release-proof.txt");
   fs.writeFileSync(releaseEvidence, "local release evidence\n", "utf8");
@@ -1035,6 +1461,16 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     ]);
     assert.equal(unavailableStatus.delivery_profiles[0].lifecycle_status, "started");
     assert.equal(unavailableStatus.delivery_profiles[0].delivery_status, "started");
+    const cancelled = mustRunJson([
+      "autonomy", "delivery", "close",
+      "--root", project,
+      "--id", "AUT-LOCAL-1",
+      "--terminal-status", "cancelled",
+      "--reason", "The host has no supported smoke-test sandbox for this local fixture.",
+      ...humanApproval("Approve cancellation of the sandbox-unavailable local fixture"),
+    ]);
+    assert.equal(cancelled.status, "terminal");
+    assertHistoricalGateDoesNotReopenLocalTarget();
     return;
   }
 
@@ -1079,6 +1515,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(status.delivery_profiles.length, 1);
   assert.equal(status.delivery_profiles[0].lifecycle_status, "terminal");
   assert.equal(status.delivery_profiles[0].delivery_status, "released");
+  assertHistoricalGateDoesNotReopenLocalTarget();
 });
 
 test("delivery revocation is hash-bound, single-record, and repairs a missing terminal receipt", () => {

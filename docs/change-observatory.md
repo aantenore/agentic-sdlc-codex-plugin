@@ -45,6 +45,8 @@ agentic-sdlc observe \
 - content-free IntentABI Codex shadow observations, when explicitly linked to a story trace;
 - raw canonical JSON, JSONL, Markdown, and text evidence under `.sdlc/`.
 
+Autonomy is presented as a practical answer, not as policy vocabulary. A reader first sees what the agent may complete for this PR, which sensitive action still requires a stop, and that the choice expires with this PR. Internal level and authority codes remain available only in the technical evidence drawer.
+
 The interface uses `recorded`, `inferred`, `missing`, and `malformed` provenance explicitly. It never silently turns an absent record into a completed phase.
 
 ## Proof-Bound Iteration Dossiers
@@ -142,6 +144,10 @@ The stored explanation scope is always `recorded-evidence-only`. Valid kinds are
 - `.sdlc` must be a real directory, not a symlink. Symlink components, cache/index paths, traversal, unsupported extensions, oversized responses, and malformed structured raw content fail closed.
 - Only `GET` and `HEAD` are accepted. Responses use no-store caching, same-origin resource policy, a restrictive CSP, and no CORS permission.
 - The application and server do not write to the target project.
+
+The server keeps one serialized read model for the current canonical revision. Concurrent requests share one rebuild, and subsequent requests receive a strong `ETag`; an unchanged conditional `GET` or `HEAD` returns `304` without serializing or transferring the model again. Before every reuse, the server rechecks the project boundary and a deterministic, bounded snapshot of canonical source content. Changes during a rebuild cause a retry rather than publishing a mixed revision. Derived cache and index directories never participate in the revision.
+
+The same configured limits bound revision scanning and normalization: file count, individual file bytes, aggregate bytes, depth, and record collection size. The loopback server scans up to the configured record budget but materializes at most 1,000 entries in each visual collection by default; an embedding API may choose another explicit bound. Oversized or unreadable evidence is represented by a stable diagnostic boundary instead of causing an unbounded read. The deterministic enterprise benchmark verifies warm-response p95 and RSS budgets on the full canonical workload.
 
 The token protects against unrelated local processes guessing the random port. It is an ephemeral local capability, not a multi-user identity or remote-access system. Do not publish the URL, tunnel the port, or bind it to another interface.
 

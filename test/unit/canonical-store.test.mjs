@@ -52,6 +52,159 @@ test("reuses bytes by deterministic project-relative key and reports command-sco
   assert.equal(store.metrics().physical_reads, 2);
 });
 
+test("returns content-bound text and JSON snapshots without an extra physical read", (t) => {
+  const root = fixture(t);
+  const store = openCanonicalStore({ root });
+
+  const text = store.snapshot("alpha.txt");
+  assert.equal(text.readText(), "alpha\n");
+  assert.equal(
+    text.sha256,
+    crypto.createHash("sha256").update("alpha\n").digest("hex"),
+  );
+  assert.equal(text.assertUnchanged(), text.sha256);
+  const json = store.snapshot("nested/data.json");
+  assert.deepEqual(json.readJson(), { value: 1, items: ["a"] });
+  assert.equal(
+    json.sha256,
+    crypto.createHash("sha256").update('{"value":1,"items":["a"]}\n').digest("hex"),
+  );
+  assert.equal(json.assertUnchanged(), json.sha256);
+  assert.equal(store.metrics().physical_reads, 2);
+  assert.equal(store.metrics().hash_computations, 2);
+  assert.equal(store.metrics().hash_calls, 4);
+  assert.equal(store.metrics().cache_hits, 2);
+});
+
+test("fails a verified snapshot closed after file or parent replacement", (t) => {
+  const root = fixture(t);
+  const store = openCanonicalStore({ root });
+  const fileSnapshot = store.snapshot("alpha.txt");
+
+  fs.writeFileSync(path.join(root, "alpha.txt"), "changed after snapshot\n");
+  assert.throws(
+    () => fileSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "file_changed",
+  );
+  assert.equal(store.metrics().cache_stale, 1);
+  assert.throws(
+    () => fileSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "file_changed",
+  );
+  assert.equal(store.metrics().cache_stale, 1);
+  assert.equal(store.metrics().cache_entries, 0);
+  assert.equal(store.readText("alpha.txt"), "changed after snapshot\n");
+
+  const parentSnapshot = store.snapshot("nested/data.json");
+  const moved = path.join(root, "nested-original");
+  fs.renameSync(path.join(root, "nested"), moved);
+  try {
+    fs.symlinkSync(moved, path.join(root, "nested"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error?.code)) return;
+    throw error;
+  }
+  assert.throws(
+    () => parentSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "parent_changed",
+  );
+  assert.equal(store.metrics().cache_stale, 2);
+});
+
+test("keeps stale snapshots isolated from newer cache entries", (t) => {
+  const root = fixture(t);
+  const store = openCanonicalStore({ root });
+  const oldSnapshot = store.snapshot("alpha.txt");
+  fs.writeFileSync(path.join(root, "alpha.txt"), "new value\n");
+  assert.equal(store.readText("alpha.txt"), "new value\n");
+  assert.throws(
+    () => oldSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "file_changed",
+  );
+  assert.equal(store.metrics().cache_entries, 1);
+  assert.equal(store.readText("alpha.txt"), "new value\n");
+  assert.equal(store.metrics().cache_stale, 1);
+});
+
+test("detects an intermediate symlink even when it still reaches the original file", (t) => {
+  const root = fixture(t);
+  fs.mkdirSync(path.join(root, "ancestor", "parent"), { recursive: true });
+  fs.writeFileSync(path.join(root, "ancestor", "parent", "data.json"), '{"stable":true}\n');
+  const store = openCanonicalStore({ root });
+  const snapshot = store.snapshot("ancestor/parent/data.json");
+  const moved = path.join(root, "ancestor-original");
+  fs.renameSync(path.join(root, "ancestor"), moved);
+  try {
+    fs.symlinkSync(moved, path.join(root, "ancestor"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error?.code)) return;
+    throw error;
+  }
+
+  assert.throws(
+    () => snapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "parent_changed",
+  );
+});
+
+test("rejects deleted files, final symlinks, and a replaced project root", (t) => {
+  const root = fixture(t);
+  const deletedStore = openCanonicalStore({ root });
+  const deletedSnapshot = deletedStore.snapshot("alpha.txt");
+  fs.unlinkSync(path.join(root, "alpha.txt"));
+  assert.throws(
+    () => deletedSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "path_missing",
+  );
+
+  const parentStore = openCanonicalStore({ root });
+  const parentSnapshot = parentStore.snapshot("nested/data.json");
+  fs.rmSync(path.join(root, "nested"), { recursive: true, force: true });
+  assert.throws(
+    () => parentSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "path_missing",
+  );
+
+  fs.mkdirSync(path.join(root, "nested"), { recursive: true });
+  fs.writeFileSync(path.join(root, "nested", "data.json"), '{"restored":true}\n');
+
+  fs.writeFileSync(path.join(root, "alpha.txt"), "alpha replacement\n");
+  const linkStore = openCanonicalStore({ root });
+  const linkSnapshot = linkStore.snapshot("alpha.txt");
+  fs.renameSync(path.join(root, "alpha.txt"), path.join(root, "alpha-original.txt"));
+  let linkCreated = false;
+  try {
+    fs.symlinkSync(
+      path.join(root, "alpha-original.txt"),
+      path.join(root, "alpha.txt"),
+      process.platform === "win32" ? "file" : undefined,
+    );
+    linkCreated = true;
+  } catch (error) {
+    if (!(process.platform === "win32" && ["EPERM", "EACCES"].includes(error?.code))) throw error;
+  }
+  if (linkCreated) {
+    assert.throws(
+      () => linkSnapshot.assertUnchanged(),
+      (error) => error instanceof CanonicalStoreError && error.code === "symlink_forbidden",
+    );
+  }
+
+  if (process.platform === "win32") return;
+  const rootStore = openCanonicalStore({ root });
+  const rootSnapshot = rootStore.snapshot("nested/data.json");
+  const movedRoot = `${root}-moved-for-snapshot`;
+  fs.renameSync(root, movedRoot);
+  fs.mkdirSync(root);
+  fs.mkdirSync(path.join(root, "nested"));
+  fs.writeFileSync(path.join(root, "nested", "data.json"), '{"replacement":true}\n');
+  t.after(() => fs.rmSync(movedRoot, { recursive: true, force: true, maxRetries: 3 }));
+  assert.throws(
+    () => rootSnapshot.assertUnchanged(),
+    (error) => error instanceof CanonicalStoreError && error.code === "root_changed",
+  );
+});
+
 test("detects external changes and supports exact, directory, and full invalidation", (t) => {
   const root = fixture(t);
   const store = openCanonicalStore({ root });
