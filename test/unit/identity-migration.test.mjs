@@ -21,6 +21,7 @@ import { computeStableHash, omitKeys } from "../../lib/canonical.mjs";
 import {
   applyIdentityMigration,
   planIdentityMigration,
+  prepareIdentityMigrationRecovery,
   publicIdentityMigrationPlan,
   recoverIdentityMigration,
   validateIdentityMigrationReceipt,
@@ -1129,12 +1130,29 @@ test("identity migration recovery restores a durable backup after an interrupted
   );
   assert.deepEqual(snapshotTree(liveRoot), interrupted);
 
-  const recovered = recoverIdentityMigration({
+  const preparation = prepareIdentityMigrationRecovery({
     projectRoot: project,
     recoveryNonce: nonce,
     planHash,
   });
+  const exactMutations = new Set(preparation.exact_mutations.map(({ operation, path: mutationPath }) =>
+    `${operation}\u0000${mutationPath}`));
+  const observedMutations = [];
+  const recovered = recoverIdentityMigration({
+    projectRoot: project,
+    recoveryNonce: nonce,
+    planHash,
+    recoveryPreparation: preparation,
+    mutationGateway(request, effect) {
+      const exactKey = `${request.operation}\u0000${request.path}`;
+      assert.ok(exactMutations.has(exactKey), `recovery attempted an unprepared mutation: ${exactKey}`);
+      observedMutations.push(exactKey);
+      return effect();
+    },
+  });
   assert.equal(recovered.status, "rolled_back");
+  assert.ok(observedMutations.length > 0);
+  assert.equal(observedMutations.some((item) => item.startsWith("transaction.execute\u0000")), false);
   assert.deepEqual(snapshotTree(liveRoot), before);
   assert.equal(fs.existsSync(path.join(project, ".sdlc-identity-migration.lock")), false);
   assert.equal(fs.existsSync(path.join(project, journalName)), false);
