@@ -29,6 +29,69 @@ import {
 const SOURCE_EMAIL = "legacy@example.invalid";
 const TARGET_EMAIL = "current@example.test";
 
+test("identity migration routes every physical mutation through the injected gateway", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const mutations = [];
+  const applied = applyIdentityMigration(plan, {
+    mutationGateway(request, effect) {
+      mutations.push(request);
+      return effect();
+    },
+    rebuildDerived: ({ sdlcRoot }) => {
+      writeJson(path.join(sdlcRoot, "cache", "kb-cache.json"), { search_text: TARGET_EMAIL });
+      writeJson(path.join(sdlcRoot, "indexes", "kb-index.json"), { search_text: TARGET_EMAIL });
+    },
+  });
+
+  assert.equal(applied.status, "applied");
+  const operations = new Set(mutations.map(({ operation }) => operation));
+  for (const operation of [
+    "directory.copy",
+    "directory.create",
+    "directory.remove",
+    "file.append",
+    "file.remove",
+    "file.truncate",
+    "file.write",
+    "lock.release",
+    "path.chmod",
+    "path.link.source",
+    "path.link.target",
+    "path.rename.source",
+    "path.rename.target",
+  ]) {
+    assert.ok(operations.has(operation), `missing governed identity operation ${operation}`);
+  }
+  assert.ok(mutations.every(({ path: mutationPath }) => path.isAbsolute(mutationPath)));
+});
+
+test("identity migration gateway denial happens before the first physical byte", (t) => {
+  const project = fixtureProject(t);
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const denied = [];
+
+  assert.throws(() => applyIdentityMigration(plan, {
+    mutationGateway(request) {
+      denied.push(request);
+      throw new Error("gateway denied before effect");
+    },
+  }), /gateway denied before effect/u);
+  assert.equal(denied[0].operation, "file.write");
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
 test("identity migration preserves approval and authorization lineage without retaining source identity", (t) => {
   const project = fixtureProject(t);
   const before = snapshotTree(path.join(project, ".sdlc"));
