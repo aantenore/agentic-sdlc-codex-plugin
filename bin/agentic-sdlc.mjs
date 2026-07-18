@@ -127,6 +127,7 @@ import {
 import {
   AUTONOMY_LEVELS,
   buildDeliveryExecutionProfile,
+  buildDeliveryExecutionProfileV2,
   buildRequirementExecutionProfile,
   mostRestrictiveAutonomyLevel,
   evaluateAutonomyPolicy,
@@ -135,6 +136,17 @@ import {
   validateDeliveryExecutionProfileIntegrity,
   validateRequirementExecutionProfileIntegrity,
 } from "../lib/autonomy-policy.mjs";
+import {
+  providerBindingForAction,
+} from "../lib/delivery/provider-compatibility.mjs";
+import {
+  DeliveryProviderError,
+  assertProviderOperationReceiptIntegrity,
+} from "../lib/delivery/provider-registry.mjs";
+import {
+  DEFAULT_DELIVERY_PROVIDER_SELECTION,
+  createDefaultDeliveryProviderRegistry,
+} from "../lib/delivery/default-providers.mjs";
 import {
   IdentityMigrationError,
   applyIdentityMigration,
@@ -378,10 +390,15 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "execution-note",
   "expires-at",
   "environment",
+  "expected-pr-base",
+  "expected-pr-body-sha256",
+  "expected-pr-state",
+  "expected-pr-title",
   "from",
   "from-email",
   "format",
   "git-event",
+  "git-provider",
   "handoff-id",
   "host",
   "host-receipt-file",
@@ -397,6 +414,7 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "integration",
   "level",
   "limit",
+  "local-release-provider",
   "locale",
   "levels",
   "metric",
@@ -425,6 +443,7 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "parent",
   "phase",
   "pr-url",
+  "pull-request-provider",
   "preset",
   "pricing-ref",
   "plan-hash",
@@ -8832,6 +8851,16 @@ function deliveryAutonomyPath(context, profileId) {
   return path.join(deliveryAutonomyRoot(context), `${normalizeId(profileId)}.json`);
 }
 
+function deliveryExecutionProfileSchemaName(profile) {
+  if (profile?.schema_version === "delivery-execution-profile:v2") {
+    return "delivery-execution-profile-v2.schema.json";
+  }
+  if (profile?.schema_version === "delivery-execution-profile:v1") {
+    return "delivery-execution-profile.schema.json";
+  }
+  fail(`Unsupported delivery profile schema '${profile?.schema_version || "missing"}'.`);
+}
+
 function readRequirementAutonomyProfile(context, profileId, options = {}) {
   const filePath = requirementAutonomyPath(context, profileId);
   if (!fs.existsSync(filePath)) {
@@ -8857,6 +8886,7 @@ function readDeliveryAutonomyProfile(context, profileId, options = {}) {
   if (!integrity.valid) {
     fail(`Delivery autonomy profile ${profileId} failed integrity validation: ${integrity.errors.join("; ")}`);
   }
+  assertRecordSchema(profile, deliveryExecutionProfileSchemaName(profile), `Delivery autonomy profile ${profileId}`);
   return profile;
 }
 
@@ -9854,6 +9884,68 @@ function deliveryConcreteIdentity(kind, target) {
   };
 }
 
+function configuredDeliveryProviderSelection(context) {
+  const configured = context.config.autonomy_policy?.delivery_providers || {};
+  return {
+    git_push: configured.git_push || DEFAULT_DELIVERY_PROVIDER_SELECTION.git_push,
+    pull_request: configured.pull_request || DEFAULT_DELIVERY_PROVIDER_SELECTION.pull_request,
+    local_release: configured.local_release || DEFAULT_DELIVERY_PROVIDER_SELECTION.local_release,
+  };
+}
+
+function normalizeDeliveryProviderId(value, label) {
+  const providerId = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]*$/u.test(providerId)) {
+    fail(`${label} must be a safe provider id, for example git-remote or github-cli.`);
+  }
+  return providerId;
+}
+
+function deliveryProviderBindingsFromOptions(context, kind, options) {
+  const configured = configuredDeliveryProviderSelection(context);
+  const selected = kind === "pull_request"
+    ? [
+        {
+          action: "git.push",
+          provider_id: normalizeDeliveryProviderId(
+            getOptionString(options, "git-provider") || configured.git_push,
+            "Git provider",
+          ),
+        },
+        ...["pull_request.create", "pull_request.merge", "pull_request.update"].map((action) => ({
+          action,
+          provider_id: normalizeDeliveryProviderId(
+            getOptionString(options, "pull-request-provider") || configured.pull_request,
+            "Pull-request provider",
+          ),
+        })),
+      ]
+    : [{
+        action: "release.local",
+        provider_id: normalizeDeliveryProviderId(
+          getOptionString(options, "local-release-provider") || configured.local_release,
+          "Local-release provider",
+        ),
+      }];
+  const registry = createDefaultDeliveryProviderRegistry();
+  for (const binding of selected) {
+    try {
+      if (
+        !registry.supports(binding.provider_id, binding.action, "precondition")
+        || !registry.supports(binding.provider_id, binding.action, "completion")
+      ) {
+        fail(`The selected provider cannot verify ${binding.action}; choose a compatible installed provider.`);
+      }
+    } catch (error) {
+      if (error instanceof DeliveryProviderError) {
+        fail(`The selected provider cannot verify ${binding.action}; choose a compatible installed provider.`);
+      }
+      throw error;
+    }
+  }
+  return selected.sort((left, right) => left.action.localeCompare(right.action));
+}
+
 function normalizeDeliveryAction(kind, value) {
   const raw = String(value || "").trim().toLowerCase();
   const aliases = {
@@ -9989,31 +10081,64 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
       delete: false,
     };
   }
-  if (action === "pull_request.merge") {
+  if (["pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
     const prUrl = getOptionString(options, "pr-url");
-    if (!prUrl) fail("pull_request.merge requires the exact --pr-url shown at the checkpoint.");
+    if (action !== "pull_request.create" && !prUrl) {
+      fail(`${action} requires the exact --pr-url shown at the checkpoint.`);
+    }
     let parsed;
-    try {
-      parsed = new URL(prUrl);
-    } catch {
-      fail("pull_request.merge --pr-url must be an absolute URL.");
+    if (prUrl) {
+      try {
+        parsed = new URL(prUrl);
+      } catch {
+        fail(`${action} --pr-url must be an absolute URL.`);
+      }
+      const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
+      const repository = segments.length >= 2
+        ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
+        : null;
+      if (
+        parsed.protocol !== "https:"
+        || parsed.search
+        || parsed.hash
+        || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
+        || segments[2] !== "pull"
+        || !/^\d+$/u.test(segments[3] || "")
+        || segments.length !== 4
+      ) {
+        fail(`${action} --pr-url does not match the exact approved repository.`);
+      }
     }
-    const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
-    const repository = segments.length >= 2
-      ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
-      : null;
-    if (
-      parsed.protocol !== "https:"
-      || parsed.search
-      || parsed.hash
-      || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
-      || segments[2] !== "pull"
-      || !/^\d+$/u.test(segments[3] || "")
-      || segments.length !== 4
-    ) {
-      fail("pull_request.merge --pr-url does not match the exact approved repository.");
+    const canonicalPrUrl = prUrl ? canonicalAbsoluteUrl(prUrl) : null;
+    details.pull_request = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha };
+    if (action === "pull_request.merge") {
+      details.merge = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha, force: false };
     }
-    details.merge = { pr_url: canonicalAbsoluteUrl(prUrl), source_sha: runtimeTarget.head_sha, force: false };
+    if (action === "pull_request.update") {
+      const expected = {};
+      const expectedTitle = getOptionString(options, "expected-pr-title");
+      const expectedBodyHash = getOptionString(options, "expected-pr-body-sha256");
+      const expectedState = getOptionString(options, "expected-pr-state");
+      const expectedBase = getOptionString(options, "expected-pr-base");
+      if (expectedTitle) expected.title = expectedTitle;
+      if (expectedBodyHash) {
+        if (!/^[a-f0-9]{64}$/u.test(expectedBodyHash)) {
+          fail("pull_request.update --expected-pr-body-sha256 must be a lowercase SHA-256 hash.");
+        }
+        expected.body_sha256 = expectedBodyHash;
+      }
+      if (expectedState) expected.is_draft = expectedState === "draft";
+      if (expectedBase) {
+        if (expectedBase !== profile.pull_request_target.base_branch) {
+          fail("pull_request.update cannot retarget the pull request outside the approved base branch.");
+        }
+        expected.base_branch = expectedBase;
+      }
+      if (Object.keys(expected).length === 0) {
+        fail("pull_request.update requires at least one exact expected PR field.");
+      }
+      details.pull_request.expected = expected;
+    }
   }
   return details;
 }
@@ -10079,99 +10204,6 @@ function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
   };
 }
 
-function verifyCompletedGitPush(context, authorization) {
-  const push = authorization.action_details?.push;
-  const precondition = authorization.action_details?.push_precondition;
-  if (!push?.remote || !push.destination_ref || !push.source_sha) {
-    fail(`git.push authorization ${authorization.id} lacks an exact remote operation.`);
-  }
-  if (
-    !precondition
-    || precondition.remote !== push.remote
-    || precondition.destination_ref !== push.destination_ref
-    || precondition.observed_sha === push.source_sha
-  ) {
-    fail(`git.push authorization ${authorization.id} lacks a distinct pre-action remote-ref observation.`);
-  }
-  let output;
-  try {
-    output = childProcess.execFileSync(
-      "git",
-      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-  } catch (error) {
-    fail(`git.push remote verification failed: ${String(error.stderr || error.message).trim()}`);
-  }
-  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
-    parts.length >= 2 && parts[1] === push.destination_ref);
-  if (matches.length !== 1 || matches[0][0] !== push.source_sha) {
-    fail(`git.push completion is not proven: ${push.destination_ref} does not resolve to ${push.source_sha}.`);
-  }
-  return {
-    provider: "git-remote",
-    remote: push.remote,
-    destination_ref: push.destination_ref,
-    observed_sha: matches[0][0],
-    verified_at: now(),
-  };
-}
-
-function observeGitPushPrecondition(context, actionDetails) {
-  const push = actionDetails?.push;
-  let output;
-  try {
-    output = childProcess.execFileSync(
-      "git",
-      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-  } catch (error) {
-    fail(`git.push precondition verification failed: ${String(error.stderr || error.message).trim()}`);
-  }
-  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
-    parts.length >= 2 && parts[1] === push.destination_ref);
-  if (matches.length > 1) {
-    fail(`git.push precondition returned multiple exact refs for ${push.destination_ref}.`);
-  }
-  const observedSha = matches[0]?.[0] || null;
-  if (observedSha === push.source_sha) {
-    fail(`git.push destination ${push.destination_ref} already equals ${push.source_sha}; no push transition is needed.`);
-  }
-  return {
-    provider: "git-remote",
-    remote: push.remote,
-    destination_ref: push.destination_ref,
-    observed_sha: observedSha,
-  };
-}
-
-function observeGitRemoteBasePrecondition(context, profile, actionDetails) {
-  const remote = actionDetails?.push?.remote;
-  const baseRef = `refs/heads/${profile.pull_request_target.base_branch}`;
-  let output;
-  try {
-    output = childProcess.execFileSync(
-      "git",
-      ["-C", context.root, "ls-remote", "--heads", remote, baseRef],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-  } catch (error) {
-    fail(`git.push base precondition verification failed: ${String(error.stderr || error.message).trim()}`);
-  }
-  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
-    parts.length >= 2 && parts[1] === baseRef);
-  if (matches.length !== 1 || !/^[a-f0-9]{40,64}$/u.test(matches[0][0])) {
-    fail(`git.push base precondition requires exactly one live remote ref for ${baseRef}.`);
-  }
-  return {
-    provider: "git-remote",
-    remote,
-    base_ref: baseRef,
-    observed_sha: matches[0][0],
-  };
-}
-
 function canonicalAbsoluteUrl(value) {
   try {
     const parsed = new URL(value);
@@ -10183,106 +10215,6 @@ function canonicalAbsoluteUrl(value) {
   }
 }
 
-function verifyCompletedGitHubMerge(profile, authorization) {
-  const merge = authorization.action_details?.merge;
-  const precondition = authorization.action_details?.merge_precondition;
-  if (!merge?.pr_url || !merge.source_sha) {
-    fail(`pull_request.merge authorization ${authorization.id} lacks an exact GitHub PR operation.`);
-  }
-  if (
-    precondition?.provider !== "github-cli"
-    || precondition.state !== "OPEN"
-    || precondition.pr_url !== canonicalAbsoluteUrl(merge.pr_url)
-    || precondition.head_sha !== merge.source_sha
-  ) {
-    fail(`pull_request.merge authorization ${authorization.id} lacks an exact open-PR precondition.`);
-  }
-  let raw;
-  try {
-    raw = childProcess.execFileSync(
-      "gh",
-      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (error) {
-    fail(`pull_request.merge provider verification requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
-  }
-  let observed;
-  try {
-    observed = JSON.parse(raw);
-  } catch {
-    fail("pull_request.merge provider returned invalid JSON.");
-  }
-  const authorizedAt = Date.parse(authorization.authorized_at || "");
-  const mergedAt = Date.parse(observed.mergedAt || "");
-  if (
-    observed.state !== "MERGED"
-    || observed.isDraft === true
-    || !observed.mergedAt
-    || !observed.mergeCommit?.oid
-    || observed.headRefOid !== merge.source_sha
-    || observed.headRefName !== profile.pull_request_target.head_branch
-    || observed.baseRefName !== profile.pull_request_target.base_branch
-    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
-    || !Number.isFinite(authorizedAt)
-    || !Number.isFinite(mergedAt)
-    || mergedAt < authorizedAt
-  ) {
-    fail("pull_request.merge completion is not proven by the exact GitHub PR, head SHA, branches, and merged state.");
-  }
-  return {
-    provider: "github-cli",
-    pr_url: canonicalAbsoluteUrl(observed.url),
-    state: observed.state,
-    is_draft: false,
-    head_sha: observed.headRefOid,
-    head_branch: observed.headRefName,
-    base_branch: observed.baseRefName,
-    merge_commit_sha: observed.mergeCommit.oid,
-    merged_at: observed.mergedAt,
-    verified_at: now(),
-  };
-}
-
-function observeGitHubMergePrecondition(profile, actionDetails) {
-  const merge = actionDetails?.merge;
-  let raw;
-  try {
-    raw = childProcess.execFileSync(
-      "gh",
-      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,headRefOid,headRefName,baseRefName"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (error) {
-    fail(`pull_request.merge precondition requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
-  }
-  let observed;
-  try {
-    observed = JSON.parse(raw);
-  } catch {
-    fail("pull_request.merge precondition provider returned invalid JSON.");
-  }
-  if (
-    observed.state !== "OPEN"
-    || observed.isDraft !== false
-    || observed.headRefOid !== merge.source_sha
-    || observed.headRefName !== profile.pull_request_target.head_branch
-    || observed.baseRefName !== profile.pull_request_target.base_branch
-    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
-  ) {
-    fail("pull_request.merge precondition must be the exact open GitHub PR at the authorized head SHA and branches.");
-  }
-  return {
-    provider: "github-cli",
-    pr_url: canonicalAbsoluteUrl(observed.url),
-    state: observed.state,
-    is_draft: false,
-    head_sha: observed.headRefOid,
-    head_branch: observed.headRefName,
-    base_branch: observed.baseRefName,
-  };
-}
-
 function remoteAuthorizationProjection(action, actionDetails) {
   const { checkpoint_policy: _checkpointPolicy, ...operationDetails } = actionDetails || {};
   if (action === "git.push") {
@@ -10290,15 +10222,237 @@ function remoteAuthorizationProjection(action, actionDetails) {
       push_precondition: _pushPrecondition,
       base_precondition: _basePrecondition,
       commit_coverage: _commitCoverage,
+      provider_operation: _providerOperation,
+      remote_verification: _remoteVerification,
       ...projection
     } = operationDetails;
     return projection;
   }
   if (action === "pull_request.merge") {
-    const { merge_precondition: _precondition, ...projection } = operationDetails;
+    const {
+      merge_precondition: _precondition,
+      provider_operation: _providerOperation,
+      provider_verification: _providerVerification,
+      ...projection
+    } = operationDetails;
     return projection;
   }
   return operationDetails;
+}
+
+const DELIVERY_PROVIDER_ACTIONS = new Set([
+  "git.push",
+  "pull_request.create",
+  "pull_request.merge",
+  "pull_request.update",
+  "release.local",
+]);
+
+function resolveDeliveryProviderBinding(profile, action) {
+  if (!DELIVERY_PROVIDER_ACTIONS.has(action)) return null;
+  try {
+    const binding = providerBindingForAction(profile, action);
+    if (!binding) {
+      fail(`This delivery has no verification provider for ${action}; create a new delivery choice with an explicit provider.`);
+    }
+    if (binding.compatibility === "unsupported-fail-closed") {
+      fail(`This historical delivery cannot safely verify ${action}; create a new delivery choice with a compatible provider.`);
+    }
+    const registry = createDefaultDeliveryProviderRegistry();
+    if (
+      !registry.supports(binding.provider_id, action, "precondition")
+      || !registry.supports(binding.provider_id, action, "completion")
+    ) {
+      fail(`The provider selected for ${action} cannot verify both the before and after state.`);
+    }
+    return binding;
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`The delivery provider for ${action} is unavailable or incompatible.`);
+    }
+    throw error;
+  }
+}
+
+function deliveryProviderOperationSubject(context, profile, action, actionDetails, authorizedAt) {
+  if (action === "git.push") {
+    return {
+      cwd: context.root,
+      repository: profile.pull_request_target.repository,
+      remote: actionDetails.push.remote,
+      destination_ref: actionDetails.push.destination_ref,
+      base_ref: `refs/heads/${profile.pull_request_target.base_branch}`,
+      source_sha: actionDetails.push.source_sha,
+    };
+  }
+  if (["pull_request.create", "pull_request.merge", "pull_request.update"].includes(action)) {
+    const subject = {
+      repository: profile.pull_request_target.repository,
+      head_branch: profile.pull_request_target.head_branch,
+      base_branch: profile.pull_request_target.base_branch,
+      source_sha: actionDetails.source_sha,
+      authorized_at: authorizedAt,
+    };
+    if (action !== "pull_request.create") subject.pr_url = actionDetails.pull_request?.pr_url;
+    if (action === "pull_request.update") subject.expected = actionDetails.pull_request?.expected;
+    return subject;
+  }
+  if (action === "release.local") {
+    return {
+      root_path: profile.local_release_target.root_path,
+      allowed_write_paths: profile.local_release_target.allowed_write_paths,
+    };
+  }
+  return null;
+}
+
+function observeDeliveryProviderPrecondition(context, profile, action, actionDetails, operationId, authorizedAt) {
+  const binding = resolveDeliveryProviderBinding(profile, action);
+  if (!binding) return null;
+  const registry = createDefaultDeliveryProviderRegistry();
+  const subject = deliveryProviderOperationSubject(context, profile, action, actionDetails, authorizedAt);
+  try {
+    const receipt = registry.observePrecondition(binding.provider_id, {
+      id: operationId,
+      action,
+      subject,
+      observed_at: authorizedAt,
+    });
+    assertProviderOperationReceiptIntegrity(receipt);
+    assertRecordSchema(receipt, "provider-operation-receipt.schema.json", `${action} provider precondition`);
+    return {
+      binding: {
+        action,
+        provider_id: binding.provider_id,
+        source: binding.derived_only ? "legacy-v1" : "explicit-v2",
+        provider_bindings_hash: profile.provider_bindings_hash || null,
+      },
+      precondition_receipt: receipt,
+      completion_receipt: null,
+    };
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`Could not verify the safe starting state for ${action}. ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function verifyDeliveryProviderCompletion(profile, action, providerOperation, completedAt) {
+  const binding = resolveDeliveryProviderBinding(profile, action);
+  if (!binding || !providerOperation?.precondition_receipt) {
+    fail(`The authorization for ${action} has no verified starting state.`);
+  }
+  if (
+    providerOperation.binding?.provider_id !== binding.provider_id
+    || providerOperation.binding?.action !== action
+    || providerOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+  ) {
+    fail(`The verification provider for ${action} changed after authorization.`);
+  }
+  const precondition = assertProviderOperationReceiptIntegrity(providerOperation.precondition_receipt);
+  if (
+    precondition.provider.id !== binding.provider_id
+    || precondition.operation.action !== action
+    || precondition.operation.phase !== "precondition"
+  ) {
+    fail(`The saved starting-state proof for ${action} does not match this delivery.`);
+  }
+  const registry = createDefaultDeliveryProviderRegistry();
+  try {
+    const completion = registry.verifyCompletion(binding.provider_id, {
+      id: precondition.operation.id,
+      action,
+      subject: precondition.subject,
+      observed_at: completedAt,
+    }, precondition);
+    assertProviderOperationReceiptIntegrity(completion);
+    assertRecordSchema(completion, "provider-operation-receipt.schema.json", `${action} provider completion`);
+    return {
+      ...providerOperation,
+      completion_receipt: completion,
+    };
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`Could not verify the completed result for ${action}. ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function withProviderCompatibilityProjection(action, actionDetails, providerOperation) {
+  const precondition = providerOperation?.precondition_receipt?.proof;
+  const completion = providerOperation?.completion_receipt?.proof;
+  let projected = { ...actionDetails, provider_operation: providerOperation };
+  if (action === "git.push") {
+    projected = {
+      ...projected,
+      base_precondition: {
+        provider: providerOperation.binding.provider_id,
+        remote: precondition.remote,
+        base_ref: precondition.base_ref,
+        observed_sha: precondition.base_sha,
+      },
+      push_precondition: {
+        provider: providerOperation.binding.provider_id,
+        remote: precondition.remote,
+        destination_ref: precondition.destination_ref,
+        observed_sha: precondition.previous_sha,
+      },
+    };
+    if (completion) {
+      projected.remote_verification = {
+        provider: providerOperation.binding.provider_id,
+        remote: completion.remote,
+        destination_ref: completion.destination_ref,
+        observed_sha: completion.observed_sha,
+        verified_at: providerOperation.completion_receipt.observed_at,
+      };
+    }
+  }
+  if (["pull_request.create", "pull_request.merge", "pull_request.update"].includes(action)) {
+    const legacyPrecondition = { provider: providerOperation.binding.provider_id, ...precondition };
+    if (action === "pull_request.merge") projected.merge_precondition = legacyPrecondition;
+    else projected.provider_precondition = legacyPrecondition;
+    if (completion) projected.provider_verification = { provider: providerOperation.binding.provider_id, ...completion };
+  }
+  return projected;
+}
+
+function assertDeliveryProviderAuthorization(context, profile, authorization) {
+  if (!DELIVERY_PROVIDER_ACTIONS.has(authorization.action)) return;
+  const providerOperation = authorization.action_details?.provider_operation;
+  if (!providerOperation) {
+    if (profile.schema_version === "delivery-execution-profile:v1") return;
+    fail(`Delivery action authorization ${authorization.id} has no provider precondition proof.`);
+  }
+  const binding = resolveDeliveryProviderBinding(profile, authorization.action);
+  let precondition;
+  try {
+    precondition = assertProviderOperationReceiptIntegrity(providerOperation.precondition_receipt);
+  } catch (error) {
+    fail(`Delivery action authorization ${authorization.id} has an invalid provider precondition proof: ${error.message}`);
+  }
+  const expectedSubject = deliveryProviderOperationSubject(
+    context,
+    profile,
+    authorization.action,
+    authorization.action_details,
+    authorization.authorized_at,
+  );
+  if (
+    providerOperation.completion_receipt !== null
+    || providerOperation.binding?.action !== authorization.action
+    || providerOperation.binding?.provider_id !== binding.provider_id
+    || providerOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+    || precondition.provider.id !== binding.provider_id
+    || precondition.operation.id !== authorization.id
+    || precondition.operation.action !== authorization.action
+    || precondition.operation.phase !== "precondition"
+    || stableJson(precondition.subject) !== stableJson(expectedSubject)
+  ) {
+    fail(`Delivery action authorization ${authorization.id} provider proof does not match its exact action boundary.`);
+  }
 }
 
 function normalizeSmokeTestCommand(value) {
@@ -10747,7 +10901,9 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     constraints,
   });
   const createdAt = now();
-  const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+  const providerBindings = deliveryProviderBindingsFromOptions(context, kind, options);
+  const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfileV2({
+    schema_version: "delivery-execution-profile:v2",
     id: profileId,
     status: "proposed",
     delivery_id: deliveryId,
@@ -10772,6 +10928,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     phase_levels: {},
     constraints,
     checkpoints: context.config.autonomy_policy?.presets?.[requestedLevel]?.checkpoints,
+    provider_bindings: providerBindings,
     ...target,
     authority_assurance: { mode: "audit_only" },
     approval_ref: null,
@@ -10784,7 +10941,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
       exact_delivery_selection: true,
     },
   }));
-  assertRecordSchema(profile, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  assertRecordSchema(profile, deliveryExecutionProfileSchemaName(profile), `Delivery autonomy profile ${profileId}`);
   const profilePath = deliveryAutonomyPath(context, profileId);
   writeJsonFile(profilePath, profile, { force: false });
   const attribution = buildAttribution(context, options, "autonomy.delivery.propose");
@@ -10819,6 +10976,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     checkpoints: profile.checkpoints,
     forbidden_actions: constraints.forbidden_actions,
     proposal_authority_mode: profile.authority_assurance.mode,
+    provider_bindings: profile.provider_bindings,
     non_reusable: true,
   };
   const projectName = readProjectSafe(context)?.project_name || path.basename(context.root);
@@ -11146,7 +11304,10 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
     authorityAction: "autonomy.delivery.approve",
     authoritySubject: approvalSubject,
   });
-  const active = buildDomainRecord(`Cannot activate delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+  const profileBuilder = proposed.schema_version === "delivery-execution-profile:v2"
+    ? buildDeliveryExecutionProfileV2
+    : buildDeliveryExecutionProfile;
+  const active = buildDomainRecord(`Cannot activate delivery autonomy ${profileId}`, () => profileBuilder({
     ...proposed,
     status: "active",
     authority_assurance: authorityAssurance,
@@ -11154,7 +11315,7 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
     updated_at: now(),
     extensions: { ...proposed.extensions, approved_profile_hash: proposed.profile_hash },
   }));
-  assertRecordSchema(active, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  assertRecordSchema(active, deliveryExecutionProfileSchemaName(active), `Delivery autonomy profile ${profileId}`);
   const { decision } = evaluateDeliveryAutonomy(context, active, {
     id: `AUT-DEC-${uniqueRecordSuffix()}`,
     phase: getOptionString(options, "phase") || undefined,
@@ -12190,6 +12351,7 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
+  assertDeliveryProviderAuthorization(context, profile, authorization);
   const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
   let checkpointRequired = actionPolicy.required;
   const auditWarnings = [];
@@ -12472,25 +12634,33 @@ function evaluateDeliveryAction(context, options) {
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
       fail("Delivery action completion --outcome must be passed or failed.");
     }
+    const actionReceiptId = `AUT-ACT-${uniqueRecordSuffix()}`;
+    const actionReceiptTimestamp = now();
     const preparedPolicySource = completingAction ? null : buildDeliveryCheckpointPolicySource(context);
     let actionDetails = completingAction
       ? null
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
+    if (!completingAction && DELIVERY_PROVIDER_ACTIONS.has(action)) {
+      const providerOperation = observeDeliveryProviderPrecondition(
+        context,
+        profile,
+        action,
+        actionDetails,
+        actionReceiptId,
+        actionReceiptTimestamp,
+      );
+      actionDetails = withProviderCompatibilityProjection(action, actionDetails, providerOperation);
+    }
     if (!completingAction && action === "git.push") {
-      const basePrecondition = observeGitRemoteBasePrecondition(context, profile, actionDetails);
+      const baseSha = actionDetails.provider_operation?.precondition_receipt?.proof?.base_sha;
       const commitCoverage = assertGitCommitReceiptCoverage(context, profile, {
         ...runtimeTarget,
-        base_sha: basePrecondition.observed_sha,
+        base_sha: baseSha,
       });
       actionDetails = {
         ...actionDetails,
-        base_precondition: basePrecondition,
         commit_coverage: commitCoverage,
-        push_precondition: observeGitPushPrecondition(context, actionDetails),
       };
-    }
-    if (!completingAction && action === "pull_request.merge") {
-      actionDetails = { ...actionDetails, merge_precondition: observeGitHubMergePrecondition(profile, actionDetails) };
     }
     if (!completingAction) {
       actionDetails = {
@@ -12623,11 +12793,19 @@ function evaluateDeliveryAction(context, options) {
       if (stableJson(currentDetails) !== stableJson(remoteAuthorizationProjection(action, priorAuthorization.action_details))) {
         fail(`Delivery action ${action} exact operation changed after authorization; request a fresh checkpoint.`);
       }
-      if (reportedOutcome === "passed") {
-        actionDetails = action === "git.push"
-          ? { ...priorAuthorization.action_details, remote_verification: verifyCompletedGitPush(context, priorAuthorization) }
-          : { ...priorAuthorization.action_details, provider_verification: verifyCompletedGitHubMerge(profile, priorAuthorization) };
-      }
+    }
+    if (completingAction && DELIVERY_PROVIDER_ACTIONS.has(action) && reportedOutcome === "passed") {
+      const completedProviderOperation = verifyDeliveryProviderCompletion(
+        profile,
+        action,
+        priorAuthorization.action_details?.provider_operation,
+        actionReceiptTimestamp,
+      );
+      actionDetails = withProviderCompatibilityProjection(
+        action,
+        priorAuthorization.action_details,
+        completedProviderOperation,
+      );
     }
     if (completingAction && evidence.length === 0) {
       fail(`Delivery action ${action} completion requires at least one immutable --evidence file.`);
@@ -12660,9 +12838,9 @@ function evaluateDeliveryAction(context, options) {
         rollback: profile.local_release_target.rollback,
       };
     }
-    const createdAt = now();
+    const createdAt = actionReceiptTimestamp;
     const receiptBase = {
-      id: `AUT-ACT-${uniqueRecordSuffix()}`,
+      id: actionReceiptId,
       kind: "delivery_action_receipt",
       schema_version: "delivery-action-receipt:v1",
       profile_ref: {
@@ -30534,7 +30712,108 @@ function validateCompletedGitCommitReceipt(context, report, receipt, authorizati
   }
 }
 
-function validateCompletedRemoteActionReceipt(report, receipt, authorization, label) {
+function validateCompletedProviderActionReceipt(context, report, profile, receipt, authorization, label) {
+  const authorizedOperation = authorization.action_details?.provider_operation;
+  const completedOperation = receipt.action_details?.provider_operation;
+  if (!authorizedOperation && !completedOperation) return false;
+  try {
+    if (!authorizedOperation || !completedOperation) {
+      throw new Error("provider proof is missing from one side of the action boundary");
+    }
+    const precondition = assertProviderOperationReceiptIntegrity(authorizedOperation.precondition_receipt);
+    const completion = assertProviderOperationReceiptIntegrity(completedOperation.completion_receipt);
+    if (authorizedOperation.completion_receipt !== null) {
+      throw new Error("authorization unexpectedly contains a completion proof");
+    }
+    if (
+      stableJson(authorizedOperation.binding) !== stableJson(completedOperation.binding)
+      || completedOperation.precondition_receipt?.receipt_hash !== precondition.receipt_hash
+      || completion.precondition_receipt_ref?.id !== precondition.id
+      || completion.precondition_receipt_ref?.hash !== precondition.receipt_hash
+      || completion.provider.id !== precondition.provider.id
+      || completion.operation.id !== precondition.operation.id
+      || completion.operation.action !== receipt.action
+      || stableJson(completion.subject) !== stableJson(precondition.subject)
+    ) {
+      throw new Error("provider completion is not bound to its exact precondition");
+    }
+    const binding = providerBindingForAction(profile, receipt.action);
+    if (
+      !binding
+      || binding.provider_id !== precondition.provider.id
+      || authorizedOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+    ) {
+      throw new Error("provider proof does not match the delivery profile binding");
+    }
+    const expectedSubject = deliveryProviderOperationSubject(
+      context,
+      profile,
+      receipt.action,
+      authorization.action_details,
+      authorization.authorized_at,
+    );
+    if (stableJson(precondition.subject) !== stableJson(expectedSubject)) {
+      throw new Error("provider proof subject differs from the authorized operation");
+    }
+    if (receipt.action === "git.push" && completion.proof?.observed_sha !== precondition.subject.source_sha) {
+      throw new Error("Git provider proof does not show the authorized source at the destination ref");
+    }
+    if (receipt.action === "pull_request.merge" && (
+      completion.proof?.state !== "MERGED"
+      || completion.proof?.head_sha !== precondition.subject.source_sha
+      || !completion.proof?.merge_commit_sha
+    )) {
+      throw new Error("pull-request provider proof does not show the exact merged head");
+    }
+    if (receipt.action === "pull_request.create" && (
+      completion.proof?.state !== "OPEN"
+      || completion.proof?.head_sha !== precondition.subject.source_sha
+    )) {
+      throw new Error("pull-request provider proof does not show the exact created PR");
+    }
+    if (receipt.action === "pull_request.update" && (
+      completion.proof?.state !== "OPEN"
+      || stableJson(completion.proof?.expected) !== stableJson(precondition.subject.expected)
+    )) {
+      throw new Error("pull-request provider proof does not show the exact requested update");
+    }
+    if (receipt.action === "release.local" && (
+      completion.proof?.root_path !== precondition.subject.root_path
+      || completion.proof?.root_identity?.device !== precondition.proof?.root_identity?.device
+      || completion.proof?.root_identity?.inode !== precondition.proof?.root_identity?.inode
+    )) {
+      throw new Error("filesystem provider proof does not preserve the authorized root identity");
+    }
+    const stripCompletion = (details) => {
+      const copy = structuredClone(details || {});
+      if (copy.provider_operation) copy.provider_operation.completion_receipt = null;
+      delete copy.remote_verification;
+      delete copy.provider_verification;
+      return copy;
+    };
+    if (
+      stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+      || stableJson(stripCompletion(receipt.action_details)) !== stableJson(stripCompletion(authorization.action_details))
+    ) {
+      throw new Error("provider completion differs from the exact authorization boundary");
+    }
+  } catch (error) {
+    report.errors.push(`${label} has invalid provider verification: ${error.message}`);
+  }
+  return true;
+}
+
+function validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, label) {
+  if (validateCompletedProviderActionReceipt(context, report, profile, receipt, authorization, label)) return;
+  if (!["git.push", "pull_request.merge"].includes(receipt.action)) {
+    if (
+      stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+      || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
+    ) {
+      report.errors.push(`${label} completion differs from its exact authorization boundary`);
+    }
+    return;
+  }
   const verificationField = receipt.action === "git.push" ? "remote_verification" : "provider_verification";
   const { [verificationField]: verification, ...authorizedProjection } = receipt.action_details || {};
   if (
@@ -30724,6 +31003,13 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
+    if (receipt.status === "authorized" && DELIVERY_PROVIDER_ACTIONS.has(receipt.action)) {
+      try {
+        assertDeliveryProviderAuthorization(context, profile, receipt);
+      } catch (error) {
+        report.errors.push(`${actionLabel} provider authorization is invalid: ${error.message}`);
+      }
+    }
     const actionPolicy = receiptHistorical && profile.delivery_kind === "local_release"
       ? null
       : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
@@ -30842,8 +31128,8 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         report.errors.push(`${actionLabel} completion differs from its authorized effective level`);
       } else if (receipt.action === "git.commit" && receipt.outcome === "passed") {
         validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
-      } else if (["git.push", "pull_request.merge"].includes(receipt.action) && receipt.outcome === "passed") {
-        validateCompletedRemoteActionReceipt(report, receipt, authorization, actionLabel);
+      } else if (DELIVERY_PROVIDER_ACTIONS.has(receipt.action) && receipt.outcome === "passed") {
+        validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, actionLabel);
       } else if (
         stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
         || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
@@ -31048,7 +31334,7 @@ function validateAutonomyRecords(context, report, storyId = null) {
     if (storyId && !(profile.story_refs || []).some((ref) => ref.id === storyId)) continue;
     const label = `delivery autonomy profile ${profile.id || name}`;
     deliveryProfiles.push(profile);
-    appendRecordSchemaIssues(report, profile, "delivery-execution-profile.schema.json", label);
+    appendRecordSchemaIssues(report, profile, deliveryExecutionProfileSchemaName(profile), label);
     const integrity = validateDeliveryExecutionProfileIntegrity(profile);
     for (const error of integrity.errors || []) report.errors.push(`${label}: ${error}`);
     if (profile.status === "active") {

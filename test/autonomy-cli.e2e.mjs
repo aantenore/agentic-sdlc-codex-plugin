@@ -397,11 +397,23 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   mustGit(project, ["remote", "set-url", "origin", "https://github.com/example/unapproved-repository.git"]);
   mustGit(project, ["remote", "set-url", "--add", "origin", expectedRemoteUrl]);
   mustGit(project, ["remote", "set-url", "--push", "--add", "origin", expectedRemoteUrl]);
-  const proposalResponse = mustRunJson(proposalArgs);
+  mustFail([...proposalArgs, "--git-provider", "github-cli"], /cannot verify git\.push/u);
+  const proposalResponse = mustRunJson([
+    ...proposalArgs,
+    "--git-provider", "git-remote",
+    "--pull-request-provider", "github-cli",
+  ]);
   const proposed = proposalResponse.delivery_profile;
   assert.equal(proposed.status, "proposed");
   assert.equal(proposed.delivery_kind, "pull_request");
   assert.equal(proposed.delivery_id, "PR-1");
+  assert.equal(proposed.schema_version, "delivery-execution-profile:v2");
+  assert.deepEqual(proposed.provider_bindings, [
+    { action: "git.push", provider_id: "git-remote" },
+    { action: "pull_request.create", provider_id: "github-cli" },
+    { action: "pull_request.merge", provider_id: "github-cli" },
+    { action: "pull_request.update", provider_id: "github-cli" },
+  ]);
   assert.equal(proposed.requested_level, "bounded-autonomous");
   assert.equal(proposed.use_policy.reusable_across_deliveries, false);
   assert.equal(proposed.pull_request_target.merge_allowed, false);
@@ -532,6 +544,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(receipt.delivery_profile_ref.id, "AUT-PR-1");
   assert.equal(receipt.autonomy_decision_ref.id, automatic.autonomy_decision.id);
   assert.equal(receipt.start_basis, "checkpointed-profile");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/1",
+    "--expected-pr-base", "production",
+  ], /cannot retarget the pull request outside the approved base branch/u);
   const startTrace = fs.readFileSync(path.join(project, ".sdlc", "traces", "ST-PR-1.jsonl"), "utf8")
     .trim()
     .split(/\r?\n/u)
@@ -832,6 +852,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.observed_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.base_ref, "refs/heads/main");
   assert.equal(pushAuthorization.action_receipt.action_details.push_precondition.observed_sha, beforeCommit);
+  assert.equal(
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "git-remote",
+  );
+  assert.equal(
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.operation.phase,
+    "precondition",
+  );
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.schema_version, "git-commit-coverage:v1");
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.base_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.head_sha, afterCommit);
@@ -893,6 +921,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushCompletion.status, "completed");
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.observed_sha, afterCommit);
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.destination_ref, "refs/heads/codex/pr-1");
+  assert.equal(
+    pushCompletion.action_receipt.action_details.provider_operation.completion_receipt.operation.phase,
+    "completion",
+  );
+  assert.equal(
+    pushCompletion.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
 
   const closeResult = mustRun([
     "autonomy", "delivery", "close",
@@ -1382,6 +1418,10 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     ...humanApproval("Approve this exact open PR merge checkpoint"),
   ], { env: fakeGitHubEnv(project, openState) });
   assert.equal(authorization.status, "authorized");
+  assert.equal(
+    authorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "github-cli",
+  );
   const mergedAt = new Date(Date.parse(authorization.action_receipt.authorized_at) + 1_000).toISOString();
   const mergeSha = "f".repeat(40);
 
@@ -1399,6 +1439,10 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
   assert.equal(completion.lifecycle_status, "terminal");
   assert.equal(completion.action_receipt.action_details.provider_verification.state, "MERGED");
   assert.equal(completion.action_receipt.action_details.provider_verification.merge_commit_sha, mergeSha);
+  assert.equal(
+    completion.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    authorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
   const close = JSON.parse(fs.readFileSync(path.join(project, completion.close_receipt_path), "utf8"));
   assert.equal(close.terminal_status, "merged");
   assert.equal(close.terminal_action_receipt_ref.id, completion.action_receipt.id);
@@ -1462,6 +1506,9 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(proposed.local_release_target.root_path, releaseRoot);
   assert.deepEqual(proposed.local_release_target.allowed_write_paths, [releaseOutput]);
   assert.deepEqual(proposed.local_release_target.smoke_tests, ['["node","--version"]']);
+  assert.deepEqual(proposed.provider_bindings, [
+    { action: "release.local", provider_id: "local-filesystem" },
+  ]);
   assert.equal(proposed.local_release_target.rollback.required, true);
   assert.match(proposed.local_release_target.rollback.procedure, /previous local build/u);
   assert.equal(proposed.local_release_target.external_access_allowed, false);
@@ -1531,6 +1578,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(releaseAuthorization.checkpoint_required, true);
   assert.equal(releaseAuthorization.action_receipt.approval.status, "approved");
   assert.equal(releaseAuthorization.action_receipt.action_details.target_root, releaseRoot);
+  assert.equal(
+    releaseAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "local-filesystem",
+  );
   assert.deepEqual(releaseAuthorization.action_receipt.action_details.allowed_write_paths, [releaseOutput]);
   const localCheckpointPolicy = releaseAuthorization.action_receipt.action_details.checkpoint_policy;
   assert.equal(localCheckpointPolicy.local_boundary_source.schema_version, "delivery-local-boundary-source:v1");
@@ -1881,6 +1932,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)));
   assert.match(completed.close_receipt_path, /autonomy\/executions\/AUT-LOCAL-1\/close\.json$/u);
   assert.equal(completed.action_receipt.authorization_receipt_ref.id, releaseAuthorization.action_receipt.id);
+  assert.equal(
+    completed.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    releaseAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
   assert.equal(completed.action_receipt.local_release_verification.outcome, "passed");
   assert.deepEqual(completed.action_receipt.local_release_verification.smoke_tests, ['["node","--version"]']);
   assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts.length, 1);

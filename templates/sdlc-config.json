@@ -521,6 +521,7 @@
     "storage_root": "autonomy",
     "requirement_profile_schema": "schemas/requirement-execution-profile.schema.json",
     "delivery_profile_schema": "schemas/delivery-execution-profile.schema.json",
+    "delivery_profile_schema_v2": "schemas/delivery-execution-profile-v2.schema.json",
     "decision_schema": "schemas/autonomy-decision.schema.json",
     "allowed_levels": [
       "supervised",
@@ -536,6 +537,11 @@
       "pull_request",
       "local_release"
     ],
+    "delivery_providers": {
+      "git_push": "git-remote",
+      "pull_request": "github-cli",
+      "local_release": "local-filesystem"
+    },
     "presets": {
       "supervised": {
         "automatic_phases": [],

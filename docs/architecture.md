@@ -266,7 +266,8 @@ Autonomy is represented by separate, composable records rather than a global tru
 
 - `requirement:v2` is the immutable, revisioned business requirement;
 - `requirement-execution-profile:v1` is its approved maximum autonomy envelope;
-- `delivery-execution-profile:v1` is the user's explicit selection for one `pull_request` or `local_release`;
+- `delivery-execution-profile:v2` is the user's explicit selection for one `pull_request` or `local_release`, including exact verification-provider bindings;
+- historical `delivery-execution-profile:v1` records remain byte- and hash-compatible and receive only an in-memory legacy provider mapping;
 - `autonomy-decision:v1` is the deterministic explanation of the effective result.
 
 ```mermaid

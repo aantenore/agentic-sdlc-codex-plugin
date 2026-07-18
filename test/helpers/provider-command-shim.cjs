@@ -17,9 +17,9 @@ if (provider === "git" && ["git", "git.exe"].includes(invoked)) {
   ];
   const commandIndex = args.indexOf("ls-remote");
   if (commandIndex >= 0) {
-    const destinationRef = args.at(-1);
     const sha = process.env.AUTONOMY_FAKE_REMOTE_SHA || "";
-    if (sha) process.stdout.write(`${sha}\t${destinationRef}\n`);
+    const refs = args.slice(commandIndex + 3);
+    if (sha) process.stdout.write(refs.map((ref) => `${sha}\t${ref}\n`).join(""));
     process.exit(0);
   }
 
