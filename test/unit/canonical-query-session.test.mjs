@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   openCanonicalQuerySession,
 } from "../../lib/canonical-query-session.mjs";
+import { immutableJson } from "../../lib/canonical.mjs";
 import {
   CanonicalStoreError,
   openCanonicalStore,
@@ -148,6 +149,133 @@ test("parses each canonical snapshot with one read and one post-parse integrity 
   assert.equal(metrics.read_json_calls, 1);
   assert.equal(metrics.read_text_calls, 1);
   assert.equal(metrics.json_parses, 1);
+});
+
+test("canonicalizes parsed JSON without changing immutable JSON semantics", (t) => {
+  const { root, write } = fixture(t);
+  const objectJson = '{"z":1,"é":2,"10":"ten","2":"two","__proto__":{"polluted":true},"negativeZero":-0,"array":[{"b":2,"a":1}]}';
+  const linesJson = `${objectJson}\n[3,{"d":4,"c":3}]\n`;
+  write(".sdlc/contracts/CANONICAL.json", `${objectJson}\n`);
+  write(".sdlc/contracts/NONFINITE.json", "1e400\n");
+  write(".sdlc/traces/canonical.jsonl", linesJson);
+  const session = openCanonicalQuerySession({ root });
+
+  const expectedObject = immutableJson(JSON.parse(objectJson));
+  const actualObject = session.readJson("contracts/CANONICAL.json");
+  assert.deepEqual(actualObject, expectedObject);
+  assert.notStrictEqual(actualObject, expectedObject);
+  assert.notStrictEqual(actualObject.array, expectedObject.array);
+  assert.deepEqual(Object.keys(actualObject), Object.keys(expectedObject));
+  assert.equal(Object.getPrototypeOf(actualObject), Object.prototype);
+  assert.equal(Object.hasOwn(actualObject, "__proto__"), true);
+  assert.equal(Object.is(actualObject.negativeZero, -0), false);
+  assert.ok(Object.isFrozen(actualObject));
+  assert.ok(Object.isFrozen(actualObject.__proto__));
+  assert.ok(Object.isFrozen(actualObject.array));
+  assert.ok(Object.isFrozen(actualObject.array[0]));
+
+  const actualLines = session.readJsonLines("traces/canonical.jsonl");
+  assert.deepEqual(actualLines.map((record) => record.value), [
+    immutableJson(JSON.parse(objectJson)),
+    immutableJson(JSON.parse('[3,{"d":4,"c":3}]')),
+  ]);
+  assert.throws(
+    () => session.readJson("contracts/NONFINITE.json"),
+    /does not support non-finite numbers/u,
+  );
+});
+
+test("does not cache parsed JSON when its verified source changes during parsing", (t) => {
+  const { root, write } = fixture(t);
+  const sourcePath = ".sdlc/stories/ST-1/story.json";
+  const baseStore = openCanonicalStore({ root });
+  const store = {
+    ...baseStore,
+    snapshot(input) {
+      const snapshot = baseStore.snapshot(input);
+      return Object.freeze({
+        ...snapshot,
+        readJson() {
+          const value = snapshot.readJson();
+          write(sourcePath, '{"id":"ST-1","title":"Changed during parse","status":"ready"}\n');
+          return value;
+        },
+      });
+    },
+  };
+  const session = openCanonicalQuerySession({ root, store });
+
+  assert.throws(
+    () => session.readJson(sourcePath),
+    (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
+  );
+  assert.equal(session.metrics().parsed_cache_entries, 0);
+});
+
+test("fails closed when the source is replaced with byte-identical JSON during parsing", (t) => {
+  const { root } = fixture(t);
+  const sourcePath = ".sdlc/stories/ST-1/story.json";
+  const absolute = path.join(root, sourcePath);
+  const baseStore = openCanonicalStore({ root });
+  const store = {
+    ...baseStore,
+    snapshot(input) {
+      const snapshot = baseStore.snapshot(input);
+      return Object.freeze({
+        ...snapshot,
+        readJson() {
+          const value = snapshot.readJson();
+          const replacement = `${absolute}.replacement`;
+          fs.writeFileSync(replacement, fs.readFileSync(absolute));
+          fs.unlinkSync(absolute);
+          fs.renameSync(replacement, absolute);
+          return value;
+        },
+      });
+    },
+  };
+  const session = openCanonicalQuerySession({ root, store });
+
+  assert.throws(
+    () => session.readJson(sourcePath),
+    (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
+  );
+  assert.equal(session.metrics().parsed_cache_entries, 0);
+});
+
+test("keeps custom-store hash fallback and rejects a mismatched snapshot digest", (t) => {
+  const { root } = fixture(t);
+  const sourcePath = ".sdlc/stories/ST-1/story.json";
+  const baseStore = openCanonicalStore({ root });
+  let fallbackHashCalls = 0;
+  const fallbackStore = {
+    ...baseStore,
+    hash(input) {
+      fallbackHashCalls += 1;
+      return baseStore.hash(input);
+    },
+    snapshot(input) {
+      const { assertUnchanged: _ignored, ...snapshot } = baseStore.snapshot(input);
+      return Object.freeze(snapshot);
+    },
+  };
+  const fallbackSession = openCanonicalQuerySession({ root, store: fallbackStore });
+  assert.equal(fallbackSession.readJson(sourcePath).id, "ST-1");
+  assert.equal(fallbackHashCalls, 1);
+
+  const mismatchStore = {
+    ...baseStore,
+    snapshot(input) {
+      const snapshot = baseStore.snapshot(input);
+      return Object.freeze({ ...snapshot, assertUnchanged: () => "0".repeat(64) });
+    },
+  };
+  const mismatchSession = openCanonicalQuerySession({ root, store: mismatchStore });
+  assert.throws(
+    () => mismatchSession.readJson(sourcePath),
+    (error) => error instanceof CanonicalStoreError && error.code === "source_changed",
+  );
+  assert.equal(mismatchSession.metrics().parsed_cache_entries, 0);
 });
 
 test("reads snapshot content only while its canonical hash remains stable", (t) => {
