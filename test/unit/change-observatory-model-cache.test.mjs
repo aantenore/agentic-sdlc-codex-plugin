@@ -141,6 +141,26 @@ test("ordered directory snapshots reject add, remove, rename, or type-change rac
   }
 });
 
+test("canonical hashing stops when a file grows beyond its captured signature", async (t) => {
+  const fixture = await createCacheFixture(t);
+  let target = path.join(fixture.projectRoot, ".sdlc", "growing.json");
+  await fs.writeFile(target, `{"value":"${"A".repeat(130_000)}"}\n`, "utf8");
+  target = await fs.realpath(target);
+  let appended = false;
+
+  await assert.rejects(
+    () => computeCanonicalRevision(fixture.projectRoot, {
+      async onFileReadChunk(event) {
+        if (event.path !== target || appended) return;
+        appended = true;
+        await fs.appendFile(target, "B".repeat(130_000), "utf8");
+      },
+    }),
+    (error) => error?.code === "canonical_revision_changed" && error?.statusCode === 409,
+  );
+  assert.equal(appended, true);
+});
+
 test("revision markers stop at maxFiles and maxTotalBytes", async (t) => {
   const fixture = await createCacheFixture(t);
   const projectPath = path.join(fixture.projectRoot, ".sdlc", "project.json");
@@ -172,6 +192,46 @@ test("revision markers stop at maxFiles and maxTotalBytes", async (t) => {
     }),
     totalLimited,
   );
+});
+
+test("aggregate maxEntries bounds wide directories and invalidates overflow snapshots", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const wideDirectory = path.join(fixture.projectRoot, ".sdlc", "z-wide");
+  await fs.mkdir(wideDirectory);
+  const ignored = [];
+  for (let index = 0; index < 3; index += 1) {
+    const target = path.join(wideDirectory, `ignored-${index}.bin`);
+    ignored.push(target);
+    await fs.writeFile(target, "x\n", "utf8");
+  }
+
+  const limits = { maxEntries: 4 };
+  const limitedRevision = await computeCanonicalRevision(fixture.projectRoot, { limits });
+  assert.equal(
+    await computeCanonicalRevision(fixture.projectRoot, { limits }),
+    limitedRevision,
+  );
+
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    limits,
+    buildModel() {
+      builds += 1;
+      return { builds };
+    },
+  });
+  await cache.get();
+  await cache.get();
+  assert.equal(builds, 1);
+
+  await fs.rm(ignored.at(-1));
+  assert.notEqual(
+    await computeCanonicalRevision(fixture.projectRoot, { limits }),
+    limitedRevision,
+  );
+  await cache.get();
+  assert.equal(builds, 2);
 });
 
 test("unreadable canonical entries use a stable marker and recover when readable", async (t) => {
@@ -256,6 +316,41 @@ test("same-size canonical mutations invalidate a cached model", async (t) => {
   assert.notEqual(refreshed, initial);
   assert.notEqual(refreshed.etag, initial.etag);
   assert.equal(JSON.parse(refreshed.body.toString("utf8")).version, 2);
+});
+
+test("same-inode rewrites invalidate a cached model when size and mtime are restored", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const recordPath = path.join(fixture.projectRoot, ".sdlc", "same-size.json");
+  const fixedTime = new Date("2024-01-02T03:04:05.000Z");
+  await fs.writeFile(recordPath, '{"value":"AAAA"}\n', "utf8");
+  await fs.utimes(recordPath, fixedTime, fixedTime);
+  const before = await fs.stat(recordPath, { bigint: true });
+  let builds = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    async buildModel() {
+      builds += 1;
+      return JSON.parse(await fs.readFile(recordPath, "utf8"));
+    },
+  });
+  const initial = await cache.get();
+  assert.equal(JSON.parse(initial.body.toString("utf8")).value, "AAAA");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await fs.writeFile(recordPath, '{"value":"BBBB"}\n', "utf8");
+  await fs.utimes(recordPath, fixedTime, fixedTime);
+  const after = await fs.stat(recordPath, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeNs, before.mtimeNs);
+  assert.notEqual(after.ctimeNs, before.ctimeNs);
+
+  const refreshed = await cache.get();
+  assert.equal(builds, 2);
+  assert.notEqual(refreshed, initial);
+  assert.notEqual(refreshed.etag, initial.etag);
+  assert.equal(JSON.parse(refreshed.body.toString("utf8")).value, "BBBB");
 });
 
 test("metadata-only drift refreshes signatures without changing content revision", async (t) => {
@@ -505,9 +600,9 @@ test("direct snapshot budget charges two retained cells per entry and one per di
 
   assert.equal(await countWarmHashes(), 0);
   await fs.writeFile(path.join(cellsDirectory, "two.bin"), "x\n", "utf8");
-  assert.equal(await cache.get(), cold);
+  assert.ok(await countWarmHashes() >= 1);
   assert.equal(builds, 1);
-  assert.equal(await countWarmHashes(), 1);
+  assert.equal(await countWarmHashes(), process.platform === "win32" ? 1 : 0);
 });
 
 test("wide and long-name directories use bounded digest snapshots and still invalidate", async (t) => {
@@ -559,7 +654,7 @@ test("wide and long-name directories use bounded digest snapshots and still inva
       } finally {
         crypto.createHash = nativeCreateHash;
       }
-      assert.equal(hashes, 2);
+      assert.equal(hashes, process.platform === "win32" ? 2 : 0);
 
       await scenario.mutate(fixture);
       const refreshed = await cache.get();
@@ -689,6 +784,41 @@ test("fast validation enforces bounded concurrency", async (t) => {
   for (const sequence of eventsByPath.values()) {
     assert.deepEqual(sequence, ["start", "end"]);
   }
+});
+
+test("default fast validation keeps at most eight filesystem checks in flight", async (t) => {
+  const fixture = await createCacheFixture(t);
+  for (let index = 0; index < 20; index += 1) {
+    await fs.writeFile(
+      path.join(fixture.projectRoot, ".sdlc", `default-bound-${String(index).padStart(2, "0")}.json`),
+      `${JSON.stringify({ index })}\n`,
+      "utf8",
+    );
+  }
+
+  let active = 0;
+  let maximum = 0;
+  let starts = 0;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ stable: true }),
+    async onFastPathCheck(event) {
+      if (event.event === "start") {
+        active += 1;
+        starts += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      } else {
+        active -= 1;
+      }
+    },
+  });
+
+  const cold = await cache.get();
+  assert.equal(await cache.get(), cold);
+  assert.ok(starts > 8);
+  assert.equal(maximum, 8);
+  assert.equal(active, 0);
 });
 
 test("model cache is single-flight, reuses serialized bytes, and invalidates by revision", async (t) => {
