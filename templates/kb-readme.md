@@ -28,6 +28,7 @@ It is intentionally stored in the project repository so people and agents can co
 - Release story claims and phase locks when work is done or handed off.
 - Link requirements, stories, decisions, tests, and release evidence.
 - Keep epics, tasks, work breakdown agreements, and dependency graphs in `.sdlc/`.
+- Keep reusable process definitions and overlays versioned under `.sdlc/workflows/`; pin every running instance to exact hashes and append events instead of rewriting its history.
 - Approve work breakdown and dependency graph proposals before using them as delivery constraints.
 - Record `dependency.revalidate` traces when downstream work is rechecked after upstream artifact changes.
 - Resolve story outputs through `.sdlc/output-contracts/registry.json` before generating new durable artifacts.
@@ -47,6 +48,7 @@ It is intentionally stored in the project repository so people and agents can co
 contracts/      Phase contracts and story-specific contracts
 autonomy/       Requirement ceilings, per-delivery profiles, decisions, execution/action receipts
 baseline/       Existing-project current-state baselines and approval records
+workflows/      Versioned definitions, governed overlays, pinned instances, and append-only events
 authorizations/ Explicit action-scoped grants for delegated automation approvals
 output-contracts/ Approved output templates, artifact links, and structure decisions
 requirements/   Product requirements and constraints

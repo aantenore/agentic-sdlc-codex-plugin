@@ -15,6 +15,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
 - [Self-service CLI](docs/self-service-cli.md) — focused help, one-step status, safe presentation presets, shell completion, and machine output.
 - [Change Observatory](docs/change-observatory.md) — launch the local visual lineage app and understand its evidence and security model.
+- [Configurable Workflows](docs/configurable-workflows.md) — select a governed process, customize labels safely, and keep running history pinned and append-only.
 
 ## Quick Start
 

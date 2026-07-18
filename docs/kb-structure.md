@@ -11,6 +11,7 @@ The sample records below use neutral placeholders. The structure is generic and 
     README.md
     baseline/
     assessments/
+    workflows/
     budgets/
     contracts/
     autonomy/
@@ -58,6 +59,7 @@ flowchart TB
   Source["Source of truth"]
   Source --> Baseline["baseline"]
   Source --> Assessments["assessments"]
+  Source --> Workflows["versioned workflows"]
   Source --> Budgets["budgets"]
   Source --> Contracts["contracts"]
   Source --> Autonomy["requirement and delivery autonomy"]
@@ -80,6 +82,7 @@ flowchart TB
 
   Baseline --> Cache["cache"]
   Assessments --> Cache
+  Workflows --> Cache
   Budgets --> Cache
   Contracts --> Cache
   Autonomy --> Cache
@@ -219,6 +222,21 @@ budget status
 budget amend
 assessment proposal complete
 ```
+
+## `workflows/`
+
+Reusable workflow definitions, governed overlays, and event-sourced instances use a separate canonical root:
+
+```text
+.sdlc/workflows/definitions/software-project/v1.json
+.sdlc/workflows/overlays/team-labels/v1.json
+.sdlc/workflows/instances/CHANGE-184/instance.json
+.sdlc/workflows/instances/CHANGE-184/events.jsonl
+```
+
+An approved definition version is immutable. An approved overlay version may customize presentation metadata and parameters for an already allowlisted guard, but cannot rewrite identifiers, transition direction, phase order, or history. The instance header pins definition, overlay, and effective hashes. `events.jsonl` is the only normally appended file; its sequence and previous-event hashes make replay tamper-evident.
+
+The four built-in definitions are software project, change request, technical assessment, and generic governed process. Existing assessment v1 records remain canonical for the two-checkpoint assessment journey. The technical-assessment definition provides the reusable process description without replacing those records.
 
 ## `receipts/`
 

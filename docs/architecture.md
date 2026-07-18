@@ -172,6 +172,26 @@ flowchart LR
 
 Budget policy is data-driven. Project configuration supplies metric templates, maxima, warning thresholds, completion reserve, and stop/extension rules. A hard limit is valid only for exactly metered usage. Amendments reference the approved base budget and proposal hashes; they never mutate the base tranche or widen scope.
 
+## Configurable Workflow Plane
+
+The reusable workflow engine separates process order from execution authority. A versioned definition says which states and transitions exist. A governed overlay may change human labels, descriptions, metadata, and parameters for an already allowlisted guard, but cannot change identifiers, initial state, transition direction, ordered phases, or recorded history.
+
+```mermaid
+flowchart LR
+  Preset["Built-in or approved definition"] --> Effective["Hash-locked effective workflow"]
+  Overlay["Optional approved overlay"] --> Effective
+  Effective --> Instance["Pinned instance header"]
+  Instance --> Events["Append-only hash-chained events"]
+  Events --> Replay["Deterministic replay and guard checks"]
+  Replay --> Status["Current status and next allowed transitions"]
+```
+
+The engine ships software-project, change-request, technical-assessment, and generic-governed-process presets. The software preset preserves the exact six existing phases: discovery, analysis, design, implementation, validation, and release. The assessment preset preserves exactly two normal user checkpoints and complements, rather than replaces, `assessment-proposal:v1` and `assessment-workflow:v1`.
+
+An instance pins the definition, optional overlay, and effective content hashes at start. A later definition or overlay version affects only a new instance. Events carry a monotonic sequence, previous-event hash, event hash, actor, timestamp, and idempotency key. Replay fails closed for modified, reordered, duplicated, or truncated evidence when a known checkpoint is supplied. Guards are declarative allowlisted identifiers with validated parameters; workflow records are never evaluated, dynamically imported, or passed to a shell.
+
+Workflow approval grants no filesystem, tool, external-service, merge, or release authority. Those limits remain in requirements, contracts, capability policy, and the non-reusable profile selected for each pull request or local release. See [Configurable workflows](configurable-workflows.md) for the user and CLI journey.
+
 ## Autonomy Control Plane
 
 Autonomy is represented by separate, composable records rather than a global trust score:
