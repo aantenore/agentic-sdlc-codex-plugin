@@ -525,6 +525,7 @@ class InstallerTransactionTests(unittest.TestCase):
                 cwd=str(REPO_ROOT),
                 capture_output=True,
                 encoding="utf-8",
+                env={**os.environ, "PYTHONIOENCODING": "cp1252"},
                 timeout=20,
                 check=False,
             )

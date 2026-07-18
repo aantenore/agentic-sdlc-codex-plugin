@@ -2276,6 +2276,14 @@ def _requested_locale(argv: list[str]) -> str:
     return "en"
 
 
+def _configure_utf8_output() -> None:
+    """Keep redirected human and machine output deterministic on every host."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
+
+
 def _help_message(locale: str) -> dict[str, str]:
     if locale == "it":
         return {
@@ -2347,6 +2355,7 @@ def _recovery_required_message(locale: str) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_output()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     json_requested = "--json" in raw_argv
     requested_locale = _requested_locale(raw_argv)

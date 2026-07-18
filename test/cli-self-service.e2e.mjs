@@ -150,13 +150,13 @@ test("completion is deterministic, static, redirectable, and project-free", () =
   assert.doesNotMatch(first, /\beval\b|\$\([^)]*\)|`[^`]*`/u);
   const syntax = spawnSync("bash", ["-n"], { encoding: "utf8", input: first });
   if (syntax.error?.code !== "ENOENT") assert.equal(syntax.status, 0, syntax.stderr);
-  const probe = spawnSync("bash", ["-c", [
+  const probe = spawnSync("bash", ["-s"], { encoding: "utf8", input: [
     first,
     "COMP_WORDS=(agentic-sdlc autonomy delivery action '')",
     "COMP_CWORD=4",
     "_agentic_sdlc_completion",
     "printf '%s\\n' \"${COMPREPLY[@]}\"",
-  ].join("\n")], { encoding: "utf8" });
+  ].join("\n") });
   if (probe.error?.code !== "ENOENT") {
     assert.equal(probe.status, 0, probe.stderr);
     assert.match(probe.stdout, /^--action$/mu);
@@ -164,13 +164,13 @@ test("completion is deterministic, static, redirectable, and project-free", () =
     assert.match(probe.stdout, /^--evidence$/mu);
     assert.doesNotMatch(probe.stdout, /^approve$/mu);
   }
-  const rootProbe = spawnSync("bash", ["-c", [
+  const rootProbe = spawnSync("bash", ["-s"], { encoding: "utf8", input: [
     first,
     "COMP_WORDS=(agentic-sdlc '')",
     "COMP_CWORD=1",
     "_agentic_sdlc_completion",
     "printf '%s\\n' \"${COMPREPLY[@]}\"",
-  ].join("\n")], { encoding: "utf8" });
+  ].join("\n") });
   if (rootProbe.error?.code !== "ENOENT") {
     assert.equal(rootProbe.status, 0, rootProbe.stderr);
     assert.match(rootProbe.stdout, /^autonomy$/mu);
