@@ -135,7 +135,9 @@ A lane membership is allowed only when canonical evidence records an explicit
 `story_id`, `requirement_id`, `related` identifier, contract identifier, or
 evidence path that resolves to the story. Time proximity, filename similarity,
 display titles, and free-text semantics are never lineage signals. The server
-computes the dossier once; the browser only validates and renders that bounded
+computes the dossier once; the server serializes it only in the top-level
+`dossiers` collection, and the browser associates it to an iteration only when
+their exact story IDs match. The browser then validates and renders that bounded
 projection and does not attempt a second semantic join.
 
 An autonomy record belongs to a story dossier only through its explicit story,

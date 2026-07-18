@@ -24,6 +24,7 @@ const DEFAULT_WORKER_TIMEOUT_MS = 120_000;
 const CHILD_TERMINATION_TIMEOUT_MS = 2_000;
 const MAX_WORKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_COLD_MODEL_BYTES = 64 * 1024 * 1024;
+const ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES = 10 * 1024 * 1024;
 const CANONICAL_QUERY_WORKER_FLAG = "--internal-canonical-query-worker";
 const OBSERVATORY_WORKER_FLAG = "--internal-observatory-worker";
 const OBSERVATORY_MODEL_VERIFIER_FLAG = "--internal-observatory-model-verifier";
@@ -2007,6 +2008,11 @@ export function validateObservatoryModelArtifact(filePath, manifest, {
   if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > maxBytes) {
     throw new Error(`Observatory cold model artifact must be between 1 and ${maxBytes} bytes`);
   }
+  if (stat.size > ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES) {
+    throw new Error(
+      `Observatory cold model artifact exceeds the ${ENTERPRISE_OBSERVATORY_MODEL_BUDGET_BYTES}-byte enterprise payload budget`,
+    );
+  }
   if (expectedSizeBytes !== null && stat.size !== expectedSizeBytes) {
     throw new Error("Observatory cold model artifact size does not match the streamed response");
   }
@@ -2177,9 +2183,6 @@ export function validateObservatoryModelArtifact(filePath, manifest, {
     || !oracleHasSourcePath(targetDossier, targetStoryPath)
   ) {
     throw new Error("Observatory cold model omitted the target iteration dossier");
-  }
-  if (JSON.stringify(targetIteration.dossier) !== JSON.stringify(targetDossier)) {
-    throw new Error("Observatory cold model target iteration is not attached to its dossier");
   }
   if (!isOracleObject(targetDossier.lanes)) {
     throw new TypeError("Observatory cold model target dossier omitted its lanes");
@@ -2487,8 +2490,13 @@ function validateOracleIterations(
       }
     }
     retainedLaneCounts.set(expectedStoryId, expectedCounts);
-    if (JSON.stringify(iteration.dossier) !== JSON.stringify(dossier)) {
-      throw new Error(`Observatory retained iteration ${expectedStoryId} has a different dossier`);
+    if (
+      iteration.dossier !== undefined
+      && JSON.stringify(iteration.dossier) !== JSON.stringify(dossier)
+    ) {
+      throw new Error(
+        `Observatory retained iteration ${expectedStoryId} has a different legacy inline dossier`,
+      );
     }
   }
   return retainedLaneCounts;

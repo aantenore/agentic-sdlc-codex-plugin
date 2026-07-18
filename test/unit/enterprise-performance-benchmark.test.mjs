@@ -255,6 +255,15 @@ test("cold model oracle rejects hollow retained evidence and dossier lane items"
     );
 
     model.dossiers[0].lanes.done.items[0] = doneItem;
+    const legacyInline = JSON.parse(JSON.stringify(model));
+    legacyInline.iterations[1].dossier = JSON.parse(JSON.stringify(legacyInline.dossiers[1]));
+    legacyInline.iterations[1].dossier.status = "complete";
+    fs.writeFileSync(artifactPath, JSON.stringify(legacyInline), "utf8");
+    assert.throws(
+      () => validateObservatoryModelArtifact(artifactPath, fixture.manifest),
+      /different legacy inline dossier/u,
+    );
+
     const nonTargetDossier = model.dossiers[1];
     for (const laneName of ["asked", "decided", "contract", "done", "verified"]) {
       nonTargetDossier.lanes[laneName].items = [];

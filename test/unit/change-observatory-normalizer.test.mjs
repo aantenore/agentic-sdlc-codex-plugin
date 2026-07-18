@@ -412,7 +412,7 @@ test("normalizes representative SDLC lineage with explicit provenance and narrat
   }
 });
 
-test("preserves the representative v1 model byte-for-byte after bounded indexing", async (t) => {
+test("keeps the representative v1 wire model deterministic with one dossier copy", async (t) => {
   const root = await createProject(t);
   const writeCompactJson = (relativePath, value) =>
     writeText(root, relativePath, `${JSON.stringify(value)}\n`);
@@ -474,7 +474,7 @@ test("preserves the representative v1 model byte-for-byte after bounded indexing
   });
   const digest = crypto.createHash("sha256").update(JSON.stringify(model)).digest("hex");
 
-  assert.equal(digest, "f00db93ad53210f26e7c302e18f1f2a6de6cdeef6e452715ae94d5c77be5277e");
+  assert.equal(digest, "e6f77daeaf0856b58539f7a52210541a490a7293204857b3746c50f64d082337");
 });
 
 test("builds proof-bound dossiers without cross-story, shared, or ambiguous lineage", async (t) => {
@@ -631,10 +631,15 @@ test("builds proof-bound dossiers without cross-story, shared, or ambiguous line
   assert.equal(dossierA.iterationId, "ST-A");
   assert.equal(dossierA.title, "Story ST-A");
   assert.equal(dossierA.summary, "Summary ST-A");
-  assert.deepEqual(
-    model.iterations.find((iteration) => iteration.id === "ST-A").dossier,
-    dossierA,
+  const iterationA = model.iterations.find((iteration) => iteration.id === "ST-A");
+  assert.deepEqual(iterationA.dossier, dossierA);
+  assert.equal(Object.getOwnPropertyDescriptor(iterationA, "dossier").enumerable, false);
+  const serializedModel = JSON.parse(JSON.stringify(model));
+  assert.equal(
+    Object.hasOwn(serializedModel.iterations.find((iteration) => iteration.id === "ST-A"), "dossier"),
+    false,
   );
+  assert.equal(serializedModel.dossiers.some((dossier) => dossier.storyId === "ST-A"), true);
   assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
   assert.equal(dossierA.lanes.asked.items.some((item) => item.id === "ST-A"), true);
   assert.equal(dossierB.lanes.asked.items.some((item) => item.id === "REQ-SHARED"), true);
