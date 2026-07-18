@@ -4,13 +4,13 @@
   "sdlc_version": "0.11.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Current Performance delivery context refreshed after the final Windows-only remediation: canonical reads, exact Windows file identity, stable Observatory cache validation, unchanged enterprise workload and thresholds, full local validation, and the same existing pull request scope; no new dependency or external service.",
+  "summary": "Current Performance delivery context refreshed after the final cross-platform optimization; canonical guarantees, workload, thresholds, dependencies, external-service boundary, and existing pull-request scope remain unchanged.",
   "repository_snapshot": {
     "root_name": "TravelOps",
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "122ccc65d9588df5b4c1c7bfa45a330dfae643b9",
+      "head_sha": "fc6620b627e2c2764b8dde4a3452f7f4ad81d1a7",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -831,8 +831,8 @@
     "lib/authorization-receipts.mjs": "873b5baa592a349361c2cb6af51c854b3fb89119d7bfc56d8e0cb142f968b40f",
     "lib/autonomy-policy.mjs": "2602204307c6dd6451797774b080058ceb001c10229bbbea097bc7942607e80f",
     "lib/baseline-source-discovery.mjs": "ab17450fb4c9e98c651e4e7989612b84f89376138eced1fad98af44e663bc857",
-    "lib/canonical-query-session.mjs": "ea2646c85528401b6c567e24b3c726a68e4cc99d9526804568d5b0cb383a7d65",
-    "lib/canonical-store.mjs": "ca32fff60bdefaff173920e9d6f0ddfb510cdbfa9c0f746f587d10ce0bf29ca7",
+    "lib/canonical-query-session.mjs": "f79fc4395cd907066c469173074f6927ce3e77cfaeab19184521a25318f51e88",
+    "lib/canonical-store.mjs": "971be1f7885ffbb194853f742c1c0774ee67b9c85db2697e2440da9ebd414572",
     "lib/canonical.mjs": "8316e1e6bbd85d0c2cf8c8d807d1ed0a50352fad1c409305aebba76fef81fc87",
     "lib/change-observatory/cli.mjs": "7e5cfdbc96bb4933dad0827e9ee4bc82c69d3dd1da395c1cef333c89272003e0",
     "lib/change-observatory/constants.mjs": "4d449b2b85c2eab0a516298c5212bee2bb976b6a191064385efc0d1992a07a00",
@@ -873,8 +873,8 @@
     "test/unit/autonomy-policy.test.mjs": "533ba3544ad916aec7c56e7cca233119d48db78a6a58f5bc545cb9149c388733",
     "test/unit/autonomy-schema.test.mjs": "d8209c42ec02372d10fe0b14588aa4a735bda08086b9d40790b5805b329319e7",
     "test/unit/baseline-source-discovery.test.mjs": "912e100edf287852a97fddb3371a03ce2554fd12191f6cda0edaa47c5829e88d",
-    "test/unit/canonical-query-session.test.mjs": "a2251e59e52cf01e727b8a0e8c0207d41ab013293b5e877f57a313681516281a",
-    "test/unit/canonical-store.test.mjs": "70b319916ed2b5a0f28a537c4a1b26855ddd0bab1e2c43e9027999763f8b620d",
+    "test/unit/canonical-query-session.test.mjs": "a47f0b2bddd049b7e0e7797f8e3f70937b366ccd8c90f2182fbaae2f1a65c54f",
+    "test/unit/canonical-store.test.mjs": "fb3a6b72a80bca3ae53977ddda8930ffc34526c26a5e17e60c40cee8718122e2",
     "test/unit/canonical.test.mjs": "b7e06558445435779890f62ffd1303c77acb1a29db80e9767aa68d38e1ea3e45",
     "test/unit/change-observatory-cli.test.mjs": "27d7233332cf5ab4747ff5106947474a97b8536b6444fe5de8b62d8ccf0b37f6",
     "test/unit/change-observatory-model-cache.test.mjs": "acff5d2795c17ce7338a13e66a85665f2622e887cbad76128b2f357cec225670",
@@ -897,10 +897,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260717233822-d9c2ae",
+      "id": "APR-20260718000817-ebfdf0",
       "baseline_id": "BASELINE-ENT-PERFORMANCE-START-001",
       "status": "approved",
-      "summary": "Antonio ha autorizzato Codex a proseguire in autonomia: approvato il contesto aggiornato della stessa PR Performance, limitato alle correzioni Windows già verificate e senza nuove dipendenze o servizi esterni.",
+      "summary": "Confermo il contesto aggiornato della stessa PR Performance: nessun ampliamento di ambito, soglie o dipendenze.",
       "scope": {
         "principle": "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
         "subject_id": "BASELINE-ENT-PERFORMANCE-START-001",
@@ -917,7 +917,7 @@
       "authorization_action": null,
       "explicit_user_confirmation": true,
       "provisional": false,
-      "approved_content_hash": "e2e5c916f6013369f901a2d1ec9d61ded5f1588fd8e373a7216e70a34e63fa89",
+      "approved_content_hash": "a63cede52295436d928e8d9653fa2f015ff716a0f60e43d8346c5fda1fe47c0f",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "antonio",
@@ -929,7 +929,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PERFORMANCE",
-        "head_sha": "122ccc65d9588df5b4c1c7bfa45a330dfae643b9",
+        "head_sha": "fc6620b627e2c2764b8dde4a3452f7f4ad81d1a7",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -946,23 +946,23 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-17T23:38:22.593Z"
+      "created_at": "2026-07-18T00:08:17.148Z"
     }
   ],
-  "created_at": "2026-07-17T23:38:17.452Z",
-  "updated_at": "2026-07-17T23:38:22.593Z",
+  "created_at": "2026-07-18T00:08:12.636Z",
+  "updated_at": "2026-07-18T00:08:17.148Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "default"
+      "source": "cli"
     },
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PERFORMANCE",
-      "head_sha": "122ccc65d9588df5b4c1c7bfa45a330dfae643b9",
+      "head_sha": "fc6620b627e2c2764b8dde4a3452f7f4ad81d1a7",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

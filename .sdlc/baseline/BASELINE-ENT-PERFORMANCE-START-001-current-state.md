@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Current Performance delivery context refreshed after the final Windows-only remediation: canonical reads, exact Windows file identity, stable Observatory cache validation, unchanged enterprise workload and thresholds, full local validation, and the same existing pull request scope; no new dependency or external service.
+Current Performance delivery context refreshed after the final cross-platform optimization; canonical guarantees, workload, thresholds, dependencies, external-service boundary, and existing pull-request scope remain unchanged.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
