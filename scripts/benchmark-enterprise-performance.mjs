@@ -13,6 +13,7 @@ import {
   createEnterpriseFoundationFixture,
 } from "./benchmark-foundation.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
+import { observatoryWorkerEnvironment } from "../lib/change-observatory/runtime.mjs";
 
 export const ENTERPRISE_PERFORMANCE_BENCHMARK_SCHEMA = "enterprise-performance-benchmark:v1";
 export const ENTERPRISE_CANONICAL_QUERY_WORKER_SCHEMA = "enterprise-performance-canonical-query-worker:v1";
@@ -610,7 +611,7 @@ function runObservatoryWorkerProcess(fixture, options = {}, processGuard = null)
       child = spawn(resolvedExecutable, spawnArguments, {
         cwd: process.cwd(),
         detached: process.platform !== "win32",
-        env: process.env,
+        env: observatoryWorkerEnvironment(process.env),
         stdio: ["ignore", "pipe", "pipe", "ipc"],
         windowsHide: true,
       });

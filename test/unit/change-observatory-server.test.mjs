@@ -772,6 +772,51 @@ test("omits deeply nested raw JSON when bounded private-reasoning redaction cann
   assert.doesNotMatch(source.body, /DEEP_PRIVATE_MUST_NOT_LEAK/);
 });
 
+test("shutdown closes idle keep-alive sockets on every supported Node runtime", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => agent.destroy());
+
+  assert.equal((await request(running, "/api/v1/health", { agent })).statusCode, 200);
+  await assertCompletesWithin(running.close(), 500, "idle keep-alive shutdown");
+  assert.equal(running.server.listening, false);
+});
+
+test("shutdown force-closes an active request after the bounded grace period", async (t) => {
+  const fixture = await createServerFixture(t);
+  let releaseBuild;
+  const buildGate = new Promise((resolve) => {
+    releaseBuild = resolve;
+  });
+  let builds = 0;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    shutdownGraceMs: 25,
+    async buildViewModel(...args) {
+      builds += 1;
+      await buildGate;
+      return buildObservatoryViewModel(...args);
+    },
+  });
+
+  const pendingRequest = request(running, "/api/v1/observatory")
+    .then((response) => ({ response, error: null }), (error) => ({ response: null, error }));
+  await waitFor(() => builds === 1);
+  await assertCompletesWithin(running.close(), 500, "active-request shutdown");
+  const outcome = await assertCompletesWithin(pendingRequest, 500, "active client teardown");
+  assert.equal(outcome.response, null);
+  assert.ok(outcome.error instanceof Error);
+  assert.equal(running.server.listening, false);
+
+  releaseBuild();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
 test("refuses non-loopback bind configuration", async (t) => {
   const fixture = await createServerFixture(t);
   await assert.rejects(
@@ -801,7 +846,12 @@ async function createServerFixture(t) {
   return { projectRoot, assetRoot };
 }
 
-function request(running, requestPath, { method = "GET", headers = {}, authenticated = true } = {}) {
+function request(running, requestPath, {
+  method = "GET",
+  headers = {},
+  authenticated = true,
+  agent = undefined,
+} = {}) {
   return new Promise((resolve, reject) => {
     const requestHeaders = {
       Host: `${running.address.host}:${running.address.port}`,
@@ -816,6 +866,7 @@ function request(running, requestPath, { method = "GET", headers = {}, authentic
       path: requestPath,
       method,
       headers: requestHeaders,
+      agent,
     }, (incoming) => {
       const chunks = [];
       incoming.on("data", (chunk) => chunks.push(chunk));
@@ -836,6 +887,16 @@ function request(running, requestPath, { method = "GET", headers = {}, authentic
     outgoing.on("error", reject);
     outgoing.end();
   });
+}
+
+function assertCompletesWithin(promise, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs} ms`)), timeoutMs);
+    }),
+  ]);
 }
 
 async function waitFor(predicate) {

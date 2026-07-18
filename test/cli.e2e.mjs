@@ -7463,6 +7463,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
   assert.ok(files.includes("lib/change-observatory/cli.mjs"));
+  assert.ok(files.includes("lib/change-observatory/runtime.mjs"));
   assert.ok(files.includes("lib/change-observatory/intentabi-adapter.mjs"));
   assert.ok(files.includes("ui/change-observatory/index.html"));
   assert.ok(files.includes("ui/change-observatory/app.js"));

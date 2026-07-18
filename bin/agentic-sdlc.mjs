@@ -90,6 +90,11 @@ import {
   validateContextOptimizationLineage,
 } from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
+import {
+  launchDedicatedObservatory,
+  OBSERVATORY_WORKER_MARKER,
+  shouldLaunchDedicatedObservatory,
+} from "../lib/change-observatory/runtime.mjs";
 import { createObservatoryConfiguration } from "../lib/change-observatory/configuration.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 import {
@@ -718,6 +723,14 @@ async function main() {
     }
     if (command === "observe") {
       try {
+        if (shouldLaunchDedicatedObservatory()) {
+          const termination = await launchDedicatedObservatory({
+            argv: rawArgs,
+            scriptPath: fileURLToPath(import.meta.url),
+          });
+          process.exitCode = termination.exitCode;
+          return;
+        }
         await runObserveCommand({
           projectRoot: path.resolve(String(parsed.options.root || process.cwd())),
           host: parsed.options.host,
@@ -725,6 +738,9 @@ async function main() {
           openBrowser: parsed.options["no-open"] !== true,
           json: parsed.options.json === true,
           locale: humanGuidanceLocale(parsed.options),
+        }, {
+          parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
+            && process.env[OBSERVATORY_WORKER_MARKER] === "1",
         });
       } catch (error) {
         if (error instanceof TypeError) fail(error.message);

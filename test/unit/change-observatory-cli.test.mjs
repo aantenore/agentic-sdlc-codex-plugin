@@ -320,6 +320,214 @@ test("signal handlers close once and leave process exit to the event loop", asyn
   handlers.dispose();
 });
 
+test("an Observatory worker closes when its parent IPC boundary disappears", async () => {
+  const processRef = new EventEmitter();
+  processRef.connected = true;
+  processRef.exitCode = null;
+  const seen = [];
+  registerShutdownHandlers({
+    processRef,
+    async shutdown(signal) {
+      seen.push(signal);
+    },
+  });
+
+  processRef.emit("disconnect");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, ["parent-disconnect"]);
+  assert.equal(processRef.exitCode, 0);
+  assert.equal(processRef.listenerCount("disconnect"), 0);
+  assert.equal(processRef.listenerCount("SIGTERM"), 0);
+  assert.equal(processRef.listenerCount("SIGINT"), 0);
+});
+
+test("disposing shutdown handlers cancels a queued disconnected-parent callback", async () => {
+  const processRef = new EventEmitter();
+  processRef.connected = false;
+  processRef.exitCode = null;
+  const seen = [];
+  const handlers = registerShutdownHandlers({
+    processRef,
+    parentIpcExpected: true,
+    async shutdown(signal) {
+      seen.push(signal);
+    },
+  });
+
+  handlers.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, []);
+  assert.equal(processRef.exitCode, null);
+});
+
+test("a parent disconnect during warm readiness closes the worker before it is announced", async () => {
+  const processRef = new EventEmitter();
+  processRef.connected = true;
+  processRef.exitCode = null;
+  const output = createMemoryStream();
+  let releaseWarmReadiness;
+  const warmGate = new Promise((resolve) => {
+    releaseWarmReadiness = resolve;
+  });
+  let warmCalls = 0;
+  let closeCalls = 0;
+
+  const launch = runObserveCommand({ projectRoot: ".", openBrowser: false, json: true }, {
+    processRef,
+    stdout: output,
+    async serverFactory() {
+      return {
+        ...(await successfulServer()),
+        async warmReadiness() {
+          warmCalls += 1;
+          await warmGate;
+          return { status: "ready" };
+        },
+        async close() {
+          closeCalls += 1;
+        },
+      };
+    },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(warmCalls, 1);
+  processRef.connected = false;
+  processRef.emit("disconnect");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closeCalls, 1);
+  assert.equal(processRef.exitCode, null);
+  assert.equal(output.value, "");
+
+  releaseWarmReadiness();
+  const stopped = await launch;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped.readyEvent, null);
+  assert.equal(closeCalls, 1);
+  assert.equal(processRef.exitCode, 0);
+  assert.equal(output.value, "");
+});
+
+test("a signal-aware server factory treats parent disconnect as a clean stop", async () => {
+  const processRef = new EventEmitter();
+  processRef.connected = true;
+  processRef.exitCode = null;
+  const output = createMemoryStream();
+  let factoryCalls = 0;
+
+  const launch = runObserveCommand({ projectRoot: ".", openBrowser: false, json: true }, {
+    processRef,
+    stdout: output,
+    serverFactory({ signal }) {
+      factoryCalls += 1;
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+
+  await waitFor(() => factoryCalls === 1);
+  processRef.connected = false;
+  processRef.emit("disconnect");
+
+  const stopped = await assertCompletesWithin(launch, 1_000, "signal-aware factory stop");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped.readyEvent, null);
+  assert.equal(processRef.exitCode, 0);
+  assert.equal(output.value, "");
+});
+
+test("a disconnected parent forces a worker whose startup ignores cancellation to stop", async (t) => {
+  for (const blockedPhase of ["server factory", "warm readiness"]) {
+    await t.test(blockedPhase, async () => {
+      const processRef = new EventEmitter();
+      processRef.connected = true;
+      processRef.exitCode = null;
+      const output = createMemoryStream();
+      let releaseBlockedPhase;
+      const blocked = new Promise((resolve) => {
+        releaseBlockedPhase = resolve;
+      });
+      let serverFactoryCalls = 0;
+      let warmCalls = 0;
+      let closeCalls = 0;
+      let resolveForcedExit;
+      const forcedExit = new Promise((resolve) => {
+        resolveForcedExit = resolve;
+      });
+
+      const launch = runObserveCommand({ projectRoot: ".", openBrowser: false, json: true }, {
+        processRef,
+        stdout: output,
+        parentDisconnectTimeoutMs: 25,
+        forceExit(code) {
+          resolveForcedExit(code);
+        },
+        async serverFactory() {
+          serverFactoryCalls += 1;
+          if (blockedPhase === "server factory") await blocked;
+          return {
+            ...(await successfulServer()),
+            async warmReadiness() {
+              warmCalls += 1;
+              if (blockedPhase === "warm readiness") await blocked;
+              return { status: "ready" };
+            },
+            async close() {
+              closeCalls += 1;
+            },
+          };
+        },
+      });
+
+      await waitFor(() => serverFactoryCalls === 1 && (
+        blockedPhase === "server factory" || warmCalls === 1
+      ));
+      processRef.connected = false;
+      processRef.emit("disconnect");
+
+      assert.equal(
+        await assertCompletesWithin(forcedExit, 1_000, `${blockedPhase} forced exit`),
+        1,
+      );
+      assert.equal(processRef.exitCode, 1);
+      assert.equal(output.value, "");
+
+      releaseBlockedPhase();
+      const stopped = await assertCompletesWithin(launch, 1_000, `${blockedPhase} cleanup`);
+      assert.equal(stopped.readyEvent, null);
+      assert.equal(closeCalls, 1);
+      assert.equal(output.value, "");
+    });
+  }
+});
+
+test("an already-disconnected expected parent closes the worker during startup", async () => {
+  const processRef = new EventEmitter();
+  processRef.connected = false;
+  processRef.exitCode = null;
+  let closeCalls = 0;
+  const stopped = await runObserveCommand({ projectRoot: ".", openBrowser: false, json: true }, {
+    processRef,
+    parentIpcExpected: true,
+    stdout: createMemoryStream(),
+    async serverFactory() {
+      await new Promise((resolve) => setImmediate(resolve));
+      return {
+        ...(await successfulServer()),
+        async close() {
+          closeCalls += 1;
+        },
+      };
+    },
+  });
+
+  assert.equal(stopped.readyEvent, null);
+  assert.equal(closeCalls, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(processRef.exitCode, 0);
+});
+
 function createMemoryStream() {
   return {
     value: "",
@@ -328,6 +536,24 @@ function createMemoryStream() {
       return true;
     },
   };
+}
+
+function assertCompletesWithin(promise, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs} ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Observatory startup phase was not reached");
 }
 
 async function successfulServer() {
