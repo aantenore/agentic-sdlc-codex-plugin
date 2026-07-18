@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,17 @@ import { createGovernancePolicy } from "../../lib/governance/policy-engine.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
+
+function verifiedCliActor() {
+  const credential = typeof process.getuid === "function"
+    ? `uid:${process.getuid()}`
+    : `user:${os.userInfo().username}`;
+  const identityHash = crypto.createHash("sha256")
+    .update(`${process.platform}\0${credential}`)
+    .digest("hex")
+    .slice(0, 32);
+  return { type: "system", id: `host-user-${identityHash}`, issuer: `os-${process.platform}` };
+}
 
 function projectFixture(t, label) {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), `agentic-sdlc-governance-cli-${label}-`));
@@ -77,7 +89,7 @@ function transitionAppendPolicy(instanceId, extraSources = []) {
     valid_from: "2026-01-01T00:00:00.000Z",
     expires_at: "2030-01-01T00:00:00.000Z",
     decision_ttl_seconds: 60,
-    role_bindings: [{ id: "BIND-LOCAL-CLI", role: "runner", actor: { type: "system", id: "local-cli" } }],
+    role_bindings: [{ id: "BIND-HOST-CLI", role: "runner", actor: verifiedCliActor() }],
     rules: [
       ...allowed.map(([operation, projectPath], index) =>
         rule(`ALLOW-${index + 1}`, "allow", operation, projectPath)),
@@ -115,7 +127,7 @@ function traceAppendPolicy(sourcePaths) {
     valid_from: "2026-01-01T00:00:00.000Z",
     expires_at: "2030-01-01T00:00:00.000Z",
     decision_ttl_seconds: 60,
-    role_bindings: [{ id: "BIND-LOCAL-TRACE", role: "runner", actor: { type: "system", id: "local-cli" } }],
+    role_bindings: [{ id: "BIND-HOST-TRACE", role: "runner", actor: verifiedCliActor() }],
     rules: [
       ...exact.map(([operation, projectPath], index) =>
         makeRule(`ALLOW-TRACE-${index + 1}`, "allow", operation, projectPath)),

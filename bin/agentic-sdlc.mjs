@@ -186,6 +186,8 @@ import {
   MutationGovernanceError,
   appendJsonLineNoFollow,
   assertMutationExecutionAuthorized,
+  consumeBootstrapMutationGrant,
+  createBootstrapMutationGrant,
   createProjectMutationGovernance,
   runWithMutationGovernance,
   withGovernedMutation,
@@ -905,6 +907,34 @@ function mutationGovernanceActor(options) {
   return { type: assertedType, id: assertedId };
 }
 
+function verifiedMutationGovernanceActor() {
+  let credential;
+  let assurance;
+  try {
+    if (typeof process.getuid === "function") {
+      credential = `uid:${process.getuid()}`;
+    } else {
+      credential = `user:${os.userInfo().username}`;
+    }
+    assurance = "host_os_identity";
+  } catch {
+    return null;
+  }
+  const identityHash = crypto.createHash("sha256")
+    .update(`${process.platform}\0${credential}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    verified: true,
+    assurance,
+    actor: {
+      type: "system",
+      id: `host-user-${identityHash}`,
+      issuer: `os-${process.platform}`,
+    },
+  };
+}
+
 function mutationGovernanceEvidencePaths(options) {
   return [
     ...normalizeRawListOption(options.evidence),
@@ -920,6 +950,7 @@ async function dispatchWithMutationGovernance(registry, resolution, invocation) 
     canonical_action: resolution?.canonical_action,
     command_path: resolution?.canonical_path?.join(" "),
     actor: mutationGovernanceActor(options),
+    verified_actor: verifiedMutationGovernanceActor(),
     evidence_paths: mutationGovernanceEvidencePaths(options),
   });
   context.mutationGovernanceObservations = governance.observations;
@@ -995,6 +1026,13 @@ async function main() {
     }
     const context = buildContext(parsed.options);
     if (handler?.stage === "pre-config") {
+      if (resolution?.canonical_action === "config.migrate" && parsed.options.apply === true) {
+        // Deliberate bootstrap exception: only the exact reviewed plan hash may
+        // enter migrateProjectConfig's transactional grant. The current config
+        // is the object being repaired, so it cannot authorize its own repair.
+        await registry.dispatch(resolution, { ...invocation, context });
+        return;
+      }
       await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
       return;
     }
@@ -4730,6 +4768,36 @@ function migrateProjectConfig(context, options) {
     ].join("\n"));
   }
 
+  if (options.apply && options.__bootstrapGrantConsumed !== true) {
+    const expectedPlanHash = getOptionString(options, "plan-hash");
+    if (expectedPlanHash) {
+      const currentPlan = prepareProjectConfigMigration(
+        context,
+        context.rawProjectConfig,
+        context.projectConfigLock,
+      );
+      if (expectedPlanHash !== currentPlan.plan_hash) {
+        fail([
+          "The configuration was not changed because the reviewed plan no longer matches.",
+          "Impact: the existing config and lock remain untouched.",
+          "Next: run `agentic-sdlc config migrate` again and review the new plan.",
+        ].join("\n"));
+      }
+      const grant = createBootstrapMutationGrant({
+        root: context.root,
+        canonical_action: "config.migrate",
+        plan_hash: expectedPlanHash,
+        expected_plan_hash: currentPlan.plan_hash,
+        exact_mutations: [{ operation: "transaction.execute", path: context.projectConfigPath }],
+      });
+      return consumeBootstrapMutationGrant(grant, {
+        canonical_action: "config.migrate",
+        operation: "transaction.execute",
+        path: context.projectConfigPath,
+      }, () => migrateProjectConfig(context, { ...options, __bootstrapGrantConsumed: true }));
+    }
+  }
+
   if (!options.apply) {
     const plan = prepareProjectConfigMigration(
       context,
@@ -7679,6 +7747,22 @@ function clamp01(value) {
 }
 
 function initProject(context, options) {
+  if (!fs.existsSync(context.sdlcRoot)) {
+    const grant = createBootstrapMutationGrant({
+      root: context.root,
+      canonical_action: "init",
+      first_time: true,
+      exact_mutations: [{ operation: "transaction.execute", path: context.sdlcRoot }],
+    });
+    return consumeBootstrapMutationGrant(grant, {
+      canonical_action: "init",
+      operation: "transaction.execute",
+      path: context.sdlcRoot,
+    }, () => {
+      const result = initializeProject(context, options);
+      output(options, result.payload, result.messages);
+    });
+  }
   const result = initializeProject(context, options);
   output(options, result.payload, result.messages);
 }
@@ -27119,11 +27203,28 @@ function migrateIdentity(context, options) {
       fail("Identity migration --recover requires both --recovery-nonce and --plan-hash from the verified lock.");
     }
     try {
-      const result = recoverIdentityMigration({
+      const grant = createBootstrapMutationGrant({
+        root: context.root,
+        canonical_action: "migration.identity",
+        recover: true,
+        nonce: recoveryNonce,
+        expected_nonce: recoveryNonce,
+        plan_hash: recoveryPlanHash,
+        expected_plan_hash: recoveryPlanHash,
+        exact_mutations: [{
+          operation: "transaction.execute",
+          path: path.join(context.root, ".sdlc-identity-migration.lock"),
+        }],
+      });
+      const result = consumeBootstrapMutationGrant(grant, {
+        canonical_action: "migration.identity",
+        operation: "transaction.execute",
+        path: path.join(context.root, ".sdlc-identity-migration.lock"),
+      }, () => recoverIdentityMigration({
         projectRoot: context.root,
         recoveryNonce,
         planHash: recoveryPlanHash,
-      });
+      }));
       output(options, result, [
         result.status === "rolled_back"
           ? `Recovered interrupted identity migration ${result.migration_id} by restoring the complete pre-migration tree.`
@@ -33554,10 +33655,18 @@ function assertNoSymlinkPathSegments(filePath) {
 }
 
 function ensureDir(dirPath) {
-  if (fs.existsSync(dirPath)) return false;
+  if (fs.existsSync(dirPath)) {
+    const entry = fs.lstatSync(dirPath);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      fail(`Refusing unstable directory path: ${dirPath}`);
+    }
+    return false;
+  }
+  const parentPath = path.dirname(dirPath);
+  ensureDir(parentPath);
   return withGovernedMutation({ operation: "directory.create", path: dirPath }, () => {
     assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
-    fs.mkdirSync(dirPath, { recursive: true });
+    fs.mkdirSync(dirPath);
     return true;
   });
 }
