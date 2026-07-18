@@ -44,28 +44,47 @@ Use `python3`, `python`, or `py -3` according to the Python 3 launcher available
 
 ## Install
 
-From the source checkout:
+From the source checkout, first inspect the machine, then create a read-only
+plan. Apply only the exact plan you just reviewed:
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
+python3 scripts/install-personal-marketplace.py check
+python3 scripts/install-personal-marketplace.py plan --json
+python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
+
+`check` and `plan` do not change files. Running the installer without a
+command is also plan-only. `apply` recalculates the plan while holding a lock
+and stops if the source, destination, marketplace entry, or options changed.
+An old lock is recovered only when its owner process is confirmed to have
+ended; elapsed time alone never permits a second installer to take it over.
+It stages and byte-verifies the new plugin before replacing the managed copy;
+if the plugin or marketplace update fails, it restores both to their previous
+state. If the process is interrupted between replacements, `check` and `plan`
+report the pending recovery without changing files. Repeating `apply` with the
+same previously reviewed plan hash reads the transaction journal and compares
+exact before/after digests before it restores or finalizes only a proven state;
+otherwise it stops without overwriting unexpected data.
 
 RTK integration does not require changing the installation command. If RTK is
 already installed and you also want the installer to configure its guidance in
 the current user's **global Codex instructions**, use the explicit opt-in:
 
 ```bash
-python3 scripts/install-personal-marketplace.py --with-rtk
+python3 scripts/install-personal-marketplace.py plan --with-rtk --json
+python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
 
-The flag does not install or upgrade RTK. Because the instruction change is
-global, it can affect Codex behavior in projects that do not use Agentic SDLC;
-omitting `--with-rtk` leaves those global instructions unchanged. The plugin's
+The flag does not install or upgrade RTK. Apply runs a private staged copy whose
+bytes match the reviewed plan. Because the instruction change is global, it can
+affect Codex behavior in projects that do not use Agentic SDLC, and that global
+change is not part of the local plugin rollback. Omitting `--with-rtk` leaves
+those global instructions unchanged. The plugin's
 project-local gateway and fail-open native fallback remain available according
 to `.sdlc/config.json`. `--rtk-executable /absolute/path/to/rtk` only tells the
 installer which binary to use while configuring and verifying global guidance;
@@ -91,13 +110,14 @@ Start a new Codex task after installing. Existing tasks do not need to be treate
 
 ### What The Installer Changes
 
-The script:
+The apply step:
 
 1. reads the package allowlist and adds npm's standard root files;
 2. builds a clean sibling staging directory;
-3. replaces `~/plugins/agentic-sdlc-codex-plugin` only when the destination is managed and safe;
-4. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
-5. preserves unrelated marketplace entries.
+3. verifies the reviewed plan is still current under a lock;
+4. replaces `~/plugins/agentic-sdlc-codex-plugin` only when the destination is managed and safe;
+5. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
+6. preserves unrelated marketplace entries and restores the previous local state on transaction failure.
 
 With `--with-rtk`, it additionally configures RTK's global Codex instruction
 profile for the current user. This is the only opt-in global change; it still
@@ -109,11 +129,15 @@ Treat the generated tree under `~/plugins` as installation output. Do not clone 
 
 ## Update
 
-There is no dedicated update subcommand in the current Codex plugin CLI. Refresh the source checkout by your normal source-control process, rerun the staging installer, and add the plugin again:
+There is no dedicated update subcommand in the current Codex plugin CLI.
+Refresh the source checkout by your normal source-control process, review a
+fresh plan, apply that exact plan, and add the plugin again:
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
+python3 scripts/install-personal-marketplace.py check
+python3 scripts/install-personal-marketplace.py plan --json
+python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
@@ -122,7 +146,8 @@ If the installation previously used global RTK guidance, repeat the opt-in so
 the installed RTK binary refreshes its global Codex instructions:
 
 ```bash
-python3 scripts/install-personal-marketplace.py --with-rtk
+python3 scripts/install-personal-marketplace.py plan --with-rtk --json
+python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 ```
 

@@ -114,9 +114,19 @@ import {
   deliveryAutonomyApprovalGuidance,
   deliveryAutonomyProposalGuidance,
   deliveryAutonomyStatusGuidance,
+  findForbiddenHumanGuidanceTerms,
   gateGuidance,
   requirementAutonomyCeilingGuidance,
 } from "../lib/human-guidance.mjs";
+import { renderHelp, UnknownCommandError } from "../lib/cli/help.mjs";
+import { generateCompletion, SUPPORTED_SHELLS } from "../lib/cli/completion.mjs";
+import {
+  CliPresetError,
+  exportCliPresets,
+  listCliPresets,
+  resolveCliPresets,
+  showCliPreset,
+} from "../lib/cli/presets.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -285,6 +295,7 @@ const KNOWN_OPTIONS = new Set([
   "capability-policy-file",
   "capability-policy-json",
   "capability-recommendation",
+  "cli-preset",
   "completion-id",
   "confidence",
   "confirmed-source",
@@ -466,6 +477,7 @@ const REPEATABLE_OPTIONS = new Set([
   "capability-binding-file",
   "capability-binding-json",
   "capability-recommendation",
+  "cli-preset",
   "capability",
   "confirmed-source",
   "constraint",
@@ -597,15 +609,36 @@ const TRACE_TYPES = new Set([
 const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready"]);
 
 async function main() {
+  const rawArgs = process.argv.slice(2);
+  const rawJsonRequested = rawBooleanOptionRequested(rawArgs, "json");
+  let parsed = { options: {} };
   try {
-    const parsed = parseArgs(process.argv.slice(2));
+    parsed = parseArgs(rawArgs);
+    parsed = applyCliPresetOptions(parsed);
     if (parsed.options.locale !== undefined) humanGuidanceLocale(parsed.options);
     if (parsed.version) {
       console.log(VERSION);
       return;
     }
-    if (parsed.help || parsed.positionals.length === 0) {
-      printHelp();
+    const [earlyCommand, earlySubcommand, ...earlyRest] = parsed.positionals;
+    if (parsed.help || earlyCommand === "help" || parsed.positionals.length === 0) {
+      const helpPath = earlyCommand === "help" ? parsed.positionals.slice(1) : parsed.positionals;
+      console.log(renderHelp(helpPath, {
+        locale: humanGuidanceLocale(parsed.options),
+        json: parsed.options.json === true,
+        version: VERSION,
+      }));
+      return;
+    }
+    if (earlyCommand === "completion") {
+      if (!earlySubcommand || earlyRest.length > 0 || !SUPPORTED_SHELLS.includes(String(earlySubcommand).toLowerCase())) {
+        fail(`Completion needs exactly one shell: ${SUPPORTED_SHELLS.join(", ")}.`);
+      }
+      console.log(generateCompletion(earlySubcommand, { json: parsed.options.json === true }));
+      return;
+    }
+    if (earlyCommand === "preset") {
+      handleCliPresetCommand(earlySubcommand, earlyRest, parsed);
       return;
     }
 
@@ -633,6 +666,7 @@ async function main() {
           port: parsed.options.port,
           openBrowser: parsed.options["no-open"] !== true,
           json: parsed.options.json === true,
+          locale: humanGuidanceLocale(parsed.options),
         });
       } catch (error) {
         if (error instanceof TypeError) fail(error.message);
@@ -1014,8 +1048,56 @@ async function main() {
 
     fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
   } catch (error) {
-    if (error instanceof UserError) {
-      console.error(`Error: ${error.message}`);
+    if (error instanceof UnknownCommandError) {
+      if (parsed.options?.json === true || rawJsonRequested) {
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+        process.exitCode = 1;
+        return;
+      }
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
+    if (error instanceof UserError || error instanceof CliPresetError) {
+      const italian = (() => {
+        try {
+          return humanGuidanceLocale(parsed.options) === "it";
+        } catch {
+          return false;
+        }
+      })();
+      const labels = italian
+        ? {
+            outcome: "Risultato",
+            impact: "Cosa cambia in pratica",
+            decision: "Cosa devi decidere",
+            protection: "Cosa resta protetto",
+            next: "Prossimo passo",
+            details: "Dettagli tecnici (facoltativi)",
+          }
+        : {
+            outcome: "Outcome",
+            impact: "What this changes in practice",
+            decision: "What you need to decide",
+            protection: "What remains protected",
+            next: "Next step",
+            details: "Technical details (optional)",
+          };
+      if (parsed.options?.json === true || rawJsonRequested) {
+        console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
+        process.exitCode = 1;
+        return;
+      }
+      console.error([
+        `${labels.outcome}: ${italian ? "Il comando non è stato completato." : "The command could not be completed."}`,
+        `${labels.impact}: ${italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically."}`,
+        `${labels.decision}: ${italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected."}`,
+        `${labels.protection}: ${italian ? "Le regole di sicurezza e i limiti già concordati restano invariati." : "Existing safety rules and agreed limits remain unchanged."}`,
+        `${labels.next}: ${italian ? "Consulta la diagnosi facoltativa, correggi il problema e riprova." : "Review the optional diagnosis, correct the problem, and try again."}`,
+        "",
+        `${labels.details}:`,
+        `- Error: ${error.message}`,
+      ].join("\n"));
       process.exitCode = 1;
       return;
     }
@@ -1023,7 +1105,76 @@ async function main() {
   }
 }
 
+function rawBooleanOptionRequested(argv, optionName) {
+  const exact = `--${optionName}`;
+  const inlinePrefix = `${exact}=`;
+  let requested = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === exact) {
+      const next = argv[index + 1];
+      if (next !== undefined && /^(?:true|false)$/iu.test(next)) {
+        requested ||= next.toLowerCase() === "true";
+        index += 1;
+      } else {
+        requested = true;
+      }
+      continue;
+    }
+    if (arg.startsWith(inlinePrefix)) {
+      requested ||= arg.slice(inlinePrefix.length).toLowerCase() === "true";
+    }
+  }
+  return requested;
+}
+
 class UserError extends Error {}
+
+function buildCliErrorPayload(error, options = {}) {
+  const italian = (() => {
+    try {
+      return humanGuidanceLocale(options) === "it";
+    } catch {
+      return false;
+    }
+  })();
+  const unknown = error instanceof UnknownCommandError;
+  const code = unknown
+    ? error.code
+    : error instanceof CliPresetError
+      ? "CLI_PRESET_ERROR"
+      : "USER_ERROR";
+  const message = unknown
+    ? `Unknown command: ${error.path || "(empty)"}`
+    : String(error.message || "The command could not be completed.");
+  const guidance = unknown
+    ? {
+        result: italian ? "Non ho trovato l’azione richiesta." : "The requested action was not found.",
+        impact: italian ? "Nessun progetto è stato aperto o modificato." : "No project was opened or changed.",
+        required_decision: italian ? "Scegli se correggere la formulazione oppure usare l’aiuto principale." : "Choose whether to correct the wording or use the main help.",
+        protection_boundary: italian ? "File locali, repository remoti, rilasci e produzione restano invariati." : "Local files, remote repositories, releases, and production remain unchanged.",
+        next_action: italian ? "Controlla la scrittura e riprova con una delle azioni suggerite." : "Check the spelling and try one of the suggested actions.",
+        details: { path: error.path || "", suggestions: error.suggestions || [] },
+      }
+    : {
+        result: italian ? "Il comando non è stato completato." : "The command could not be completed.",
+        impact: italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically.",
+        required_decision: italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected.",
+        protection_boundary: italian ? "Le regole di sicurezza e i limiti già concordati restano invariati." : "Existing safety rules and agreed limits remain unchanged.",
+        next_action: italian ? "Correggi il problema descritto nella diagnosi e riprova." : "Correct the problem described in the diagnosis and try again.",
+        details: { code, message },
+      };
+  return {
+    schema_version: "agentic-sdlc-cli-error:v1",
+    status: "error",
+    error: {
+      code,
+      message,
+      ...(unknown ? { path: error.path || "", suggestions: error.suggestions || [] } : {}),
+    },
+    human_guidance: guidance,
+  };
+}
 
 function parseArgs(argv) {
   const options = {};
@@ -1101,6 +1252,79 @@ function addOption(options, key, value) {
     options[key] = [options[key]];
   }
   options[key].push(value);
+}
+
+function applyCliPresetOptions(parsed) {
+  const explicitOptions = { ...parsed.options };
+  const cliPresets = explicitOptions["cli-preset"];
+  delete explicitOptions["cli-preset"];
+  if (cliPresets === undefined) {
+    return { ...parsed, options: explicitOptions, cliPresets: [] };
+  }
+  const resolved = resolveCliPresets(cliPresets, {
+    cwd: process.cwd(),
+    explicitOptions,
+  });
+  return {
+    ...parsed,
+    options: { ...resolved.options },
+    cliPresets: Array.isArray(cliPresets) ? [...cliPresets] : [cliPresets],
+    cliPresetResolution: resolved,
+  };
+}
+
+function handleCliPresetCommand(subcommand, rest, parsed) {
+  const options = parsed.options;
+  const locale = humanGuidanceLocale(options);
+  const italian = locale === "it";
+  if (subcommand === "list") {
+    if (rest.length > 0) fail("preset list does not accept positional values.");
+    const presets = listCliPresets();
+    if (options.json) {
+      console.log(JSON.stringify({ schema_version: "agentic-sdlc-cli-preset-list-v1", presets }, null, 2));
+      return;
+    }
+    console.log([
+      `${italian ? "Risultato" : "Outcome"}: ${italian ? "Sono disponibili impostazioni di presentazione sicure e incluse nel plugin." : "Safe built-in presentation settings are available."}`,
+      `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${italian ? "Puoi scegliere lingua, formato macchina, livello di dettaglio o apertura del browser senza ampliare i permessi." : "You can choose language, machine output, diagnostic detail, or browser behavior without widening permissions."}`,
+      `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${italian ? "Scegli soltanto l’impostazione di presentazione che preferisci." : "Choose only the presentation setting you prefer."}`,
+      `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian ? "Queste impostazioni non possono approvare azioni, cambiare destinazioni o ampliare i file modificabili." : "These settings cannot approve actions, change targets, or widen writable files."}`,
+      `${italian ? "Prossimo passo" : "Next step"}: ${italian ? "Consulta i dettagli facoltativi e scegli una voce." : "Review the optional details and choose one entry."}`,
+      "",
+      `${italian ? "Dettagli tecnici (facoltativi)" : "Technical details (optional)"}:`,
+      ...presets.map((preset) => `- ${preset.id}: ${preset.description[locale]} | ${JSON.stringify(preset.options)}`),
+    ].join("\n"));
+    return;
+  }
+  if (subcommand === "show") {
+    const id = rest[0] || getOptionString(options, "id");
+    if (!id || rest.length > 1) fail("preset show needs exactly one preset name.");
+    const preset = showCliPreset(id);
+    if (options.json) {
+      console.log(JSON.stringify(preset, null, 2));
+      return;
+    }
+    console.log([
+      `${italian ? "Risultato" : "Outcome"}: ${preset.description[locale]}`,
+      `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${italian ? "Questa scelta modifica soltanto come vengono presentati i risultati." : "This choice changes only how results are presented."}`,
+      `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${italian ? "Decidi se questa presentazione è adatta alla singola esecuzione." : "Decide whether this presentation suits the current run."}`,
+      `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian ? "Non autorizza operazioni e non cambia il perimetro del lavoro." : "It authorizes no operation and does not change the work boundary."}`,
+      `${italian ? "Prossimo passo" : "Next step"}: ${italian ? "Applicala soltanto se corrisponde alla presentazione desiderata." : "Apply it only if it matches the presentation you want."}`,
+      "",
+      `${italian ? "Dettagli tecnici (facoltativi)" : "Technical details (optional)"}:`,
+      `- id: ${preset.id}`,
+      `- options: ${JSON.stringify(preset.options)}`,
+      `- sha256: ${preset.sha256}`,
+    ].join("\n"));
+    return;
+  }
+  if (subcommand === "export") {
+    const references = [...rest, ...(parsed.cliPresets || [])];
+    if (references.length === 0) fail("preset export needs at least one preset name or @file.json reference.");
+    console.log(exportCliPresets(references, { cwd: process.cwd() }));
+    return;
+  }
+  fail("preset needs one subcommand: list, show, or export.");
 }
 
 function buildContext(options) {
@@ -1249,51 +1473,66 @@ function mergeMissingConfigDefaults(projectConfig, templateConfig) {
   return merge(projectConfig, templateConfig);
 }
 
-function configStatusGuidance(context) {
+function configStatusGuidance(context, locale = "en") {
+  const italian = locale === "it";
   const status = context.configState?.status || "invalid";
   if (status === "locked") {
     return {
-      outcome: "Configuration is pinned and safe to use.",
-      impact: "Plugin updates cannot silently change this project's effective policy.",
-      next_action: "No action is required.",
+      result: italian ? "Le regole del progetto sono confermate e pronte all’uso." : "The project's rules are confirmed and ready to use.",
+      impact: italian ? "Un aggiornamento del programma non può cambiare di nascosto il modo in cui questo progetto viene gestito." : "A software update cannot silently change how this project is governed.",
+      required_decision: italian ? "Non devi decidere nulla adesso." : "You do not need to decide anything now.",
+      protection_boundary: italian ? "Questo controllo ha soltanto letto le regole; non ha modificato file né avviato lavoro." : "This check only read the rules; it did not change files or start work.",
+      next_action: italian ? "Puoi continuare con l’attività concordata." : "You can continue with the agreed work.",
     };
   }
   if (status === "legacy_compat") {
     return {
-      outcome: "The project is safely using its previous compatible behavior.",
-      impact: "Current behavior is preserved from the frozen compatibility profile, but the project does not have a stored configuration lock yet.",
-      next_action: "Run `agentic-sdlc config migrate` to preview the lock adoption. The preview changes no files.",
+      result: italian ? "Il progetto continua a usare in sicurezza le regole precedenti." : "The project is safely using its previous compatible behavior.",
+      impact: italian ? "Il comportamento attuale resta invariato, ma le regole non sono ancora state confermate nel nuovo formato." : "Current behavior stays unchanged, but the rules have not yet been confirmed in the new format.",
+      required_decision: italian ? "Prima di aggiornarle, dovrai controllare che il riepilogo delle differenze sia corretto." : "Before updating them, you will need to confirm that the change summary is correct.",
+      protection_boundary: italian ? "La semplice anteprima non modifica alcun file e il programma non sostituirà le regole in automatico." : "The preview changes no files, and the software will not replace the rules automatically.",
+      next_action: italian ? "Crea l’anteprima indicata nei dettagli facoltativi e controlla le differenze." : "Create the preview shown in the optional details and review the differences.",
     };
   }
   if (status === "drifted") {
     return {
-      outcome: "Configuration changed after the last approved lock; governed writes are paused.",
-      impact: "The CLI will not guess whether that policy change was intentional.",
-      next_action: "Run `agentic-sdlc config migrate` to review the exact change, then apply only the displayed plan hash.",
+      result: italian ? "Le regole sono cambiate dopo l’ultima conferma, quindi le modifiche controllate sono in pausa." : "The rules changed after their last confirmation, so governed changes are paused.",
+      impact: italian ? "Il programma non presume che il cambiamento fosse intenzionale e non continuerà da solo." : "The software will not assume the change was intentional or continue on its own.",
+      required_decision: italian ? "Dovrai esaminare le differenze e confermare soltanto quelle desiderate." : "You will need to review the differences and confirm only the intended ones.",
+      protection_boundary: italian ? "Nessuna regola nuova viene accettata e nessun file di lavoro viene modificato durante questo controllo." : "No new rule is accepted and no work file is changed during this check.",
+      next_action: italian ? "Crea una nuova anteprima con il comando nei dettagli facoltativi, poi applica soltanto quella approvata." : "Create a fresh preview with the command in the optional details, then apply only the reviewed result.",
     };
   }
   if (status === "uninitialized") {
     return {
-      outcome: "This project has not been initialized for Agentic SDLC yet.",
-      impact: "No project policy is active and no project files were changed.",
-      next_action: "Run `agentic-sdlc init` to create a complete, pinned configuration.",
+      result: italian ? "Questo progetto non è ancora stato preparato per il flusso di lavoro guidato." : "This project has not been initialized for Agentic SDLC yet.",
+      impact: italian ? "Non è attiva alcuna regola del progetto e nessun file è stato modificato." : "No project policy is active and no project files were changed.",
+      required_decision: italian ? "Decidi se vuoi preparare questo progetto adesso." : "Decide whether you want to prepare this project now.",
+      protection_boundary: italian ? "Questo controllo non ha creato cartelle, modificato file o avviato attività." : "This check did not create folders, change files, or start work.",
+      next_action: italian ? "Se vuoi procedere, usa il comando di inizializzazione indicato nei dettagli facoltativi." : "If you want to proceed, use the initialization command in the optional details.",
     };
   }
   return {
-    outcome: "The configuration lock cannot be trusted; governed writes are blocked.",
-    impact: "No policy-dependent change is allowed while the project configuration is invalid.",
-    next_action: "Inspect the technical detail below, or restore the last valid config and lock before continuing.",
+    result: italian ? "Le regole salvate non possono essere verificate, quindi le modifiche controllate sono bloccate." : "The saved rules cannot be verified, so governed changes are blocked.",
+    impact: italian ? "Il programma non eseguirà attività che dipendono da queste regole finché il problema non viene corretto." : "The software will not perform work that depends on these rules until the problem is corrected.",
+    required_decision: italian ? "Non devi approvare nulla finché le regole non sono state ripristinate o corrette." : "You do not need to approve anything until the rules are restored or corrected.",
+    protection_boundary: italian ? "Nessuna regola dubbia viene usata e nessun file di lavoro viene modificato." : "No untrusted rule is used and no work file is changed.",
+    next_action: italian ? "Consulta la diagnosi facoltativa e ripristina l’ultima versione valida prima di continuare." : "Review the optional diagnosis and restore the last valid version before continuing.",
   };
 }
 
 function showConfigStatus(context, options) {
-  const guidance = configStatusGuidance(context);
+  const locale = humanGuidanceLocale(options);
+  const guidance = configStatusGuidance(context, locale);
   const verificationErrors = context.configState?.lock_verification?.errors || [];
   const payload = {
     status: context.configState.status,
-    outcome: guidance.outcome,
+    outcome: guidance.result,
     impact: guidance.impact,
+    required_decision: guidance.required_decision,
+    protection_boundary: guidance.protection_boundary,
     next_action: guidance.next_action,
+    human_guidance: guidance,
     mutation_allowed: context.configState.mutation_allowed,
     migration_required: context.configState.migration_required,
     config_path: context.projectConfigPath
@@ -1308,18 +1547,19 @@ function showConfigStatus(context, options) {
     validation_error: context.configValidationError,
     lock_errors: verificationErrors,
   };
-  output(options, payload, [
-    guidance.outcome,
-    `Impact: ${guidance.impact}`,
-    `Next: ${guidance.next_action}`,
-    "",
-    "Details:",
+  output(options, payload, humanGuidanceLines(guidance, [
     `- Status: ${context.configState.status}`,
     `- Effective config: ${context.configState.effective_config_hash || "not created"}`,
     `- Defaults profile: ${context.configState.defaults_profile?.id || "not selected"}`,
+    ...(context.configState.status === "legacy_compat" || context.configState.status === "drifted"
+      ? ["- Preview command: agentic-sdlc config migrate"]
+      : []),
+    ...(context.configState.status === "uninitialized"
+      ? ["- Initialization command: agentic-sdlc init"]
+      : []),
     ...(context.configValidationError ? [`- Config validation: ${context.configValidationError}`] : []),
     ...verificationErrors.map((issue) => `- Lock check: ${issue.message}`),
-  ]);
+  ].map((line) => line.replace(/^- /u, "")), options));
 }
 
 function prepareProjectConfigMigration(context, projectConfig, projectLock) {
@@ -1836,7 +2076,7 @@ function validateAutonomyPolicy(policy) {
 
 function decideRoute(context, options) {
   const decision = buildRouteDecision(context, options);
-  output(options, decision, formatRouteDecision(decision));
+  output(options, decision, formatRouteDecision(decision, options));
 }
 
 function startTask(context, options) {
@@ -2937,10 +3177,28 @@ function userFriendlyBlockingReason(code, locale = "en") {
 
 function formatTaskStartDecision(decision) {
   const italian = decision.__human_locale === "it";
+  const ready = decision.status === "ready_to_execute" && decision.execution_allowed;
   const lines = [
-    decision.assistant_message || null,
+    `${italian ? "Risultato" : "Outcome"}: ${ready
+      ? (italian ? "Il lavoro concordato è pronto per iniziare." : "The agreed work is ready to start.")
+      : (italian ? "Il lavoro non è ancora iniziato." : "The work has not started yet.")}`,
+    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${ready
+      ? (italian ? "Posso procedere con l’attività entro i limiti già concordati." : "I can proceed with the work inside the limits already agreed.")
+      : (italian ? "Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa." : "No changes will begin until the pending point is clarified.")}`,
+    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${ready
+      ? (italian ? "Non devi prendere un’altra decisione per avviare questa attività." : "You do not need to make another decision to start this work.")
+      : (italian ? "Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare." : "Answer the choice described below, or say what should change.")}`,
+    `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian
+      ? "Questo controllo non ha eseguito modifiche, pubblicazioni, rilasci o merge; quei passaggi restano separati."
+      : "This check did not change files, publish, release, or merge anything; those steps remain separate."}`,
+    `${italian ? "Prossimo passo" : "Next step"}: ${ready
+      ? (italian ? "Inizia soltanto il lavoro già concordato." : "Begin only the work already agreed.")
+      : (italian ? "Leggi la spiegazione facoltativa e chiarisci il punto in attesa." : "Review the optional explanation and clarify the pending point.")}`,
     "",
-    italian ? "Dettagli tecnici:" : "Technical details:",
+    italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
+    ...(decision.assistant_message
+      ? decision.assistant_message.split("\n").map((line) => line ? `- ${line}` : "-")
+      : []),
     `- ${italian ? "Stato di avvio" : "Task start"}: ${decision.status}`,
     `- ${italian ? "Esecuzione consentita" : "Execution allowed"}: ${decision.execution_allowed ? (italian ? "sì" : "yes") : "no"}`,
     `- Route: ${decision.route}`,
@@ -4139,35 +4397,57 @@ function dedupeRouteDecision(decision) {
   decision.next_commands = Array.from(new Set(decision.next_commands));
 }
 
-function formatRouteDecision(decision) {
-  const lines = [
+function formatRouteDecision(decision, options = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const ready = ["ready", "needs_confirmation"].includes(decision.status)
+    && decision.route !== "ask_clarification";
+  const technicalLines = [
     `Route: ${decision.route}`,
     `Status: ${decision.status}`,
     `Confidence: ${Number(decision.confidence).toFixed(2)}`,
     `Requires confirmation: ${decision.requires_confirmation ? "yes" : "no"}`,
   ];
-  lines.push(
+  technicalLines.push(
     decision.blocking_reasons.length
       ? `Blocking reasons: ${decision.blocking_reasons.join(", ")}`
       : "Blocking reasons: none",
   );
   if (decision.questions.length > 0) {
-    lines.push("Questions:");
-    lines.push(...decision.questions.map((question) => `- ${question}`));
+    technicalLines.push("Questions:");
+    technicalLines.push(...decision.questions.map((question) => `- ${question}`));
   }
   if (decision.deterministic_checks.length > 0) {
-    lines.push("Deterministic checks:");
-    lines.push(
+    technicalLines.push("Deterministic checks:");
+    technicalLines.push(
       ...decision.deterministic_checks.map((check) =>
         `- ${check.check}: ${check.status}${check.details ? ` (${check.details})` : ""}`,
       ),
     );
   }
   if (decision.next_commands.length > 0) {
-    lines.push("Next commands:");
-    lines.push(...decision.next_commands.map((command) => `- ${command}`));
+    technicalLines.push("Next commands:");
+    technicalLines.push(...decision.next_commands.map((command) => `- ${command}`));
   }
-  return lines;
+  return [
+    `${italian ? "Risultato" : "Outcome"}: ${ready
+      ? (italian ? "La richiesta è stata compresa e può essere indirizzata correttamente." : "The request is understood and can be directed correctly.")
+      : (italian ? "La richiesta ha bisogno di un chiarimento prima di procedere." : "The request needs clarification before work can continue.")}`,
+    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${ready
+      ? (italian ? "Il prossimo passaggio è stato individuato senza avviare modifiche." : "The next step was identified without starting any changes.")
+      : (italian ? "Il plugin resta fermo per evitare di scegliere al posto tuo." : "The plugin remains paused so it does not guess on your behalf.")}`,
+    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${decision.questions.length > 0
+      ? (italian ? "Chiarisci la scelta descritta nei dettagli facoltativi." : "Clarify the choice described in the optional details.")
+      : (italian ? "Non devi decidere altro per questo controllo." : "You do not need to decide anything else for this check.")}`,
+    `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian
+      ? "Questo controllo ha interpretato la richiesta ma non ha modificato file, pubblicato o eseguito merge."
+      : "This check interpreted the request but did not change files, publish, or merge anything."}`,
+    `${italian ? "Prossimo passo" : "Next step"}: ${ready
+      ? (italian ? "Prosegui soltanto con il passaggio individuato." : "Continue only with the identified next step.")
+      : (italian ? "Fornisci il chiarimento richiesto e ripeti il controllo." : "Provide the requested clarification and run the check again.")}`,
+    "",
+    `${italian ? "Dettagli tecnici (facoltativi)" : "Technical details (optional)"}:`,
+    ...technicalLines.map((line) => `- ${line}`),
+  ];
 }
 
 function canonicalIntentQuestion() {
@@ -4303,7 +4583,7 @@ async function runDoctor(context, options) {
     add("plugin-metadata", "failed", error.message);
   }
 
-  const configGuidance = configStatusGuidance(context);
+  const configGuidance = configStatusGuidance(context, humanGuidanceLocale(options));
   add(
     "effective-config",
     context.configState.status === "locked"
@@ -4311,7 +4591,7 @@ async function runDoctor(context, options) {
       : ["drifted", "invalid"].includes(context.configState.status)
         ? "failed"
         : "not_applicable",
-    `${configGuidance.outcome} ${configGuidance.next_action}`,
+    `${configGuidance.result} ${configGuidance.next_action}`,
   );
 
   for (const [id, relativePath] of [
@@ -4370,13 +4650,34 @@ async function runDoctor(context, options) {
     version: VERSION,
     checks,
   };
+  const italian = humanGuidanceLocale(options) === "it";
+  const passed = failed.length === 0;
+  const guidance = {
+    result: passed
+      ? (italian ? "Tutti i controlli di salute disponibili sono riusciti." : "All available health checks passed.")
+      : (italian ? "Alcuni controlli di salute hanno trovato un problema." : "Some health checks found a problem."),
+    impact: passed
+      ? (italian ? "Gli strumenti locali e i dati del progetto controllati qui sono pronti per il normale utilizzo." : "The local tools and project data checked here are ready for normal use.")
+      : (italian ? "Una funzione che dipende dal controllo non riuscito potrebbe non funzionare correttamente." : "A feature that depends on the failed check may not work correctly."),
+    required_decision: passed
+      ? (italian ? "Non devi decidere nulla in base a questi controlli." : "You do not need to decide anything based on these checks.")
+      : (italian ? "Non approvare attività che dipendono dal controllo non riuscito finché il problema non è corretto." : "Do not approve work that depends on the failed check until the problem is corrected."),
+    protection_boundary: italian
+      ? "La diagnosi ha soltanto letto lo stato locale; non ha modificato file, pubblicato, rilasciato, distribuito o eseguito merge."
+      : "The diagnosis only read local state; it did not change files, publish, release, deploy, or merge anything.",
+    next_action: passed
+      ? (italian ? "Puoi continuare con il prossimo passo già concordato." : "You can continue with the next step already agreed.")
+      : (italian ? "Correggi il primo controllo non riuscito nei dettagli facoltativi, poi ripeti la diagnosi." : "Correct the first failed check in the optional details, then run the diagnosis again."),
+    details: { status: payload.status, failed_checks: failed.map((check) => check.id) },
+  };
+  payload.human_guidance = guidance;
   if (failed.length > 0) {
     process.exitCode = 1;
   }
-  output(options, payload, [
+  output(options, payload, humanGuidanceLines(guidance, [
     `Agentic SDLC doctor: ${payload.status}`,
     ...checks.map((check) => `${check.status === "passed" ? "PASS" : check.status === "not_applicable" ? "N/A" : "FAIL"} ${check.id}: ${check.details}`),
-  ]);
+  ], options));
 }
 
 function readContextOptimizationPolicy(context) {
@@ -4749,6 +5050,31 @@ async function showOptimizationStatus(context, options) {
   const latest = observations.at(-1) || null;
   const proposalDelta = proposalId ? buildProposalContextOptimizationDelta(observations) : null;
   const policy = readContextOptimizationPolicy(context);
+  const italian = humanGuidanceLocale(options) === "it";
+  const operational = telemetry.status === "operational";
+  const requiredButUnavailable = !operational && policy.fallback === "error";
+  const guidance = {
+    result: operational
+      ? (italian ? "La riduzione dei risultati lunghi dei comandi è attiva." : "Command-output reduction is working.")
+      : requiredButUnavailable
+        ? (italian ? "La riduzione dei risultati lunghi non è disponibile, quindi i comandi che la richiedono sono in pausa." : "Command-output reduction is unavailable, so commands that require it are paused.")
+        : (italian ? "La riduzione dei risultati lunghi non è disponibile, ma i comandi normali possono continuare." : "Command-output reduction is unavailable, but normal commands can continue."),
+    impact: operational
+      ? (italian ? "I risultati estesi possono occupare meno contesto senza cambiare le prove complete conservate dal progetto." : "Long results can use less context without changing the complete evidence kept by the project.")
+      : (italian ? "Non viene misurato alcun risparmio; quando consentito, i comandi usano il normale risultato completo." : "No saving is measured; when allowed, commands use their normal complete output."),
+    required_decision: requiredButUnavailable
+      ? (italian ? "Non approvare attività che richiedono questa funzione finché non è stata ripristinata." : "Do not approve work that requires this feature until it is restored.")
+      : (italian ? "Non devi prendere una decisione per questo stato." : "You do not need to make a decision for this status."),
+    protection_boundary: italian
+      ? "Questa funzione cambia soltanto quanto testo dei comandi entra nel contesto; non amplia permessi, file, budget o decisioni e non modifica le prove originali."
+      : "This feature changes only how much command text enters the context; it does not widen permissions, files, budgets, or decisions, and it does not change original evidence.",
+    next_action: requiredButUnavailable
+      ? (italian ? "Consulta la diagnosi facoltativa, ripristina la funzione e controlla di nuovo lo stato." : "Review the optional diagnosis, restore the feature, and check the status again.")
+      : operational
+        ? (italian ? "Continua normalmente; non serve alcuna configurazione aggiuntiva." : "Continue normally; no additional setup is needed.")
+        : (italian ? "Continua con i comandi normali oppure consulta la diagnosi facoltativa per ripristinare il risparmio." : "Continue with normal commands or review the optional diagnosis to restore the saving."),
+    details: { status: telemetry.status, fallback: policy.fallback },
+  };
   output(options, {
     status: telemetry.status,
     policy,
@@ -4756,7 +5082,8 @@ async function showOptimizationStatus(context, options) {
     proposal_optimization_delta: proposalDelta,
     latest_observation: latest?.observation || null,
     latest_observation_path: latest ? toProjectPath(context, latest.filePath) : null,
-  }, [
+    human_guidance: guidance,
+  }, humanGuidanceLines(guidance, [
     `Context optimization: ${telemetry.status}`,
     `Provider: ${policy.provider.id}${telemetry.detection?.version ? ` ${telemetry.detection.version}` : ""}`,
     `Mode: ${policy.mode}; fallback: ${policy.fallback}`,
@@ -4769,7 +5096,7 @@ async function showOptimizationStatus(context, options) {
         : `Proposal delta: ${proposalDelta.status}.`,
     ] : []),
     "Budget effect: advisory only; usage adjustment applied is always 0.",
-  ]);
+  ], options));
 }
 
 async function captureOptimizationFromCommand(context, options) {
@@ -7371,11 +7698,21 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     proposal_authority_mode: profile.authority_assurance.mode,
     non_reusable: true,
   };
+  const projectName = readProjectSafe(context)?.project_name || path.basename(context.root);
   const guidance = deliveryAutonomyProposalGuidance({
     status: "proposed",
     profile_id: profileId,
     delivery_id: deliveryId,
     delivery_kind: kind,
+    project_name: projectName,
+    project_root: context.root,
+    repository: profile.pull_request_target?.repository,
+    base_branch: profile.pull_request_target?.base_branch,
+    head_branch: profile.pull_request_target?.head_branch,
+    target_root: profile.local_release_target?.root_path,
+    allowed_write_paths: review.allowed_write_paths,
+    review_moments: profile.checkpoints,
+    expires_at: profile.expires_at,
     requested_level: requestedLevel,
     effective_level: review.authority_effective_cap === "checkpointed" && requestedLevel === "bounded-autonomous"
       ? "checkpointed"
@@ -7397,11 +7734,16 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     ...humanGuidanceLines(guidance, [
       `Profile: ${profileId}`,
       `Delivery: ${deliveryId}; story ${storyId}; contract ${contractId}`,
+      `Project: ${projectName} (${context.root})`,
+      `Destination: ${kind === "pull_request"
+        ? `${profile.pull_request_target.repository} ${profile.pull_request_target.head_branch} from ${profile.pull_request_target.base_branch}`
+        : profile.local_release_target.root_path}`,
       `Requested technical level: ${requestedLevel}`,
       `Highest currently enforceable level: ${guidance.details.effective_level}`,
       `Allowed actions: ${review.allowed_actions.join(", ")}`,
       `Allowed write paths: ${review.allowed_write_paths.join(", ")}`,
       `Checkpoints: ${review.checkpoints.join(", ") || "global exceptions only"}`,
+      `Expires at: ${profile.expires_at || "delivery lifecycle only"}`,
     ], options),
   ]);
 }
@@ -9241,6 +9583,38 @@ function evaluateDeliveryAction(context, options) {
           merge_executed: false,
         }, { locale: humanGuidanceLocale(options) })
       : null;
+    const locale = humanGuidanceLocale(options);
+    const italian = locale === "it";
+    const completedSuccessfully = reportedOutcome === "passed";
+    const completionGuidance = completingAction
+      ? {
+          result: completedSuccessfully
+            ? (italian ? "L’operazione protetta è stata completata e registrata con successo." : "The protected operation was completed and recorded successfully.")
+            : (italian ? "L’operazione protetta è stata registrata come non riuscita." : "The protected operation was recorded as unsuccessful."),
+          impact: autoClosePath
+            ? (italian ? "Questa consegna è terminata e la scelta usata per svolgerla non può essere riutilizzata." : "This delivery is finished, and its working choice cannot be reused.")
+            : completedSuccessfully
+              ? (italian ? "La prova del risultato è stata salvata; il lavoro può continuare soltanto con un altro passo già consentito." : "Evidence of the result was saved; work may continue only with another already allowed step.")
+              : (italian ? "Il lavoro resta aperto, ma non deve proseguire finché la causa non viene corretta." : "The work remains open, but it should not continue until the cause is corrected."),
+          required_decision: completedSuccessfully
+            ? (italian ? "Non devi prendere una nuova decisione per registrare questo risultato." : "You do not need to make a new decision to record this result.")
+            : (italian ? "Non approvare un nuovo tentativo finché non è chiaro cosa deve cambiare." : "Do not approve another attempt until it is clear what must change."),
+          protection_boundary: italian
+            ? "È stata registrata soltanto questa operazione esatta. Il risultato non autorizza altre consegne, distribuzioni, produzione, segreti o modifiche fuori dai limiti concordati."
+            : "Only this exact operation was recorded. The result does not authorize another delivery, deployment, production, secrets, or changes outside the agreed limits.",
+          next_action: autoClosePath
+            ? (italian ? "Se serve altro lavoro, crea una nuova scelta separata per la prossima consegna." : "If more work is needed, create a new separate choice for the next delivery.")
+            : completedSuccessfully
+              ? (italian ? "Continua soltanto con il prossimo passo già consentito per questa consegna." : "Continue only with the next step already allowed for this delivery.")
+              : (italian ? "Correggi la causa e richiedi una nuova autorizzazione prima di riprovare." : "Correct the cause and request a fresh authorization before trying again."),
+          details: {
+            profile_id: profile.id,
+            action,
+            outcome: reportedOutcome,
+            receipt_path: toProjectPath(context, receiptPath),
+          },
+        }
+      : null;
     output(options, {
       status: completingAction ? "completed" : "authorized",
       execution_allowed: !completingAction,
@@ -9252,18 +9626,15 @@ function evaluateDeliveryAction(context, options) {
       action_receipt_path: toProjectPath(context, receiptPath),
       lifecycle_status: autoClosePath ? "terminal" : "started",
       close_receipt_path: autoClosePath,
-      human_guidance: guidance,
+      human_guidance: completingAction ? completionGuidance : guidance,
     }, completingAction
-      ? [
-          `${action} was completed and its outcome was recorded for ${profile.delivery_id}.`,
-          `Impact: immutable evidence is bound to this exact ${profile.delivery_kind} operation.`,
-          `Next: ${autoClosePath ? "the delivery is terminal; use a new profile for further work." : "continue only with the next action allowed by this delivery profile."}`,
-          "",
-          "Details:",
+      ? humanGuidanceLines(completionGuidance, [
           `- Profile: ${profile.id}`,
+          `- Delivery: ${profile.delivery_id}`,
+          `- Canonical action: ${action}`,
           `- Outcome: ${reportedOutcome}`,
           `- Evidence record: ${toProjectPath(context, receiptPath)}`,
-        ]
+        ].map((line) => line.replace(/^- /u, "")), options)
       : humanGuidanceLines(guidance, [
           `Delivery: ${profile.delivery_id}`,
           `Canonical action: ${action}`,
@@ -9366,12 +9737,37 @@ function closeDeliveryAutonomy(context, options) {
       git: attribution.git,
       run: attribution.run,
     });
+    const italian = humanGuidanceLocale(options) === "it";
+    const closeGuidance = {
+      result: italian
+        ? "Questa consegna è stata chiusa come richiesto."
+        : "This delivery was closed as requested.",
+      impact: italian
+        ? "La scelta usata per svolgerla è terminata e non può essere riutilizzata."
+        : "Its working choice has ended and cannot be reused.",
+      required_decision: italian
+        ? "Non devi prendere un’altra decisione per completare questa chiusura."
+        : "You do not need to make another decision to complete this closure.",
+      protection_boundary: italian
+        ? "La chiusura non ha eseguito merge, rilasci, distribuzioni, accessi alla produzione o modifiche fuori dai limiti concordati."
+        : "The closure did not merge, release, deploy, access production, or change anything outside the agreed limits.",
+      next_action: italian
+        ? "Se serve altro lavoro, crea una nuova scelta separata per la prossima consegna."
+        : "If more work is needed, create a new separate choice for the next delivery.",
+      details: { profile_id: profile.id, terminal_status: terminalStatus },
+    };
     output(options, {
       status: "terminal",
       terminal_status: terminalStatus,
       close_receipt: closeReceipt,
       close_receipt_path: toProjectPath(context, closePath),
-    }, [`Closed ${profile.delivery_kind} ${profile.delivery_id} as ${terminalStatus}`]);
+      human_guidance: closeGuidance,
+    }, humanGuidanceLines(closeGuidance, [
+      `Profile: ${profile.id}`,
+      `Delivery: ${profile.delivery_id}`,
+      `Terminal status: ${terminalStatus}`,
+      `Evidence record: ${toProjectPath(context, closePath)}`,
+    ], options));
   } finally {
     releaseLock();
   }
@@ -9485,10 +9881,54 @@ function showDeliveryAutonomy(context, options) {
       };
     });
   if (id && profiles.length === 0) fail(`Delivery autonomy profile ${id} does not exist.`);
+  const locale = humanGuidanceLocale(options);
+  const italian = locale === "it";
+  const profilesNeedingRepair = profiles.filter((profile) => profile.effective_status === "needs_repair").length;
+  const profilesNeedingDecision = profiles.filter((profile) => profile.effective_status === "proposed").length;
+  const activeProfiles = profiles.filter((profile) => profile.lifecycle_status === "started").length;
+  const listGuidance = profiles.length === 0
+    ? {
+        result: italian ? "Non esistono ancora scelte di lavoro per una pull request o un rilascio locale." : "There are no working choices for a pull request or local release yet.",
+        impact: italian ? "Nessuna consegna può ereditare automaticamente un livello di autonomia." : "No delivery can inherit a level of autonomy automatically.",
+        required_decision: italian ? "Non devi decidere nulla finché non viene preparata una consegna concreta." : "You do not need to decide anything until a concrete delivery is prepared.",
+        protection_boundary: italian ? "Il requisito da solo non autorizza lavoro, merge, rilasci, produzione, segreti o modifiche." : "The requirement alone authorizes no work, merge, release, production, secrets, or changes.",
+        next_action: italian ? "Quando prepari la prossima consegna, scegli separatamente come devo lavorare." : "When the next delivery is prepared, choose separately how I should work.",
+        details: {},
+      }
+    : {
+        result: italian
+          ? `Ho trovato ${profiles.length} ${profiles.length === 1 ? "scelta separata" : "scelte separate"} per consegne concrete.`
+          : `I found ${profiles.length} separate working ${profiles.length === 1 ? "choice" : "choices"} for concrete deliveries.`,
+        impact: profilesNeedingRepair > 0
+          ? (italian ? "Almeno una scelta non può essere verificata e non deve essere usata finché non viene corretta." : "At least one choice cannot be verified and must not be used until it is corrected.")
+          : activeProfiles > 0
+            ? (italian ? "Almeno una consegna è in corso; ogni scelta vale soltanto per la propria consegna e non può essere riutilizzata." : "At least one delivery is in progress; each choice applies only to its own delivery and cannot be reused.")
+            : (italian ? "Ogni scelta vale soltanto per la propria consegna e non può essere riutilizzata." : "Each choice applies only to its own delivery and cannot be reused."),
+        required_decision: profilesNeedingRepair > 0
+          ? (italian ? "Non approvare altro lavoro per la scelta non verificabile finché il problema non è risolto." : "Do not approve more work for the unverifiable choice until the problem is fixed.")
+          : profilesNeedingDecision > 0
+            ? (italian ? "Esamina separatamente ogni scelta ancora in attesa prima di iniziare quella consegna." : "Review each pending choice separately before starting that delivery.")
+            : (italian ? "In questo momento non serve una nuova decisione per le consegne già concordate." : "No new decision is needed now for deliveries already agreed."),
+        protection_boundary: italian
+          ? "Nessuna scelta vale per un’altra pull request o rilascio locale; merge, distribuzione, produzione, segreti e file non concordati restano separati."
+          : "No choice applies to another pull request or local release; merges, deployment, production, secrets, and unagreed files remain separate.",
+        next_action: profilesNeedingRepair > 0
+          ? (italian ? "Apri i dettagli facoltativi della scelta non verificabile e correggila prima di continuare." : "Open the optional details for the unverifiable choice and correct it before continuing.")
+          : profilesNeedingDecision > 0
+            ? (italian ? "Apri la scelta in attesa e decidi soltanto per quella consegna." : "Open the pending choice and decide only for that delivery.")
+            : (italian ? "Continua ogni consegna soltanto entro i limiti già concordati." : "Continue each delivery only within its already agreed limits."),
+        details: {
+          profile_count: profiles.length,
+          needs_repair: profilesNeedingRepair,
+          needs_decision: profilesNeedingDecision,
+          active: activeProfiles,
+        },
+      };
   const humanLines = profiles.length === 1
-    ? humanGuidanceLines(profiles[0].human_guidance, [
+      ? humanGuidanceLines(profiles[0].human_guidance, [
         `Profile: ${profiles[0].id}`,
         `Delivery: ${profiles[0].delivery_id}`,
+        `Usability: ${profiles[0].effective_status === "needs_repair" ? "needs repair" : profiles[0].effective_status}`,
         `Requested technical level: ${profiles[0].requested_level}`,
         `Effective technical level: ${profiles[0].human_guidance.details.effective_level}`,
         `Lifecycle: ${profiles[0].lifecycle_status}`,
@@ -9496,16 +9936,17 @@ function showDeliveryAutonomy(context, options) {
           ? [`Technical reason codes: ${profiles[0].human_guidance.details.reason_codes.join(", ")}`]
           : []),
       ], options)
-    : profiles.length > 1
-      ? profiles.flatMap((profile) => [
-          profile.human_guidance.result,
-          `Impact: ${profile.human_guidance.impact}`,
-          `Next: ${profile.human_guidance.next_action}`,
-          `Details: ${profile.id}; effective ${profile.human_guidance.details.effective_level}.`,
-          "",
-        ])
-      : ["No delivery autonomy profiles found."];
-  output(options, { delivery_profiles: profiles }, humanLines);
+    : humanGuidanceLines(listGuidance, profiles.flatMap((profile) => [
+        `Profile: ${profile.id}`,
+        `Delivery: ${profile.delivery_id}`,
+        `Usability: ${profile.effective_status === "needs_repair" ? "needs repair" : profile.effective_status}`,
+        `Lifecycle: ${profile.lifecycle_status}`,
+        `Effective technical level: ${profile.human_guidance.details.effective_level}`,
+        ...(profile.human_guidance.details.reason_codes.length > 0
+          ? [`Technical reason codes: ${profile.human_guidance.details.reason_codes.join(", ")}`]
+          : []),
+      ]), options);
+  output(options, { delivery_profiles: profiles, human_guidance: profiles.length === 1 ? profiles[0].human_guidance : listGuidance }, humanLines);
 }
 
 function explainDeliveryAutonomy(context, options) {
@@ -14805,20 +15246,156 @@ function showApprovalRequests(context, options) {
   const storyId = options.story ? normalizeId(String(options.story)) : null;
   const requests = collectApprovalRequests(context, { storyId });
   const assistantMessage = renderApprovalRequestsAssistantMessage(requests);
+  const internalRefreshOnly = requests.length > 0
+    && requests.every((request) => request.status === "needs_internal_refresh");
+  const guidance = approvalRequestsHumanGuidance(requests, options, { internalRefreshOnly });
   output(
     options,
     {
       kind: "approval_requests",
       story_id: storyId,
-      status: requests.length ? "needs_user_input" : "clear",
+      status: requests.length
+        ? (internalRefreshOnly ? "needs_internal_refresh" : "needs_user_input")
+        : "clear",
       generated_at: now(),
       assistant_message: assistantMessage,
+      human_guidance: guidance,
+      internal_refresh_only: internalRefreshOnly,
       ...assistantMessagePresentationFields(),
       requests,
       source_paths: Array.from(new Set(requests.flatMap((request) => request.sources || []))).sort(),
     },
-    assistantMessage.split("\n"),
+    humanGuidanceLines(
+      guidance,
+      assistantMessage.split("\n"),
+      options,
+      approvalRequestsPrimarySummary(requests, options, { internalRefreshOnly }),
+    ),
   );
+}
+
+function approvalRequestsHumanGuidance(requests, options, { internalRefreshOnly = false } = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  if (requests.length === 0) {
+    return {
+      result: italian ? "Non ci sono decisioni in attesa." : "There are no decisions waiting for you.",
+      impact: italian ? "Il lavoro può proseguire con il prossimo passo già concordato." : "Work can continue with the next step already agreed.",
+      required_decision: italian ? "Non devi decidere nulla adesso." : "You do not need to decide anything now.",
+      protection_boundary: italian ? "Questo controllo non amplia il lavoro né autorizza altre modifiche, merge o rilasci." : "This check does not widen the work or authorize other changes, merges, or releases.",
+      next_action: italian ? "Continua con il prossimo passo già concordato." : "Continue with the next step already agreed.",
+      details: { request_count: 0 },
+    };
+  }
+  if (internalRefreshOnly) {
+    return {
+      result: italian ? "Devo aggiornare alcuni riferimenti al progetto prima di continuare." : "I need to refresh some project references before continuing.",
+      impact: italian ? "L'obiettivo e i limiti concordati non cambiano; aggiornerò soltanto i riferimenti divenuti obsoleti." : "The agreed goal and limits do not change; I will only update references that became outdated.",
+      required_decision: italian ? "Non devi approvare nulla: il lavoro concordato non è cambiato." : "You do not need to approve anything because the agreed work has not changed.",
+      protection_boundary: italian ? "L'aggiornamento non aggiunge attività, strumenti, file, merge o rilasci." : "The refresh adds no work, tools, files, merges, or releases.",
+      next_action: italian ? "Aggiornerò i riferimenti e ripeterò il controllo prima di proseguire." : "I will refresh the references and repeat the check before continuing.",
+      details: { request_count: requests.length, internal_refresh_only: true },
+    };
+  }
+  const count = requests.length;
+  return {
+    result: italian
+      ? `${count === 1 ? "C'è una scelta" : `Ci sono ${count} scelte`} da confermare prima di continuare.`
+      : `${count === 1 ? "One choice needs" : `${count} choices need`} your answer before work continues.`,
+    impact: italian ? "Il lavoro resta fermo finché non confermi, correggi o rifiuti le scelte riepilogate qui sotto." : "Work remains paused until you confirm, correct, or reject the choices summarized below.",
+    required_decision: italian ? "Per ogni voce, indica in parole normali se va bene o cosa deve cambiare." : "For each item, say in ordinary language whether it is right or what should change.",
+    protection_boundary: italian ? "La risposta vale solo per le voci mostrate; non autorizza altre consegne, merge, rilasci, produzione o accesso a segreti." : "Your answer applies only to the items shown; it does not authorize other deliveries, merges, releases, production, or secret access.",
+    next_action: italian ? "Leggi il riepilogo qui sotto e rispondi voce per voce." : "Read the summary below and answer item by item.",
+    details: { request_count: count, internal_refresh_only: false },
+  };
+}
+
+function approvalRequestsPrimarySummary(requests, options, { internalRefreshOnly = false } = {}) {
+  if (requests.length === 0) return [];
+  const italian = humanGuidanceLocale(options) === "it";
+  const heading = internalRefreshOnly
+    ? (italian ? "Riferimenti da aggiornare:" : "References to refresh:")
+    : (italian ? "Scelte da esaminare:" : "Choices to review:");
+  return [
+    heading,
+    ...requests.flatMap((request, index) => {
+      const copy = approvalRequestPrimaryCopy(request, italian);
+      const highlights = approvalRequestPrimaryHighlights(request, italian);
+      return [
+        `${index + 1}. ${copy.label} — ${copy.decision}`,
+        ...highlights.map((highlight) => `   ${italian ? "Cosa comprende" : "What it includes"}: ${highlight}`),
+      ];
+    }),
+  ];
+}
+
+function approvalRequestPrimaryCopy(request, italian = false) {
+  const copies = {
+    baseline_approval: italian
+      ? { label: "Fatti del progetto da usare", decision: "Decidi se descrivono correttamente il progetto." }
+      : { label: "Project facts to rely on", decision: "Decide whether they describe the project correctly." },
+    capability_profile_approval: italian
+      ? { label: "Fonti e limiti di accesso", decision: "Decidi se sono le fonti e i limiti corretti per questo lavoro." }
+      : { label: "Evidence and access boundaries", decision: "Decide whether these are the right sources and limits for this work." },
+    capability_profile_refresh_required: italian
+      ? { label: "Fonti e limiti di accesso", decision: "Aggiornerò i riferimenti senza ampliare il lavoro concordato." }
+      : { label: "Evidence and access boundaries", decision: "I will refresh the references without widening the agreed work." },
+    capability_recommendation_approval: italian
+      ? { label: "Strumenti e accessi", decision: "Decidi se posso usare soltanto gli strumenti e gli accessi descritti." }
+      : { label: "Tools and access", decision: "Decide whether I may use only the tools and access described." },
+    capability_recommendation_refresh_required: italian
+      ? { label: "Strumenti e accessi", decision: "Aggiornerò i riferimenti senza aggiungere strumenti o permessi." }
+      : { label: "Tools and access", decision: "I will refresh the references without adding tools or permissions." },
+    output_template_approval: italian
+      ? { label: "Struttura e formato del risultato", decision: "Decidi se sezioni, dettaglio e formato sono adatti." }
+      : { label: "Result structure and format", decision: "Decide whether its sections, detail, and format are right." },
+    contract_clarification: italian
+      ? { label: "Informazioni mancanti sul lavoro", decision: "Fornisci i fatti o i vincoli mancanti prima che prepari la proposta." }
+      : { label: "Missing work information", decision: "Provide the missing facts or limits before I prepare the proposal." },
+    contract_approval: italian
+      ? { label: "Proposta di lavoro", decision: "Decidi se obiettivo, contesto, limiti, strumenti e risultato atteso corrispondono a ciò che vuoi." }
+      : { label: "Proposed work brief", decision: "Decide whether the goal, context, limits, tools, and expected result match what you want." },
+    output_link_required: italian
+      ? { label: "File da considerare come risultato ufficiale", decision: "Indica quale risultato completato deve essere riutilizzato e verificato in seguito." }
+      : { label: "Official result file", decision: "Choose which completed result should be reused and verified later." },
+  };
+  return copies[request.type] || (italian
+    ? { label: "Scelta in attesa", decision: "Conferma se va bene o spiega cosa deve cambiare." }
+    : { label: "Pending choice", decision: "Confirm whether it is right or explain what should change." });
+}
+
+function approvalRequestPrimaryHighlights(request, italian = false) {
+  return userVisibleReviewItems(request)
+    .map((item) => safePrimaryGuidanceText(item, request))
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((item) => italian
+      ? item
+          .replace(/^Purpose:/u, "Obiettivo:")
+          .replace(/^Context:/u, "Contesto:")
+          .replace(/^Expected output:/u, "Risultato atteso:")
+          .replace(/^Validation:/u, "Verifica:")
+      : item);
+}
+
+function safePrimaryGuidanceText(value, request = {}) {
+  const text = compactText(value, 260);
+  if (!text || findForbiddenHumanGuidanceTerms(text).length > 0) return null;
+  if (
+    /--[a-z]|(?:^|\s)\/(?:[^\s/]+\/)*[^\s]*|(?:^|\s)[A-Za-z]:\\[^\s]+|(?:^|\s)\\\\[^\\\s]+\\[^\s]+|(?:^|\s)\.?[A-Za-z0-9_-]+[\\/][A-Za-z0-9_.\\/-]+|\.(?:json|jsonl|md|ya?ml)\b/iu.test(text)
+    || /(?:^|\s)(?:npm|npx|node|python3?|pip3?|git|gh|rtk|codex|bash|zsh|fish|pwsh|powershell|sh)\s+(?:[^\s]+(?:\s+[^\s]+)*)/iu.test(text)
+  ) {
+    return null;
+  }
+  const technicalLiterals = [
+    request.id,
+    request.subject_id,
+    request.story_id,
+    request.template_id,
+    request.artifact_type,
+    ...(request.sources || []),
+  ].map((item) => String(item || "").trim()).filter((item) => item.length > 2);
+  if (technicalLiterals.some((literal) => text.includes(literal))) return null;
+  return text;
 }
 
 function collectApprovalRequests(context, options = {}) {
@@ -14862,24 +15439,23 @@ function renderApprovalRequestsAssistantMessage(requests) {
 }
 
 function assistantMessagePresentationFields() {
+  const preservedLiterals = [
+    "record IDs",
+    "file paths",
+    "CLI commands",
+    "status and reason codes",
+    "schema keys",
+  ];
   return {
     assistant_message_source_language: "en",
     assistant_message_presentation: {
       translate_to_chat_language: true,
       contextualize_for_user: true,
       presenter: "codex",
-      preserve_literals: [
-        "artifact IDs",
-        "story IDs",
-        "contract IDs",
-        "template IDs",
-        "file paths",
-        "CLI commands",
-        "status codes",
-        "schema keys",
-      ],
+      preserve_literals: preservedLiterals,
+      preserve_literals_in_technical_details_only: preservedLiterals,
       instruction:
-        "Before showing assistant_message to a human, Codex should translate and contextualize it in the active chat language while preserving technical literals exactly. Explain the decision in plain product/work terms first. Do not expose blocking_reasons, status codes, stale/hash wording, or schema keys as the primary message; keep them only as technical detail if needed. If an internal freshness check needs a refresh but the user-approved scope has not changed, say that you are refreshing the internal reference and continuing inside the approved scope. Do not send the user to inspect files manually as the main path: summarize the relevant contents of baseline reports, templates, contracts, and source lists directly in chat, then provide file paths only as supporting evidence. The summary must be substantial enough for approval: explain what artifact was produced, what is inside it, what decision is needed, and what approval does not cover; avoid one-line or ID-only summaries. Do not collapse the message into a bare approval question: show what will be used as context, what output format is being agreed, what work is being authorized, how the result will be delivered, and what the user can answer naturally. By default, a user's yes, ok, or approval applies only to the artifact or decision that was just shown and summarized. If the user explicitly specifies a broader approval level or autonomy scope, carry it only inside that scope and record later formal approvals as delegated automation, not as direct explicit-user approvals.",
+        "Before showing assistant_message to a human, translate and contextualize it in the active chat language. Use plain product language and begin with outcome, practical impact, the decision needed or an explicit statement that none is needed, what remains protected, and one next action. Do not place record IDs, internal autonomy terms, status or reason codes, hashes, schema keys, file paths, or CLI commands in that primary explanation. Preserve those literals exactly only after an optional Technical details or Dettagli tecnici divider. If an internal freshness check needs a refresh but the user-approved scope has not changed, explain that the internal reference will be updated and work will continue inside the same scope; do not present it as a new product decision. Summarize relevant contents directly instead of sending the user to inspect files. State what approval covers and what it does not cover. A yes or ok applies only to the displayed decision unless the user explicitly grants a broader approval level; later delegated approvals must be recorded as automation, not misattributed as direct user actions.",
     },
   };
 }
@@ -16307,11 +16883,79 @@ function createContractLocked(context, options, settings) {
   const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
   writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
   const linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
+  const guidance = contractProposalHumanGuidance(contract, options);
   output(
     options,
-    { status: "created", contract_path: contractPath, contract, story_link: linkedStory },
-    [`Created contract ${id} for phase ${phase}`],
+    {
+      status: "proposed",
+      write_status: "created",
+      contract_path: contractPath,
+      contract,
+      story_link: linkedStory,
+      human_guidance: guidance,
+    },
+    humanGuidanceLines(
+      guidance,
+      [
+        `Contract: ${id}`,
+        `Phase: ${phase}`,
+        `Lifecycle status: ${contract.status}`,
+        `Path: ${toProjectPath(context, contractPath)}`,
+        ...(contract.contextualization?.summary
+          ? [`Context summary: ${contract.contextualization.summary}`]
+          : []),
+        ...(storyId ? [`Story: ${storyId}`] : []),
+      ],
+      options,
+      contractProposalPrimarySummary(contract, options),
+    ),
   );
+}
+
+function contractProposalHumanGuidance(contract, options) {
+  const italian = humanGuidanceLocale(options) === "it";
+  return {
+    result: italian ? "È pronta una bozza del lavoro da esaminare." : "A draft work brief is ready for review.",
+    impact: italian ? "Nessun lavoro descritto nella bozza inizierà finché non confermi che corrisponde a ciò che vuoi." : "None of the work described in the draft will start until you confirm that it matches what you want.",
+    required_decision: italian ? "Controlla obiettivo, contesto, risultato atteso, limiti e verifiche; approva la bozza oppure indica cosa cambiare." : "Review the goal, context, expected result, limits, and checks; approve the draft or say what should change.",
+    protection_boundary: italian ? "La creazione della bozza non autorizza modifiche al prodotto, merge, rilasci, produzione, segreti o attività fuori dai limiti descritti." : "Creating the draft does not authorize product changes, merges, releases, production, secrets, or work outside the described limits.",
+    next_action: italian ? "Leggi il riepilogo qui sotto e conferma la proposta, correggila o rifiutala prima di iniziare." : "Read the summary below and confirm, correct, or reject the proposal before work starts.",
+    details: {
+      contract_id: contract.id,
+      lifecycle_status: contract.status,
+      story_id: contract.story_id || null,
+    },
+  };
+}
+
+function contractProposalPrimarySummary(contract, options) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const request = {
+    id: contract.id,
+    subject_id: contract.id,
+    story_id: contract.story_id,
+    artifact_type: (contract.output_contract_refs || []).map((ref) => ref.artifact_type),
+  };
+  const overview = [contract.contextualization?.summary, contract.purpose]
+    .map((item) => safePrimaryGuidanceText(item, request))
+    .find(Boolean);
+  const expectedResults = (contract.outputs || [])
+    .map((item) => safePrimaryGuidanceText(humanOutputLabel(item), request))
+    .filter(Boolean)
+    .slice(0, 4);
+  const checks = (contract.validation || [])
+    .map((item) => safePrimaryGuidanceText(item, request))
+    .filter(Boolean)
+    .slice(0, 2);
+  return [
+    overview ? `${italian ? "Lavoro proposto" : "Proposed work"}: ${overview}` : null,
+    expectedResults.length
+      ? `${italian ? "Risultati attesi" : "Expected results"}: ${expectedResults.join("; ")}`
+      : null,
+    checks.length
+      ? `${italian ? "Come verrà controllato" : "How it will be checked"}: ${checks.join("; ")}`
+      : null,
+  ].filter(Boolean);
 }
 
 function assertDeliveryProfileReservationUnique(context, deliveryProfileId, contractId) {
@@ -24805,14 +25449,202 @@ function showStatus(context, options) {
     counts[directory] = countCanonicalRecords(directory, dirPath);
   }
   const project = readProjectJson(context, path.join(context.sdlcRoot, "project.json"));
+  const orchestration = buildOrchestrationSnapshot(context);
+  const approvalRequests = collectApprovalRequests(context);
+  const pendingDecisions = approvalRequests.filter((request) =>
+    request.status !== "needs_internal_refresh"
+    && request.status !== "needs_refresh"
+    && !String(request.type || "").endsWith("_refresh_required"));
+  const internalRefreshes = approvalRequests.length - pendingDecisions.length;
+  const summary = {
+    pending_decisions: pendingDecisions.length,
+    internal_refreshes: internalRefreshes,
+    available_work: orchestration.summary.available,
+    active_work: orchestration.summary.claimed,
+    blocked_work: orchestration.summary.blocked,
+    stale_claims: orchestration.summary.stale,
+    completed_work: orchestration.summary.terminal,
+  };
+  const nextAction = buildStatusNextAction(summary, orchestration);
+  const italian = humanGuidanceLocale(options) === "it";
+  const guidance = statusHumanGuidance(nextAction, summary, { italian });
+  const payload = {
+    schema_version: "cli-status:v1",
+    project,
+    counts,
+    summary,
+    next_action: nextAction,
+    ...(options.full ? {
+      pending_decision_items: pendingDecisions,
+      internal_refresh_items: approvalRequests.filter((request) => !pendingDecisions.includes(request)),
+      orchestration,
+    } : {}),
+  };
   output(
     options,
-    { project, counts },
-    [
-      `Project: ${project.project_name} (${project.project_id})`,
-      ...Object.entries(counts).map(([key, value]) => `${key}: ${value}`),
-    ],
+    payload,
+    humanGuidanceLines(guidance, [
+      `${italian ? "Progetto" : "Project"}: ${project.project_name} (${project.project_id})`,
+      `${italian ? "Tipo di prossimo passo" : "Next-action kind"}: ${nextAction.kind}`,
+      `${italian ? "Motivo tecnico" : "Technical reason"}: ${nextAction.reason}`,
+      `${italian ? "Comando suggerito" : "Suggested command"}: ${nextAction.command || (italian ? "nessuno" : "none")}`,
+      ...Object.entries(summary).map(([key, value]) => `${key}: ${value}`),
+      ...(options.full ? Object.entries(counts).map(([key, value]) => `${key}: ${value}`) : []),
+    ], options),
   );
+}
+
+function buildStatusNextAction(summary, orchestration) {
+  if (summary.pending_decisions > 0) {
+    return {
+      kind: "review_decision",
+      reason: "pending_human_decision",
+      command: "agentic-sdlc approval requests",
+      protected: true,
+    };
+  }
+  if (summary.blocked_work > 0) {
+    const story = orchestration.stories.find((item) => item.orchestration_state === "blocked");
+    return {
+      kind: "resolve_blocker",
+      reason: "blocked_story",
+      command: story ? `agentic-sdlc story deps --id ${story.id}` : "agentic-sdlc orchestrate status",
+      protected: false,
+      story_id: story?.id || null,
+    };
+  }
+  if (summary.stale_claims > 0) {
+    const story = orchestration.stories.find((item) => item.orchestration_state === "stale");
+    return {
+      kind: "repair_claim",
+      reason: "stale_claim",
+      command: story ? `agentic-sdlc story release --id ${story.id}` : "agentic-sdlc orchestrate status",
+      protected: true,
+      story_id: story?.id || null,
+    };
+  }
+  if (summary.available_work > 0) {
+    const story = orchestration.stories.find((item) => item.orchestration_state === "available");
+    return {
+      kind: "start_available_work",
+      reason: "available_story",
+      command: story ? `agentic-sdlc task start --story ${story.id}` : "agentic-sdlc orchestrate plan",
+      protected: true,
+      story_id: story?.id || null,
+    };
+  }
+  if (summary.active_work > 0) {
+    const story = orchestration.stories.find((item) => item.orchestration_state === "claimed");
+    return {
+      kind: "continue_active_work",
+      reason: "active_story",
+      command: story ? `agentic-sdlc gate check --story ${story.id}` : "agentic-sdlc orchestrate status",
+      protected: false,
+      story_id: story?.id || null,
+    };
+  }
+  return {
+    kind: "none",
+    reason: "no_operational_work",
+    command: null,
+    protected: false,
+  };
+}
+
+function statusHumanGuidance(nextAction, summary, options = {}) {
+  const { italian = false } = options;
+  const copy = italian
+    ? {
+        review_decision: {
+          result: "C’è una decisione in attesa.",
+          impact: "Il lavoro interessato resta fermo finché la scelta non viene chiarita.",
+          decision: "Controlla la scelta proposta e approvala oppure chiedi una modifica.",
+          next: "Apri il riepilogo della decisione in attesa.",
+        },
+        resolve_blocker: {
+          result: "Alcune attività non possono ancora procedere.",
+          impact: "Prima di continuare bisogna risolvere almeno un impedimento già rilevato.",
+          decision: "Non serve approvare un’eccezione; scegli se correggere o chiarire l’impedimento.",
+          next: "Esamina il primo impedimento e risolvilo.",
+        },
+        repair_claim: {
+          result: "Una prenotazione di lavoro non è più attuale.",
+          impact: "Nessun nuovo lavoro dovrebbe partire su quella prenotazione finché non viene sistemata.",
+          decision: "Decidi se chiudere la prenotazione vecchia o riassegnare il lavoro.",
+          next: "Controlla la prenotazione non più attuale.",
+        },
+        start_available_work: {
+          result: "C’è lavoro pronto per essere avviato.",
+          impact: "È possibile preparare la prossima attività senza sovrapporsi a lavoro già in corso.",
+          decision: "Non devi decidere altro per questo controllo; l’avvio applicherà le regole della singola consegna.",
+          next: "Avvia la prima attività disponibile.",
+        },
+        continue_active_work: {
+          result: "Il lavoro è già in corso.",
+          impact: "La priorità è completare e verificare l’attività aperta prima di iniziarne un’altra.",
+          decision: "Non devi prendere una nuova decisione per questo controllo.",
+          next: "Continua l’attività aperta e verifica il prossimo risultato.",
+        },
+        none: {
+          result: "Non ci sono attività operative in attesa.",
+          impact: "Il progetto non richiede un’azione immediata.",
+          decision: "Non devi decidere nulla in questo momento.",
+          next: "Ripeti il controllo quando cambia lo stato del progetto.",
+        },
+      }
+    : {
+        review_decision: {
+          result: "A decision is waiting for review.",
+          impact: "The affected work remains paused until the choice is clarified.",
+          decision: "Review the proposed choice and either approve it or request a change.",
+          next: "Open the pending decision summary.",
+        },
+        resolve_blocker: {
+          result: "Some work cannot proceed yet.",
+          impact: "At least one known obstacle must be resolved before work can continue.",
+          decision: "Do not approve an exception; choose whether to correct or clarify the obstacle.",
+          next: "Review and resolve the first obstacle.",
+        },
+        repair_claim: {
+          result: "A work reservation is no longer current.",
+          impact: "No new work should start on that reservation until it is repaired.",
+          decision: "Choose whether to close the old reservation or reassign the work.",
+          next: "Review the outdated work reservation.",
+        },
+        start_available_work: {
+          result: "Work is ready to start.",
+          impact: "The next activity can be prepared without overlapping work already in progress.",
+          decision: "You do not need to decide anything else for this check; starting will apply the rules for that one delivery.",
+          next: "Start the first available activity.",
+        },
+        continue_active_work: {
+          result: "Work is already in progress.",
+          impact: "The priority is to complete and verify the open activity before starting another one.",
+          decision: "You do not need to make a new decision for this check.",
+          next: "Continue the open activity and verify its next result.",
+        },
+        none: {
+          result: "There is no operational work waiting.",
+          impact: "The project does not need an immediate action.",
+          decision: "You do not need to decide anything now.",
+          next: "Check again when the project state changes.",
+        },
+      };
+  const selected = copy[nextAction.kind] || copy.none;
+  return Object.freeze({
+    result: selected.result,
+    impact: selected.impact,
+    required_decision: selected.decision,
+    protection_boundary: italian
+      ? "Questo controllo ha letto lo stato del progetto; non ha modificato file, pubblicato, rilasciato o eseguito merge."
+      : "This check only read project state; it did not change files, publish, release, or merge anything.",
+    next_action: selected.next,
+    details: Object.freeze({
+      guidance_kind: "project_status",
+      next_action: nextAction,
+      summary,
+    }),
+  });
 }
 
 function showOrchestrationStatus(context, options) {
@@ -28215,9 +29047,72 @@ function output(options, jsonPayload, lines) {
     console.log(JSON.stringify(jsonPayload, null, 2));
     return;
   }
-  for (const line of lines) {
+  const requestedLines = Array.isArray(lines) ? lines.map((line) => String(line)) : [String(lines ?? "")];
+  const renderedLines = isHumanGuidanceOutput(requestedLines)
+    ? requestedLines
+    : humanGuidanceLines(legacyOutputGuidance(jsonPayload, options), requestedLines, options);
+  for (const line of renderedLines) {
     console.log(line);
   }
+}
+
+function isHumanGuidanceOutput(lines) {
+  const english = [
+    "Outcome:",
+    "What this changes in practice:",
+    "What you need to decide:",
+    "What remains protected:",
+    "Next step:",
+  ];
+  const italian = [
+    "Risultato:",
+    "Cosa cambia in pratica:",
+    "Cosa devi decidere:",
+    "Cosa resta protetto:",
+    "Prossimo passo:",
+  ];
+  const hasFiveFields = [english, italian].some((labels) =>
+    labels.every((label, index) => lines[index]?.startsWith(label)));
+  if (!hasFiveFields) return false;
+  const dividerIndex = lines.findIndex((line) =>
+    line === "Technical details (optional):" || line === "Dettagli tecnici (facoltativi):");
+  if (dividerIndex < 5) return false;
+  return findForbiddenHumanGuidanceTerms(lines.slice(0, dividerIndex).join("\n")).length === 0;
+}
+
+function legacyOutputGuidance(payload, options = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const status = String(payload?.status || "").toLowerCase();
+  const blocked = ["blocked", "failed", "invalid", "needs_repair", "exception_pending"].includes(status);
+  const needsDecision = ["needs_user_input", "pending", "proposed", "awaiting_approval"].includes(status);
+  if (blocked) {
+    return {
+      result: italian ? "Il controllo richiesto ha trovato un problema." : "The requested check found a problem.",
+      impact: italian ? "Il lavoro che dipende da questo risultato non deve ancora proseguire." : "Work that depends on this result should not continue yet.",
+      required_decision: italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected.",
+      protection_boundary: italian ? "Questo risultato non autorizza modifiche, merge, rilasci, distribuzioni, produzione, segreti o lavoro fuori dai limiti concordati." : "This result does not authorize changes, merges, releases, deployments, production, secrets, or work outside the agreed limits.",
+      next_action: italian ? "Leggi la diagnosi facoltativa, correggi il problema e ripeti il controllo." : "Review the optional diagnosis, correct the problem, and run the check again.",
+      details: {},
+    };
+  }
+  if (needsDecision) {
+    return {
+      result: italian ? "Serve una decisione prima del prossimo passo." : "A decision is needed before the next step.",
+      impact: italian ? "Il lavoro resta in pausa finché la scelta mostrata non viene chiarita." : "Work remains paused until the displayed choice is clarified.",
+      required_decision: italian ? "Esamina la scelta nei dettagli facoltativi e rispondi in linguaggio naturale." : "Review the choice in the optional details and answer in natural language.",
+      protection_boundary: italian ? "Nessuna risposta viene interpretata come permesso per altre consegne, merge, rilasci, produzione, segreti o file non concordati." : "No answer is treated as permission for another delivery, merge, release, production, secrets, or unagreed files.",
+      next_action: italian ? "Conferma, correggi o rifiuta soltanto la scelta mostrata." : "Confirm, correct, or reject only the displayed choice.",
+      details: {},
+    };
+  }
+  return {
+    result: italian ? "Il risultato richiesto è pronto." : "The requested result is ready.",
+    impact: italian ? "Puoi vedere cosa è stato controllato o registrato senza dover interpretare i termini interni." : "You can review what was checked or recorded without interpreting internal labels.",
+    required_decision: italian ? "Questo risultato non richiede una nuova decisione, salvo che i dettagli facoltativi indichino esplicitamente una scelta in attesa." : "This result needs no new decision unless the optional details explicitly show a pending choice.",
+    protection_boundary: italian ? "Il risultato non autorizza da solo merge, rilasci, distribuzioni, produzione, segreti o lavoro fuori dai limiti concordati." : "The result does not by itself authorize merges, releases, deployments, production, secrets, or work outside the agreed limits.",
+    next_action: italian ? "Consulta i dettagli facoltativi e continua soltanto con il prossimo passo già concordato." : "Review the optional details and continue only with the next step already agreed.",
+    details: {},
+  };
 }
 
 function humanGuidanceLocale(options = {}) {
@@ -28232,13 +29127,15 @@ function humanGuidanceLocale(options = {}) {
 function humanGuidanceLines(guidance, detailLines = [], options = {}, summaryLines = []) {
   const italian = humanGuidanceLocale(options) === "it";
   return [
-    guidance.result,
-    `${italian ? "Impatto" : "Impact"}: ${guidance.impact}`,
-    `${italian ? "Prossimo passo" : "Next"}: ${guidance.next_action}`,
-    ...(summaryLines.length > 0 ? ["", ...summaryLines] : []),
+    `${italian ? "Risultato" : "Outcome"}: ${guidance.result}`,
+    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${guidance.impact}`,
+    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${guidance.required_decision}`,
+    `${italian ? "Cosa resta protetto" : "What remains protected"}: ${guidance.protection_boundary}`,
+    `${italian ? "Prossimo passo" : "Next step"}: ${guidance.next_action}`,
+    ...summaryLines,
     "",
-    italian ? "Dettagli:" : "Details:",
-    ...detailLines.map((line) => `- ${line}`),
+    italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
+    ...detailLines.map((line) => String(line).trim()).filter(Boolean).map((line) => `- ${line}`),
   ];
 }
 

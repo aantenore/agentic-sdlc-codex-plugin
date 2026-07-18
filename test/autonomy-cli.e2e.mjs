@@ -65,6 +65,27 @@ function mustRunJson(args, options = {}) {
   return JSON.parse(mustRun([...args, "--json"], options).stdout);
 }
 
+const INTERNAL_HUMAN_GUIDANCE_PATTERN = /\b(?:bounded[-_ ]autonomous|checkpoint(?:ed|s)?|audit[-_ ]only|host[-_ ]verified|profiles?|profil[oi]|receipts?|ricevut[ae]|ceiling|schema|hash(?:es)?|reason[_ -]?codes?|codic[ei] (?:motivo|ragione)|(?:REQ|AUT|AUTH|CAP|ST|ACT|PR)-[A-Z0-9][A-Z0-9._-]*)\b/iu;
+
+function splitHumanGuidance(output, locale = "en") {
+  const divider = locale === "it"
+    ? "Dettagli tecnici (facoltativi):"
+    : "Technical details (optional):";
+  const labels = locale === "it"
+    ? ["Risultato", "Cosa cambia in pratica", "Cosa devi decidere", "Cosa resta protetto", "Prossimo passo"]
+    : ["Outcome", "What this changes in practice", "What you need to decide", "What remains protected", "Next step"];
+  const dividerIndex = output.indexOf(divider);
+  assert.notEqual(dividerIndex, -1, `missing ${divider}\n${output}`);
+  const primary = output.slice(0, dividerIndex).trim();
+  const technical = output.slice(dividerIndex + divider.length).trim();
+  const lines = primary.split(/\r?\n/u);
+  for (const label of labels) {
+    assert.ok(lines.some((line) => line.startsWith(`${label}:`)), `missing ${label}\n${output}`);
+  }
+  assert.doesNotMatch(primary, INTERNAL_HUMAN_GUIDANCE_PATTERN);
+  return { primary, technical, firstLine: lines.find(Boolean) || "" };
+}
+
 function mustGit(project, args) {
   const result = spawnSync("git", ["-C", project, ...args], {
     encoding: "utf8",
@@ -316,9 +337,11 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--root", project,
     "--id", "REQ-AUTONOMY",
   ]);
-  assert.match(requirementStatus.stdout.split(/\r?\n/u)[0], /choose at most independent completion/i);
-  assert.match(requirementStatus.stdout, /does not authorize a pull request or local release by itself/u);
-  assert.match(requirementStatus.stdout, /Details:\n- Requirement: REQ-AUTONOMY/u);
+  const requirementGuidance = splitHumanGuidance(requirementStatus.stdout);
+  assert.match(requirementGuidance.firstLine, /^Outcome: For this requirement, the most independent option available/u);
+  assert.match(requirementGuidance.primary, /Every pull request or local release needs its own choice/u);
+  assert.match(requirementGuidance.technical, /Requirement: REQ-AUTONOMY/u);
+  assert.match(requirementGuidance.technical, /bounded-autonomous/u);
   createApprovedImplementationContract(project, {
     storyId: "ST-PR-1",
     contractId: "CONTRACT-PR-1",
@@ -365,13 +388,23 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   mustGit(project, ["remote", "set-url", "origin", "https://github.com/example/unapproved-repository.git"]);
   mustGit(project, ["remote", "set-url", "--add", "origin", expectedRemoteUrl]);
   mustGit(project, ["remote", "set-url", "--push", "--add", "origin", expectedRemoteUrl]);
-  const proposed = mustRunJson(proposalArgs).delivery_profile;
+  const proposalResponse = mustRunJson(proposalArgs);
+  const proposed = proposalResponse.delivery_profile;
   assert.equal(proposed.status, "proposed");
   assert.equal(proposed.delivery_kind, "pull_request");
   assert.equal(proposed.delivery_id, "PR-1");
   assert.equal(proposed.requested_level, "bounded-autonomous");
   assert.equal(proposed.use_policy.reusable_across_deliveries, false);
   assert.equal(proposed.pull_request_target.merge_allowed, false);
+  assert.match(proposalResponse.human_guidance.impact, /project “Autonomy E2E”/u);
+  assert.match(proposalResponse.human_guidance.impact, /destination is “codex\/pr-1” in repository “github\.com\/aantenore\/agentic-sdlc-codex-plugin”, starting from “main”/u);
+  assert.match(proposalResponse.human_guidance.impact, /change only “src”/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /before anything is deployed outside the local machine and before the pull request is merged/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /no separate calendar deadline.*ends when the pull request is merged, closed, or cancelled/u);
+  assert.equal(proposalResponse.human_guidance.details.project_name, "Autonomy E2E");
+  assert.deepEqual(proposalResponse.human_guidance.details.allowed_write_paths, ["src"]);
+  assert.deepEqual(proposalResponse.human_guidance.details.review_moments, ["deploy.remote", "pull_request.merge"]);
+  assert.equal(proposalResponse.human_guidance.details.expires_at, null);
 
   const activated = mustRunJson([
     "autonomy", "delivery", "approve",
@@ -393,12 +426,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--root", project,
     "--id", "AUT-PR-1",
   ]);
-  assert.match(humanStatus.stdout.split(/\r?\n/u)[0], /active for one pull request/i);
-  assert.match(humanStatus.stdout, /Impact: .*independent work between agreed checkpoints/u);
-  assert.match(humanStatus.stdout, /Next: .*actions allowed by this delivery profile/u);
-  assert.match(humanStatus.stdout, /Requested technical level: bounded-autonomous/u);
-  assert.match(humanStatus.stdout, /Effective technical level: checkpointed/u);
-  assert.match(humanStatus.stdout, /Technical reason codes: .*delivery\.authority\.audit_only_caps_autonomy/u);
+  const deliveryGuidance = splitHumanGuidance(humanStatus.stdout);
+  assert.match(deliveryGuidance.firstLine, /^Outcome: The working choice is active for one pull request/u);
+  assert.match(deliveryGuidance.primary, /What this changes in practice: .*continue between the review moments we agreed/u);
+  assert.match(deliveryGuidance.primary, /Next step: .*approved limits.*review moment/u);
+  assert.match(deliveryGuidance.technical, /Profile: AUT-PR-1/u);
+  assert.match(deliveryGuidance.technical, /Requested technical level: bounded-autonomous/u);
+  assert.match(deliveryGuidance.technical, /Effective technical level: checkpointed/u);
+  assert.match(deliveryGuidance.technical, /Technical reason codes: .*delivery\.authority\.audit_only_caps_autonomy/u);
 
   const humanExplainItalian = mustRun([
     "autonomy", "delivery", "explain",
@@ -406,10 +441,13 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--id", "AUT-PR-1",
     "--locale", "it",
   ]);
-  assert.match(humanExplainItalian.stdout.split(/\r?\n/u)[0], /attiva per una sola pull request/u);
-  assert.match(humanExplainItalian.stdout, /Impatto: .*checkpoint concordati/u);
-  assert.match(humanExplainItalian.stdout, /Prossimo passo:/u);
-  assert.match(humanExplainItalian.stdout, /Dettagli:/u);
+  const deliveryGuidanceItalian = splitHumanGuidance(humanExplainItalian.stdout, "it");
+  assert.match(deliveryGuidanceItalian.firstLine, /^Risultato: La scelta del modo di lavorare è attiva per una sola pull request/u);
+  assert.match(deliveryGuidanceItalian.primary, /Cosa cambia in pratica: .*proseguire tra i momenti di revisione che abbiamo concordato/u);
+  assert.match(deliveryGuidanceItalian.primary, /Prossimo passo: .*limiti approvati.*momento di revisione/u);
+  assert.match(deliveryGuidanceItalian.technical, /Profile: AUT-PR-1/u);
+  assert.match(deliveryGuidanceItalian.technical, /bounded-autonomous/u);
+  assert.match(deliveryGuidanceItalian.technical, /audit_only/u);
 
   const intent = taskIntent("ST-PR-1");
   const mixedFetchRemoteStart = mustRunJson([
@@ -448,18 +486,13 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--intent-json", intent,
     "--locale", "it",
   ]);
-  assert.match(profileMissingItalian.stdout.split(/\r?\n/u)[0], /Mi serve una decisione rapida/u);
-  assert.match(profileMissingItalian.stdout, /questa pull request .* propria scelta del livello di autonomia/u);
-  assert.match(profileMissingItalian.stdout, /Quale livello di autonomia vuoi usare/u);
-  assert.match(profileMissingItalian.stdout, /Dettagli tecnici:/u);
-  assert.ok(
-    profileMissingItalian.stdout.indexOf("autonomy_selection_required")
-      > profileMissingItalian.stdout.indexOf("Dettagli tecnici:"),
-  );
-  assert.doesNotMatch(
-    profileMissingItalian.stdout.slice(0, profileMissingItalian.stdout.indexOf("Dettagli tecnici:")),
-    /autonomy_selection_required/u,
-  );
+  const missingGuidanceItalian = splitHumanGuidance(profileMissingItalian.stdout, "it");
+  assert.match(missingGuidanceItalian.firstLine, /^Risultato: Il lavoro non è ancora iniziato/u);
+  assert.match(missingGuidanceItalian.primary, /Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa/u);
+  assert.match(missingGuidanceItalian.primary, /Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare/u);
+  assert.match(missingGuidanceItalian.technical, /questa pull request .* propria scelta del livello di autonomia/u);
+  assert.match(missingGuidanceItalian.technical, /Quale livello di autonomia vuoi usare/u);
+  assert.match(missingGuidanceItalian.technical, /autonomy_selection_required/u);
 
   const automatic = mustRunJson([
     "task", "start",
@@ -566,9 +599,12 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--id", "AUT-PR-1",
   ]);
   assert.notEqual(invalidHumanStatus.status, 0);
-  assert.match(invalidHumanStatus.stdout.split(/\r?\n/u)[0], /needs repair and cannot be used now/u);
-  assert.match(invalidHumanStatus.stdout, /Effective technical level: supervised/u);
-  assert.match(invalidHumanStatus.stdout, /Technical reason codes: autonomy_profile_evaluation_failed/u);
+  const invalidGuidance = splitHumanGuidance(invalidHumanStatus.stdout);
+  assert.match(invalidGuidance.firstLine, /^Outcome: This working choice needs repair and cannot be used now/u);
+  assert.match(invalidGuidance.primary, /What remains protected:/u);
+  assert.match(invalidGuidance.technical, /Profile: AUT-PR-1/u);
+  assert.match(invalidGuidance.technical, /Effective technical level: supervised/u);
+  assert.match(invalidGuidance.technical, /Technical reason codes: autonomy_profile_evaluation_failed/u);
   const tamperedDecision = mustRunJson([
     "task", "start",
     "--root", project,
@@ -743,7 +779,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--evidence", "src/change.txt",
   ], /does not resolve to/u, { env: pushBeforeEnv });
 
-  const pushCompletion = mustRunJson([
+  const pushCompletionResult = mustRun([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-PR-1",
@@ -751,11 +787,25 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--outcome", "passed",
     "--evidence", "src/change.txt",
   ], { env: fakeGitRemoteEnv(project, afterCommit) });
+  const pushCompletionGuidance = splitHumanGuidance(pushCompletionResult.stdout);
+  assert.match(pushCompletionGuidance.firstLine, /^Outcome: The protected operation was completed and recorded successfully/u);
+  assert.match(pushCompletionGuidance.primary, /What remains protected: Only this exact operation was recorded/u);
+  assert.match(pushCompletionGuidance.technical, /Profile: AUT-PR-1/u);
+  assert.match(pushCompletionGuidance.technical, /Canonical action: git\.push/u);
+  const pushCompletionReceipt = fs.readdirSync(path.join(project, ".sdlc", "autonomy", "actions"))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(project, ".sdlc", "autonomy", "actions", name), "utf8")))
+    .find((receipt) =>
+      receipt.status === "completed"
+      && receipt.action === "git.push"
+      && receipt.authorization_receipt_ref?.id === pushAuthorization.action_receipt.id);
+  assert.ok(pushCompletionReceipt);
+  const pushCompletion = { status: "completed", action_receipt: pushCompletionReceipt };
   assert.equal(pushCompletion.status, "completed");
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.observed_sha, afterCommit);
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.destination_ref, "refs/heads/codex/pr-1");
 
-  const closed = mustRunJson([
+  const closeResult = mustRun([
     "autonomy", "delivery", "close",
     "--root", project,
     "--id", "AUT-PR-1",
@@ -763,6 +813,22 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--reason", "The test delivery is complete without publishing the temporary PR.",
     ...humanApproval("Approve cancellation of this exact test delivery"),
   ]);
+  const closeGuidance = splitHumanGuidance(closeResult.stdout);
+  assert.match(closeGuidance.firstLine, /^Outcome: This delivery was closed as requested/u);
+  assert.match(closeGuidance.primary, /What remains protected: The closure did not merge, release, deploy, access production/u);
+  assert.match(closeGuidance.technical, /Profile: AUT-PR-1/u);
+  assert.match(closeGuidance.technical, /Terminal status: cancelled/u);
+  const closeReceiptRelativePath = ".sdlc/autonomy/executions/AUT-PR-1/close.json";
+  const closeReceipt = JSON.parse(fs.readFileSync(
+    path.join(project, closeReceiptRelativePath),
+    "utf8",
+  ));
+  const closed = {
+    status: "terminal",
+    terminal_status: closeReceipt.terminal_status,
+    close_receipt: closeReceipt,
+    close_receipt_path: closeReceiptRelativePath,
+  };
   assert.equal(closed.status, "terminal");
   assert.equal(closed.terminal_status, "cancelled");
   assert.equal(closed.close_receipt.terminal_action_receipt_ref, null);
@@ -854,6 +920,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(successorStart.execution_allowed, true);
   assert.equal(successorStart.delivery_profile_id, "AUT-PR-2");
+  const multiDeliveryGuidance = splitHumanGuidance(mustRun([
+    "autonomy", "delivery", "status",
+    "--root", project,
+  ]).stdout);
+  assert.match(multiDeliveryGuidance.firstLine, /^Outcome: I found 2 separate working choices for concrete deliveries/u);
+  assert.match(multiDeliveryGuidance.primary, /No choice applies to another pull request or local release/u);
+  assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-1/u);
+  assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-2/u);
 
   const successorPushAuthorization = mustRunJson([
     "autonomy", "delivery", "action",
@@ -1000,8 +1074,9 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--json",
   ]);
   assert.equal(forgedGate.status, 1, forgedGate.stderr || forgedGate.stdout);
+  const forgedGateError = JSON.parse(forgedGate.stderr || forgedGate.stdout);
   assert.match(
-    `${forgedGate.stdout}\n${forgedGate.stderr}`,
+    forgedGateError.error.message,
     /Delivery lifecycle receipt .*close\.json validation failed: .*approval\.status: must equal "approved"/u,
   );
 });

@@ -359,6 +359,87 @@ svg {
   color: var(--ink-secondary);
 }
 
+.human-guidance,
+.technical-details {
+  margin: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.human-guidance {
+  border-left: 3px solid var(--accent);
+  background: var(--surface-selected);
+}
+
+.human-guidance-grid,
+.technical-details-grid {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.human-guidance-field {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.human-guidance-field:last-child {
+  border-bottom: 0;
+}
+
+.human-guidance-field dt {
+  color: var(--ink-secondary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.human-guidance-field dd {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.technical-details > summary {
+  padding: 11px 13px;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.technical-details[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.technical-details > .source-button,
+.technical-details > p {
+  margin: 10px 13px 13px;
+}
+
+.diagnostics-human-summary {
+  display: grid;
+  gap: 8px;
+  padding: 13px;
+}
+
+.diagnostics-human-summary > strong {
+  font-size: 14px;
+}
+
+.diagnostics-human-summary .human-guidance-grid {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.diagnostics-technical {
+  margin-top: 0;
+}
+
 .nav-meta strong[data-status="ready"] {
   color: var(--success);
 }
@@ -405,6 +486,41 @@ svg {
   font-size: 13px;
   line-height: 1.25;
   letter-spacing: -0.01em;
+}
+
+.summary-recorded-answer {
+  display: grid;
+  gap: 5px;
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.summary-answer-label {
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.summary-recorded-answer strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.summary-recorded-answer .status-text {
+  justify-self: start;
+  font-size: 10px;
+}
+
+.summary-answer > .human-guidance,
+.summary-answer > .technical-details {
+  margin: 12px 0 0;
+}
+
+.summary-answer > .human-guidance .human-guidance-field {
+  padding: 8px 10px;
 }
 
 .summary-answer p {

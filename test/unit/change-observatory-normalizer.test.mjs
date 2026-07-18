@@ -813,17 +813,46 @@ test("projects autonomy records and links them only through explicit dossier ref
 
   const requirementProfile = model.decisions.find((item) => item.id === "AUT-REQ-A");
   assert.equal(requirementProfile.type, "requirement-execution-profile");
-  assert.equal(requirementProfile.title, "Autonomy ceiling for REQ-A");
-  assert.equal(requirementProfile.summary, "Maximum checkpointed autonomy for requirement REQ-A.");
+  assert.equal(requirementProfile.title, "Approved working limit for this request");
+  assert.equal(
+    requirementProfile.summary,
+    "This sets how independently a delivery may be configured; every code change or local installation still needs its own agreement.",
+  );
+  assert.equal(requirementProfile.humanStatus, "In effect");
   const deliveryProfile = model.decisions.find((item) => item.id === "AUT-PR-A");
-  assert.equal(deliveryProfile.title, "Autonomy for pull request PR-A");
-  assert.equal(deliveryProfile.summary, "Selected checkpointed autonomy for pull request PR-A.");
+  assert.equal(deliveryProfile.title, "Approved working agreement for this code change");
+  assert.equal(
+    deliveryProfile.summary,
+    "The approved way of working applies only to this code change and cannot be reused for another change or installation.",
+  );
+  assert.equal(deliveryProfile.humanStatus, "In effect");
   const autonomyDecision = model.decisions.find((item) => item.id === "AUT-DEC-A");
   assert.equal(autonomyDecision.status, "checkpoint_required");
+  assert.equal(autonomyDecision.title, "Review needed before the next protected step");
   assert.equal(
     autonomyDecision.summary,
-    "requested checkpointed; effective checkpointed; status checkpoint_required; reasons: authority.audit_only_cap.",
+    "Routine work has reached a boundary where the recorded evidence must be reviewed before continuing.",
   );
+  assert.equal(autonomyDecision.humanStatus, "Review needed");
+  const readyDecision = model.decisions.find((item) => item.id === "AUT-DEC-B");
+  assert.equal(readyDecision.title, "This work may continue");
+  assert.equal(readyDecision.humanStatus, "Ready to continue");
+  assert.equal(
+    new Set([
+      requirementProfile.humanTitle,
+      deliveryProfile.humanTitle,
+      autonomyDecision.humanTitle,
+      readyDecision.humanTitle,
+    ]).size,
+    4,
+    "different autonomy record kinds and states remain distinguishable without identifiers",
+  );
+  for (const item of [requirementProfile, deliveryProfile, autonomyDecision, readyDecision]) {
+    assert.doesNotMatch(
+      `${item.humanTitle}\n${item.humanSummary}\n${item.humanStatus}`,
+      /\b(?:bounded-autonomous|checkpointed|audit_only|profile|receipt|ceiling|AUT-[A-Z0-9-]+)\b/iu,
+    );
+  }
   assert.equal(
     model.records.find((record) => record.id === "AUT-REQ-ORPHAN").kind,
     "requirement-execution-profile",

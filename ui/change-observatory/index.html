@@ -12,7 +12,7 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <a class="skip-link" href="#workspace">Skip to project lineage</a>
+    <a class="skip-link" href="#workspace" data-i18n="Skip to project lineage">Skip to project lineage</a>
 
     <svg class="icon-sprite" aria-hidden="true">
       <symbol id="icon-observatory" viewBox="0 0 24 24">
@@ -71,28 +71,28 @@
         </div>
         <button class="icon-button mobile-nav-toggle" type="button" data-action="toggle-navigation" aria-controls="primary-navigation" aria-expanded="false">
           <svg aria-hidden="true"><use href="#icon-menu"></use></svg>
-          <span class="sr-only">Toggle navigation</span>
+          <span class="sr-only" data-i18n="Toggle navigation">Toggle navigation</span>
         </button>
-        <div class="app-controls" aria-label="Project controls">
+        <div class="app-controls" aria-label="Project controls" data-i18n-aria-label="Project controls">
           <label class="field-control">
-            <span>Project</span>
+            <span data-i18n="Project">Project</span>
             <select id="project-select" aria-label="Project" disabled>
-              <option>Loading…</option>
+              <option data-i18n="Loading…">Loading…</option>
             </select>
           </label>
           <label class="field-control snapshot-control">
-            <span>Branch / snapshot</span>
+            <span data-i18n="Branch / snapshot">Branch / snapshot</span>
             <select id="snapshot-select" aria-label="Branch or snapshot" disabled>
-              <option>Current evidence</option>
+              <option data-i18n="Current evidence">Current evidence</option>
             </select>
           </label>
           <button class="quiet-button" type="button" data-action="refresh">
             <svg aria-hidden="true"><use href="#icon-refresh"></use></svg>
-            <span>Refresh</span>
+            <span data-i18n="Refresh">Refresh</span>
           </button>
           <button class="outline-button" type="button" data-action="open-first-raw">
             <svg aria-hidden="true"><use href="#icon-code"></use></svg>
-            <span>Open raw evidence</span>
+            <span data-i18n="Open raw evidence">Open raw evidence</span>
           </button>
         </div>
       </header>
@@ -100,46 +100,46 @@
       <nav id="primary-navigation" class="side-navigation" aria-label="Change Observatory">
         <div class="nav-primary">
           <button class="nav-item is-active" type="button" data-view="overview" aria-current="page">
-            <svg aria-hidden="true"><use href="#icon-overview"></use></svg><span>Overview</span>
+            <svg aria-hidden="true"><use href="#icon-overview"></use></svg><span data-i18n="Overview">Overview</span>
           </button>
           <button class="nav-item" type="button" data-view="timeline">
-            <svg aria-hidden="true"><use href="#icon-timeline"></use></svg><span>Timeline</span>
+            <svg aria-hidden="true"><use href="#icon-timeline"></use></svg><span data-i18n="Timeline">Timeline</span>
           </button>
           <button class="nav-item" type="button" data-view="contracts">
-            <svg aria-hidden="true"><use href="#icon-contracts"></use></svg><span>Contracts</span>
+            <svg aria-hidden="true"><use href="#icon-contracts"></use></svg><span data-i18n="Contracts">Contracts</span>
           </button>
           <button class="nav-item" type="button" data-view="decisions">
-            <svg aria-hidden="true"><use href="#icon-decisions"></use></svg><span>Decisions</span>
+            <svg aria-hidden="true"><use href="#icon-decisions"></use></svg><span data-i18n="Decisions">Decisions</span>
           </button>
           <button class="nav-item" type="button" data-view="changes">
-            <svg aria-hidden="true"><use href="#icon-changes"></use></svg><span>Changes</span>
+            <svg aria-hidden="true"><use href="#icon-changes"></use></svg><span data-i18n="Changes">Changes</span>
           </button>
           <button class="nav-item" type="button" data-view="intent-evidence">
-            <svg aria-hidden="true"><use href="#icon-intent-evidence"></use></svg><span>Intent evidence</span>
+            <svg aria-hidden="true"><use href="#icon-intent-evidence"></use></svg><span data-i18n="Intent evidence">Intent evidence</span>
           </button>
           <button class="nav-item" type="button" data-view="verification">
-            <svg aria-hidden="true"><use href="#icon-verification"></use></svg><span>Verification</span>
+            <svg aria-hidden="true"><use href="#icon-verification"></use></svg><span data-i18n="Verification">Verification</span>
           </button>
         </div>
         <div class="nav-meta" aria-live="polite">
-          <span class="nav-meta-label">Evidence API</span>
-          <strong id="api-status">Connecting</strong>
+          <span class="nav-meta-label" data-i18n="Evidence API">Evidence API</span>
+          <strong id="api-status" data-i18n="Connecting">Connecting</strong>
         </div>
       </nav>
 
       <main id="workspace" class="workspace" tabindex="-1">
-        <section id="summary-region" class="summary-strip" aria-label="Change summary">
+        <section id="summary-region" class="summary-strip" aria-label="Change summary" data-i18n-aria-label="Change summary">
           <article class="summary-answer">
-            <h2>What was asked?</h2>
-            <p class="skeleton-line">Loading recorded requirements…</p>
+            <h2 data-i18n="What was asked?">What was asked?</h2>
+            <p class="skeleton-line" data-i18n="Loading recorded requirements…">Loading recorded requirements…</p>
           </article>
           <article class="summary-answer">
-            <h2>What changed?</h2>
-            <p class="skeleton-line">Loading recorded changes…</p>
+            <h2 data-i18n="What changed?">What changed?</h2>
+            <p class="skeleton-line" data-i18n="Loading recorded changes…">Loading recorded changes…</p>
           </article>
           <article class="summary-answer">
-            <h2>Why was it decided?</h2>
-            <p class="skeleton-line">Loading recorded decisions…</p>
+            <h2 data-i18n="Why was it decided?">Why was it decided?</h2>
+            <p class="skeleton-line" data-i18n="Loading recorded decisions…">Loading recorded decisions…</p>
           </article>
         </section>
 
@@ -150,20 +150,20 @@
             <div class="loading-state" role="status">
               <span class="loading-pulse" aria-hidden="true"></span>
               <div>
-                <strong>Reconstructing project lineage</strong>
-                <p>Reading canonical SDLC evidence. No history is inferred silently.</p>
+                <strong data-i18n="Reconstructing project lineage">Reconstructing project lineage</strong>
+                <p data-i18n="Reading canonical SDLC evidence. No history is inferred silently.">Reading canonical SDLC evidence. No history is inferred silently.</p>
               </div>
             </div>
           </section>
 
-          <aside id="inspector" class="inspector" aria-label="Evidence inspector">
+          <aside id="inspector" class="inspector" aria-label="Evidence inspector" data-i18n-aria-label="Evidence inspector">
             <header class="inspector-header">
-              <h2>Inspector</h2>
-              <span>No record selected</span>
+              <h2 data-i18n="Inspector">Inspector</h2>
+              <span data-i18n="No record selected">No record selected</span>
             </header>
             <div class="inspector-empty">
               <svg aria-hidden="true"><use href="#icon-source"></use></svg>
-              <p>Select a lineage state or evidence record to inspect its recorded inputs, outputs, rationale, alternatives, and sources.</p>
+              <p data-i18n="Select a lineage state or evidence record to inspect its recorded inputs, outputs, rationale, alternatives, and sources.">Select a lineage state or evidence record to inspect its recorded inputs, outputs, rationale, alternatives, and sources.</p>
             </div>
           </aside>
         </div>
@@ -173,25 +173,25 @@
         <header class="raw-header">
           <button class="raw-toggle" type="button" data-action="toggle-raw" aria-expanded="false" aria-controls="raw-content">
             <svg class="raw-chevron" aria-hidden="true"><use href="#icon-chevron"></use></svg>
-            <strong id="raw-heading">Raw record</strong>
-            <span id="raw-path">Select a source record</span>
+            <strong id="raw-heading" data-i18n="Raw record">Raw record</strong>
+            <span id="raw-path" data-i18n="Select a source record">Select a source record</span>
           </button>
           <div class="raw-actions">
-            <span class="raw-format">JSON / text</span>
+            <span class="raw-format" data-i18n="JSON / text">JSON / text</span>
             <button class="icon-button" type="button" data-action="close-raw">
               <svg aria-hidden="true"><use href="#icon-close"></use></svg>
-              <span class="sr-only">Close raw record</span>
+              <span class="sr-only" data-i18n="Close raw record">Close raw record</span>
             </button>
           </div>
         </header>
         <div id="raw-content" class="raw-content" hidden>
-          <pre tabindex="0"><code id="raw-code">No source record selected.</code></pre>
+          <pre tabindex="0"><code id="raw-code" data-i18n="No source record selected.">No source record selected.</code></pre>
         </div>
       </section>
     </div>
 
     <noscript>
-      <div class="noscript-message">Change Observatory needs JavaScript to load the local, read-only evidence API.</div>
+      <div class="noscript-message" data-i18n="Change Observatory needs JavaScript to load the local, read-only evidence API.">Change Observatory needs JavaScript to load the local, read-only evidence API.</div>
     </noscript>
     <script type="module" src="./app.js"></script>
   </body>

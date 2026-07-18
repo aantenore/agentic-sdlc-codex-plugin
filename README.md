@@ -13,6 +13,7 @@ Project state stays in the target repository under `.sdlc/`. The plugin installa
 - [Token Efficiency](docs/token-efficiency.md) — compact derived JSON, the RTK command gateway, lifecycle observations, and budget-safe savings telemetry.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
+- [Self-service CLI](docs/self-service-cli.md) — focused help, one-step status, safe presentation presets, shell completion, and machine output.
 - [Change Observatory](docs/change-observatory.md) — launch the local visual lineage app and understand its evidence and security model.
 
 ## Quick Start
@@ -22,7 +23,9 @@ Install from the `aantenore` source repository. Keep this checkout separate from
 ```bash
 git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git
 cd agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
+python3 scripts/install-personal-marketplace.py check
+python3 scripts/install-personal-marketplace.py plan --json
+python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
@@ -31,7 +34,8 @@ If RTK 0.43 or newer is already installed and you want its guidance available to
 Codex globally, opt in while staging:
 
 ```bash
-python3 scripts/install-personal-marketplace.py --with-rtk
+python3 scripts/install-personal-marketplace.py plan --with-rtk --json
+python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 ```
 
 `--with-rtk` configures the current user's global Codex instructions. It does
@@ -57,6 +61,21 @@ Open the Change Observatory and explain this project's recorded delivery lineage
 ```
 
 The installed `Change Observatory` skill resolves the plugin-local launcher directly, so a Codex plugin installation does not depend on a global shell command.
+
+## Self-service CLI
+
+The CLI explains the outcome, practical impact, any decision needed, what remains protected, and one next step before showing optional technical details. Focused help and completion work even outside an initialized project:
+
+```bash
+agentic-sdlc help
+agentic-sdlc help autonomy delivery approve --locale it
+agentic-sdlc completion zsh
+agentic-sdlc preset list
+agentic-sdlc status --cli-preset human-it
+agentic-sdlc status --cli-preset machine
+```
+
+`--cli-preset` changes presentation only. It cannot authorize an action, change a command or destination, widen writable paths, or supply approval flags. Explicit CLI options take precedence. The existing assessment/output `--preset` option is unchanged. See [Self-service CLI](docs/self-service-cli.md) for deterministic export and shell setup examples.
 
 ## Change Observatory
 
@@ -333,7 +352,9 @@ Use a source checkout that is separate from the generated personal-plugin direct
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
+python3 scripts/install-personal-marketplace.py check
+python3 scripts/install-personal-marketplace.py plan --json
+python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
@@ -343,7 +364,7 @@ current user's global Codex instructions for an already installed RTK binary.
 
 On systems where Python 3 is exposed as `python` or `py -3`, use that launcher for the same script. Start a new Codex task after installation so the app reloads plugin skills and agent cards.
 
-The installer stages the package allowlist into `~/plugins/agentic-sdlc-codex-plugin` and updates the plugin entry in `~/.agents/plugins/marketplace.json`. It refuses unsafe destinations instead of traversing or replacing a symlink, Windows junction/reparse point, Git checkout, source checkout, or unmanaged directory.
+`check` and `plan` are read-only. `apply` accepts only the exact current plan hash, rechecks it under a lock, stages and byte-verifies the package, then updates `~/plugins/agentic-sdlc-codex-plugin` and the matching entry in `~/.agents/plugins/marketplace.json` as one rollback boundary. It refuses unsafe destinations instead of traversing or replacing a symlink, Windows junction/reparse point, Git checkout, source checkout, or unmanaged directory. Running the script without a mode is the same as `plan`; it never installs implicitly.
 
 ## Update
 
@@ -351,7 +372,8 @@ Update the source checkout, rerun the staging installer, and add the plugin agai
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py
+python3 scripts/install-personal-marketplace.py plan --json
+python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 ```
@@ -359,7 +381,8 @@ codex plugin list --json
 If global RTK guidance was previously enabled, retain the opt-in during update:
 
 ```bash
-python3 scripts/install-personal-marketplace.py --with-rtk
+python3 scripts/install-personal-marketplace.py plan --with-rtk --json
+python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 ```
 
 Do not edit the generated tree under `~/plugins` directly. Start a new Codex task after the refresh.

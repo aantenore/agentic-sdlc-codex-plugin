@@ -12,15 +12,33 @@ import {
   recordSelectionKey,
   sentenceCase,
 } from "./model.js";
+import {
+  displayKindForItem,
+  displayTextForItem,
+  humanGuidanceForItem,
+  isAutonomyRecord,
+  localizeUiText,
+  localizedErrorGuidance,
+  t,
+} from "./i18n.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 function node(tag, options = {}, children = []) {
   const element = document.createElement(tag);
   if (options.className) element.className = options.className;
-  if (options.text !== undefined) element.textContent = options.text;
+  if (options.text !== undefined) {
+    element.textContent = options.i18n
+      ? localizeUiText(options.text)
+      : String(options.text ?? "");
+  }
   for (const [name, value] of Object.entries(options.attrs ?? {})) {
-    if (value !== null && value !== undefined) element.setAttribute(name, String(value));
+    if (value !== null && value !== undefined) {
+      const rendered = options.i18n && (name === "title" || name.startsWith("aria-"))
+        ? localizeUiText(value)
+        : value;
+      element.setAttribute(name, String(rendered));
+    }
   }
   for (const [name, value] of Object.entries(options.dataset ?? {})) {
     if (value !== null && value !== undefined) element.dataset[name] = String(value);
@@ -43,6 +61,7 @@ function provenanceBadge(provenance) {
   return node("span", {
     className: "provenance",
     text: sentenceCase(provenance),
+    i18n: true,
     dataset: { provenance },
   });
 }
@@ -50,19 +69,20 @@ function provenanceBadge(provenance) {
 function sourceButtonFor(item, label = "Source records") {
   const target = rawTargetFor(item);
   if (!target) return null;
+  const display = displayTextForItem(item);
   return node(
     "button",
     {
       className: "source-button",
-      attrs: { type: "button", "aria-label": `${label}: ${item.title ?? item.id ?? target.path}` },
+      attrs: { type: "button", "aria-label": `${t(label)}: ${display.title}` },
       dataset: { action: "open-raw", rawHref: target.href, rawPath: target.path },
     },
-    [icon("source"), node("span", { text: label })],
+    [icon("source"), node("span", { text: label, i18n: true })],
   );
 }
 
 function emptyInline(message) {
-  return node("p", { className: "empty-inline", text: message });
+  return node("p", { className: "empty-inline", text: message, i18n: true });
 }
 
 function statusKey(status) {
@@ -73,14 +93,15 @@ function statusText(status) {
   return node("span", {
     className: "status-text",
     text: sentenceCase(status),
+    i18n: true,
     dataset: { state: statusKey(status) },
   });
 }
 
 function sectionHeading(title, description, actions = []) {
   const copy = node("div", {}, [
-    node("h2", { text: title }),
-    description ? node("p", { text: description }) : null,
+    node("h2", { text: title, i18n: true }),
+    description ? node("p", { text: description, i18n: true }) : null,
   ]);
   return node("header", { className: "section-heading" }, [
     copy,
@@ -91,13 +112,14 @@ function sectionHeading(title, description, actions = []) {
 function selectControl(label, name, values, selectedValue) {
   const select = node("select", {
     className: "compact-select",
-    attrs: { "aria-label": label },
+    attrs: { "aria-label": t(label) },
     dataset: { filter: name },
   });
-  select.append(node("option", { text: `${label}: All`, attrs: { value: "" } }));
+  select.append(node("option", { text: `${label}: All`, i18n: true, attrs: { value: "" } }));
   for (const value of values) {
     const option = node("option", {
       text: sentenceCase(value.label ?? value),
+      i18n: name === "phase",
       attrs: { value: value.value ?? value },
     });
     if ((value.value ?? value) === selectedValue) option.selected = true;
@@ -114,7 +136,7 @@ export function renderProjectControls(model) {
   );
   snapshotSelect.replaceChildren(
     node("option", {
-      text: model.project.branch || model.project.snapshot || "Current evidence",
+      text: model.project.branch || model.project.snapshot || t("Current evidence"),
       attrs: { value: "current" },
     }),
   );
@@ -123,22 +145,43 @@ export function renderProjectControls(model) {
 function renderSummaryAnswer(question, items) {
   const item = firstSummaryItem(items);
   const article = node("article", { className: "summary-answer" }, [
-    node("h2", { text: question }),
+    node("h2", { text: question, i18n: true }),
   ]);
   if (!item) {
-    article.append(node("p", { text: "No canonical evidence was recorded for this answer." }));
+    article.append(humanGuidanceSection({
+      outcome: "No recorded evidence answers this question yet.",
+      impact: "This part of the project history may be incomplete.",
+      decision: "Do not treat missing evidence as approval or completed work.",
+      protection: "This view remains read-only and does not invent missing facts.",
+      nextAction: "Return to the Codex chat and describe the missing evidence in natural language; after it is recorded, refresh this view.",
+    }));
     article.append(
       node("div", { className: "summary-meta" }, [provenanceBadge("missing")]),
     );
     return article;
   }
-  const meta = node("div", { className: "summary-meta" }, [
-    node("span", { text: item.id }),
-    sourceButtonFor(item),
-    provenanceBadge(item.provenance),
-  ]);
-  article.append(node("p", { text: item.summary }), meta);
+  article.append(
+    recordedAnswerForItem(item),
+    humanGuidanceBlock(item),
+    technicalDetailsForItem(item),
+  );
   return article;
+}
+
+function recordedAnswerForItem(item) {
+  const display = displayTextForItem(item);
+  const recordedStatus = String(item?.status ?? "").trim().toLowerCase().replace(/[-\s]+/gu, "_");
+  const hasMeaningfulStatus = display.status
+    && !["", "missing", "not_recorded"].includes(recordedStatus);
+  return node("section", {
+    className: "summary-recorded-answer",
+    attrs: { "aria-label": t("Recorded answer") },
+  }, [
+    node("span", { className: "summary-answer-label", text: "Recorded answer", i18n: true }),
+    node("strong", { text: display.title }),
+    node("p", { text: display.summary }),
+    hasMeaningfulStatus ? statusText(display.status) : null,
+  ]);
 }
 
 export function renderSummary(container, model) {
@@ -167,35 +210,50 @@ export function renderDiagnostics(container, diagnostics) {
   disclosure.append(
     node("summary", {}, [
       icon("alert"),
-      node("strong", { text: "Evidence diagnostics" }),
+      node("strong", { text: "Evidence diagnostics", i18n: true }),
       node("span", {
         text: `${diagnostics.length} ${diagnostics.length === 1 ? "category" : "categories"} · ${occurrenceTotal} ${occurrenceTotal === 1 ? "record" : "records"}`,
+        i18n: true,
       }),
     ]),
-    node("div", { className: "diagnostics-list" }, diagnostics.map((diagnostic) =>
-      node(
-        "div",
-        {
-          className: "diagnostic",
-          attrs: { role: diagnostic.severity === "error" ? "alert" : "status" },
-          dataset: { severity: diagnostic.severity },
-        },
-        [
-          icon("alert"),
-          node("div", { className: "diagnostic-copy" }, [
-            node("strong", { text: `${diagnostic.code}: ` }),
-            document.createTextNode(diagnostic.message),
-            diagnostic.occurrences > 1
-              ? node("span", {
-                className: "diagnostic-count",
-                text: `${diagnostic.occurrences} records`,
-                attrs: { title: "Equivalent diagnostics grouped" },
-              })
-              : null,
-          ]),
-        ],
-      ),
-    )),
+    node("div", { className: "diagnostics-human-summary" }, [
+      node("strong", { text: "Evidence needs attention", i18n: true }),
+      node("dl", { className: "human-guidance-grid" }, [
+        guidanceField("Outcome", "Some recorded evidence could not be read safely.", { i18nText: true }),
+        guidanceField("Impact", "Related views may be incomplete until the evidence is corrected.", { i18nText: true }),
+        guidanceField("Decision", "Do not make a decision from the affected view alone.", { i18nText: true }),
+        guidanceField("Protection", "Unsafe or unsupported evidence is omitted and no project file is changed.", { i18nText: true }),
+        guidanceField("Next action", "Open technical details, then return to the Codex chat and describe the correction in natural language; after it is recorded, refresh this view.", { i18nText: true }),
+      ]),
+    ]),
+    node("details", { className: "technical-details diagnostics-technical" }, [
+      node("summary", { text: "Technical details (optional)", i18n: true }),
+      node("div", { className: "diagnostics-list" }, diagnostics.map((diagnostic) =>
+        node(
+          "div",
+          {
+            className: "diagnostic",
+            attrs: { role: diagnostic.severity === "error" ? "alert" : "status" },
+            dataset: { severity: diagnostic.severity },
+          },
+          [
+            icon("alert"),
+            node("div", { className: "diagnostic-copy" }, [
+              node("strong", { text: `${diagnostic.code}: ` }),
+              document.createTextNode(diagnostic.message),
+              diagnostic.occurrences > 1
+                ? node("span", {
+                  className: "diagnostic-count",
+                  text: `${diagnostic.occurrences} records`,
+                  i18n: true,
+                  attrs: { title: "Equivalent diagnostics grouped" },
+                })
+                : null,
+            ]),
+          ],
+        ),
+      )),
+    ]),
   );
   container.replaceChildren(disclosure);
 }
@@ -269,13 +327,13 @@ function lineagePanel(model, state) {
   }
 
   const table = node("table", { className: "lineage-table" });
-  const headRow = node("tr", {}, [node("th", { text: "Iteration", attrs: { scope: "col" } })]);
+  const headRow = node("tr", {}, [node("th", { text: "Iteration", i18n: true, attrs: { scope: "col" } })]);
   PHASES.forEach((phase, index) => {
     headRow.append(
       node("th", { attrs: { scope: "col" } }, [
         node("span", { className: "phase-heading" }, [
           node("span", { className: "phase-number", text: String(index + 1) }),
-          node("span", { text: sentenceCase(phase) }),
+          node("span", { text: sentenceCase(phase), i18n: true }),
         ]),
       ]),
     );
@@ -315,7 +373,7 @@ function lineagePanel(model, state) {
               attrs: {
                 type: "button",
                 "aria-pressed": String(state.selectedId === selectionId || associatedSelection),
-                "aria-label": `${iteration.title}, ${sentenceCase(phase.phase)}: ${sentenceCase(phase.status)}, ${sentenceCase(phase.provenance)}`,
+                "aria-label": `${iteration.title}, ${t(sentenceCase(phase.phase))}: ${t(sentenceCase(phase.status))}, ${t(sentenceCase(phase.provenance))}`,
               },
               dataset: {
                 action: "select-phase",
@@ -325,7 +383,7 @@ function lineagePanel(model, state) {
             },
             [
               phaseStateIcon(phase.status),
-              node("span", { className: "state-label", text: sentenceCase(phase.status) }),
+              node("span", { className: "state-label", text: sentenceCase(phase.status), i18n: true }),
               provenanceBadge(phase.provenance),
             ],
           ),
@@ -336,8 +394,8 @@ function lineagePanel(model, state) {
   }
   table.append(body);
   panel.append(
-    node("div", { className: "lineage-scroll", attrs: { tabindex: "0", "aria-label": "Scrollable lineage matrix" } }, [table]),
-    node("footer", { className: "lineage-legend", attrs: { "aria-label": "Lineage status legend" } }, [
+    node("div", { className: "lineage-scroll", i18n: true, attrs: { tabindex: "0", "aria-label": "Scrollable lineage matrix" } }, [table]),
+    node("footer", { className: "lineage-legend", i18n: true, attrs: { "aria-label": "Lineage status legend" } }, [
       ...[
         ["complete", "Complete"],
         ["inProgress", "In progress"],
@@ -346,7 +404,7 @@ function lineagePanel(model, state) {
       ].map(([status, label]) =>
         node("span", { className: "legend-item" }, [
           node("span", { className: "legend-dot", dataset: { state: status } }),
-          document.createTextNode(label),
+          document.createTextNode(t(label)),
         ]),
       ),
       node("span", { className: "legend-item" }, [provenanceBadge("recorded")]),
@@ -395,8 +453,8 @@ function dossierNarrative(item, laneKey) {
       className: "dossier-narrative-part",
       dataset: { state: narrative.rationale ? "recorded" : "missing" },
     }, [
-      node("span", { text: "Recorded rationale" }),
-      node("p", { text: narrative.rationale || "Not recorded." }),
+      node("span", { text: "Recorded rationale", i18n: true }),
+      node("p", { text: narrative.rationale || t("Not recorded.") }),
     ]),
     node("div", {
       className: "dossier-narrative-part",
@@ -406,18 +464,19 @@ function dossierNarrative(item, laneKey) {
         text: narrative.generatedExplanation
           ? `Generated explanation · ${sentenceCase(narrative.explanationLabel || "source recorded")}`
           : "Generated explanation",
+        i18n: !narrative.generatedExplanation,
       }),
-      node("p", { text: narrative.generatedExplanation || "Not recorded." }),
+      node("p", { text: narrative.generatedExplanation || t("Not recorded.") }),
     ]),
   ]);
 }
 
 function dossierItem(item, sourceLane, laneKey, state, iterationId) {
   const selectionId = recordSelectionKey(item);
-  const sourceControl = sourceButtonFor(item, "Open raw source");
+  const display = displayTextForItem(item);
   const itemKind = sourceLane === "release" || item.type === "release"
-    ? "Release evidence"
-    : sentenceCase(item.type);
+    ? t("Release evidence")
+    : displayKindForItem(item);
   return node("article", {
     className: "dossier-item",
     dataset: { sourceLane, provenance: item.provenance },
@@ -427,7 +486,7 @@ function dossierItem(item, sourceLane, laneKey, state, iterationId) {
       attrs: {
         type: "button",
         "aria-pressed": String(selectionId === state.selectedId),
-        "aria-label": `Inspect ${item.title}`,
+        "aria-label": t(`Inspect ${display.title}`),
       },
       dataset: {
         action: "select-record",
@@ -435,24 +494,32 @@ function dossierItem(item, sourceLane, laneKey, state, iterationId) {
         iterationId,
       },
     }, [
-      node("span", { className: "dossier-item-title", text: item.title }),
-      node("span", { className: "dossier-item-summary", text: item.summary }),
+      node("span", { className: "dossier-item-title", text: display.title }),
+      node("span", { className: "dossier-item-summary", text: display.summary }),
     ]),
-    dossierNarrative(item, laneKey),
+    humanGuidanceBlock(item),
+    technicalDetailsForItem(item, isAutonomyRecord(item) ? [] : [dossierNarrative(item, laneKey)]),
     node("footer", { className: "dossier-item-footer" }, [
       node("span", { className: "dossier-item-kind", text: itemKind }),
-      statusText(item.status),
+      statusText(display.status),
       provenanceBadge(item.provenance),
-      node("span", { className: "dossier-linkage", text: linkageLabel(item) }),
-      sourceControl,
+      node("span", {
+        className: "dossier-linkage",
+        text: isAutonomyRecord(item)
+          ? (item.linkage?.status === "linked"
+              ? "Linked to related recorded evidence"
+              : "Related evidence link not recorded")
+          : linkageLabel(item),
+        i18n: true,
+      }),
     ]),
   ]);
 }
 
 function dossierMissingLane(laneState) {
   return node("div", { className: "dossier-missing", attrs: { role: "status" } }, [
-    node("strong", { text: "No linked evidence" }),
-    node("p", { text: "No explicitly linked canonical record was provided for this lane." }),
+    node("strong", { text: "No linked evidence", i18n: true }),
+    node("p", { text: "No explicitly linked canonical record was provided for this lane.", i18n: true }),
     provenanceBadge(laneState?.provenance ?? "missing"),
   ]);
 }
@@ -468,8 +535,8 @@ function dossierLane(dossier, definition, state, iterationId, index) {
     node("header", { className: "dossier-lane-header" }, [
       node("span", { className: "dossier-step", text: String(index + 1), attrs: { "aria-hidden": "true" } }),
       node("div", {}, [
-        node("h3", { text: definition.label, attrs: { id: `dossier-lane-${definition.key}` } }),
-        node("span", { text: items.length ? `${items.length} linked ${items.length === 1 ? "record" : "records"}` : "Evidence missing" }),
+        node("h3", { text: definition.label, i18n: true, attrs: { id: `dossier-lane-${definition.key}` } }),
+        node("span", { text: items.length ? `${items.length} linked ${items.length === 1 ? "record" : "records"}` : "Evidence missing", i18n: true }),
       ]),
       provenanceBadge(items.length ? laneState.provenance : "missing"),
     ]),
@@ -483,11 +550,12 @@ function unlinkedLineageDisclosure(items, state) {
   if (!items.length) return null;
   return node("details", { className: "unlinked-lineage" }, [
     node("summary", {}, [
-      node("strong", { text: "Unlinked project evidence" }),
-      node("span", { text: `${items.length} ${items.length === 1 ? "record" : "records"}` }),
+      node("strong", { text: "Unlinked project evidence", i18n: true }),
+      node("span", { text: `${items.length} ${items.length === 1 ? "record" : "records"}`, i18n: true }),
     ]),
     node("p", {
       text: "These canonical records are visible, but no explicit story link assigns them to an iteration dossier.",
+      i18n: true,
     }),
     node("div", { className: "unlinked-lineage-list" }, items.map((item) =>
       dossierItem(item, "unlinked", "unlinked", state, null),
@@ -542,7 +610,7 @@ function dossierPanel(model, state) {
   const dossier = selectedIteration.dossier;
   const dossierMeta = node("header", { className: "dossier-meta", attrs: { "aria-live": "polite" } }, [
     node("div", {}, [
-      node("span", { className: "dossier-label", text: "Selected iteration" }),
+      node("span", { className: "dossier-label", text: "Selected iteration", i18n: true }),
       node("h3", { text: selectedIteration.title }),
       node("p", { text: dossier?.summary || selectedIteration.summary }),
     ]),
@@ -556,8 +624,8 @@ function dossierPanel(model, state) {
 
   if (!dossier) {
     panel.append(node("div", { className: "dossier-unavailable", attrs: { role: "status" } }, [
-      node("strong", { text: "Dossier not recorded" }),
-      node("p", { text: "This iteration has no proof-bound dossier. Project-level or unlinked evidence is not assigned here." }),
+      node("strong", { text: "Dossier not recorded", i18n: true }),
+      node("p", { text: "This iteration has no proof-bound dossier. Project-level or unlinked evidence is not assigned here.", i18n: true }),
       provenanceBadge("missing"),
     ]));
     const unlinked = unlinkedLineageDisclosure(model.unlinkedLineage, state);
@@ -569,7 +637,7 @@ function dossierPanel(model, state) {
     panel.append(node("div", { className: "diagnostic", attrs: { role: "alert" }, dataset: { severity: "warning" } }, [
       icon("alert"),
       node("div", { className: "diagnostic-copy" }, [
-        node("strong", { text: "Unsupported dossier schema: " }),
+        node("strong", { text: "Unsupported dossier schema: ", i18n: true }),
         document.createTextNode(dossier.schemaVersion || "not recorded"),
       ]),
     ]));
@@ -581,7 +649,7 @@ function dossierPanel(model, state) {
   panel.append(
     node("div", {
       className: "dossier-flow-scroll",
-      attrs: { tabindex: "0", "aria-label": `Five-lane dossier for ${selectedIteration.title}` },
+      attrs: { tabindex: "0", "aria-label": t(`Five-lane dossier for ${selectedIteration.title}`) },
     }, [
       node("div", { className: "dossier-flow" }, DOSSIER_LANES.map((definition, index) =>
         dossierLane(dossier, definition, state, selectedIteration.id, index),
@@ -594,7 +662,7 @@ function dossierPanel(model, state) {
 
   if (dossier.diagnostics.length) {
     panel.append(node("details", { className: "dossier-diagnostics" }, [
-      node("summary", { text: `Dossier diagnostics · ${dossier.diagnostics.length}` }),
+      node("summary", { text: `Dossier diagnostics · ${dossier.diagnostics.length}`, i18n: true }),
       node("div", { className: "diagnostics-list" }, dossier.diagnostics.map((diagnostic) =>
         node("div", { className: "diagnostic", dataset: { severity: diagnostic.severity } }, [
           icon("alert"),
@@ -611,6 +679,7 @@ function dossierPanel(model, state) {
 
 function recordRow(item, selectedId) {
   const selectionId = recordSelectionKey(item);
+  const display = displayTextForItem(item);
   return node(
     "button",
     {
@@ -623,11 +692,11 @@ function recordRow(item, selectedId) {
     },
     [
       node("span", { className: "record-main" }, [
-        node("span", { className: "record-title", text: item.title }),
-        node("span", { className: "record-summary", text: item.summary }),
+        node("span", { className: "record-title", text: display.title }),
+        node("span", { className: "record-summary", text: display.summary }),
       ]),
       node("span", { className: "record-meta" }, [
-        statusText(item.status),
+        statusText(display.status),
         provenanceBadge(item.provenance),
       ]),
     ],
@@ -651,6 +720,7 @@ function recordsPanel(title, description, items, state, options = {}) {
     panel.append(node("footer", {
       className: "panel-note",
       text: `Showing ${visibleItems.length} of ${items.length}. Open the dedicated view for the complete history.`,
+      i18n: true,
     }));
   }
   return panel;
@@ -681,6 +751,7 @@ function changesPanel(model, state, options = {}) {
     panel.append(node("footer", {
       className: "panel-note",
       text: `Showing ${visibleChanges.length} of ${model.changes.length}. Open Changes for the complete history.`,
+      i18n: true,
     }));
   }
   return panel;
@@ -699,10 +770,11 @@ function verificationPanel(model, state, options = {}) {
     ? model.verification.slice(0, options.limit)
     : model.verification;
   for (const item of visibleItems) {
+    const display = displayTextForItem(item);
     list.append(
       node("div", { className: "verification-row", attrs: { role: "listitem" } }, [
         recordRow(item, state.selectedId),
-        statusText(item.status),
+        statusText(display.status),
       ]),
     );
   }
@@ -711,6 +783,7 @@ function verificationPanel(model, state, options = {}) {
     panel.append(node("footer", {
       className: "panel-note",
       text: `Showing ${visibleItems.length} of ${model.verification.length}. Open Verification for the complete history.`,
+      i18n: true,
     }));
   }
   return panel;
@@ -732,10 +805,10 @@ const INTENT_EVIDENCE_LABELS = Object.freeze({
 
 function intentEvidenceValue(label, value, { code = false } = {}) {
   return node("div", { className: "intent-evidence-field" }, [
-    node("dt", { text: label }),
+    node("dt", { text: label, i18n: true }),
     code
       ? node("dd", {}, [node("code", { text: INTENT_EVIDENCE_LABELS[value] ?? value })])
-      : node("dd", { text: INTENT_EVIDENCE_LABELS[value] ?? value }),
+      : node("dd", { text: INTENT_EVIDENCE_LABELS[value] ?? value, i18n: true }),
   ]);
 }
 
@@ -754,28 +827,28 @@ function intentEvidenceDetails(item) {
 function intentEvidenceLink(item) {
   const linked = item.link.status === "linked";
   const section = node("section", { className: "intent-evidence-link" }, [
-    node("h3", { text: "Project link" }),
+    node("h3", { text: "Project link", i18n: true }),
   ]);
 
   if (!linked) {
-    section.append(node("p", { text: "Unlinked. No complete explicit story and trace link was recorded." }));
+    section.append(node("p", { text: "Unlinked. No complete explicit story and trace link was recorded.", i18n: true }));
     return section;
   }
 
   section.append(
     node("p", {}, [
-      document.createTextNode("Story "),
+      document.createTextNode(`${t("Story")} `),
       node("code", { text: item.link.storyId }),
     ]),
   );
   if (item.link.traceIds.length) {
     section.append(
-      node("div", { className: "intent-trace-list", attrs: { "aria-label": "Linked traces" } },
+      node("div", { className: "intent-trace-list", i18n: true, attrs: { "aria-label": "Linked traces" } },
         item.link.traceIds.map((traceId) => node("code", { className: "intent-trace", text: traceId })),
       ),
     );
   } else {
-    section.append(node("p", { className: "intent-evidence-muted", text: "No trace link was recorded." }));
+    section.append(node("p", { className: "intent-evidence-muted", text: "No trace link was recorded.", i18n: true }));
   }
   return section;
 }
@@ -797,13 +870,14 @@ function intentEvidenceCard(item, state) {
           dataset: { action: "select-record", selectId: selectionId },
         }),
       ]),
-      node("span", { className: "intent-evidence-readonly", text: "Read-only" }),
+      node("span", { className: "intent-evidence-readonly", text: "Read-only", i18n: true }),
     ]),
     intentEvidenceDetails(item),
     intentEvidenceLink(item),
     node("p", {
       className: "intent-evidence-note",
       text: "Content-free evidence only. MAC present · not verified by Change Observatory.",
+      i18n: true,
     }),
   ]);
 }
@@ -894,8 +968,8 @@ function inspectorTextSection(title, text, tone = null, meta = null) {
     },
     [
       node("div", { className: "section-label-row" }, [
-        node("h3", { text: title }),
-        meta ? node("span", { className: "explanation-label", text: meta }) : null,
+        node("h3", { text: title, i18n: true }),
+        meta ? node("span", { className: "explanation-label", text: meta, i18n: true }) : null,
       ]),
       node("p", { text }),
     ],
@@ -907,9 +981,9 @@ function inspectorEntriesSection(title, entries, tone = null) {
     className: "inspector-section",
     dataset: { tone: entries.length ? tone : "missing" },
   });
-  section.append(node("h3", { text: title }));
+  section.append(node("h3", { text: title, i18n: true }));
   if (!entries.length) {
-    section.append(node("p", { text: "Not recorded for this evidence item." }));
+    section.append(node("p", { text: "Not recorded for this evidence item.", i18n: true }));
     return section;
   }
   section.append(
@@ -941,9 +1015,9 @@ function evidenceSection(item, narrative) {
     className: "inspector-section",
     dataset: { tone: unique.length ? null : "missing" },
   });
-  section.append(node("h3", { text: "Evidence" }));
+  section.append(node("h3", { text: "Evidence", i18n: true }));
   if (!unique.length) {
-    section.append(node("p", { text: "No source evidence was linked to this item." }));
+    section.append(node("p", { text: "No source evidence was linked to this item.", i18n: true }));
     return section;
   }
   unique.forEach((entry) => {
@@ -960,7 +1034,7 @@ function evidenceSection(item, narrative) {
                 attrs: { type: "button" },
                 dataset: { action: "open-raw", rawHref: href, rawPath: source.path },
               },
-              [icon("source"), node("span", { text: "Open" })],
+              [icon("source"), node("span", { text: "Open", i18n: true })],
             )
           : null,
       ]),
@@ -969,17 +1043,62 @@ function evidenceSection(item, narrative) {
   return section;
 }
 
+function guidanceField(label, text, { i18nText = false } = {}) {
+  return node("div", { className: "human-guidance-field" }, [
+    node("dt", { text: label, i18n: true }),
+    node("dd", { text, i18n: i18nText }),
+  ]);
+}
+
+function humanGuidanceSection(guidance) {
+  if (!guidance) return null;
+  return node("section", {
+    className: "human-guidance",
+    attrs: { "aria-label": t("Plain-language explanation") },
+  }, [
+    node("dl", { className: "human-guidance-grid" }, [
+      guidanceField("Outcome", guidance.outcome, { i18nText: true }),
+      guidanceField("Impact", guidance.impact, { i18nText: true }),
+      guidanceField("Decision", guidance.decision, { i18nText: true }),
+      guidanceField("Protection", guidance.protection, { i18nText: true }),
+      guidanceField("Next action", guidance.nextAction, { i18nText: true }),
+    ]),
+  ]);
+}
+
+function humanGuidanceBlock(item) {
+  return humanGuidanceSection(humanGuidanceForItem(item));
+}
+
+function technicalDetailsForItem(item, sections = []) {
+  const source = sourceButtonFor(item, "Open raw source");
+  return node("details", { className: "technical-details" }, [
+    node("summary", { text: "Technical details (optional)", i18n: true }),
+    node("dl", { className: "technical-details-grid" }, [
+      guidanceField("Type", item.type),
+      guidanceField("ID", item.id),
+      guidanceField("Status", item.status),
+      guidanceField("Recorded title", item.title),
+      guidanceField("Recorded summary", item.summary),
+      guidanceField("Evidence", sentenceCase(item.provenance)),
+    ]),
+    source,
+    ...sections,
+  ]);
+}
+
 export function renderInspector(container, item) {
   if (!item) {
     container.replaceChildren(
       node("header", { className: "inspector-header" }, [
-        node("h2", { text: "Inspector" }),
-        node("span", { text: "No record selected" }),
+        node("h2", { text: "Inspector", i18n: true }),
+        node("span", { text: "No record selected", i18n: true }),
       ]),
       node("div", { className: "inspector-empty" }, [
         icon("source"),
         node("p", {
           text: "Select a lineage state or evidence record to inspect its recorded inputs, outputs, rationale, alternatives, and sources.",
+          i18n: true,
         }),
       ]),
     );
@@ -989,65 +1108,103 @@ export function renderInspector(container, item) {
   if (item.type === "intentabi-codex-shadow") {
     container.replaceChildren(
       node("header", { className: "inspector-header" }, [
-        node("h2", { text: "Intent evidence" }),
-        node("span", { text: `Event · ${item.id}` }),
+        node("h2", { text: "Intent evidence", i18n: true }),
+        node("span", { text: "Read-only", i18n: true }),
       ]),
-      node("section", { className: "inspector-section intent-evidence-inspector" }, [
-        intentEvidenceDetails(item),
-        intentEvidenceLink(item),
-        node("p", {
-          className: "intent-evidence-note",
-          text: "Content-free evidence only. MAC present · not verified by Change Observatory.",
-        }),
+      humanGuidanceBlock(item),
+      technicalDetailsForItem(item, [
+        node("section", { className: "inspector-section intent-evidence-inspector" }, [
+          intentEvidenceDetails(item),
+          intentEvidenceLink(item),
+          node("p", {
+            className: "intent-evidence-note",
+            text: "Content-free evidence only. MAC present · not verified by Change Observatory.",
+            i18n: true,
+          }),
+        ]),
       ]),
     );
     return;
   }
 
+  if (isAutonomyRecord(item)) {
+    const display = displayTextForItem(item);
+    container.replaceChildren(
+      node("header", { className: "inspector-header" }, [
+        node("h2", { text: display.title }),
+        node("span", { className: "inspector-status" }, [
+          statusText(display.status),
+          node("span", { text: "Read-only", i18n: true }),
+        ]),
+      ]),
+      humanGuidanceBlock(item),
+      technicalDetailsForItem(item),
+    );
+    return;
+  }
+
+  const display = displayTextForItem(item);
   const narrative = narrativeFor(item);
   const generatedTone = narrative.generatedExplanation ? "generated" : "missing";
   const generatedText =
-    narrative.generatedExplanation || "No plain-language explanation was recorded for this evidence item.";
-  const rationale = narrative.rationale || "No rationale was recorded for this evidence item.";
+    narrative.generatedExplanation || t("No plain-language explanation was recorded for this evidence item.");
+  const rationale = narrative.rationale || t("No rationale was recorded for this evidence item.");
 
   const sections = [
     node("header", { className: "inspector-header" }, [
-      node("h2", { text: "Inspector" }),
-      node("span", { text: `${sentenceCase(item.phase || item.type)} · ${item.id}` }),
+      node("h2", { text: display.title }),
+      node("span", { className: "inspector-status" }, [
+        statusText(display.status),
+        node("span", { text: "Read-only", i18n: true }),
+      ]),
     ]),
-    inspectorTextSection("Request / record", `${item.title}\n${item.summary}`),
-    inspectorTextSection("Decision rationale", rationale, narrative.rationale ? null : "missing"),
-    inspectorEntriesSection("Inputs", narrative.inputs),
-    inspectorEntriesSection("Outputs", narrative.outputs),
-    inspectorTextSection(
-      "Plain-language explanation",
-      generatedText,
-      generatedTone,
-      narrative.generatedExplanation
-        ? sentenceCase(narrative.explanationLabel || "generated")
-        : "not recorded",
-    ),
-    narrative.chainOfThoughtIncluded
-      ? inspectorTextSection(
+    humanGuidanceBlock(item),
+    technicalDetailsForItem(item, [
+      inspectorTextSection("Request / record", `${item.title}\n${item.summary}`),
+      inspectorTextSection("Decision rationale", rationale, narrative.rationale ? null : "missing"),
+      inspectorEntriesSection("Inputs", narrative.inputs),
+      inspectorEntriesSection("Outputs", narrative.outputs),
+      inspectorTextSection(
+        "Plain-language explanation",
+        generatedText,
+        generatedTone,
+        narrative.generatedExplanation
+          ? sentenceCase(narrative.explanationLabel || "generated")
+          : "not recorded",
+      ),
+      narrative.chainOfThoughtIncluded
+        ? inspectorTextSection(
           "Private reasoning",
           "Hidden by design. Change Observatory never renders private chain-of-thought.",
           "missing",
           "not displayed",
         )
-      : null,
-    inspectorEntriesSection("Alternatives rejected", narrative.alternatives, "alternatives"),
-    evidenceSection(item, narrative),
+        : null,
+      inspectorEntriesSection("Alternatives rejected", narrative.alternatives, "alternatives"),
+      evidenceSection(item, narrative),
+    ]),
   ].filter(Boolean);
   container.replaceChildren(...sections);
 }
 
 export function renderFatalError(container, error) {
+  const guidance = localizedErrorGuidance(error);
   container.replaceChildren(
     node("div", { className: "error-state", attrs: { role: "alert" } }, [
       icon("alert"),
       node("div", {}, [
-        node("strong", { text: "Project lineage could not be loaded" }),
-        node("p", { text: error.message }),
+        node("strong", { text: "Project lineage could not be loaded", i18n: true }),
+        node("dl", { className: "human-guidance-grid" }, [
+          guidanceField("Outcome", guidance.outcome, { i18nText: true }),
+          guidanceField("Impact", guidance.impact, { i18nText: true }),
+          guidanceField("Decision", guidance.decision, { i18nText: true }),
+          guidanceField("Protection", guidance.protection, { i18nText: true }),
+          guidanceField("Next action", guidance.nextAction, { i18nText: true }),
+        ]),
+        node("details", { className: "technical-details" }, [
+          node("summary", { text: "Technical details (optional)", i18n: true }),
+          node("p", { text: guidance.technical }),
+        ]),
       ]),
     ]),
   );

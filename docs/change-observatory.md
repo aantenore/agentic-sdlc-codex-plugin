@@ -15,8 +15,22 @@ The installed `Change Observatory` skill resolves its own plugin root and runs t
 An npm, Git, or tarball installation that exposes the package bin can launch it directly:
 
 ```bash
-agentic-sdlc observe --root /path/to/project
+agentic-sdlc observe --root /path/to/project --locale en
 ```
+
+Use `--locale it` for Italian. The language choice is carried to the browser in
+the local URL; it does not weaken the per-run token or the loopback-only
+boundary.
+
+For a reader who does not know the plugin, every delivery-control record starts
+with five practical answers: what happened, what changes in practice, whether a
+decision is needed, what remains protected, and what to do next. Exact policy
+names, identifiers, and stored reason codes appear only after the optional
+**Technical details** divider or in the explicit raw-evidence drawer.
+
+In italiano: ogni decisione viene prima spiegata come risultato, impatto,
+decisione richiesta, protezioni ancora attive e prossimo passo. Livelli, codici
+e identificativi interni restano nei **Dettagli tecnici** facoltativi.
 
 Automation can suppress browser opening and consume the first NDJSON event:
 
@@ -38,14 +52,20 @@ agentic-sdlc observe \
   Done, and Verified;
 - what changed, grouped by recorded intent where available;
 - decisions, approvals, rationale summaries, alternatives, and evidence;
-- requirement autonomy ceilings, the explicit level selected for the current one-story/one-contract pull request or local release, and the effective decision with reason codes;
+- how independently the current delivery may proceed, whether a review is now
+  needed, and which sensitive actions remain protected; exact internal settings
+  and recorded reason codes stay in technical details;
 - immutable delivery start/close state and exact action authorization/completion receipts, without treating an authorization as proof that the action ran;
 - contract evolution and implementation/validation/release state;
 - tests, gates, handoffs, sync events, and missing or malformed lineage;
 - content-free IntentABI Codex shadow observations, when explicitly linked to a story trace;
 - raw canonical JSON, JSONL, Markdown, and text evidence under `.sdlc/`.
 
-Autonomy is presented as a practical answer, not as policy vocabulary. A reader first sees what the agent may complete for this PR, which sensitive action still requires a stop, and that the choice expires with this PR. Internal level and authority codes remain available only in the technical evidence drawer.
+The working agreement is presented as a practical answer, not as policy
+vocabulary. A reader first sees what may be completed for this delivery, which
+sensitive action still requires a review, and that the choice expires with this
+delivery. Internal level and authority codes remain available only in technical
+details and the raw-evidence drawer.
 
 The interface uses `recorded`, `inferred`, `missing`, and `malformed` provenance explicitly. It never silently turns an absent record into a completed phase.
 
@@ -56,9 +76,10 @@ the causal lineage of one iteration. Each recorded story therefore has an
 additive dossier that groups its evidence into five lanes:
 
 1. **Asked** — the story, explicitly linked requirements, and recorded request;
-2. **Decided** — requirement execution ceiling, current delivery profile,
-   effective autonomy decision, approvals, assumptions, risks, and their stored
-   rationale or alternatives;
+2. **Decided** — the agreed working limit, the choice made specifically for the
+   current delivery, approvals, assumptions, risks, and their stored rationale
+   or alternatives; internal policy records remain available as technical
+   evidence;
 3. **Contract** — the exact story contract and any contract-bound approval;
 4. **Done** — implementation, delivery-action completion, and sync evidence recorded for the story;
 5. **Verified** — tests, gates, completed steps, local smoke receipts, remote host/provider evidence when present, and release evidence.

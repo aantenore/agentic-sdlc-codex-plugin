@@ -98,6 +98,27 @@ function readJsonLines(filePath) {
   return fs.readFileSync(filePath, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
+const INTERNAL_HUMAN_GUIDANCE_PATTERN = /\b(?:bounded[-_ ]autonomous|checkpoint(?:ed|s)?|audit[-_ ]only|host[-_ ]verified|profiles?|profil[oi]|receipts?|ricevut[ae]|ceiling|schema|hash(?:es)?|reason[_ -]?codes?|codic[ei] (?:motivo|ragione)|(?:REQ|AUT|AUTH|CAP|ST|ACT|PR)-[A-Z0-9][A-Z0-9._-]*)\b/iu;
+
+function splitHumanGuidance(output, locale = "en") {
+  const divider = locale === "it"
+    ? "Dettagli tecnici (facoltativi):"
+    : "Technical details (optional):";
+  const labels = locale === "it"
+    ? ["Risultato", "Cosa cambia in pratica", "Cosa devi decidere", "Cosa resta protetto", "Prossimo passo"]
+    : ["Outcome", "What this changes in practice", "What you need to decide", "What remains protected", "Next step"];
+  const dividerIndex = output.indexOf(divider);
+  assert.notEqual(dividerIndex, -1, `missing ${divider}\n${output}`);
+  const primary = output.slice(0, dividerIndex).trim();
+  const technical = output.slice(dividerIndex + divider.length).trim();
+  const lines = primary.split(/\r?\n/u);
+  for (const label of labels) {
+    assert.ok(lines.some((line) => line.startsWith(`${label}:`)), `missing ${label}\n${output}`);
+  }
+  assert.doesNotMatch(primary, INTERNAL_HUMAN_GUIDANCE_PATTERN);
+  return { primary, technical, firstLine: lines.find(Boolean) || "" };
+}
+
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -740,9 +761,10 @@ test("effective configuration is human-readable, reviewable, hash-bound, and fai
   const project = tmpProject("effective-config-cli");
 
   const uninitializedHuman = mustRun(["config", "status", "--root", project]).stdout;
-  assert.match(uninitializedHuman, /^This project has not been initialized/m);
-  assert.match(uninitializedHuman, /Impact:/);
-  assert.match(uninitializedHuman, /Next:/);
+  const uninitializedGuidance = splitHumanGuidance(uninitializedHuman);
+  assert.match(uninitializedGuidance.firstLine, /^Outcome: This project has not been initialized/u);
+  assert.match(uninitializedGuidance.technical, /Status: uninitialized/u);
+  assert.match(uninitializedGuidance.technical, /Defaults profile:/u);
 
   initProject(project);
   const configPath = path.join(project, ".sdlc", "config.json");
@@ -759,8 +781,9 @@ test("effective configuration is human-readable, reviewable, hash-bound, and fai
   writeJson(configPath, legacyConfig);
   const configBeforePreview = fs.readFileSync(configPath, "utf8");
   const legacyHuman = mustRun(["config", "status", "--root", project]).stdout;
-  assert.match(legacyHuman, /^The project is safely using its previous compatible behavior/m);
-  assert.match(legacyHuman, /preview.*changes no files/i);
+  const legacyGuidance = splitHumanGuidance(legacyHuman);
+  assert.match(legacyGuidance.firstLine, /^Outcome: The project is safely using its previous compatible behavior/u);
+  assert.match(legacyGuidance.primary, /preview.*changes no files/i);
 
   const firstPreview = JSON.parse(mustRun([
     "config", "migrate", "--root", project, "--json",
@@ -799,7 +822,9 @@ test("effective configuration is human-readable, reviewable, hash-bound, and fai
   driftedConfig.claim_policy.default_ttl_seconds = 120;
   writeJson(configPath, driftedConfig);
   const driftedHuman = mustRun(["config", "status", "--root", project]).stdout;
-  assert.match(driftedHuman, /^Configuration changed after the last approved lock/m);
+  const driftedGuidance = splitHumanGuidance(driftedHuman);
+  assert.match(driftedGuidance.firstLine, /^Outcome: The rules changed after their last confirmation, so governed changes are paused/u);
+  assert.match(driftedGuidance.technical, /Status: drifted/u);
   mustFail([
     "story", "create", "--root", project, "--id", "ST-BLOCKED",
     "--title", "Blocked by config drift", "--acceptance", "No write occurs",
@@ -846,6 +871,12 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
   assert.equal(status.rtk_project_cumulative.usage_credit_tokens, 0);
   assert.equal(status.rtk_project_cumulative.savings.estimated_tokens_avoided, 2_900);
   assert.match(status.rtk_project_cumulative.source.report_hash, /^[a-f0-9]{64}$/u);
+  const optimizationGuidance = splitHumanGuidance(mustRun([
+    "optimization", "status", "--root", project, "--trust-custom-rtk-command",
+  ]).stdout);
+  assert.match(optimizationGuidance.firstLine, /^Outcome: Command-output reduction is working/u);
+  assert.match(optimizationGuidance.technical, /Context optimization: operational/u);
+  assert.match(optimizationGuidance.technical, /Provider: rtk 0\.43\.0/u);
 
   const optimized = mustRun([
     "optimization", "run", "--root", project,
@@ -886,6 +917,12 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
   ]).stdout);
   assert.equal(doctor.status, "passed");
   assert.equal(doctor.checks.find((check) => check.id === "rtk-optimization-provider").status, "passed");
+  const doctorGuidance = splitHumanGuidance(mustRun([
+    "doctor", "--root", project, "--trust-custom-rtk-command",
+  ]).stdout);
+  assert.match(doctorGuidance.firstLine, /^Outcome: All available health checks passed/u);
+  assert.match(doctorGuidance.technical, /Agentic SDLC doctor: passed/u);
+  assert.match(doctorGuidance.technical, /PASS rtk-optimization-provider:/u);
 });
 
 test("standard RTK PATH lookup rejects project-local shadows and spawns the canonical host path", {
@@ -1159,20 +1196,23 @@ test("strict gate fails when a story has no contract", () => {
     ["gate", "check", "--root", project, "--story", "ST-001", "--strict"],
     /has no contract_id/,
   );
-  const firstLine = failedGate.stdout.trim().split(/\r?\n/u).find(Boolean);
-  assert.match(firstLine, /checks found .*blocking issue/i);
-  assert.match(failedGate.stdout, /Impact: .*No protected action was performed/u);
-  assert.match(failedGate.stdout, /What needs fixing:\n- This work item does not have a valid approved work brief/u);
-  assert.match(failedGate.stdout, /Details:\n- Scope checked:/u);
-  assert.ok(failedGate.stdout.indexOf("has no contract_id") > failedGate.stdout.indexOf("Details:"));
+  const failedGuidance = splitHumanGuidance(failedGate.stdout);
+  assert.match(failedGuidance.firstLine, /^Outcome: The checks found .*blocking issue/i);
+  assert.match(failedGuidance.primary, /What this changes in practice: .*No protected action was performed/u);
+  assert.match(failedGuidance.primary, /What needs fixing:\n- This work item does not have a valid approved work brief/u);
+  assert.match(failedGuidance.technical, /Scope checked:/u);
+  assert.match(failedGuidance.technical, /has no contract_id/u);
+  assert.match(failedGuidance.technical, /ST-001/u);
 
   const failedGateItalian = mustFail(
     ["gate", "check", "--root", project, "--story", "ST-001", "--strict", "--locale", "it"],
     /has no contract_id/,
   );
-  assert.match(failedGateItalian.stdout.split(/\r?\n/u)[0], /controlli hanno trovato .*blocco/i);
-  assert.match(failedGateItalian.stdout, /Cosa bisogna sistemare:\n- Questa attività non ha un incarico di lavoro valido e approvato/u);
-  assert.match(failedGateItalian.stdout, /Impatto:|Prossimo passo:|Dettagli:/u);
+  const failedGuidanceItalian = splitHumanGuidance(failedGateItalian.stdout, "it");
+  assert.match(failedGuidanceItalian.firstLine, /^Risultato: I controlli hanno trovato .*blocco/i);
+  assert.match(failedGuidanceItalian.primary, /Cosa bisogna sistemare:\n- Questa attività non ha un incarico di lavoro valido e approvato/u);
+  assert.match(failedGuidanceItalian.technical, /has no contract_id/u);
+  assert.match(failedGuidanceItalian.technical, /ST-001/u);
 });
 
 test("story id mismatch and invalid branch pattern fail strict gate", () => {
@@ -1257,6 +1297,10 @@ test("terminal stories cannot be claimed or scheduled and status counts story re
 
   const status = JSON.parse(mustRun(["status", "--root", project, "--json"]).stdout);
   assert.equal(status.counts.stories, 2);
+  const statusGuidance = splitHumanGuidance(mustRun(["status", "--root", project]).stdout);
+  assert.match(statusGuidance.primary, /What remains protected:/u);
+  assert.match(statusGuidance.technical, /available_work: 1/u);
+  assert.match(statusGuidance.technical, /completed_work: 1/u);
 });
 
 test("claim TTL is config-driven and legacy unbounded claims become stale", () => {
@@ -3635,9 +3679,10 @@ test("strict gates reject missing historical baselines still referenced by contr
   ]);
   mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-NEWER", ...humanApproval("Approved newer baseline")]);
   const passedGate = mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
-  const firstLine = passedGate.stdout.trim().split(/\r?\n/u).find(Boolean);
-  assert.match(firstLine, /checks completed without a blocking issue/i);
-  assert.match(passedGate.stdout, /did not change, release, deploy, or merge anything/u);
+  const passedGuidance = splitHumanGuidance(passedGate.stdout);
+  assert.match(passedGuidance.firstLine, /^Outcome: The checks completed without a blocking issue/i);
+  assert.match(passedGuidance.primary, /did not change, release, deploy, or merge anything/u);
+  assert.match(passedGuidance.technical, /ST-001/u);
   fs.rmSync(path.join(project, ".sdlc", "baseline", "BASELINE-USED.json"));
   mustFail(
     ["gate", "check", "--root", project, "--story", "ST-001", "--strict"],
@@ -4569,6 +4614,33 @@ test("technical analysis routing ignores approved profiles whose sources became 
   fs.appendFileSync(path.join(project, source), "\n");
   const stale = routeDecision(project, intent);
   assert.ok(stale.blocking_reasons.includes("capability_profile_missing"));
+
+  const refreshPayload = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--json",
+  ]).stdout);
+  assert.equal(refreshPayload.status, "needs_internal_refresh");
+  assert.equal(refreshPayload.internal_refresh_only, true);
+  assert.ok(refreshPayload.requests.every((request) => request.status === "needs_internal_refresh"));
+  assert.match(refreshPayload.human_guidance.required_decision, /do not need to approve anything/u);
+
+  const refreshGuidance = splitHumanGuidance(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+  ]).stdout);
+  assert.match(refreshGuidance.primary, /agreed goal and limits do not change/u);
+  assert.match(refreshGuidance.primary, /do not need to approve anything/u);
+  assert.doesNotMatch(refreshGuidance.primary, /CAP-PROFILE-ST-001|needs_internal_refresh|--[a-z]|\.sdlc/u);
+  assert.match(refreshGuidance.technical, /CAP-PROFILE-ST-001/u);
 });
 
 test("technical assessment aliases route through the contract front door", () => {
@@ -5726,7 +5798,7 @@ test("contract create asks before missing guidance or story output agreement", (
     "technical-analysis:technical-analysis-v1:new",
   ], /open question/i);
 
-  const completeContract = JSON.parse(mustRun([
+  const completeContractResult = JSON.parse(mustRun([
     "contract",
     "create",
     "--root",
@@ -5744,10 +5816,65 @@ test("contract create asks before missing guidance or story output agreement", (
     "--output-ref",
     "technical-analysis:technical-analysis-v1:new",
     "--json",
-  ]).stdout).contract;
+  ]).stdout);
+  assert.equal(completeContractResult.status, "proposed");
+  assert.equal(completeContractResult.write_status, "created");
+  assert.match(completeContractResult.human_guidance.required_decision, /Review the goal, context, expected result/u);
+  const completeContract = completeContractResult.contract;
   assert.equal(completeContract.output_contract_refs[0].template_id, "technical-analysis-v1");
   const linkedStory = readJson(path.join(project, ".sdlc", "stories", "ST-001", "story.json"));
   assert.equal(linkedStory.contract_id, "contract-ST-001-analysis");
+
+  const contractDraftGuidance = splitHumanGuidance(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    "Analysis work covering current architecture and delivery risks",
+    "--qa",
+    "Which output detail level should be used?|Architecture-level detail",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--force",
+  ]).stdout);
+  assert.match(contractDraftGuidance.primary, /A draft work brief is ready for review/u);
+  assert.match(contractDraftGuidance.primary, /Proposed work: Analysis work covering current architecture and delivery risks/u);
+  assert.match(contractDraftGuidance.primary, /approve the draft or say what should change/u);
+  assert.doesNotMatch(contractDraftGuidance.primary, /contract-ST-001-analysis|technical-analysis-v1|agentic-sdlc|--[a-z]/u);
+  assert.match(contractDraftGuidance.technical, /Contract: contract-ST-001-analysis/u);
+  assert.match(contractDraftGuidance.technical, /Lifecycle status: draft/u);
+
+  const technicalContext = "Use /Users/antonio/project, C:\\repo\\src, and \\\\server\\share; run npm test";
+  const technicalContextGuidance = splitHumanGuidance(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-001",
+    "--id",
+    "contract-ST-001-analysis",
+    "--context-summary",
+    technicalContext,
+    "--qa",
+    "Which output detail level should be used?|Architecture-level detail",
+    "--output-ref",
+    "technical-analysis:technical-analysis-v1:new",
+    "--force",
+  ]).stdout);
+  for (const literal of ["/Users/antonio/project", "C:\\repo\\src", "\\\\server\\share", "npm test"]) {
+    assert.equal(technicalContextGuidance.primary.includes(literal), false, literal);
+    assert.equal(technicalContextGuidance.technical.includes(literal), true, literal);
+  }
 });
 
 test("contract create auto-links story contract and requires explicit replacement", () => {
@@ -6132,11 +6259,21 @@ test("contract create requires agreed output templates and approval requests sum
   assert.equal(requests.assistant_message_presentation.presenter, "codex");
   assert.ok(requests.assistant_message_presentation.preserve_literals.includes("CLI commands"));
   assert.match(requests.assistant_message_presentation.instruction, /plain product/);
-  assert.match(requests.assistant_message_presentation.instruction, /summarize the relevant contents/);
-  assert.match(requests.assistant_message_presentation.instruction, /summary must be substantial enough/);
+  assert.match(requests.assistant_message_presentation.instruction, /summarize (?:the )?relevant contents directly/i);
+  assert.match(requests.assistant_message_presentation.instruction, /instead of sending the user to inspect files/i);
   assert.match(requests.assistant_message_presentation.instruction, /broader approval level/);
 
   const plainRequests = mustRun(["approval", "requests", "--root", project, "--story", "ST-001"]).stdout;
+  const approvalGuidance = splitHumanGuidance(plainRequests);
+  assert.match(approvalGuidance.primary, /Choices to review:/u);
+  assert.match(approvalGuidance.primary, /Result structure and format/u);
+  assert.match(approvalGuidance.primary, /Missing work information/u);
+  assert.match(approvalGuidance.primary, /say in ordinary language whether it is right or what should change/u);
+  assert.doesNotMatch(
+    approvalGuidance.primary,
+    /technical-analysis-v1|contract-ST-001-analysis|agentic-sdlc|--[a-z]|\.sdlc/u,
+  );
+  assert.match(approvalGuidance.technical, /technical-analysis-v1/u);
   assert.match(plainRequests, /I need your decision/);
   assert.match(plainRequests, /What is inside this item/);
   assert.match(plainRequests, /Scope of your answer:/);
@@ -6862,14 +6999,14 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
   const home = tmpProject("personal-installer-home");
   const python = process.env.PYTHON || "python3";
   const installer = path.join(repoRoot, "scripts", "install-personal-marketplace.py");
-  const install = () => spawnSync(python, [installer], {
+  const invoke = (args = []) => spawnSync(python, [installer, ...args, "--home", home], {
     cwd: repoRoot,
     encoding: "utf8",
     env: { ...process.env, HOME: home },
     timeout: 30_000,
   });
-  const installAsync = () => new Promise((resolve, reject) => {
-    const child = spawn(python, [installer], {
+  const invokeAsync = (args = []) => new Promise((resolve, reject) => {
+    const child = spawn(python, [installer, ...args, "--home", home], {
       cwd: repoRoot,
       env: { ...process.env, HOME: home },
     });
@@ -6887,9 +7024,47 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
       resolve({ status, signal, stdout, stderr });
     });
   });
-  const first = install();
-  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  const mustPlan = (args = []) => {
+    const result = invoke(["plan", "--json", ...args]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.command, "plan");
+    assert.match(envelope.data.plan_hash, /^[a-f0-9]{64}$/u);
+    return { result, envelope };
+  };
+  const applyPlan = (planHash, args = []) => invoke([
+    "apply", "--json", "--plan-hash", planHash, ...args,
+  ]);
+
   const destination = path.join(home, "plugins", "agentic-sdlc-codex-plugin");
+  const marketplacePath = path.join(home, ".agents", "plugins", "marketplace.json");
+  const checked = invoke(["check", "--json"]);
+  assert.equal(checked.status, 0, `${checked.stdout}\n${checked.stderr}`);
+  assert.equal(JSON.parse(checked.stdout).command, "check");
+  assert.equal(fs.existsSync(path.join(home, "plugins")), false);
+  assert.equal(fs.existsSync(path.join(home, ".agents")), false);
+
+  const defaultPlan = invoke(["--json"]);
+  assert.equal(defaultPlan.status, 0, `${defaultPlan.stdout}\n${defaultPlan.stderr}`);
+  const defaultPlanEnvelope = JSON.parse(defaultPlan.stdout);
+  assert.equal(defaultPlanEnvelope.command, "plan", "running without a command must only plan");
+  assert.equal(fs.existsSync(path.join(home, "plugins")), false);
+  assert.equal(fs.existsSync(path.join(home, ".agents")), false);
+
+  const { envelope: firstPlan } = mustPlan();
+  assert.equal(firstPlan.data.plan_hash, defaultPlanEnvelope.data.plan_hash);
+  assert.equal(fs.existsSync(path.join(home, "plugins")), false);
+  assert.equal(fs.existsSync(path.join(home, ".agents")), false);
+  const italianPlan = mustPlan(["--locale", "it"]).envelope;
+  assert.equal(italianPlan.data.plan_hash, firstPlan.data.plan_hash);
+  assert.match(italianPlan.human.outcome, /piano sicuro|già aggiornato/u);
+  assert.match(italianPlan.human.protection_boundary, /ripristinat[io] insieme/u);
+
+  const first = applyPlan(firstPlan.data.plan_hash);
+  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  const firstEnvelope = JSON.parse(first.stdout);
+  assert.equal(firstEnvelope.data.plugin_transaction, "committed");
   assert.equal(fs.existsSync(path.join(destination, ".codex-plugin", "plugin.json")), true);
   assert.equal(fs.existsSync(path.join(destination, "lib", "change-observatory", "cli.mjs")), true);
   assert.equal(fs.existsSync(path.join(destination, "ui", "change-observatory", "index.html")), true);
@@ -6900,18 +7075,24 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
   }
   const stale = path.join(destination, "docs", "stale.md");
   fs.writeFileSync(stale, "stale\n");
-  const second = install();
+  const secondPlan = mustPlan().envelope;
+  const second = applyPlan(secondPlan.data.plan_hash);
   assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
   assert.equal(fs.existsSync(stale), false);
-  const marketplace = readJson(path.join(home, ".agents", "plugins", "marketplace.json"));
+  const marketplace = readJson(marketplacePath);
   const entry = marketplace.plugins.find((plugin) => plugin.name === "agentic-sdlc-codex-plugin");
   assert.equal(entry.source.path, "./plugins/agentic-sdlc-codex-plugin");
-  const concurrent = await Promise.all([installAsync(), installAsync()]);
+  const concurrentPlan = mustPlan().envelope;
+  const concurrentArgs = [
+    "apply", "--json", "--plan-hash", concurrentPlan.data.plan_hash,
+  ];
+  const concurrent = await Promise.all([invokeAsync(concurrentArgs), invokeAsync(concurrentArgs)]);
   for (const result of concurrent) {
     assert.equal(result.signal, null, result.stderr);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(JSON.parse(result.stdout).data.state, "current");
   }
-  const concurrentMarketplace = readJson(path.join(home, ".agents", "plugins", "marketplace.json"));
+  const concurrentMarketplace = readJson(marketplacePath);
   assert.equal(
     concurrentMarketplace.plugins.filter((plugin) => plugin.name === "agentic-sdlc-codex-plugin").length,
     1,
@@ -6925,10 +7106,11 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
     const rollbackSentinel = path.join(destination, "docs", "rollback-sentinel.md");
     fs.writeFileSync(rollbackSentinel, "restore me\n");
     const marketplaceDirectory = path.join(home, ".agents", "plugins");
+    const rollbackPlan = mustPlan().envelope;
     fs.chmodSync(marketplaceDirectory, 0o500);
     let failedMarketplaceUpdate;
     try {
-      failedMarketplaceUpdate = install();
+      failedMarketplaceUpdate = applyPlan(rollbackPlan.data.plan_hash);
     } finally {
       fs.chmodSync(marketplaceDirectory, 0o700);
     }
@@ -6942,19 +7124,19 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
     const sentinel = path.join(externalPlugins, "sentinel.txt");
     fs.writeFileSync(sentinel, "do not replace\n");
     fs.symlinkSync(externalPlugins, path.join(junctionHome, "plugins"), "junction");
-    const junctionInstall = spawnSync(python, [installer], {
+    const junctionInstall = spawnSync(python, [installer, "plan", "--json", "--home", junctionHome], {
       cwd: repoRoot,
       encoding: "utf8",
       env: { ...process.env, HOME: junctionHome },
       timeout: 30_000,
     });
     assert.notEqual(junctionInstall.status, 0);
-    assert.match(junctionInstall.stderr, /symlinked or junction/i);
+    assert.match(`${junctionInstall.stdout}\n${junctionInstall.stderr}`, /symlinked or junction/i);
     assert.equal(fs.readFileSync(sentinel, "utf8"), "do not replace\n");
   }
 
   fs.writeFileSync(path.join(destination, "unmanaged.txt"), "do not delete\n");
-  const refused = install();
+  const refused = invoke(["plan"]);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /unexpected unmanaged top-level entries/);
   assert.equal(fs.readFileSync(path.join(destination, "unmanaged.txt"), "utf8"), "do not delete\n");
@@ -6978,7 +7160,8 @@ test("personal marketplace installer can validate and configure RTK globally", (
     "const path = require('node:path');",
     `const invocationPath = ${JSON.stringify(invocationPath)};`,
     "const args = process.argv.slice(2);",
-    "fs.appendFileSync(invocationPath, `${JSON.stringify(args)}\\n`);",
+    "const entry = process.env.RTK_FAKE_ENTRY || __filename;",
+    "fs.appendFileSync(invocationPath, `${JSON.stringify({entry,args})}\\n`);",
     "if (args.join(' ') === '--version') process.stdout.write('rtk 0.43.0\\n');",
     "else if (args.join(' ') === 'gain --project --format json') process.stdout.write(JSON.stringify({summary:{total_commands:2,total_input:100,total_output:20,total_saved:75,avg_savings_pct:75}}));",
     "else if (args.join(' ') === 'init -g --codex') { const root=process.env.CODEX_HOME; fs.mkdirSync(root,{recursive:true}); fs.writeFileSync(path.join(root,'RTK.md'),'rtk\\n'); fs.writeFileSync(path.join(root,'AGENTS.md'),'@RTK.md\\n'); }",
@@ -6988,6 +7171,7 @@ test("personal marketplace installer can validate and configure RTK globally", (
   if (process.platform === "win32") {
     fs.writeFileSync(fakeRtk, [
       "@echo off",
+      "set RTK_FAKE_ENTRY=%~f0",
       '"%RTK_FAKE_NODE_EXECUTABLE%" "%RTK_FAKE_RUNNER_PATH%" %*',
       "exit /b %errorlevel%",
     ].join("\r\n"));
@@ -6996,28 +7180,81 @@ test("personal marketplace installer can validate and configure RTK globally", (
   }
   const python = process.env.PYTHON || "python3";
   const installer = path.join(repoRoot, "scripts", "install-personal-marketplace.py");
-  const installed = spawnSync(python, [installer, "--with-rtk", "--rtk-executable", fakeRtk], {
+  const installerEnv = {
+    ...process.env,
+    HOME: home,
+    CODEX_HOME: codexHome,
+    RTK_FAKE_NODE_EXECUTABLE: process.execPath,
+    RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
+  };
+  const planned = spawnSync(python, [
+    installer, "plan", "--json", "--home", home,
+    "--with-rtk", "--rtk-executable", fakeRtk,
+  ], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: home,
-      CODEX_HOME: codexHome,
-      RTK_FAKE_NODE_EXECUTABLE: process.execPath,
-      RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
-    },
+    env: installerEnv,
+    timeout: 30_000,
+  });
+  assert.equal(planned.status, 0, `${planned.stdout}\n${planned.stderr}`);
+  const plannedEnvelope = JSON.parse(planned.stdout);
+  assert.equal(plannedEnvelope.command, "plan");
+  assert.equal(plannedEnvelope.data.state, "ready_to_apply");
+  assert.ok(plannedEnvelope.data.changes.includes("separate_global_rtk_configuration"));
+  assert.equal(plannedEnvelope.technical_details.rollback.rtk_scope, "separate_global_side_effect_not_covered");
+  assert.match(plannedEnvelope.human.impact, /global personal instructions Codex uses/u);
+  assert.match(plannedEnvelope.human.protection_boundary, /separate.*not undone/su);
+  assert.equal(fs.existsSync(path.join(home, "plugins", "agentic-sdlc-codex-plugin")), false);
+  assert.equal(fs.existsSync(path.join(codexHome, "RTK.md")), false);
+
+  const italianPlan = spawnSync(python, [
+    installer, "plan", "--json", "--locale", "it", "--home", home,
+    "--with-rtk", "--rtk-executable", fakeRtk,
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: installerEnv,
+    timeout: 30_000,
+  });
+  assert.equal(italianPlan.status, 0, `${italianPlan.stdout}\n${italianPlan.stderr}`);
+  const italianEnvelope = JSON.parse(italianPlan.stdout);
+  assert.match(italianEnvelope.human.impact, /istruzioni personali globali usate da Codex/u);
+  assert.match(italianEnvelope.human.protection_boundary, /separata.*non viene annullata/su);
+
+  const installed = spawnSync(python, [
+    installer, "apply", "--json", "--plan-hash", plannedEnvelope.data.plan_hash,
+    "--home", home, "--with-rtk", "--rtk-executable", fakeRtk,
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: installerEnv,
     timeout: 30_000,
   });
   assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`);
-  assert.match(installed.stdout, /Configured RTK 0\.43\.0 for global Codex use/u);
+  const installedEnvelope = JSON.parse(installed.stdout);
+  assert.equal(installedEnvelope.data.plugin_transaction, "committed");
+  assert.equal(installedEnvelope.data.global_rtk_configuration, "configured");
+  assert.match(installedEnvelope.human.impact, /changed the global personal instructions Codex uses/u);
+  assert.match(installedEnvelope.human.protection_boundary, /separate.*not undone/su);
   assert.equal(fs.readFileSync(path.join(codexHome, "AGENTS.md"), "utf8"), "@RTK.md\n");
   assert.equal(fs.readFileSync(path.join(codexHome, "RTK.md"), "utf8"), "rtk\n");
-  assert.deepEqual(readJsonLines(invocationPath), [
-    ["--version"],
+  const successfulInvocations = readJsonLines(invocationPath);
+  assert.ok(
+    successfulInvocations.filter(({ args }) => args.length === 1 && args[0] === "--version").length >= 2,
+    "plan and apply must each revalidate the RTK executable",
+  );
+  assert.deepEqual(successfulInvocations.slice(-3).map(({ args }) => args), [
     ["gain", "--project", "--format", "json"],
     ["init", "-g", "--codex"],
     ["init", "-g", "--codex", "--show"],
   ]);
+  const configurationInvocations = successfulInvocations.slice(-4);
+  assert.equal(new Set(configurationInvocations.map(({ entry }) => path.resolve(entry))).size, 1);
+  assert.notEqual(
+    path.resolve(configurationInvocations[0].entry),
+    fs.realpathSync(fakeRtk),
+    "global configuration must execute only the private byte-bound RTK copy",
+  );
   assert.equal(
     readJson(path.join(home, "plugins", "agentic-sdlc-codex-plugin", ".codex-plugin", "plugin.json")).version,
     readJson(path.join(repoRoot, "package.json")).version,
@@ -7025,24 +7262,48 @@ test("personal marketplace installer can validate and configure RTK globally", (
 
   const partialFailureHome = tmpProject("personal-installer-rtk-partial-home");
   const partialCodexHome = path.join(partialFailureHome, ".codex-test");
-  const partialFailure = spawnSync(python, [installer, "--with-rtk", "--rtk-executable", fakeRtk], {
+  const partialFailureEnv = {
+    ...process.env,
+    HOME: partialFailureHome,
+    CODEX_HOME: partialCodexHome,
+    RTK_FAKE_SHOW_FAIL: "1",
+    RTK_FAKE_NODE_EXECUTABLE: process.execPath,
+    RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
+  };
+  const partialPlan = spawnSync(python, [
+    installer, "plan", "--json", "--home", partialFailureHome,
+    "--with-rtk", "--rtk-executable", fakeRtk,
+  ], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: partialFailureHome,
-      CODEX_HOME: partialCodexHome,
-      RTK_FAKE_SHOW_FAIL: "1",
-      RTK_FAKE_NODE_EXECUTABLE: process.execPath,
-      RTK_FAKE_RUNNER_PATH: fakeRtkRunner,
-    },
+    env: partialFailureEnv,
+    timeout: 30_000,
+  });
+  assert.equal(partialPlan.status, 0, `${partialPlan.stdout}\n${partialPlan.stderr}`);
+  const partialPlanEnvelope = JSON.parse(partialPlan.stdout);
+  const partialFailure = spawnSync(python, [
+    installer, "apply", "--json", "--plan-hash", partialPlanEnvelope.data.plan_hash,
+    "--home", partialFailureHome, "--with-rtk", "--rtk-executable", fakeRtk,
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: partialFailureEnv,
     timeout: 30_000,
   });
   assert.notEqual(partialFailure.status, 0);
-  assert.match(partialFailure.stderr, /global RTK files may have been left in place/u);
+  const partialFailureEnvelope = JSON.parse(partialFailure.stdout);
+  assert.equal(partialFailureEnvelope.ok, false);
+  assert.equal(partialFailureEnvelope.data.plugin_transaction, "committed");
+  assert.equal(partialFailureEnvelope.data.global_rtk_configuration, "failed_or_incomplete");
+  assert.match(partialFailureEnvelope.technical_details.error, /RTK global Codex verification failed/u);
   assert.equal(fs.existsSync(path.join(partialCodexHome, "RTK.md")), true);
   assert.equal(fs.existsSync(path.join(partialCodexHome, "AGENTS.md")), true);
-  assert.equal(fs.existsSync(path.join(partialFailureHome, "plugins", "agentic-sdlc-codex-plugin")), false);
+  assert.equal(fs.existsSync(path.join(partialFailureHome, "plugins", "agentic-sdlc-codex-plugin")), true);
+  const partialMarketplace = readJson(path.join(partialFailureHome, ".agents", "plugins", "marketplace.json"));
+  assert.equal(
+    partialMarketplace.plugins.some((plugin) => plugin.name === "agentic-sdlc-codex-plugin"),
+    true,
+  );
 });
 
 test("manifests, trace compaction, and archive plans scale the KB without using cache as truth", () => {

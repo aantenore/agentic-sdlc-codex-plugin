@@ -61,6 +61,22 @@ test("serves health, view model, raw records, static assets, and HEAD over loopb
   assert.match(denied.headers["www-authenticate"], /^Bearer /);
 });
 
+test("carries a validated locale to the browser without exposing the access token in the query", async (t) => {
+  const fixture = await createServerFixture(t);
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+    locale: "it",
+  });
+  t.after(() => running.close());
+
+  const access = new URL(running.accessUrl);
+  assert.equal(access.hostname, "127.0.0.1");
+  assert.equal(access.searchParams.get("locale"), "it");
+  assert.equal(access.searchParams.has("access_token"), false);
+  assert.match(access.hash, /^#access_token=[A-Za-z0-9_-]+$/u);
+});
+
 test("rejects invalid Host, write methods, traversal, derived evidence, and symlink escape", async (t) => {
   const fixture = await createServerFixture(t);
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-outside-"));
