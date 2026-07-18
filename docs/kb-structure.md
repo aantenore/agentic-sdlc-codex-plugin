@@ -826,11 +826,27 @@ actor, origin, or timestamp, and someone able to replace both JSONL and
 checkpoint can create another internally consistent history. Independent
 authenticity requires a separately trusted signed or append-only anchor.
 
-When an `evidence` path resolves to a supported file, `evidence_refs` may record
-its size and SHA-256 over `redacted_utf8_v1`, plus either `snapshot_only` or
+When an `evidence` path resolves to a supported file, new `evidence_refs` record
+its size and SHA-256 over `redacted_utf8_v2`, plus either `snapshot_only` or
 `current_content` verification. The hash is intentionally calculated after
-redaction so secret bytes are not preserved as a hidden fingerprint. Strict
-gates recheck current-content references and the trace/checkpoint pair.
+redaction so secret bytes are not preserved as a hidden fingerprint. Every v2
+reference also points to an immutable, content-addressed policy source under
+`.sdlc/evidence-redaction-policies/`. That source contains the exact algorithm,
+detectors and flags, sensitive keys, replacement, and safety limits that
+determined the bytes. Verification checks the source path and hash and rebuilds
+that recorded policy; it never substitutes the project's current configuration.
+
+Historical `redacted_utf8_v1` references are intentionally fail-closed because
+the old format did not identify which of two writer policies produced a hash.
+Run `agentic-sdlc trace evidence bind --target-event <TR-ID>
+--redaction-policy <legacy_evidence_v1|operational_evidence_v1|operational_v2>`
+after reviewing the
+historical event. The command appends (without rewriting history) one binding
+covering the sealed event hash and every exact v1 reference hash. A gate rejects
+a missing, malformed, duplicate, conflicting, or later-policy-substituted
+binding. It never tries both policies for the same reference. The legacy engine
+replays the frozen v1 writer semantics, including historical `__proto__`
+omission, through bounded code that does not mutate object prototypes.
 
 For an SBOM or report that exceeds the safe evidence redaction limits, store a
 small reference record and link that record from the trace:

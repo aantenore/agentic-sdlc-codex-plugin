@@ -102,7 +102,11 @@ import {
   normalizeOperationalError,
 } from "../lib/observability/context.mjs";
 import {
+  createLegacyEvidenceV1RedactionPolicy,
+  createHistoricalOperationalEvidenceV1RedactionPolicy,
   createOperationalRedactionPolicy,
+  createRedactionPolicyFromSource,
+  describeRedactionPolicy,
   redactText,
   redactValue,
   redactValueWithMetadata,
@@ -185,6 +189,9 @@ const BUILT_IN_BUDGET_METER_ADAPTERS = Object.freeze({
   }),
 });
 const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
+const TRACE_EVIDENCE_POLICY_REF_SCHEMA = "trace-evidence-redaction-policy-ref:v1";
+const TRACE_EVIDENCE_POLICY_BINDING_SCHEMA = "trace-evidence-redaction-policy-binding:v1";
+const TRACE_EVIDENCE_POLICY_SOURCE_ROOT = `${SDLC_DIR}/evidence-redaction-policies`;
 const OUTPUT_LINK_MODES = new Set(["reuse", "delta", "new"]);
 const OUTPUT_DELIVERY_MODES = new Set(["artifact", "artifact-plus-chat-summary"]);
 const OUTPUT_VISUAL_FORMATS = new Set(["docx", "xlsx", "pdf", "pptx", "html"]);
@@ -478,6 +485,7 @@ const KNOWN_OPTIONS = new Set([
   "task-gate",
   "template",
   "template-dir",
+  "target-event",
   "target-root",
   "terminal-status",
   "text",
@@ -507,6 +515,7 @@ const KNOWN_OPTIONS = new Set([
   "validation",
   "view",
   "workflow-preset",
+  "redaction-policy",
   "guard-input-json",
 ]);
 const REPEATABLE_OPTIONS = new Set([
@@ -554,6 +563,7 @@ const REPEATABLE_OPTIONS = new Set([
   "source",
   "tool",
   "validation",
+  "target-event",
   "write-path",
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
@@ -1043,6 +1053,10 @@ async function main() {
     }
     if (command === "trace" && subcommand === "append") {
       appendTrace(context, parsed.options);
+      return;
+    }
+    if (command === "trace" && subcommand === "evidence" && rest[0] === "bind") {
+      bindHistoricalTraceEvidencePolicy(context, parsed.options);
       return;
     }
     if (command === "sync" && subcommand === "record") {
@@ -10706,6 +10720,34 @@ function localReleaseBoundaryCheckpointFromSource(source) {
   );
 }
 
+function localReleaseRuntimeBoundaryProjection(source) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  return {
+    schema_version: source.schema_version,
+    target_hash: source.target_hash,
+    platform: source.platform,
+    workspace_real_path: source.workspace_real_path,
+    target_real_path: source.target_real_path,
+    global_roots: Array.isArray(source.global_roots) ? [...source.global_roots] : source.global_roots,
+    target_outside_workspace: source.target_outside_workspace,
+    target_machine_global: source.target_machine_global,
+  };
+}
+
+function localDeliveryRuntimeBoundaryChanged(authorizedSnapshot, currentSnapshot) {
+  if (
+    authorizedSnapshot?.delivery_kind !== "local_release"
+    || currentSnapshot?.delivery_kind !== "local_release"
+    || authorizedSnapshot?.action !== currentSnapshot?.action
+    || !authorizedSnapshot?.local_boundary_source
+    || !currentSnapshot?.local_boundary_source
+  ) {
+    return false;
+  }
+  return stableJson(localReleaseRuntimeBoundaryProjection(authorizedSnapshot.local_boundary_source))
+    !== stableJson(localReleaseRuntimeBoundaryProjection(currentSnapshot.local_boundary_source));
+}
+
 function localReleaseBoundaryRequiresCheckpoint(context, target) {
   return localReleaseBoundaryCheckpointFromSource(localReleaseBoundarySource(context, target));
 }
@@ -11878,6 +11920,11 @@ function deliveryActionReceipts(context, profileId) {
     .filter((record) => record.profile_ref?.id === profileId);
 }
 
+function compareDeliveryAuthorizationOrder(left, right) {
+  return String(left.authorized_at).localeCompare(String(right.authorized_at))
+    || String(left.id).localeCompare(String(right.id));
+}
+
 function pullRequestCommitLineage(profile) {
   return {
     schema_version: "pull-request-commit-lineage:v1",
@@ -12013,7 +12060,7 @@ function validateCommitMediationCandidate(
       authorization.effective_level,
       "git.commit",
     );
-    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointValidation.required) {
+    if (!checkpointValidation.valid || authorization.checkpoint_required !== checkpointPolicy.required) {
       errors.push(`${label} authorization has an invalid immutable checkpoint policy`);
     }
   }
@@ -12387,11 +12434,12 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     || authorization.delivery?.id !== profile.delivery_id
     || authorization.delivery?.kind !== profile.delivery_kind
     || authorization.effective_level !== decision.effective_level
-    || authorization.checkpoint_required !== actionPolicy.required
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
   const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
+  let checkpointRequired = actionPolicy.required;
+  const auditWarnings = [];
   if (checkpointSnapshot) {
     const snapshotValidation = validateDeliveryActionCheckpointPolicySnapshot(
       context,
@@ -12400,6 +12448,13 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       decision.effective_level,
       authorization.action,
     );
+    if (!snapshotValidation.valid) {
+      fail(`Delivery action authorization ${authorization.id} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
+    }
+    checkpointRequired = checkpointSnapshot.required;
+    if (authorization.checkpoint_required !== checkpointRequired) {
+      fail(`Delivery action authorization ${authorization.id} checkpoint flag disagrees with its immutable event-time policy snapshot.`);
+    }
     const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
       context,
       profile,
@@ -12407,9 +12462,18 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       authorization.action,
       actionPolicy,
     );
-    if (!snapshotValidation.valid || stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
-      fail(`Delivery action authorization ${authorization.id} has a stale or invalid checkpoint policy snapshot.`);
+    if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+      if (localDeliveryRuntimeBoundaryChanged(checkpointSnapshot, currentSnapshot)) {
+        fail(
+          `Delivery action authorization ${authorization.id} was approved for a different local target or machine scope; authorize this exact action again.`,
+        );
+      }
+      auditWarnings.push(
+        `Delivery action authorization ${authorization.id} remains valid for this exact action; updated approval rules apply to later actions.`,
+      );
     }
+  } else if (authorization.checkpoint_required !== checkpointRequired) {
+    fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
   if (authorization.action === "git.push") {
     const coverageProof = authorization.action_details?.commit_coverage || null;
@@ -12432,9 +12496,9 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
       }
     }
   }
-  if (!actionPolicy.required) return;
+  if (!checkpointRequired) return { checkpointRequired, auditWarnings };
   if (authorization.approval?.status !== "approved") {
-    fail(`Delivery action authorization ${authorization.id} lacks its currently required formal approval.`);
+    fail(`Delivery action authorization ${authorization.id} lacks the formal approval required by its event-time checkpoint policy.`);
   }
   const subject = {
     profile_id: profile.id,
@@ -12473,6 +12537,7 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
     fail(`Delivery action authorization ${authorization.id} governance is invalid: ${report.errors.join("; ")}`);
   }
   validateDeliveryActionHostAuthority(context, profile, authorization);
+  return { checkpointRequired, auditWarnings };
 }
 
 function terminalStatusForDeliveryAction(action) {
@@ -12648,7 +12713,7 @@ function evaluateDeliveryAction(context, options) {
       fail(`Delivery profile ${profileId} does not authorize pull_request.merge.`);
     }
     const actionPolicy = deliveryActionCheckpointRequired(context, profile, decision.effective_level, action);
-    const checkpointRequired = actionPolicy.required;
+    let checkpointRequired = actionPolicy.required;
     const reportedOutcome = getOptionString(options, "outcome");
     const completingAction = Boolean(reportedOutcome);
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
@@ -12765,14 +12830,23 @@ function evaluateDeliveryAction(context, options) {
             && receipt.status === "authorized"
             && receipt.profile_ref?.hash === profile.profile_hash
             && !consumedAuthorizationIds.has(receipt.id))
-          .sort((left, right) => String(left.authorized_at).localeCompare(String(right.authorized_at)))
+          .sort(compareDeliveryAuthorizationOrder)
           .at(-1) || null
       : null;
     if (completingAction && !priorAuthorization) {
       fail(`Delivery action ${action} must be authorized before recording its outcome.`);
     }
+    let actionAuditWarnings = [];
     if (completingAction) {
-      assertCurrentDeliveryActionAuthorization(context, profile, decision, actionPolicy, priorAuthorization);
+      const authorizationValidation = assertCurrentDeliveryActionAuthorization(
+        context,
+        profile,
+        decision,
+        actionPolicy,
+        priorAuthorization,
+      );
+      checkpointRequired = authorizationValidation.checkpointRequired;
+      actionAuditWarnings = authorizationValidation.auditWarnings;
     }
     if (completingAction) {
       actionDetails = action === "git.commit" && reportedOutcome === "passed"
@@ -12879,6 +12953,15 @@ function evaluateDeliveryAction(context, options) {
     }
     const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
     writeJsonFile(receiptPath, receipt, { atomicCreate: true });
+    if (
+      process.env.NODE_ENV === "test"
+      && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE === "after-terminal-completion-receipt"
+      && completingAction
+      && reportedOutcome === "passed"
+      && terminalStatusForDeliveryAction(action)
+    ) {
+      fail("Simulated interruption after the terminal completion receipt was persisted.");
+    }
     const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
       ? repairTerminalDeliveryClose(context, profile, executionState)
       : null;
@@ -12954,6 +13037,7 @@ function evaluateDeliveryAction(context, options) {
       action_receipt_path: toProjectPath(context, receiptPath),
       lifecycle_status: autoClosePath ? "terminal" : "started",
       close_receipt_path: autoClosePath,
+      audit_warnings: actionAuditWarnings,
       human_guidance: completingAction ? completionGuidance : guidance,
     }, completingAction
       ? humanGuidanceLines(completionGuidance, [
@@ -24146,6 +24230,156 @@ function appendTrace(context, options) {
   output(options, { status: "appended", trace_path: tracePath, event: sealedEvent }, [`Appended ${type} trace ${sealedEvent.id}`]);
 }
 
+function bindHistoricalTraceEvidencePolicy(context, options) {
+  ensureInitialized(context);
+  const storyId = options.story ? normalizeId(String(options.story)) : null;
+  if (storyId && !readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist`);
+  }
+  const targetIds = [...new Set(normalizeListOption(options["target-event"]).map(String))];
+  if (targetIds.length === 0) fail("Provide at least one --target-event to bind.");
+  const policyName = String(requireOption(options, "redaction-policy"));
+  if (!["legacy_evidence_v1", "operational_evidence_v1", "operational_v2"].includes(policyName)) {
+    fail("--redaction-policy must be legacy_evidence_v1, operational_evidence_v1, or operational_v2.");
+  }
+  const policy = policyName === "legacy_evidence_v1"
+    ? buildLegacyEvidenceV1RedactionPolicy(context)
+    : policyName === "operational_evidence_v1"
+      ? buildHistoricalOperationalEvidenceV1RedactionPolicy(context)
+      : buildTraceRedactionPolicy(context);
+  let policySourceRef;
+  const traceFile = storyId ? `${storyId}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const bindUnderLock = () => {
+    let records;
+    try {
+      records = withTraceIntegritySnapshot(
+        traceIntegrityOptions(context, tracePath),
+        ({ integrity, records: snapshotRecords, present }) => {
+          if (!present || !integrity.valid || !integrity.initialized) {
+            fail("Historical evidence policy binding requires a valid sealed trace.");
+          }
+          return snapshotRecords;
+        },
+      );
+    } catch (error) {
+      if (error instanceof UserError) throw error;
+      failTraceIntegrityWrite(error);
+    }
+    if (
+      process.env.NODE_ENV === "test"
+      && /^\d{1,4}$/u.test(process.env.AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS || "")
+    ) {
+      sleepSync(Math.min(Number(process.env.AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS), 1_000));
+    }
+    const events = records.filter((record) => record.valid).map((record) => record.event);
+    const byId = new Map();
+    for (const event of events) {
+      if (byId.has(event.id)) fail(`Trace contains duplicate event id ${event.id}.`);
+      byId.set(event.id, event);
+    }
+    const alreadyBound = new Set();
+    for (const event of events) {
+      for (const binding of Array.isArray(event.evidence_policy_bindings) ? event.evidence_policy_bindings : []) {
+        const key = traceEvidencePolicyBindingKey(binding?.target);
+        if (key) alreadyBound.add(key);
+      }
+    }
+    const bindings = [];
+    for (const targetId of targetIds) {
+      const target = byId.get(targetId);
+      if (!target || target?._trace_integrity?.schema_version !== "trace-integrity-event:v1") {
+        fail(`Target trace event ${targetId} is missing or unsealed.`);
+      }
+      const refs = Array.isArray(target.evidence_refs)
+        ? target.evidence_refs.filter((ref) => ref?.representation === "redacted_utf8_v1")
+        : [];
+      if (refs.length === 0) fail(`Target trace event ${targetId} has no historical v1 evidence refs.`);
+      for (const ref of refs) {
+        const bindingTarget = {
+          event_id: target.id,
+          event_hash: target._trace_integrity.event_hash,
+          evidence_path: ref.path,
+          evidence_sha256: ref.sha256,
+          evidence_ref_sha256: traceEvidenceRefHash(ref),
+        };
+        const key = traceEvidencePolicyBindingKey(bindingTarget);
+        if (alreadyBound.has(key)) fail(`Historical evidence ref ${target.id}:${ref.path} is already bound.`);
+        const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+        const representation = redactedEvidenceRepresentation(filePath, policy);
+        if (!evidenceRepresentationMatchesRef(representation, ref)) {
+          fail(`Selected redaction policy does not reproduce ${target.id}:${ref.path}.`);
+        }
+        policySourceRef ||= traceEvidencePolicySourceRef(context, policy);
+        alreadyBound.add(key);
+        bindings.push({
+          schema_version: TRACE_EVIDENCE_POLICY_BINDING_SCHEMA,
+          target: bindingTarget,
+          policy_source_ref: policySourceRef,
+        });
+      }
+    }
+    const attribution = buildAttribution(context, options, "trace.evidence-policy.bind");
+    const event = sealPreparedTraceEventLocked(
+      context,
+      tracePath,
+      prepareGovernedTraceEvent(context, {
+        id: `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
+        story_id: storyId,
+        type: "decision",
+        summary: getOptionString(options, "summary")
+          || `Bound ${bindings.length} historical evidence reference${bindings.length === 1 ? "" : "s"} to ${policyName}`,
+        outcome: "passed",
+        actor: attribution.actor,
+        ...buildTraceAuthorityMetadata(context, options, attribution),
+        action: "trace.evidence-policy.bind",
+        evidence: [policySourceRef.path],
+        evidence_policy_bindings: bindings,
+        related: targetIds,
+        git: attribution.git,
+        run: attribution.run,
+        correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
+        created_at: now(),
+      }),
+    );
+    return { bindings, event };
+  };
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  let result;
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    result = bindUnderLock();
+  } finally {
+    releaseTraceLock();
+  }
+  const { bindings, event } = result;
+  output(options, {
+    status: "bound",
+    trace_path: tracePath,
+    policy_source_ref: policySourceRef,
+    binding_count: bindings.length,
+    event,
+  }, [`Bound ${bindings.length} historical evidence references to ${policyName}`]);
+}
+
+function traceEvidenceRefHash(ref) {
+  return hashBuffer(Buffer.from(stableJson(ref), "utf8"));
+}
+
+function traceEvidencePolicyBindingKey(target) {
+  if (!target || typeof target !== "object") return null;
+  const values = [
+    target.event_id,
+    target.event_hash,
+    target.evidence_path,
+    target.evidence_sha256,
+    target.evidence_ref_sha256,
+  ];
+  return values.every((value) => typeof value === "string" && value.length > 0)
+    ? values.join("\u0000")
+    : null;
+}
+
 function recordSyncEvent(context, options) {
   ensureInitialized(context);
   const event = normalizeGitEvent(requireOption(options, "event"));
@@ -28463,6 +28697,129 @@ function assertNoPendingWorkflowTraceTransaction(context, tracePath) {
 }
 
 function buildTraceRedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createOperationalRedactionPolicy);
+}
+
+function buildLegacyEvidenceV1RedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createLegacyEvidenceV1RedactionPolicy);
+}
+
+function buildHistoricalOperationalEvidenceV1RedactionPolicy(context) {
+  return createTraceRedactionPolicy(context, createHistoricalOperationalEvidenceV1RedactionPolicy);
+}
+
+function traceEvidencePolicySourceRef(context, policy) {
+  let source;
+  try {
+    source = describeRedactionPolicy(policy);
+    assertTraceEvidencePolicySourceSafety(source);
+  } catch {
+    fail("The trace evidence redaction policy cannot be represented safely.");
+  }
+  const bytes = `${JSON.stringify(source, null, 2)}\n`;
+  const sha256 = hashBuffer(Buffer.from(bytes, "utf8"));
+  const projectPath = `${TRACE_EVIDENCE_POLICY_SOURCE_ROOT}/${sha256}.json`;
+  const filePath = resolveProjectFilePath(context, projectPath, { mustExist: false });
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  try {
+    writeTextFile(filePath, bytes, {
+      atomicCreate: true,
+      durable: true,
+      maxExistingBytes: Buffer.byteLength(bytes, "utf8"),
+    });
+  } finally {
+    releaseLock();
+  }
+  return {
+    schema_version: TRACE_EVIDENCE_POLICY_REF_SCHEMA,
+    path: projectPath,
+    sha256,
+  };
+}
+
+function loadTraceEvidencePolicySource(context, ref, options = {}) {
+  if (
+    !ref
+    || typeof ref !== "object"
+    || Array.isArray(ref)
+    || Object.keys(ref).sort().join("\u0000") !== ["path", "schema_version", "sha256"].sort().join("\u0000")
+    || ref.schema_version !== TRACE_EVIDENCE_POLICY_REF_SCHEMA
+    || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))
+    || ref.path !== `${TRACE_EVIDENCE_POLICY_SOURCE_ROOT}/${ref.sha256}.json`
+  ) {
+    fail("Trace evidence policy source reference is malformed.");
+  }
+  const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const bytes = readFileFromStableParent(filePath, parentIdentity, {
+    maxBytes: 256 * 1024,
+    tooLargeMessage: "Trace evidence policy source exceeds the 256 KiB limit.",
+  });
+  if (hashBuffer(Buffer.from(bytes, "utf8")) !== ref.sha256) {
+    fail("Trace evidence policy source hash does not match its content address.");
+  }
+  let source;
+  try {
+    source = JSON.parse(bytes);
+  } catch {
+    fail("Trace evidence policy source is not valid JSON.");
+  }
+  try {
+    assertTraceEvidencePolicySourceSafety(source, options.allowedAlgorithms);
+    return createRedactionPolicyFromSource(source);
+  } catch {
+    fail("Trace evidence policy source is unsupported or non-canonical.");
+  }
+}
+
+function assertTraceEvidencePolicySourceSafety(source, allowedAlgorithms) {
+  const permitted = new Set(allowedAlgorithms ?? [
+    "legacy_evidence_v1",
+    "operational_evidence_v1",
+    "operational_v2",
+  ]);
+  if (!source || typeof source !== "object" || Array.isArray(source) || !permitted.has(source.algorithm)) {
+    throw new TypeError("unsupported trace evidence redaction algorithm");
+  }
+  const baselinePolicy = source.algorithm === "legacy_evidence_v1"
+    ? createLegacyEvidenceV1RedactionPolicy()
+    : source.algorithm === "operational_evidence_v1"
+      ? createHistoricalOperationalEvidenceV1RedactionPolicy()
+      : createOperationalRedactionPolicy();
+  const baseline = describeRedactionPolicy(baselinePolicy);
+  if (
+    stableJson(source.limits) !== stableJson(baseline.limits)
+    || source.replacement !== baseline.replacement
+    || stableJson(source.credential_assignment_detector)
+      !== stableJson(baseline.credential_assignment_detector)
+  ) {
+    throw new TypeError("trace evidence redaction safety boundary changed");
+  }
+  if (
+    !Array.isArray(source.sensitive_keys)
+    || source.sensitive_keys.length > 256
+    || source.sensitive_keys.some((key) => typeof key !== "string" || key.length === 0 || key.length > 128)
+    || !Array.isArray(source.detectors)
+    || !Array.isArray(source.identifier_allow_patterns)
+    || source.detectors.length + source.identifier_allow_patterns.length > baseline.limits.maxPatterns
+  ) {
+    throw new TypeError("trace evidence redaction policy exceeds its immutable safety limits");
+  }
+  const hasCanonicalEntry = (entries, required) => {
+    const serialized = new Set(entries.map((entry) => stableJson(entry)));
+    return required.every((entry) => serialized.has(stableJson(entry)));
+  };
+  if (
+    !baseline.sensitive_keys.every((key) => source.sensitive_keys.includes(key))
+    || !hasCanonicalEntry(source.detectors, baseline.detectors)
+    || !hasCanonicalEntry(source.identifier_allow_patterns, baseline.identifier_allow_patterns)
+  ) {
+    throw new TypeError("trace evidence redaction policy omits a mandatory privacy detector");
+  }
+}
+
+function createTraceRedactionPolicy(context, factory) {
   const configured = context.config.observability?.redaction;
   const secretPatterns = normalizeTraceDetectorPatterns(configured?.secret_patterns, "secret_patterns", "configured_secret");
   const piiPatterns = normalizeTraceDetectorPatterns(configured?.pii_patterns, "pii_patterns", "configured_pii");
@@ -28479,7 +28836,7 @@ function buildTraceRedactionPolicy(context) {
     fail("observability.redaction.sensitive_keys must be an array of non-empty strings");
   }
   try {
-    return createOperationalRedactionPolicy({
+    return factory({
       secretPatterns,
       piiPatterns,
       identifierAllowPatterns,
@@ -28502,6 +28859,7 @@ function normalizeTraceDetectorPatterns(value, fieldName, prefix) {
 
 function buildTraceEvidenceRefs(context, event, policy) {
   const refs = [];
+  let policySourceRef;
   const evidence = Array.isArray(event.evidence) ? event.evidence : [];
   for (const projectPath of evidence) {
     let filePath;
@@ -28511,11 +28869,13 @@ function buildTraceEvidenceRefs(context, event, policy) {
       continue;
     }
     const representation = redactedEvidenceRepresentation(filePath, policy);
+    policySourceRef ||= traceEvidencePolicySourceRef(context, policy);
     refs.push({
       path: projectPath,
       size_bytes: Buffer.byteLength(representation, "utf8"),
       sha256: hashBuffer(Buffer.from(representation, "utf8")),
-      representation: "redacted_utf8_v1",
+      representation: "redacted_utf8_v2",
+      policy_source_ref: policySourceRef,
       verification: shouldVerifyTraceEvidence(event, projectPath)
         ? "current_content"
         : "snapshot_only",
@@ -30483,8 +30843,30 @@ function validateCompletedRemoteActionReceipt(report, receipt, authorization, la
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  const recoverableTerminal = options.allowRecoverableTerminal === true
+    && actions.some((receipt) =>
+      terminalStatusForDeliveryAction(receipt.action)
+      && receipt.status === "completed"
+      && receipt.outcome === "passed");
   const historical = state.lifecycle_status === "terminal"
-    || effectiveDeliveryProfileStatus(context, profile).status === "revoked";
+    || effectiveDeliveryProfileStatus(context, profile).status === "revoked"
+    || recoverableTerminal;
+  const consumedAuthorizationIds = new Set(actions
+    .filter((receipt) => receipt.status === "completed")
+    .map((receipt) => receipt.authorization_receipt_ref?.id)
+    .filter(Boolean));
+  const liveAuthorizationIds = new Set();
+  const liveAuthorizationsByAction = new Map();
+  for (const authorization of actions.filter((receipt) =>
+    receipt.status === "authorized" && !consumedAuthorizationIds.has(receipt.id))) {
+    const current = liveAuthorizationsByAction.get(authorization.action);
+    if (!current || compareDeliveryAuthorizationOrder(current, authorization) < 0) {
+      liveAuthorizationsByAction.set(authorization.action, authorization);
+    }
+  }
+  for (const authorization of liveAuthorizationsByAction.values()) {
+    liveAuthorizationIds.add(authorization.id);
+  }
   let expectedEffectiveLevel = "supervised";
   try {
     const start = state.start_receipt;
@@ -30560,6 +30942,17 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
   }
   for (const receipt of actions) {
     const actionLabel = `${label} action receipt ${receipt.id}`;
+    const supersededAuthorization = receipt.status === "authorized"
+      && !consumedAuthorizationIds.has(receipt.id)
+      && !liveAuthorizationIds.has(receipt.id);
+    const receiptHistorical = historical
+      || receipt.status === "completed"
+      || consumedAuthorizationIds.has(receipt.id)
+      || supersededAuthorization;
+    if (supersededAuthorization) {
+      const warning = `${actionLabel} is superseded by a later unconsumed authorization for the same action`;
+      if (!report.warnings.includes(warning)) report.warnings.push(warning);
+    }
     if (receipt.profile_ref?.hash !== profile.profile_hash) {
       report.errors.push(`${actionLabel} is bound to stale profile content`);
     }
@@ -30578,7 +30971,7 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
-    const actionPolicy = historical
+    const actionPolicy = receiptHistorical && profile.delivery_kind === "local_release"
       ? null
       : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
     if (receipt.effective_level !== expectedEffectiveLevel) {
@@ -30598,9 +30991,31 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       report.errors.push(`${actionLabel} has an invalid checkpoint policy snapshot: ${snapshotValidation.errors.join("; ")}`);
     }
     let checkpointRequired = actionPolicy?.required ?? false;
-    if (historical && snapshotValidation?.valid) {
-      checkpointRequired = snapshotValidation.required;
-    } else if (historical) {
+    if (snapshotValidation?.valid) {
+      checkpointRequired = checkpointSnapshot.required;
+      if (actionPolicy) {
+        const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
+          context,
+          profile,
+          expectedEffectiveLevel,
+          receipt.action,
+          actionPolicy,
+        );
+        if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
+          if (
+            !receiptHistorical
+            && localDeliveryRuntimeBoundaryChanged(checkpointSnapshot, currentSnapshot)
+          ) {
+            report.errors.push(
+              `${actionLabel} was approved for a different local target or machine scope; authorize this exact action again`,
+            );
+          } else {
+            const policyWarning = `${actionLabel} remains valid for this exact action; updated approval rules apply to later actions`;
+            if (!report.warnings.includes(policyWarning)) report.warnings.push(policyWarning);
+          }
+        }
+      }
+    } else if (receiptHistorical) {
       const immutableLegacyCheckpoint = expectedEffectiveLevel === "supervised"
         || (profile.checkpoints || []).includes(receipt.action)
         || DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS.includes(receipt.action)
@@ -30611,17 +31026,6 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       checkpointRequired = receipt.checkpoint_required === true;
       const legacyWarning = `${label} uses legacy action receipts without an event-time checkpoint policy snapshot; immutable boundaries and recorded approvals were verified`;
       if (!report.warnings.includes(legacyWarning)) report.warnings.push(legacyWarning);
-    } else if (checkpointSnapshot && snapshotValidation?.valid) {
-      const currentSnapshot = deliveryActionCheckpointPolicySnapshot(
-        context,
-        profile,
-        expectedEffectiveLevel,
-        receipt.action,
-        actionPolicy,
-      );
-      if (stableJson(checkpointSnapshot) !== stableJson(currentSnapshot)) {
-        report.errors.push(`${actionLabel} checkpoint policy snapshot is stale for the current exact policy source`);
-      }
     }
     if (receipt.checkpoint_required !== checkpointRequired) {
       report.errors.push(`${actionLabel} checkpoint flag does not match its exact action policy`);
@@ -31430,6 +31834,7 @@ function validateTraceSnapshotRecords(context, report, filePath, label, records,
   const fileName = path.basename(filePath, ".jsonl");
   const expectedStoryId = fileName === "project" ? null : fileName;
   const latestOutcomeEvents = new Map();
+  const evidencePolicyBindings = collectTraceEvidencePolicyBindings(context, report, records, label);
   for (const record of records) {
     const index = record.line - 1;
     if (!record.valid) {
@@ -31472,7 +31877,13 @@ function validateTraceSnapshotRecords(context, report, filePath, label, records,
     }
     validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
     if (report.strict && event._trace_integrity) {
-      validateTraceEvidenceRefs(context, report, event, `${label}:${index + 1}`);
+      validateTraceEvidenceRefs(
+        context,
+        report,
+        event,
+        `${label}:${index + 1}`,
+        evidencePolicyBindings,
+      );
     }
     if (report.strict && ["test", "release"].includes(event.type)) {
       validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
@@ -31625,7 +32036,113 @@ function validateTraceEvidence(context, report, event, label) {
   }
 }
 
-function validateTraceEvidenceRefs(context, report, event, label) {
+function collectTraceEvidencePolicyBindings(context, report, records, label) {
+  const result = new Map();
+  if (!report.strict) return result;
+  const eventRecords = new Map();
+  for (const record of records) {
+    if (!record.valid || !record.event?.id) continue;
+    const entries = eventRecords.get(record.event.id) || [];
+    entries.push({ event: record.event, line: record.line });
+    eventRecords.set(record.event.id, entries);
+  }
+  for (const record of records) {
+    if (!record.valid) continue;
+    const event = record.event;
+    if (
+      event.evidence_policy_bindings !== undefined
+      && !Array.isArray(event.evidence_policy_bindings)
+    ) {
+      report.errors.push(`${label}:${record.line} evidence policy bindings must be an array`);
+      continue;
+    }
+    const bindings = Array.isArray(event.evidence_policy_bindings)
+      ? event.evidence_policy_bindings
+      : [];
+    if (bindings.length === 0) {
+      if (event.action === "trace.evidence-policy.bind") {
+        report.errors.push(`${label}:${record.line} evidence policy binding event has no bindings`);
+      }
+      continue;
+    }
+    if (event.action !== "trace.evidence-policy.bind") {
+      report.errors.push(`${label}:${record.line} evidence policy bindings require action trace.evidence-policy.bind`);
+      continue;
+    }
+    for (const binding of bindings) {
+      const bindingLabel = `${label}:${record.line} evidence policy binding`;
+      if (
+        !binding
+        || typeof binding !== "object"
+        || Array.isArray(binding)
+        || Object.keys(binding).sort().join("\u0000")
+          !== ["policy_source_ref", "schema_version", "target"].sort().join("\u0000")
+        || binding.schema_version !== TRACE_EVIDENCE_POLICY_BINDING_SCHEMA
+      ) {
+        report.errors.push(`${bindingLabel} is malformed`);
+        continue;
+      }
+      const target = binding.target;
+      if (
+        !target
+        || typeof target !== "object"
+        || Array.isArray(target)
+        || Object.keys(target).sort().join("\u0000") !== [
+          "event_hash",
+          "event_id",
+          "evidence_path",
+          "evidence_ref_sha256",
+          "evidence_sha256",
+        ].sort().join("\u0000")
+        || !/^[a-f0-9]{64}$/u.test(String(target.event_hash || ""))
+        || !/^[a-f0-9]{64}$/u.test(String(target.evidence_sha256 || ""))
+        || !/^[a-f0-9]{64}$/u.test(String(target.evidence_ref_sha256 || ""))
+      ) {
+        report.errors.push(`${bindingLabel} target is malformed`);
+        continue;
+      }
+      const targetRecords = eventRecords.get(target.event_id) || [];
+      if (targetRecords.length !== 1 || targetRecords[0].line >= record.line) {
+        report.errors.push(`${bindingLabel} target must be one earlier sealed event`);
+        continue;
+      }
+      const targetEvent = targetRecords[0].event;
+      if (targetEvent?._trace_integrity?.event_hash !== target.event_hash) {
+        report.errors.push(`${bindingLabel} target event hash does not match`);
+        continue;
+      }
+      const refs = (Array.isArray(targetEvent.evidence_refs) ? targetEvent.evidence_refs : [])
+        .filter((ref) => (
+          ref?.representation === "redacted_utf8_v1"
+          && ref.path === target.evidence_path
+          && ref.sha256 === target.evidence_sha256
+          && traceEvidenceRefHash(ref) === target.evidence_ref_sha256
+        ));
+      if (refs.length !== 1) {
+        report.errors.push(`${bindingLabel} does not identify one exact historical v1 ref`);
+        continue;
+      }
+      const key = traceEvidencePolicyBindingKey(target);
+      if (!key || result.has(key)) {
+        report.errors.push(`${bindingLabel} conflicts with another binding for the same historical ref`);
+        if (key) result.set(key, null);
+        continue;
+      }
+      try {
+        result.set(key, {
+          binding,
+          policy: loadTraceEvidencePolicySource(context, binding.policy_source_ref),
+        });
+      } catch {
+        report.errors.push(`${bindingLabel} policy source cannot be verified`);
+        result.set(key, null);
+      }
+    }
+  }
+  return result;
+}
+
+function validateTraceEvidenceRefs(context, report, event, label, evidencePolicyBindings = new Map()) {
   const refs = Array.isArray(event.evidence_refs) ? event.evidence_refs : [];
   const evidence = Array.isArray(event.evidence) ? event.evidence.filter(Boolean) : [];
   const byPath = new Map();
@@ -31642,17 +32159,53 @@ function validateTraceEvidenceRefs(context, report, event, label) {
     if (!evidence.includes(ref.path)) {
       report.errors.push(`${label} evidence integrity reference ${ref.path} is not listed as evidence`);
     }
-    if (ref.verification !== "current_content") continue;
-    if (ref.representation !== "redacted_utf8_v1" || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))) {
+    if (
+      !["redacted_utf8_v1", "redacted_utf8_v2"].includes(ref.representation)
+      || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))
+      || !Number.isSafeInteger(ref.size_bytes)
+      || ref.size_bytes < 0
+      || !["snapshot_only", "current_content"].includes(ref.verification)
+      || (ref.representation === "redacted_utf8_v1" && ref.policy_source_ref !== undefined)
+      || Object.keys(ref).sort().join("\u0000") !== (
+        ref.representation === "redacted_utf8_v2"
+          ? ["path", "policy_source_ref", "representation", "sha256", "size_bytes", "verification"]
+          : ["path", "representation", "sha256", "size_bytes", "verification"]
+      ).sort().join("\u0000")
+    ) {
       report.errors.push(`${label} evidence integrity reference ${ref.path} is malformed`);
       continue;
     }
+    let policy;
+    if (ref.representation === "redacted_utf8_v2") {
+      try {
+        policy = loadTraceEvidencePolicySource(context, ref.policy_source_ref, {
+          allowedAlgorithms: ["operational_v2"],
+        });
+      } catch {
+        report.errors.push(`${label} evidence policy source cannot be verified for ${ref.path}`);
+        continue;
+      }
+    } else {
+      const target = {
+        event_id: event.id,
+        event_hash: event?._trace_integrity?.event_hash,
+        evidence_path: ref.path,
+        evidence_sha256: ref.sha256,
+        evidence_ref_sha256: traceEvidenceRefHash(ref),
+      };
+      const resolution = evidencePolicyBindings.get(traceEvidencePolicyBindingKey(target));
+      if (!resolution?.policy) {
+        report.errors.push(`${label} historical v1 evidence ${ref.path} requires one exact append-only policy binding`);
+        continue;
+      }
+      policy = resolution.policy;
+    }
+    if (ref.verification !== "current_content") continue;
     try {
       const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
-      const representation = redactedEvidenceRepresentation(filePath, buildTraceRedactionPolicy(context));
-      const actualSize = Buffer.byteLength(representation, "utf8");
-      const actualHash = hashBuffer(Buffer.from(representation, "utf8"));
-      if (actualSize !== ref.size_bytes || actualHash !== ref.sha256) {
+      const currentRepresentation = redactedEvidenceRepresentation(filePath, policy);
+      const matches = evidenceRepresentationMatchesRef(currentRepresentation, ref);
+      if (!matches) {
         report.errors.push(`${label} evidence content drift detected for ${ref.path}`);
       }
     } catch {
@@ -31666,6 +32219,11 @@ function validateTraceEvidenceRefs(context, report, event, label) {
       }
     }
   }
+}
+
+function evidenceRepresentationMatchesRef(representation, ref) {
+  const bytes = Buffer.from(representation, "utf8");
+  return bytes.length === ref.size_bytes && hashBuffer(bytes) === ref.sha256;
 }
 
 function hasTraceActor(event) {
@@ -32195,8 +32753,16 @@ function writeTextFile(filePath, content, options = {}) {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
       fail(`Refusing to write through symlink: ${filePath}`);
     }
-    const existing = readFileFromStableParent(filePath, parentIdentity);
+    const existing = readFileFromStableParent(filePath, parentIdentity, {
+      ...(options.maxExistingBytes === undefined
+        ? {}
+        : {
+            maxBytes: options.maxExistingBytes,
+            tooLargeMessage: `Existing immutable file exceeds its expected size: ${filePath}`,
+          }),
+    });
     if (existing === content) {
+      if (options.durable) syncWorkflowFile(filePath);
       return false;
     }
     fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
@@ -32207,7 +32773,7 @@ function writeTextFile(filePath, content, options = {}) {
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity);
+      writeFileToStableParent(tempPath, content, parentIdentity, options);
       assertDirectoryIdentity(parentPath, parentIdentity);
       try {
         fs.linkSync(tempPath, filePath);
@@ -32217,6 +32783,7 @@ function writeTextFile(filePath, content, options = {}) {
         }
         throw error;
       }
+      if (options.durable) syncWorkflowDirectory(parentPath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
         fs.rmSync(tempPath, { force: true });
@@ -32339,7 +32906,7 @@ function sameStableFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function writeFileToStableParent(filePath, content, parentIdentity) {
+function writeFileToStableParent(filePath, content, parentIdentity, options = {}) {
   assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
   let descriptor;
   let created = false;
@@ -32353,6 +32920,7 @@ function writeFileToStableParent(filePath, content, parentIdentity) {
     created = true;
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     fs.writeFileSync(descriptor, content);
+    if (options.durable) fs.fsyncSync(descriptor);
     complete = true;
   } finally {
     if (descriptor !== undefined) {
@@ -33113,6 +33681,7 @@ Usage:
   agentic-sdlc phase lock --phase phase [--reason text] [--expires-at iso]
   agentic-sdlc phase release --id lock-id [--reason text]
   agentic-sdlc trace append --type decision --summary text [--story ST-001]
+  agentic-sdlc trace evidence bind --target-event TR-... --redaction-policy <legacy_evidence_v1|operational_evidence_v1|operational_v2> [--story ST-001]
       [--outcome passed|failed|blocked|skipped|ready]
       [--actor id] [--requested-by id] [--authorized-by id]
       [--request-summary text] [--git-event push|commit|merge|pull|rebase]

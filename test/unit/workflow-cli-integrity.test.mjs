@@ -216,7 +216,10 @@ test("sealed trace append, workflow start and transition remain one strict chain
   let traces = projectTraceEvents(project);
   assert.deepEqual(traces.map((event) => event._trace_integrity?.sequence), [1, 2, 3]);
   assert.equal(traces.some((event) => JSON.stringify(event).includes(secret)), false);
-  assert.match(traces.find((event) => event.action === "workflow.instance.transition").summary, /credential=\[REDACTED\]/u);
+  assert.equal(
+    traces.find((event) => event.action === "workflow.instance.transition").summary,
+    "[REDACTED]",
+  );
 
   const strictGate = run(["gate", "check", "--root", project, "--strict", "--json"], project);
   const strictReport = JSON.parse(strictGate.stdout);

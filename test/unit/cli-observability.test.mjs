@@ -1,12 +1,16 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { REDACTION_PLACEHOLDER } from "../../lib/observability/redaction.mjs";
+import {
+  REDACTION_PLACEHOLDER,
+} from "../../lib/observability/redaction.mjs";
+import { sealTraceEvent, verifyTraceIntegrity } from "../../lib/trace-integrity.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const cliPath = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -43,6 +47,36 @@ function runCli(args, options = {}) {
   });
 }
 
+function runCliAsync(args, options = {}) {
+  const env = { ...process.env };
+  for (const key of [
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITHUB_ACTOR",
+    "CODEX_AGENT_NAME",
+    "CODEX_USER_ID",
+    "NODE_OPTIONS",
+  ]) {
+    delete env[key];
+  }
+  Object.assign(env, options.env || {});
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd: repoRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+}
+
 function mustRun(args, options = {}) {
   const result = runCli(args, options);
   assert.equal(result.error, undefined, `${args.join(" ")} failed to execute: ${result.error?.message}`);
@@ -74,6 +108,22 @@ function readOnlyJsonLine(filePath) {
   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/u).filter(Boolean);
   assert.equal(lines.length, 1, `expected one JSONL event in ${filePath}`);
   return JSON.parse(lines[0]);
+}
+
+function resealOnlyProjectTrace(project, event) {
+  const tracesRoot = path.join(project, ".sdlc", "traces");
+  const tracePath = path.join(tracesRoot, "project.jsonl");
+  const checkpointPath = path.join(tracesRoot, ".integrity", "project.jsonl.checkpoint.json");
+  const unsealed = JSON.parse(JSON.stringify(event));
+  delete unsealed._trace_integrity;
+  fs.rmSync(tracePath, { force: true });
+  fs.rmSync(path.dirname(checkpointPath), { recursive: true, force: true });
+  sealTraceEvent({
+    boundaryRoot: tracesRoot,
+    tracePath,
+    checkpointPath,
+    event: unsealed,
+  });
 }
 
 test("unexpected CLI failures return safe correlated JSON and human errors", () => {
@@ -249,13 +299,15 @@ test("CLI errors withhold user input when project configuration is a symlink", (
 test("trace append seals a redacted event without treating identifiers or opaque business values as secrets", () => {
   const project = initializedProject("trace-redaction");
   const fakeSecret = `github_pat_${"A".repeat(32)}`;
+  const fakeAliasSecret = "correct-horse-battery-staple";
   const opaqueBusinessValue = "aB3dE5gH7jK9mN2pQ4sT6vW8xY0zC1fG";
   const authorizationActionId = "AUT-ACT-20260718123456789-abcdef";
   const sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const uuid = "550e8400-e29b-41d4-a716-446655440000";
   const suppliedCorrelationId = `corr-${uuid}`;
   const summary = [
-    `credential=${fakeSecret}`,
+    `credential="${fakeSecret}"`,
+    `passwd="${fakeAliasSecret}"`,
     `opaque=${opaqueBusinessValue}`,
     `receipt=${authorizationActionId}`,
     `digest=${sha256}`,
@@ -275,8 +327,9 @@ test("trace append seals a redacted event without treating identifiers or opaque
   assert.match(payload.correlation_id, CORRELATION_ID_PATTERN);
   assert.equal(payload.event.correlation_id, payload.correlation_id);
   assert.equal(payload.event.summary.includes(fakeSecret), false);
+  assert.equal(payload.event.summary.includes(fakeAliasSecret), false);
   assert.equal(payload.event.summary.includes(opaqueBusinessValue), true);
-  assert.match(payload.event.summary, /credential=\[REDACTED\]/u);
+  assert.match(payload.event.summary, /^\[REDACTED\] \[REDACTED\] opaque=/u);
   for (const identifier of [
     opaqueBusinessValue,
     authorizationActionId,
@@ -296,6 +349,7 @@ test("trace append seals a redacted event without treating identifiers or opaque
   assert.equal(fs.existsSync(checkpointPath), true);
   const rawTrace = fs.readFileSync(tracePath, "utf8");
   assert.equal(rawTrace.includes(fakeSecret), false);
+  assert.equal(rawTrace.includes(fakeAliasSecret), false);
   for (const identifier of [
     opaqueBusinessValue,
     authorizationActionId,
@@ -443,8 +497,14 @@ test("strict gate reports current-content evidence drift without storing origina
   assert.equal(appendPayload.event.evidence_refs.length, 1);
   assert.equal(appendPayload.event.evidence_refs[0].path, evidenceRelativePath);
   assert.equal(appendPayload.event.evidence_refs[0].verification, "current_content");
-  assert.equal(appendPayload.event.evidence_refs[0].representation, "redacted_utf8_v1");
+  assert.equal(appendPayload.event.evidence_refs[0].representation, "redacted_utf8_v2");
   assert.match(appendPayload.event.evidence_refs[0].sha256, /^[a-f0-9]{64}$/u);
+  const policyRef = appendPayload.event.evidence_refs[0].policy_source_ref;
+  assert.equal(policyRef.schema_version, "trace-evidence-redaction-policy-ref:v1");
+  assert.match(policyRef.sha256, /^[a-f0-9]{64}$/u);
+  const policyPath = path.join(project, ...policyRef.path.split("/"));
+  const policyBytes = fs.readFileSync(policyPath);
+  assert.equal(crypto.createHash("sha256").update(policyBytes).digest("hex"), policyRef.sha256);
   assert.equal(JSON.stringify(appendPayload.event).includes("verified evidence before change"), false);
 
   fs.writeFileSync(evidencePath, "different evidence after change\n");
@@ -455,6 +515,268 @@ test("strict gate reports current-content evidence drift without storing origina
     report.errors.some((error) => error.includes(`evidence content drift detected for ${evidenceRelativePath}`)),
     true,
     report.errors.join("\n"),
+  );
+});
+
+test("strict gate rejects trace policy sources that weaken privacy or exceed fixed limits", () => {
+  const cases = [
+    {
+      name: "generic algorithm",
+      mutate(source) {
+        source.algorithm = "generic_v1";
+        source.credential_assignment_detector = null;
+        source.semantics.credential_assignments = false;
+      },
+    },
+    {
+      name: "missing mandatory detector",
+      mutate(source) {
+        source.detectors = source.detectors.filter((detector) => detector.name !== "common_access_token");
+      },
+    },
+    {
+      name: "oversized limits",
+      mutate(source) {
+        source.limits.maxPatterns = 1_000_000;
+        source.limits.maxMatches = 1_000_000;
+      },
+    },
+  ];
+
+  for (const fixture of cases) {
+    const project = initializedProject(`unsafe-policy-${fixture.name.replaceAll(" ", "-")}`);
+    const evidenceRelativePath = "evidence/result.txt";
+    const evidencePath = path.join(project, evidenceRelativePath);
+    fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+    fs.writeFileSync(evidencePath, "safe validation result\n");
+    const append = JSON.parse(mustRun([
+      "trace", "append", "--root", project, "--type", "test",
+      "--summary", "Policy source safety", "--outcome", "passed",
+      "--evidence", evidenceRelativePath, "--json",
+    ]).stdout);
+    const ref = append.event.evidence_refs[0].policy_source_ref;
+    const sourcePath = path.join(project, ...ref.path.split("/"));
+    const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+    fixture.mutate(source);
+    const bytes = `${JSON.stringify(source, null, 2)}\n`;
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    const maliciousPath = path.join(path.dirname(sourcePath), `${sha256}.json`);
+    fs.writeFileSync(maliciousPath, bytes);
+    ref.path = path.relative(project, maliciousPath).split(path.sep).join("/");
+    ref.sha256 = sha256;
+    resealOnlyProjectTrace(project, append.event);
+
+    const report = JSON.parse(mustFail([
+      "gate", "check", "--root", project, "--strict", "--json",
+    ]).stdout);
+    assert.equal(
+      report.errors.some((error) => error.includes("evidence policy source cannot be verified")),
+      true,
+      `${fixture.name}: ${report.errors.join("\n")}`,
+    );
+  }
+});
+
+test("a policy-source fsync failure prevents the trace event from being appended", () => {
+  const project = initializedProject("policy-fsync-failure");
+  const evidenceRelativePath = "evidence/fsync.txt";
+  const evidencePath = path.join(project, evidenceRelativePath);
+  const hookPath = path.join(project, "inject-policy-fsync-failure.mjs");
+  const policyRoot = path.join(project, ".sdlc", "evidence-redaction-policies");
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(evidencePath, "validation result before durable policy write\n");
+  fs.writeFileSync(hookPath, [
+    'import fs from "node:fs";',
+    "const originalOpenSync = fs.openSync.bind(fs);",
+    "const originalFsyncSync = fs.fsyncSync.bind(fs);",
+    "const policyDescriptors = new Set();",
+    "fs.openSync = function injectedOpenSync(filePath, ...args) {",
+    "  const descriptor = originalOpenSync(filePath, ...args);",
+    "  if (String(filePath).startsWith(process.env.OBS_POLICY_ROOT) && String(filePath).endsWith('.tmp')) policyDescriptors.add(descriptor);",
+    "  return descriptor;",
+    "};",
+    "fs.fsyncSync = function injectedFsyncSync(descriptor) {",
+    "  if (policyDescriptors.has(descriptor)) {",
+    "    const error = new Error('simulated policy fsync failure');",
+    "    error.code = 'EIO';",
+    "    throw error;",
+    "  }",
+    "  return originalFsyncSync(descriptor);",
+    "};",
+    "",
+  ].join("\n"));
+
+  mustFail([
+    "trace", "append", "--root", project, "--type", "test",
+    "--summary", "Must remain unappended", "--outcome", "passed",
+    "--evidence", evidenceRelativePath, "--json",
+  ], {
+    nodeArgs: ["--import", pathToFileURL(hookPath).href],
+    env: { OBS_POLICY_ROOT: policyRoot },
+  });
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "traces", "project.jsonl")), false);
+  assert.deepEqual(
+    fs.existsSync(policyRoot) ? fs.readdirSync(policyRoot).filter((name) => name.endsWith(".json")) : [],
+    [],
+  );
+});
+
+test("historical v1 requires one explicit policy binding and rejects cross-policy collisions", () => {
+  const project = initializedProject("evidence-representation-binding");
+  const evidenceRelativePath = "evidence/versioned.txt";
+  const evidencePath = path.join(project, evidenceRelativePath);
+  const bearer = `Bearer ${"a".repeat(40)}`;
+  const entropyOnly = "Z9_".repeat(16);
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(evidencePath, bearer);
+
+  const append = JSON.parse(mustRun([
+    "trace", "append",
+    "--root", project,
+    "--type", "test",
+    "--summary", "Versioned evidence compatibility",
+    "--outcome", "passed",
+    "--evidence", evidenceRelativePath,
+    "--json",
+  ]).stdout);
+  const ref = append.event.evidence_refs[0];
+  assert.equal(ref.representation, "redacted_utf8_v2");
+
+  ref.representation = "redacted_utf8_v1";
+  delete ref.policy_source_ref;
+  resealOnlyProjectTrace(project, append.event);
+  const unboundReport = JSON.parse(mustFail([
+    "gate", "check", "--root", project, "--strict", "--json",
+  ]).stdout);
+  assert.equal(
+    unboundReport.errors.some((error) => error.includes("requires one exact append-only policy binding")),
+    true,
+    unboundReport.errors.join("\n"),
+  );
+
+  const target = readOnlyJsonLine(path.join(project, ".sdlc", "traces", "project.jsonl"));
+  const binding = JSON.parse(mustRun([
+    "trace", "evidence", "bind",
+    "--root", project,
+    "--target-event", target.id,
+    "--redaction-policy", "operational_v2",
+    "--json",
+  ]).stdout);
+  assert.equal(binding.status, "bound");
+  assert.equal(binding.binding_count, 1);
+  assert.equal(binding.event.evidence_policy_bindings[0].target.event_hash, target._trace_integrity.event_hash);
+  assert.equal(binding.event.evidence_policy_bindings[0].target.evidence_sha256, ref.sha256);
+
+  fs.writeFileSync(evidencePath, entropyOnly);
+  const collisionReport = JSON.parse(mustFail([
+    "gate", "check", "--root", project, "--strict", "--json",
+  ]).stdout);
+  assert.equal(
+    collisionReport.errors.some((error) => error.includes("evidence content drift detected")),
+    true,
+    collisionReport.errors.join("\n"),
+  );
+  const duplicate = mustFail([
+    "trace", "evidence", "bind",
+    "--root", project,
+    "--target-event", target.id,
+    "--redaction-policy", "legacy_evidence_v1",
+    "--json",
+  ]);
+  assert.match(duplicate.stderr, /already bound/u);
+});
+
+test("legacy v1 binding reproduces the frozen historical writer only", () => {
+  const project = initializedProject("legacy-v1-binding");
+  const evidenceRelativePath = "evidence/legacy.json";
+  const evidencePath = path.join(project, evidenceRelativePath);
+  const value = JSON.parse(`{"entropy":"${"Z9_".repeat(16)}","__proto__":{"hidden":true}}`);
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(evidencePath, `${JSON.stringify(value)}\n`);
+  const append = JSON.parse(mustRun([
+    "trace", "append", "--root", project, "--type", "test",
+    "--summary", "Legacy evidence", "--outcome", "passed",
+    "--evidence", evidenceRelativePath, "--json",
+  ]).stdout);
+  const ref = append.event.evidence_refs[0];
+  const legacyValue = `${JSON.stringify({ entropy: REDACTION_PLACEHOLDER })}\n`;
+  const legacyBytes = Buffer.from(legacyValue, "utf8");
+  ref.representation = "redacted_utf8_v1";
+  ref.size_bytes = legacyBytes.length;
+  ref.sha256 = crypto.createHash("sha256").update(legacyBytes).digest("hex");
+  delete ref.policy_source_ref;
+  resealOnlyProjectTrace(project, append.event);
+  const target = readOnlyJsonLine(path.join(project, ".sdlc", "traces", "project.jsonl"));
+  mustRun([
+    "trace", "evidence", "bind", "--root", project,
+    "--target-event", target.id,
+    "--redaction-policy", "legacy_evidence_v1",
+    "--json",
+  ]);
+  const report = JSON.parse(mustFail([
+    "gate", "check", "--root", project, "--strict", "--json",
+  ]).stdout);
+  assert.equal(
+    report.errors.some((error) => /historical v1 evidence|evidence content drift/u.test(error)),
+    false,
+    report.errors.join("\n"),
+  );
+});
+
+test("concurrent historical policy binding appends exactly one immutable binding", async () => {
+  const project = initializedProject("concurrent-evidence-binding");
+  const evidenceRelativePath = "evidence/concurrent.txt";
+  const evidencePath = path.join(project, evidenceRelativePath);
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(evidencePath, `Bearer ${"a".repeat(40)}`);
+  const append = JSON.parse(mustRun([
+    "trace", "append", "--root", project, "--type", "test",
+    "--summary", "Concurrent binding fixture", "--outcome", "passed",
+    "--evidence", evidenceRelativePath, "--json",
+  ]).stdout);
+  append.event.evidence_refs[0].representation = "redacted_utf8_v1";
+  delete append.event.evidence_refs[0].policy_source_ref;
+  resealOnlyProjectTrace(project, append.event);
+  const tracePath = path.join(project, ".sdlc", "traces", "project.jsonl");
+  const target = readOnlyJsonLine(tracePath);
+  const args = [
+    "trace", "evidence", "bind", "--root", project,
+    "--target-event", target.id,
+    "--redaction-policy", "operational_v2",
+    "--json",
+  ];
+  const results = await Promise.all([
+    runCliAsync(args, {
+      env: { NODE_ENV: "test", AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS: "200" },
+    }),
+    runCliAsync(args, {
+      env: { NODE_ENV: "test", AGENTIC_SDLC_TEST_TRACE_BIND_DELAY_MS: "200" },
+    }),
+  ]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [0, 1]);
+  const failure = results.find((result) => result.status !== 0);
+  assert.equal(failure.signal, null);
+  assert.match(`${failure.stdout}\n${failure.stderr}`, /already bound/u);
+
+  const events = fs.readFileSync(tracePath, "utf8")
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const bindingEvents = events.filter((event) => event.action === "trace.evidence-policy.bind");
+  assert.equal(bindingEvents.length, 1);
+  assert.equal(bindingEvents[0].evidence_policy_bindings.length, 1);
+  assert.equal(verifyTraceIntegrity({
+    boundaryRoot: path.join(project, ".sdlc"),
+    tracePath,
+  }).valid, true);
+  const gate = runCli(["gate", "check", "--root", project, "--strict", "--json"]);
+  assert.ok([0, 1].includes(gate.status), gate.stderr || gate.stdout);
+  const gateReport = JSON.parse(gate.stdout);
+  assert.equal(
+    gateReport.errors.some((error) =>
+      /trace .*integrity|evidence policy|historical evidence|binding conflict/iu.test(error)),
+    false,
+    gate.stdout,
   );
 });
 

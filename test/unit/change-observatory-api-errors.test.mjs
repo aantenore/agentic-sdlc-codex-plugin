@@ -87,6 +87,26 @@ test("fails closed for malformed, unsafe, or correlation-inconsistent envelopes"
       expectedCorrelationId: CORRELATION_ID,
     },
     {
+      name: "unsafe credential alias message",
+      envelope: errorEnvelope({
+        error: { code: "model_unavailable", message: "passwd=correct-horse-battery-staple", retryable: false },
+      }),
+      header: CORRELATION_ID,
+      expectedCorrelationId: CORRELATION_ID,
+    },
+    ...[
+      "secret_access_key=opaque-secret-access-key-material",
+      "secret_key=opaque-secret-key-material",
+      "storage_account_key=opaque-storage-account-key-material",
+    ].map((message) => ({
+      name: `unsafe core credential alias ${message.split("=", 1)[0]}`,
+      envelope: errorEnvelope({
+        error: { code: "model_unavailable", message, retryable: false },
+      }),
+      header: CORRELATION_ID,
+      expectedCorrelationId: CORRELATION_ID,
+    })),
+    {
       name: "unexpected field",
       envelope: { ...errorEnvelope(), debug: "must not be trusted" },
       header: CORRELATION_ID,

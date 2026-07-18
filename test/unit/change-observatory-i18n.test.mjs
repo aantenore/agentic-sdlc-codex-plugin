@@ -493,12 +493,17 @@ test("optional error details with credential context fail closed", () => {
   setLocale("en");
   for (const message of [
     'payload {"password":"p@ssw0rd!"}',
+    "account_key=opaque-account-key-material",
+    "passwd=correct-horse-battery-staple",
+    "secret_access_key=opaque-secret-access-key-material",
+    "secret_key=opaque-secret-key-material",
+    "storage_account_key=opaque-storage-account-key-material",
     "Cookie: session=abcdefghijklmnop",
     [`eyJ${"H".repeat(20)}`, "P".repeat(32), "S".repeat(43)].join("."),
   ]) {
     const guidance = localizedErrorGuidance(new Error(message));
     assert.equal(guidance.technical, "Error: Unspecified error");
-    assert.doesNotMatch(guidance.technical, /p@ssw0rd|Cookie|eyJ/u);
+    assert.doesNotMatch(guidance.technical, /p@ssw0rd|opaque-account|correct-horse|Cookie|eyJ/u);
   }
 });
 

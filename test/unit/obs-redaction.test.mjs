@@ -5,13 +5,98 @@ import test from "node:test";
 import {
   REDACTION_LIMIT_PLACEHOLDER,
   REDACTION_PLACEHOLDER,
+  createLegacyEvidenceV1RedactionPolicy,
+  createHistoricalOperationalEvidenceV1RedactionPolicy,
   createRedactionPolicy,
+  createRedactionPolicyFromSource,
   createOperationalRedactionPolicy,
+  describeRedactionPolicy,
   isAllowedIdentifier,
   redactText,
   redactValue,
   redactValueWithMetadata,
 } from "../../lib/observability/redaction.mjs";
+
+test("legacy evidence v1 compatibility preserves historical entropy and allowlist semantics", () => {
+  const legacy = createLegacyEvidenceV1RedactionPolicy();
+  const current = createOperationalRedactionPolicy();
+  const entropyOnly = "Z9_".repeat(16);
+  const sha = "a".repeat(64);
+  const actionId = "AUT-ACT-20260718112254904-6a4356";
+
+  assert.equal(redactText(entropyOnly, current), entropyOnly);
+  assert.equal(redactText(entropyOnly, legacy), REDACTION_PLACEHOLDER);
+  assert.equal(redactText("owner@example.com", legacy), REDACTION_PLACEHOLDER);
+  assert.equal(redactText(sha, legacy), sha);
+  assert.equal(redactText(actionId, legacy), actionId);
+  const frozenEmailExpression = /\b[^\s@]+@[^\s@]+\.[^\s@]+\b/giu;
+  for (const input of [
+    ".b@-_..a.@!b_-_.b",
+    "-@a中@_é!._!_bK-_bbK",
+    "prefix owner@example.com suffix",
+  ]) {
+    assert.equal(
+      redactText(input, legacy),
+      input.replace(frozenEmailExpression, REDACTION_PLACEHOLDER),
+      input,
+    );
+  }
+});
+
+test("content-addressable policy sources round-trip the exact effective semantics", () => {
+  const policy = createOperationalRedactionPolicy({
+    sensitiveKeys: ["employee_pin"],
+    piiPatterns: [{ name: "employee", pattern: /EMP-[0-9]{6}/giu }],
+    identifierAllowPatterns: [{ name: "case", pattern: /^CASE-[0-9]{4}$/u }],
+    limits: { maxMatches: 123 },
+  });
+  const source = describeRedactionPolicy(policy);
+  const rebuilt = createRedactionPolicyFromSource(JSON.parse(JSON.stringify(source)));
+  const sample = "employee=EMP-123456 case=CASE-1234 token=abcdefghijklmnopqrstuvwxyz012345";
+
+  assert.deepEqual(describeRedactionPolicy(rebuilt), source);
+  assert.equal(redactText(sample, rebuilt), redactText(sample, policy));
+  const tampered = JSON.parse(JSON.stringify(source));
+  tampered.semantics.credential_assignments = false;
+  assert.throws(() => createRedactionPolicyFromSource(tampered), /algorithm and semantics disagree/u);
+});
+
+test("operational key aliases do not change the frozen legacy v1 policy source", () => {
+  const operational = createOperationalRedactionPolicy();
+  const legacy = createLegacyEvidenceV1RedactionPolicy();
+  const historicalOperational = createHistoricalOperationalEvidenceV1RedactionPolicy();
+  const legacySource = describeRedactionPolicy(legacy);
+
+  assert.deepEqual(redactValue({ passwd: "new-alias-secret" }, operational), {
+    passwd: REDACTION_PLACEHOLDER,
+  });
+  assert.deepEqual(redactValue({ passwd: "historically-visible" }, legacy), {
+    passwd: "historically-visible",
+  });
+  assert.deepEqual(redactValue({ passwd: "historically-visible" }, historicalOperational), {
+    passwd: "historically-visible",
+  });
+  assert.equal(
+    describeRedactionPolicy(historicalOperational).algorithm,
+    "operational_evidence_v1",
+  );
+  assert.equal(legacySource.sensitive_keys.includes("passwd"), false);
+  assert.deepEqual(
+    describeRedactionPolicy(createRedactionPolicyFromSource(JSON.parse(JSON.stringify(legacySource)))),
+    legacySource,
+  );
+});
+
+test("legacy v1 reproduces historical __proto__ omission without prototype mutation", () => {
+  const legacy = createLegacyEvidenceV1RedactionPolicy();
+  const source = JSON.parse('{"safe":"kept","__proto__":{"polluted":true}}');
+  const output = redactValue(source, legacy);
+
+  assert.deepEqual(output, { safe: "kept" });
+  assert.equal(Object.getPrototypeOf(output), Object.prototype);
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(JSON.stringify(output), '{"safe":"kept"}');
+});
 
 test("recursive redaction is immutable, idempotent, and preserves approved identifiers", () => {
   const policy = createRedactionPolicy({
@@ -194,6 +279,12 @@ test("operational policy redacts known tokens, credential assignments, and Beare
     '"client_secret":"correct horse battery staple"',
     `authorization: Basic ${Buffer.from("user:password").toString("base64")}`,
     'password="escaped \\" quote"',
+    'account_key="account key material"',
+    'credential="opaque credential material"',
+    'credentials="opaque credential collection"',
+    'passphrase="correct horse battery staple"',
+    'passwd="alternate password material"',
+    'pwd="short password alias"',
   ]) {
     assert.equal(redactText(assignment, policy), REDACTION_PLACEHOLDER, assignment.slice(0, 16));
   }
@@ -406,6 +497,24 @@ test("the default bounded email detector completes on maximum-size non-email inp
     timeout: 2_000,
   });
   assert.equal(result.error, undefined, "default email detection exceeded the safety deadline");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "completed");
+});
+
+test("the exact legacy email engine is linear on adversarial maximum-size input", () => {
+  const moduleUrl = new URL("../../lib/observability/redaction.mjs", import.meta.url).href;
+  const script = [
+    `import { createLegacyEvidenceV1RedactionPolicy, redactText } from ${JSON.stringify(moduleUrl)};`,
+    "const policy = createLegacyEvidenceV1RedactionPolicy();",
+    "redactText('a.'.repeat(131_000), policy);",
+    "redactText(`${'a'.repeat(80_000)}@${'b'.repeat(80_000)}.${'c'.repeat(80_000)}`, policy);",
+    "process.stdout.write('completed');",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+  assert.equal(result.error, undefined, "legacy email compatibility exceeded the safety deadline");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "completed");
 });

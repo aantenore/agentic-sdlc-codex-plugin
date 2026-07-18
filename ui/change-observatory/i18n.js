@@ -9,7 +9,7 @@ const UNSAFE_TECHNICAL_ERROR_PATTERNS = Object.freeze([
   /\beyJ[A-Za-z0-9_-]{5,512}\.[A-Za-z0-9_-]{5,768}\.[A-Za-z0-9_-]{10,512}\b/u,
   /\b(?:Set-Cookie|Cookie)\s*:/iu,
   /-----BEGIN [A-Z ]{0,32}PRIVATE KEY-----/u,
-  /(?:["'](?=[A-Za-z0-9_])|\b)[A-Za-z0-9_]{0,128}(?:access[_-]?token|api[_-]?key|authorization|client[_-]?secret|password|private[_-]?key|refresh[_-]?token|secret)["']?\s*[:=]/iu,
+  /(?:["'](?=[A-Za-z0-9_])|\b)[A-Za-z0-9_]{0,128}(?:access[_-]?token|account[_-]?key|api[_-]?key|authorization|client[_-]?secret|credentials?|cookie|passphrase|passwd|password|private[_-]?key|pwd|refresh[_-]?token|secret[_-]?access[_-]?key|secret[_-]?key|secret|set[_-]?cookie|storage[_-]?account[_-]?key|token)["']?\s*[:=]/iu,
 ]);
 
 let activeLocale = "en";

@@ -708,24 +708,6 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   const afterCommit = mustGit(project, ["rev-parse", "HEAD"]);
   assert.notEqual(afterCommit, beforeCommit);
 
-  const commitCompletion = mustRunJson([
-    "autonomy", "delivery", "action",
-    "--root", project,
-    "--id", "AUT-PR-1",
-    "--action", "git.commit",
-    "--outcome", "passed",
-    "--evidence", "src/change.txt",
-  ]);
-  assert.equal(commitCompletion.status, "completed");
-  assert.equal(commitCompletion.lifecycle_status, "started");
-  assert.equal(commitCompletion.action_receipt.authorization_receipt_ref.id, commitAuthorization.action_receipt.id);
-  assert.deepEqual(commitCompletion.action_receipt.action_details.commit, {
-    before_sha: beforeCommit,
-    after_sha: afterCommit,
-    committed_paths: ["src/change.txt"],
-  });
-  assert.deepEqual(commitCompletion.action_receipt.evidence.map((item) => item.path), ["src/change.txt"]);
-
   const configPreview = mustRunJson([
     "config", "migrate",
     "--root", project,
@@ -741,6 +723,88 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(configApplied.status, "applied");
   assert.equal(fs.existsSync(checkpointPolicySourcePath), true);
+
+  const migratedConfigPath = path.join(project, ".sdlc", "config.json");
+  const changedConfig = JSON.parse(fs.readFileSync(migratedConfigPath, "utf8"));
+  changedConfig.autonomy_policy.presets.checkpointed.checkpoints = [
+    ...new Set([
+      ...changedConfig.autonomy_policy.presets.checkpointed.checkpoints,
+      "git.commit",
+      "git.push",
+    ]),
+  ].sort();
+  fs.writeFileSync(migratedConfigPath, `${JSON.stringify(changedConfig, null, 2)}\n`, "utf8");
+  const changedConfigPreview = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+  ]);
+  assert.equal(changedConfigPreview.status, "planned");
+  assert.notEqual(changedConfigPreview.plan.effective_config_hash, checkpointPolicy.policy_source_ref.effective_config_hash);
+  const changedConfigApplied = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", changedConfigPreview.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+  assert.equal(changedConfigApplied.status, "applied");
+  assert.equal(changedConfigApplied.config_hash, changedConfigPreview.plan.effective_config_hash);
+
+  const commitCompletion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--action", "git.commit",
+    "--outcome", "passed",
+    "--evidence", "src/change.txt",
+  ]);
+  assert.equal(commitCompletion.status, "completed");
+  assert.equal(commitCompletion.lifecycle_status, "started");
+  assert.equal(commitCompletion.checkpoint_required, false);
+  assert.equal(commitCompletion.action_receipt.checkpoint_required, checkpointPolicy.required);
+  assert.equal(commitCompletion.action_receipt.authorization_receipt_ref.id, commitAuthorization.action_receipt.id);
+  assert.deepEqual(commitCompletion.action_receipt.action_details.commit, {
+    before_sha: beforeCommit,
+    after_sha: afterCommit,
+    committed_paths: ["src/change.txt"],
+  });
+  assert.deepEqual(commitCompletion.action_receipt.evidence.map((item) => item.path), ["src/change.txt"]);
+  assert.ok(
+    commitCompletion.audit_warnings.some((warning) =>
+      /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)),
+  );
+
+  const statusAfterPolicyChange = mustRunJson([
+    "autonomy", "delivery", "status",
+    "--root", project,
+    "--id", "AUT-PR-1",
+  ]);
+  assert.equal(statusAfterPolicyChange.delivery_profiles[0].effective_status, "active");
+  assert.equal(statusAfterPolicyChange.delivery_profiles[0].lifecycle_status, "started");
+
+  const validationAfterPolicyChange = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(validationAfterPolicyChange.error, undefined, validationAfterPolicyChange.error?.message);
+  assert.equal(validationAfterPolicyChange.signal, null, `gate check terminated by ${validationAfterPolicyChange.signal}`);
+  assert.ok([0, 1].includes(validationAfterPolicyChange.status), validationAfterPolicyChange.stderr || validationAfterPolicyChange.stdout);
+  const validationAfterPolicyChangeReport = JSON.parse(validationAfterPolicyChange.stdout);
+  assert.deepEqual(
+    validationAfterPolicyChangeReport.errors.filter((error) =>
+      /checkpoint policy snapshot .*stale|checkpoint flag does not match its exact action policy/iu.test(error)),
+    [],
+    validationAfterPolicyChange.stdout,
+  );
+  assert.ok(
+    validationAfterPolicyChangeReport.warnings.some((warning) =>
+      /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)),
+    validationAfterPolicyChange.stdout,
+  );
 
   mustFail([
     "autonomy", "delivery", "action",
@@ -758,8 +822,12 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--id", "AUT-PR-1",
     "--action", "git.push",
     "--remote", "origin",
+    "--confirm-action",
+    ...humanApproval("Approve this exact push under the current checkpoint policy"),
   ], { env: pushBeforeEnv });
   assert.equal(pushAuthorization.status, "authorized");
+  assert.equal(pushAuthorization.checkpoint_required, true);
+  assert.equal(pushAuthorization.action_receipt.action_details.checkpoint_policy.required, true);
   assert.equal(pushAuthorization.action_receipt.action_details.push.source_sha, afterCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.observed_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.base_ref, "refs/heads/main");
@@ -784,8 +852,9 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   const lockedPolicySourceRef = pushAuthorization.action_receipt.action_details.checkpoint_policy.policy_source_ref;
   assert.equal(
     lockedPolicySourceRef.effective_config_hash,
-    checkpointPolicy.policy_source_ref.effective_config_hash,
+    changedConfigApplied.config_hash,
   );
+  assert.notEqual(lockedPolicySourceRef.effective_config_hash, checkpointPolicy.policy_source_ref.effective_config_hash);
   assert.notEqual(lockedPolicySourceRef.hash, checkpointPolicy.policy_source_ref.hash);
   assert.notEqual(lockedPolicySourceRef.path, checkpointPolicy.policy_source_ref.path);
   assert.equal(fs.existsSync(path.join(project, lockedPolicySourceRef.path)), true);
@@ -955,6 +1024,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--id", "AUT-PR-2",
     "--action", "git.push",
     "--remote", "origin",
+    "--confirm-action",
+    ...humanApproval("Approve the successor push under the current checkpoint policy"),
   ], { env: pushBeforeEnv });
   assert.equal(successorPushAuthorization.status, "authorized");
   assert.deepEqual(
@@ -1473,6 +1544,36 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
       .digest("hex"),
   );
 
+  fs.writeFileSync(path.join(project, "build-runtime-proof.txt"), "local build evidence\n", "utf8");
+  const historicalBuildAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-1",
+    "--action", "build.local",
+    "--confirm-action",
+    ...humanApproval("Approve this exact local build checkpoint"),
+  ]);
+  const historicalBuildCompletion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-1",
+    "--action", "build.local",
+    "--outcome", "passed",
+    "--evidence", "build-runtime-proof.txt",
+  ]);
+  assert.equal(
+    historicalBuildCompletion.action_receipt.authorization_receipt_ref.id,
+    historicalBuildAuthorization.action_receipt.id,
+  );
+  const liveBuildAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-1",
+    "--action", "build.local",
+    "--confirm-action",
+    ...humanApproval("Approve the next exact local build checkpoint"),
+  ]);
+
   const releaseAuthorizationPath = path.join(project, releaseAuthorization.action_receipt_path);
   const originalReleaseAuthorization = fs.readFileSync(releaseAuthorizationPath, "utf8");
   const forgedReleaseAuthorization = JSON.parse(originalReleaseAuthorization);
@@ -1509,6 +1610,160 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   );
   fs.writeFileSync(releaseAuthorizationPath, originalReleaseAuthorization, "utf8");
 
+  const localConfigPreview = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+  ]);
+  assert.equal(localConfigPreview.status, "planned");
+  mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", localConfigPreview.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+  const localConfigPath = path.join(project, ".sdlc", "config.json");
+  const changedLocalConfig = JSON.parse(fs.readFileSync(localConfigPath, "utf8"));
+  changedLocalConfig.autonomy_policy.presets.checkpointed.checkpoints = [
+    ...new Set([
+      ...changedLocalConfig.autonomy_policy.presets.checkpointed.checkpoints,
+      "git.commit",
+    ]),
+  ].sort();
+  fs.writeFileSync(localConfigPath, `${JSON.stringify(changedLocalConfig, null, 2)}\n`, "utf8");
+  const changedLocalConfigPreview = mustRunJson([
+    "config", "migrate",
+    "--root", project,
+  ]);
+  assert.equal(changedLocalConfigPreview.status, "planned");
+  mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", changedLocalConfigPreview.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+  const configOnlyDriftGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(configOnlyDriftGate.error, undefined, configOnlyDriftGate.error?.message);
+  assert.equal(configOnlyDriftGate.signal, null, `gate check terminated by ${configOnlyDriftGate.signal}`);
+  assert.ok([0, 1].includes(configOnlyDriftGate.status), configOnlyDriftGate.stderr || configOnlyDriftGate.stdout);
+  const configOnlyDriftReport = JSON.parse(configOnlyDriftGate.stdout);
+  assert.equal(
+    configOnlyDriftReport.errors.some((error) =>
+      /different local target or machine scope/iu.test(error)),
+    false,
+    configOnlyDriftGate.stdout,
+  );
+  assert.ok(
+    configOnlyDriftReport.warnings.some((warning) =>
+      /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)),
+    configOnlyDriftGate.stdout,
+  );
+
+  const relocatedProject = `${project}-relocated`;
+  fs.cpSync(project, relocatedProject, { recursive: true });
+  tempProjects.add(relocatedProject);
+  fs.writeFileSync(
+    path.join(relocatedProject, "release-runtime-proof.txt"),
+    "local release runtime-boundary evidence\n",
+    "utf8",
+  );
+  const relocatedBoundaryGate = run([
+    "gate", "check",
+    "--root", relocatedProject,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(
+    relocatedBoundaryGate.status,
+    1,
+    relocatedBoundaryGate.stderr || relocatedBoundaryGate.stdout,
+  );
+  assert.match(
+    `${relocatedBoundaryGate.stdout}\n${relocatedBoundaryGate.stderr}`,
+    /different local target or machine scope/u,
+  );
+  const relocatedBoundaryReport = JSON.parse(relocatedBoundaryGate.stdout);
+  const localTargetErrors = relocatedBoundaryReport.errors.filter((error) =>
+    /different local target or machine scope/u.test(error));
+  const localTargetReceiptIds = new Set(localTargetErrors.flatMap((error) =>
+    error.match(/AUT-ACT-[0-9]+-[a-f0-9]+/gu) || []));
+  assert.equal(localTargetReceiptIds.size, 2, relocatedBoundaryGate.stdout);
+  assert.equal(
+    localTargetErrors.some((error) => error.includes(historicalBuildAuthorization.action_receipt.id)),
+    false,
+    relocatedBoundaryGate.stdout,
+  );
+  assert.equal(
+    localTargetErrors.some((error) => error.includes(liveBuildAuthorization.action_receipt.id)),
+    true,
+    relocatedBoundaryGate.stdout,
+  );
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", relocatedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "build.local",
+    "--outcome", "failed",
+    "--evidence", "build-runtime-proof.txt",
+  ], /different local target or machine scope/u);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", relocatedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "release.local",
+    "--outcome", "passed",
+    "--evidence", "release-runtime-proof.txt",
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore the previous local build directory snapshot.",
+  ], /different local target or machine scope/u);
+
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", relocatedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "build.local",
+    "--confirm-action",
+    ...humanApproval("Approve the relocated local build target"),
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", relocatedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve the relocated local release target"),
+  ]);
+  const refreshedBoundaryGate = run([
+    "gate", "check",
+    "--root", relocatedProject,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.ok([0, 1].includes(refreshedBoundaryGate.status), refreshedBoundaryGate.stderr);
+  const refreshedBoundaryReport = JSON.parse(refreshedBoundaryGate.stdout);
+  assert.equal(
+    refreshedBoundaryReport.errors.some((error) => /different local target or machine scope/u.test(error)),
+    false,
+    refreshedBoundaryGate.stdout,
+  );
+  assert.equal(
+    refreshedBoundaryReport.warnings.some((warning) => /superseded by a later unconsumed authorization/u.test(warning)),
+    true,
+    refreshedBoundaryGate.stdout,
+  );
+
   const assertHistoricalGateDoesNotReopenLocalTarget = () => {
     const unavailableReleaseRoot = `${releaseRoot}-after-completion`;
     fs.renameSync(releaseRoot, unavailableReleaseRoot);
@@ -1533,9 +1788,9 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
 
   const releaseEvidence = path.join(releaseOutput, "release-proof.txt");
   fs.writeFileSync(releaseEvidence, "local release evidence\n", "utf8");
-  const completionArgs = [
+  const completionArgsFor = (root) => [
     "autonomy", "delivery", "action",
-    "--root", project,
+    "--root", root,
     "--id", "AUT-LOCAL-1",
     "--action", "release.local",
     "--outcome", "passed",
@@ -1543,6 +1798,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     "--smoke-test", '["node","--version"]',
     "--rollback", "Restore the previous local build directory snapshot.",
   ];
+  const completionArgs = completionArgsFor(project);
   if (!hostSupportsLocalSmokeSandbox()) {
     mustFail(
       completionArgs,
@@ -1569,9 +1825,60 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     return;
   }
 
+  const interruptedProject = `${project}-interrupted`;
+  fs.cpSync(project, interruptedProject, { recursive: true });
+  tempProjects.add(interruptedProject);
+  const interruptedAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", interruptedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve the exact interrupted-release fixture target"),
+  ]);
+  mustFail(
+    completionArgsFor(interruptedProject),
+    /Simulated interruption after the terminal completion receipt was persisted/u,
+    {
+      timeout: 90_000,
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE: "after-terminal-completion-receipt",
+      },
+    },
+  );
+  const interruptedRelocatedProject = `${interruptedProject}-relocated`;
+  fs.cpSync(interruptedProject, interruptedRelocatedProject, { recursive: true });
+  tempProjects.add(interruptedRelocatedProject);
+  const repairedAfterRelocation = mustRunJson(
+    completionArgsFor(interruptedRelocatedProject),
+    { timeout: 90_000 },
+  );
+  assert.equal(repairedAfterRelocation.status, "terminal");
+  assert.equal(repairedAfterRelocation.idempotent_repair, true);
+  assert.equal(
+    repairedAfterRelocation.action_receipt.authorization_receipt_ref.id,
+    interruptedAuthorization.action_receipt.id,
+  );
+  const recoveredGate = run([
+    "gate", "check",
+    "--root", interruptedRelocatedProject,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.ok([0, 1].includes(recoveredGate.status), recoveredGate.stderr);
+  assert.doesNotMatch(
+    `${recoveredGate.stdout}\n${recoveredGate.stderr}`,
+    /different local target or machine scope/u,
+  );
+
   const completed = mustRunJson(completionArgs, { timeout: 90_000 });
   assert.equal(completed.status, "completed");
   assert.equal(completed.lifecycle_status, "terminal");
+  assert.ok(completed.audit_warnings.some((warning) =>
+    /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)));
   assert.match(completed.close_receipt_path, /autonomy\/executions\/AUT-LOCAL-1\/close\.json$/u);
   assert.equal(completed.action_receipt.authorization_receipt_ref.id, releaseAuthorization.action_receipt.id);
   assert.equal(completed.action_receipt.local_release_verification.outcome, "passed");

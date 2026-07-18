@@ -72,11 +72,29 @@
           "path": { "type": "string" },
           "size_bytes": { "type": "integer", "minimum": 0 },
           "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-          "representation": { "const": "redacted_utf8_v1" },
+          "representation": {
+            "enum": ["redacted_utf8_v1", "redacted_utf8_v2"]
+          },
+          "policy_source_ref": { "$ref": "#/$defs/evidencePolicySourceRef" },
           "verification": { "enum": ["snapshot_only", "current_content"] }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "representation": { "const": "redacted_utf8_v2" } },
+              "required": ["representation"]
+            },
+            "then": { "required": ["policy_source_ref"] },
+            "else": { "not": { "required": ["policy_source_ref"] } }
+          }
+        ],
         "additionalProperties": false
       }
+    },
+    "evidence_policy_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/evidencePolicyBinding" }
     },
     "related": {
       "type": "array",
@@ -255,6 +273,37 @@
   },
   "additionalProperties": true,
   "$defs": {
+    "evidencePolicySourceRef": {
+      "type": "object",
+      "required": ["schema_version", "path", "sha256"],
+      "properties": {
+        "schema_version": { "const": "trace-evidence-redaction-policy-ref:v1" },
+        "path": { "type": "string", "pattern": "^\\.sdlc/evidence-redaction-policies/[a-f0-9]{64}\\.json$" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "evidencePolicyBinding": {
+      "type": "object",
+      "required": ["schema_version", "target", "policy_source_ref"],
+      "properties": {
+        "schema_version": { "const": "trace-evidence-redaction-policy-binding:v1" },
+        "target": {
+          "type": "object",
+          "required": ["event_id", "event_hash", "evidence_path", "evidence_sha256", "evidence_ref_sha256"],
+          "properties": {
+            "event_id": { "type": "string" },
+            "event_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "evidence_path": { "type": "string" },
+            "evidence_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "evidence_ref_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          },
+          "additionalProperties": false
+        },
+        "policy_source_ref": { "$ref": "#/$defs/evidencePolicySourceRef" }
+      },
+      "additionalProperties": false
+    },
     "actor": {
       "oneOf": [
         {
