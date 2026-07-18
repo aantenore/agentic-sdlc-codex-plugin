@@ -243,6 +243,20 @@ test("AsyncLocalStorage isolates concurrent commands and prevents nested downgra
       runWithMutationGovernance({ mode: "audit", root: rootA }, () => assert.fail("downgrade ran"))),
     (error) => error.code === "MUTATION_GOVERNANCE_DOWNGRADE",
   );
+
+  const bypassTarget = path.join(rootA, ".sdlc", "nested-bypass.json");
+  const outerDeny = guardedContext(rootA, {
+    decisionProvider: () => { throw new Error("outer policy denies"); },
+  });
+  assert.throws(
+    () => runWithMutationGovernance(outerDeny, () =>
+      runWithMutationGovernance(guardedContext(rootA), () =>
+        withGovernedMutation({ operation: "file.write", path: bypassTarget }, () => {
+          fs.writeFileSync(bypassTarget, "bypassed");
+        }))),
+    (error) => error.code === "MUTATION_GOVERNANCE_CONTEXT_REPLACEMENT",
+  );
+  assert.equal(fs.existsSync(bypassTarget), false);
 });
 
 test("authorization tokens expire with their callback and remain active only until an async callback settles", async () => {
@@ -458,7 +472,7 @@ test("secure JSONL append uses a no-follow append descriptor and complete record
   assert.equal(fs.readFileSync(outside, "utf8"), "");
 });
 
-test("bootstrap grants are exact and limited to first init or bound recovery material", () => {
+test("bootstrap grants are exact and limited to first init or bound recovery material", async () => {
   const root = fixture(test, "bootstrap");
   const hash = "a".repeat(64);
   const init = createBootstrapMutationGrant({
@@ -473,31 +487,87 @@ test("bootstrap grants are exact and limited to first init or bound recovery mat
     operation: "directory.create",
     project_path: ".sdlc",
   }]);
+  const clonedInit = structuredClone(init);
+  assert.throws(
+    () => consumeBootstrapMutationGrant(clonedInit, () => assert.fail("cloned grant ran")),
+    /invalid/u,
+  );
   let initConsumed = false;
-  consumeBootstrapMutationGrant(init, {
-    canonical_action: "init",
+  consumeBootstrapMutationGrant(init, () => withGovernedMutation({
     operation: "directory.create",
     path: ".sdlc",
-  }, () => { initConsumed = true; });
+  }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: ".sdlc" });
+    initConsumed = true;
+  }));
   assert.equal(initConsumed, true);
-  assert.throws(() => consumeBootstrapMutationGrant(init, {
+  assert.throws(
+    () => consumeBootstrapMutationGrant(clonedInit, () => assert.fail("cloned grant ran")),
+    /invalid/u,
+  );
+
+  const detachedTarget = path.join(root, ".sdlc", "detached.json");
+  const detached = createBootstrapMutationGrant({
+    root,
     canonical_action: "init",
-    operation: "directory.create",
-    path: ".sdlc",
-  }, () => assert.fail("reused grant ran")), /already consumed/u);
+    first_time: true,
+    exact_mutations: [{ operation: "file.write", path: detachedTarget }],
+  });
+  let detachedError = null;
+  await new Promise((resolve) => {
+    consumeBootstrapMutationGrant(detached, () => {
+      setImmediate(() => {
+        try {
+          withGovernedMutation({ operation: "file.write", path: detachedTarget }, () => {
+            assertMutationExecutionAuthorized({ operation: "file.write", path: detachedTarget });
+            fs.writeFileSync(detachedTarget, "detached");
+          });
+        } catch (error) {
+          detachedError = error;
+        } finally {
+          resolve();
+        }
+      });
+    });
+  });
+  assert.equal(detachedError?.code, "MUTATION_GOVERNANCE_DENIED");
+  assert.equal(fs.existsSync(detachedTarget), false);
+
+  const replayTarget = path.join(root, ".sdlc", "replay.json");
+  const replay = createBootstrapMutationGrant({
+    root,
+    canonical_action: "init",
+    first_time: true,
+    exact_mutations: [{ operation: "file.write", path: replayTarget }],
+  });
+  let capturedContext;
+  consumeBootstrapMutationGrant(replay, () => {
+    capturedContext = currentMutationGovernance();
+  });
+  assert.throws(
+    () => runWithMutationGovernance(capturedContext, () => withGovernedMutation({
+      operation: "file.write",
+      path: replayTarget,
+    }, () => fs.writeFileSync(replayTarget, "replay"))),
+    (error) => error.code === "MUTATION_GOVERNANCE_DENIED",
+  );
+  assert.equal(fs.existsSync(replayTarget), false);
+  assert.throws(() => runWithMutationGovernance({
+    ...capturedContext,
+    bootstrap_mutations: [{ operation: "file.write", path: replayTarget }],
+  }, () => assert.fail("forged bootstrap context ran")), (error) => error.code === "MUTATION_BOOTSTRAP_DENIED");
 
   const config = createBootstrapMutationGrant({
     root,
     canonical_action: "config.migrate",
     plan_hash: hash,
     expected_plan_hash: hash,
-    exact_mutations: [{ operation: "transaction.execute", path: ".sdlc/config.json" }],
+    exact_mutations: [{ operation: "file.write", path: ".sdlc/config.json" }],
   });
-  assert.equal(consumeBootstrapMutationGrant(config, {
-    canonical_action: "config.migrate",
-    operation: "transaction.execute",
+  assert.equal(consumeBootstrapMutationGrant(config, () => withGovernedMutation({
+    operation: "file.write",
     path: ".sdlc/config.json",
-  }, () => "config-consumed"), "config-consumed");
+  }, () => "config-consumed")), "config-consumed");
 
   const identity = createBootstrapMutationGrant({
     root,
@@ -507,13 +577,25 @@ test("bootstrap grants are exact and limited to first init or bound recovery mat
     expected_nonce: "transaction-a",
     plan_hash: hash,
     expected_plan_hash: hash,
-    exact_mutations: [{ operation: "transaction.execute", path: ".sdlc-identity-migration.lock" }],
+    exact_mutations: [{ operation: "file.write", path: ".sdlc-identity-migration.lock" }],
   });
-  assert.equal(consumeBootstrapMutationGrant(identity, {
-    canonical_action: "migration.identity",
-    operation: "transaction.execute",
+  assert.equal(consumeBootstrapMutationGrant(identity, () => withGovernedMutation({
+    operation: "file.write",
     path: ".sdlc-identity-migration.lock",
-  }, () => "identity-consumed"), "identity-consumed");
+  }, () => "identity-consumed")), "identity-consumed");
+
+  const outOfGrant = createBootstrapMutationGrant({
+    root,
+    canonical_action: "init",
+    first_time: true,
+    exact_mutations: [{ operation: "directory.create", path: ".sdlc" }],
+  });
+  assert.throws(() => consumeBootstrapMutationGrant(outOfGrant, () => withGovernedMutation({
+    operation: "file.write",
+    path: ".sdlc/unlisted.json",
+  }, () => assert.fail("out-of-grant mutation ran"))), (error) =>
+    error.code === "MUTATION_GOVERNANCE_DENIED"
+    && error.details.reason_codes.includes("mutation.bootstrap_exact_grant_miss"));
   assert.throws(() => createBootstrapMutationGrant({
     root,
     canonical_action: "init",
