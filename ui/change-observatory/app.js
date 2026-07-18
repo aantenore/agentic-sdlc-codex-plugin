@@ -10,6 +10,15 @@ import {
   renderSummary,
 } from "./components.js";
 import { rawTargetFor, recordSelectionKey } from "./model.js";
+import {
+  applyDocumentLocale,
+  localeFromLocation,
+  setLocale,
+  t,
+} from "./i18n.js";
+
+const locale = setLocale(localeFromLocation(window.location));
+applyDocumentLocale(document, locale);
 
 const VALID_VIEWS = new Set([
   "overview",
@@ -70,7 +79,7 @@ function viewFromHash() {
 }
 
 function setApiStatus(label, status) {
-  elements.apiStatus.textContent = label;
+  elements.apiStatus.textContent = t(label);
   elements.apiStatus.dataset.status = status;
 }
 
@@ -248,15 +257,15 @@ async function openRaw(href, path) {
   state.rawController?.abort();
   const controller = new AbortController();
   state.rawController = controller;
-  elements.rawPath.textContent = path || "Canonical source";
-  elements.rawCode.textContent = "Loading canonical source…";
+  elements.rawPath.textContent = path || t("Canonical source");
+  elements.rawCode.textContent = t("Loading canonical source…");
   setRawExpanded(true);
 
   try {
     elements.rawCode.textContent = await api.loadRaw(href, { signal: controller.signal });
   } catch (error) {
     if (error?.name === "AbortError") return;
-    elements.rawCode.textContent = `Raw source unavailable\n\n${error.message}`;
+    elements.rawCode.textContent = `${t("Raw source unavailable")}\n\n${error.message}`;
   }
 }
 

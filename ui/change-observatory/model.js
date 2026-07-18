@@ -268,6 +268,11 @@ export function normalizeItem(value) {
     type: readable(item.type, "record"),
     title: readable(item.title ?? item.summary, "Untitled record"),
     summary: readable(item.summary, "No recorded summary."),
+    ...(readable(item.humanTitle ?? item.human_title, "") ? {
+      humanTitle: readable(item.humanTitle ?? item.human_title, ""),
+      humanSummary: readable(item.humanSummary ?? item.human_summary, ""),
+      humanStatus: readable(item.humanStatus ?? item.human_status, ""),
+    } : {}),
     status: readable(item.status, "missing"),
     phase: readable(item.phase, "") || null,
     action: readable(item.action, "") || null,
