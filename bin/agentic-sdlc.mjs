@@ -33323,6 +33323,10 @@ function executeIdentityMutation(request, effect) {
   });
 }
 
+executeIdentityMutation.revalidate = function revalidateIdentityMutation(request) {
+  return assertMutationExecutionAuthorized(request);
+};
+
 function removePathGoverned(filePath, options = {}) {
   const operation = options.recursive ? "directory.remove" : "file.remove";
   return withGovernedMutation({ operation, path: filePath }, () => {

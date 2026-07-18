@@ -37,11 +37,17 @@ test("identity migration routes every physical mutation through the injected gat
     mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
   });
   const mutations = [];
+  const revalidated = [];
+  const mutationGateway = (request, effect) => {
+    mutations.push(request);
+    return effect();
+  };
+  mutationGateway.revalidate = (request) => {
+    revalidated.push(request);
+    return true;
+  };
   const applied = applyIdentityMigration(plan, {
-    mutationGateway(request, effect) {
-      mutations.push(request);
-      return effect();
-    },
+    mutationGateway,
     rebuildDerived: ({ sdlcRoot }) => {
       writeJson(path.join(sdlcRoot, "cache", "kb-cache.json"), { search_text: TARGET_EMAIL });
       writeJson(path.join(sdlcRoot, "indexes", "kb-index.json"), { search_text: TARGET_EMAIL });
@@ -68,7 +74,79 @@ test("identity migration routes every physical mutation through the injected gat
     assert.ok(operations.has(operation), `missing governed identity operation ${operation}`);
   }
   assert.ok(mutations.every(({ path: mutationPath }) => path.isAbsolute(mutationPath)));
+  for (const operation of [
+    "path.link.source",
+    "path.link.target",
+    "path.rename.source",
+    "path.rename.target",
+  ]) {
+    assert.ok(revalidated.some((request) => request.operation === operation));
+  }
 });
+
+for (const dualPathOperation of ["link", "rename"]) {
+  test(`identity ${dualPathOperation} revalidates an expired source after deciding its target`, (t) => {
+    const project = fixtureProject(t);
+    const plan = planIdentityMigration({
+      projectRoot: project,
+      mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+    });
+    const prefix = `path.${dualPathOperation}`;
+    const active = [];
+    let clockMinutes = 0;
+    let targetEvaluatedAt = null;
+    let sourceRevalidatedAt = null;
+    let armed = true;
+    const mutationGateway = (request, effect) => {
+      const authorization = {
+        request,
+        validUntilMinutes: request.operation === `${prefix}.source` && armed ? 10 : Number.POSITIVE_INFINITY,
+      };
+      active.push(authorization);
+      if (request.operation === `${prefix}.target` && armed) {
+        clockMinutes = 11;
+        targetEvaluatedAt = clockMinutes;
+      }
+      try {
+        return effect();
+      } finally {
+        active.pop();
+      }
+    };
+    mutationGateway.revalidate = (request) => {
+      const authorization = [...active].reverse().find((candidate) =>
+        candidate.request.operation === request.operation && candidate.request.path === request.path);
+      assert.ok(authorization, `missing active ${request.operation} authorization`);
+      if (request.operation === `${prefix}.source` && armed) {
+        sourceRevalidatedAt = clockMinutes;
+      }
+      if (clockMinutes >= authorization.validUntilMinutes) {
+        throw new Error(`${dualPathOperation} source authorization expired`);
+      }
+      return true;
+    };
+
+    const syscallName = dualPathOperation === "link" ? "linkSync" : "renameSync";
+    const originalSyscall = fs[syscallName];
+    let syscallCount = 0;
+    fs[syscallName] = function countedDualPathSyscall(...args) {
+      syscallCount += 1;
+      return originalSyscall.apply(fs, args);
+    };
+    try {
+      assert.throws(
+        () => applyIdentityMigration(plan, { mutationGateway }),
+        new RegExp(`${dualPathOperation} source authorization expired`, "u"),
+      );
+    } finally {
+      fs[syscallName] = originalSyscall;
+    }
+
+    assert.equal(targetEvaluatedAt, 11);
+    assert.equal(sourceRevalidatedAt, 11);
+    assert.equal(syscallCount, 0, `${dualPathOperation} ran after its source authorization expired`);
+  });
+}
 
 test("identity migration gateway denial happens before the first physical byte", (t) => {
   const project = fixtureProject(t);
@@ -1154,17 +1232,23 @@ test("identity migration recovery restores a durable backup after an interrupted
   const exactMutations = new Set(preparation.exact_mutations.map(({ operation, path: mutationPath }) =>
     `${operation}\u0000${mutationPath}`));
   const observedMutations = [];
+  const recoveryMutationGateway = (request, effect) => {
+    const exactKey = `${request.operation}\u0000${request.path}`;
+    assert.ok(exactMutations.has(exactKey), `recovery attempted an unprepared mutation: ${exactKey}`);
+    observedMutations.push(exactKey);
+    return effect();
+  };
+  recoveryMutationGateway.revalidate = (request) => {
+    const exactKey = `${request.operation}\u0000${request.path}`;
+    assert.ok(exactMutations.has(exactKey), `recovery revalidated an unprepared mutation: ${exactKey}`);
+    return true;
+  };
   const recovered = recoverIdentityMigration({
     projectRoot: project,
     recoveryNonce: nonce,
     planHash,
     recoveryPreparation: preparation,
-    mutationGateway(request, effect) {
-      const exactKey = `${request.operation}\u0000${request.path}`;
-      assert.ok(exactMutations.has(exactKey), `recovery attempted an unprepared mutation: ${exactKey}`);
-      observedMutations.push(exactKey);
-      return effect();
-    },
+    mutationGateway: recoveryMutationGateway,
   });
   assert.equal(recovered.status, "rolled_back");
   assert.ok(observedMutations.length > 0);
