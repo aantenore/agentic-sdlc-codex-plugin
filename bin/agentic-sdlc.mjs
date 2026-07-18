@@ -21,6 +21,23 @@ import {
   validateProposalIntegrity,
 } from "../lib/assessment-workflow.mjs";
 import {
+  applyWorkflowOverlay,
+  approveWorkflowDefinition,
+  approveWorkflowOverlay,
+  buildWorkflowDefinition,
+  buildWorkflowOverlay,
+  createWorkflowInstance,
+  createWorkflowTransition,
+  replayWorkflowEvents,
+  validateWorkflowDefinition,
+  validateWorkflowOverlay,
+} from "../lib/workflow-engine.mjs";
+import {
+  buildWorkflowPreset,
+  getWorkflowPreset,
+  listWorkflowPresets,
+} from "../lib/workflow-presets.mjs";
+import {
   applyBudgetAmendment,
   buildBudgetAmendment,
   buildExecutionUsageReceipt,
@@ -313,6 +330,10 @@ const KNOWN_OPTIONS = new Set([
   "delivery-profile",
   "document",
   "delivery",
+  "definition",
+  "definition-file",
+  "definition-json",
+  "definition-version",
   "edge",
   "event",
   "evidence",
@@ -354,6 +375,10 @@ const KNOWN_OPTIONS = new Set([
   "next-step",
   "notes",
   "open-item",
+  "overlay",
+  "overlay-file",
+  "overlay-json",
+  "overlay-version",
   "out",
   "outcome",
   "output",
@@ -462,6 +487,8 @@ const KNOWN_OPTIONS = new Set([
   "to-name",
   "validation",
   "view",
+  "workflow-preset",
+  "guard-input-json",
 ]);
 const REPEATABLE_OPTIONS = new Set([
   "acceptance",
@@ -743,6 +770,50 @@ async function main() {
     }
     if (command === "assessment" && subcommand === "status") {
       showAssessmentProposalStatus(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "definition" && rest[0] === "list") {
+      listWorkflowDefinitionsCommand(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "definition" && rest[0] === "show") {
+      showWorkflowDefinition(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "definition" && rest[0] === "propose") {
+      proposeWorkflowDefinition(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "definition" && rest[0] === "approve") {
+      approveWorkflowDefinitionCommand(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "overlay" && rest[0] === "propose") {
+      proposeWorkflowOverlay(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "overlay" && rest[0] === "approve") {
+      approveWorkflowOverlayCommand(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") {
+      explainWorkflowOverlay(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "instance" && rest[0] === "start") {
+      startWorkflowInstance(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "instance" && rest[0] === "transition") {
+      transitionWorkflowInstance(context, parsed.options);
+      return;
+    }
+    if (command === "workflow" && subcommand === "instance" && rest[0] === "status") {
+      showWorkflowInstance(context, parsed.options, { explain: false });
+      return;
+    }
+    if (command === "workflow" && subcommand === "instance" && rest[0] === "explain") {
+      showWorkflowInstance(context, parsed.options, { explain: true });
       return;
     }
     if (command === "budget" && subcommand === "usage" && rest[0] === "record") {
@@ -1103,6 +1174,870 @@ async function main() {
     }
     throw error;
   }
+}
+
+function workflowsRoot(context) {
+  return path.join(context.sdlcRoot, "workflows");
+}
+
+function workflowDefinitionsRoot(context) {
+  return path.join(workflowsRoot(context), "definitions");
+}
+
+function workflowOverlaysRoot(context) {
+  return path.join(workflowsRoot(context), "overlays");
+}
+
+function workflowInstancesRoot(context) {
+  return path.join(workflowsRoot(context), "instances");
+}
+
+function normalizeWorkflowVersion(value, optionName) {
+  const normalized = String(value ?? "").trim();
+  if (!/^[1-9][0-9]*$/u.test(normalized)) {
+    fail(`Invalid --${optionName} '${value}'. Use a positive whole number, for example 1 or 2.`);
+  }
+  return normalized;
+}
+
+function workflowDefinitionPath(context, id, version) {
+  return path.join(
+    workflowDefinitionsRoot(context),
+    normalizeId(id),
+    `v${normalizeWorkflowVersion(version, "definition-version")}.json`,
+  );
+}
+
+function workflowOverlayPath(context, id, version) {
+  return path.join(
+    workflowOverlaysRoot(context),
+    normalizeId(id),
+    `v${normalizeWorkflowVersion(version, "overlay-version")}.json`,
+  );
+}
+
+function workflowInstanceRoot(context, id) {
+  return path.join(workflowInstancesRoot(context), normalizeId(id));
+}
+
+function workflowInstancePath(context, id) {
+  return path.join(workflowInstanceRoot(context, id), "instance.json");
+}
+
+function workflowEventsPath(context, id) {
+  return path.join(workflowInstanceRoot(context, id), "events.jsonl");
+}
+
+function workflowVersionFromFileName(fileName) {
+  const match = /^v(.+)\.json$/u.exec(fileName);
+  return match ? match[1] : null;
+}
+
+function compareWorkflowVersions(left, right) {
+  return String(left).localeCompare(String(right), "en", { numeric: true, sensitivity: "base" });
+}
+
+function listVersionedWorkflowRecords(context, rootPath) {
+  const records = [];
+  for (const id of safeReadDir(rootPath).sort((left, right) => left.localeCompare(right, "en"))) {
+    const idPath = path.join(rootPath, id);
+    if (!fs.statSync(idPath).isDirectory()) continue;
+    for (const fileName of safeReadDir(idPath)) {
+      const version = workflowVersionFromFileName(fileName);
+      if (!version) continue;
+      const filePath = path.join(idPath, fileName);
+      if (!fs.statSync(filePath).isFile()) continue;
+      records.push({ id, version, path: filePath, record: readProjectJson(context, filePath) });
+    }
+  }
+  return records.sort((left, right) =>
+    left.id.localeCompare(right.id, "en") || compareWorkflowVersions(left.version, right.version));
+}
+
+function resolveWorkflowRecord(context, { kind, id, version = null }) {
+  const rootPath = kind === "definition" ? workflowDefinitionsRoot(context) : workflowOverlaysRoot(context);
+  const normalizedId = normalizeId(id);
+  if (version) {
+    const filePath = kind === "definition"
+      ? workflowDefinitionPath(context, normalizedId, version)
+      : workflowOverlayPath(context, normalizedId, version);
+    if (!fs.existsSync(filePath)) fail(`Workflow ${kind} ${normalizedId} version ${version} does not exist.`);
+    return { id: normalizedId, version: String(version), path: filePath, record: readProjectJson(context, filePath) };
+  }
+  const candidates = listVersionedWorkflowRecords(context, rootPath).filter((entry) => entry.id === normalizedId);
+  if (candidates.length === 0) fail(`Workflow ${kind} ${normalizedId} does not exist.`);
+  return candidates.sort((left, right) => compareWorkflowVersions(left.version, right.version)).at(-1);
+}
+
+function parseWorkflowJsonInput(context, options, { fileOption, jsonOption, label }) {
+  const fileValue = getOptionString(options, fileOption);
+  const jsonValue = getOptionString(options, jsonOption);
+  if (Boolean(fileValue) === Boolean(jsonValue)) {
+    fail(`${label} needs exactly one of --${fileOption} or --${jsonOption}.`);
+  }
+  try {
+    if (jsonValue) return JSON.parse(jsonValue);
+    const filePath = resolveProjectFilePath(context, fileValue, { mustExist: true, fileOnly: true });
+    return JSON.parse(readProjectText(context, filePath));
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    fail(`Unable to read ${label} JSON: ${error.message}`);
+  }
+}
+
+function assertWorkflowValidation(result, label) {
+  if (result === true || result?.valid === true) return;
+  const errors = Array.isArray(result) ? result : result?.errors;
+  fail(`${label} is invalid: ${Array.isArray(errors) && errors.length > 0 ? errors.join("; ") : "validation failed"}`);
+}
+
+function validateWorkflowDefinitionRecord(definition, label) {
+  const result = callWorkflowDomain(`Unable to validate ${label}`, () => validateWorkflowDefinition(definition));
+  assertWorkflowValidation(result, label);
+}
+
+function validateWorkflowOverlayRecord(overlay, definition, label) {
+  const result = callWorkflowDomain(`Unable to validate ${label}`, () => validateWorkflowOverlay(overlay, { definition }));
+  assertWorkflowValidation(result, label);
+}
+
+function workflowApprovalForDomain(approval) {
+  return {
+    id: approval.id,
+    approved_at: approval.created_at,
+    approved_by: approval.approved_by,
+    approval_source: approval.approval_source,
+    summary: approval.summary,
+    evidence: approval.evidence,
+    authorization_ref: approval.authorization_ref,
+  };
+}
+
+function workflowGuidance(options, kind, settings = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const copy = {
+    listed: italian
+      ? ["I modi di lavorare disponibili sono stati raccolti.", "Puoi confrontarli prima di scegliere quale usare.", "Non devi decidere nulla finché non vuoi avviare o approvare un nuovo modo di lavorare.", "La consultazione non modifica file, attività in corso o permessi.", "Consulta i dettagli e scegli una voce solo quando serve."]
+      : ["The available ways of working have been collected.", "You can compare them before choosing which one to use.", "You do not need to decide anything until you want to start or approve a new way of working.", "This view changes no files, active work, or permissions.", "Review the details and choose an entry only when needed."],
+    shown: italian
+      ? ["Il modo di lavorare richiesto è stato descritto.", "Puoi vedere passaggi e controlli prima di usarlo.", "Non devi decidere nulla con questa sola consultazione.", "La consultazione non modifica esecuzioni attive né concede nuovi permessi.", "Se il contenuto è adatto, usalo per una nuova esecuzione o approva la proposta mostrata."]
+      : ["The requested way of working has been described.", "You can review its steps and checks before using it.", "This view alone needs no decision.", "It changes no active run and grants no new permission.", "If it fits, use it for a new run or approve the displayed proposal."],
+    proposed: italian
+      ? ["È pronta una proposta di modo di lavorare.", "Resta inattiva finché non viene confermata; nessuna attività esistente cambia.", "Conferma soltanto se passaggi, controlli e limiti mostrati sono corretti, altrimenti chiedi una modifica.", "La conferma vale solo per questa versione e non autorizza lavoro, merge, rilasci o accessi esterni.", "Esamina il riepilogo e approva o correggi la proposta."]
+      : ["A proposed way of working is ready for review.", "It remains inactive until confirmed, and no existing work changes.", "Confirm only if the displayed steps, checks, and limits are correct; otherwise request a change.", "Confirmation applies only to this version and does not authorize work, merges, releases, or external access.", "Review the summary, then approve or correct the proposal."],
+    approved: italian
+      ? ["Il modo di lavorare proposto è stato confermato.", "Questa versione può essere scelta per nuove esecuzioni.", "Non devi decidere altro per questa conferma.", "Le esecuzioni già avviate restano invariate e ogni consegna conserva i propri limiti e permessi.", "Puoi avviare una nuova esecuzione quando serve."]
+      : ["The proposed way of working has been confirmed.", "This version can now be selected for new runs.", "No further decision is needed for this confirmation.", "Existing runs stay unchanged, and every delivery keeps its own limits and permissions.", "You can start a new run when needed."],
+    overlay_proposed: italian
+      ? ["È pronto un adattamento del modo di lavorare per questo progetto.", "Resta inattivo finché non viene confermato e non cambia le esecuzioni già avviate.", "Conferma soltanto se le differenze mostrate sono volute, altrimenti chiedi una correzione.", "Non può riscrivere la cronologia, cambiare i passaggi fondamentali o ampliare i permessi.", "Esamina le differenze e approva o correggi l’adattamento."]
+      : ["A project-specific adjustment is ready for review.", "It remains inactive until confirmed and does not change runs already started.", "Confirm only if the displayed differences are intended; otherwise request a correction.", "It cannot rewrite history, change the fundamental steps, or widen permissions.", "Review the differences, then approve or correct the adjustment."],
+    overlay_explained: italian
+      ? ["Le differenze introdotte dall’adattamento sono state raccolte.", "Puoi capire cosa vedranno le nuove esecuzioni prima di usarlo.", "Questa consultazione non richiede una decisione.", "Le esecuzioni già attive, la loro cronologia e i permessi restano invariati.", "Se le differenze sono corrette, usa l’adattamento solo per una nuova esecuzione."]
+      : ["The differences introduced by the adjustment have been collected.", "You can see what new runs would use before selecting it.", "This view needs no decision.", "Active runs, their history, and permissions remain unchanged.", "If the differences are right, select the adjustment only for a new run."],
+    started: italian
+      ? ["È iniziata una nuova esecuzione tracciata.", "Seguirà la versione esatta scelta anche se il modello generale cambierà in futuro.", "Non devi decidere altro finché non raggiunge un passaggio che richiede una scelta.", "L’avvio non concede permessi per modifiche, merge, rilasci o accessi esterni.", "Continua con il prossimo passaggio consentito quando sei pronto."]
+      : ["A new tracked run has started.", "It will keep using the exact selected version even if the general model changes later.", "No further decision is needed until it reaches a step that requires one.", "Starting the run grants no permission for changes, merges, releases, or external access.", "Continue with the next permitted step when ready."],
+    transitioned: italian
+      ? ["L’esecuzione è passata al passo successivo consentito.", "La cronologia è stata estesa senza modificare gli eventi precedenti.", "Non devi decidere altro salvo quanto richiesto dal nuovo passo.", "Il passaggio non amplia i permessi né autorizza azioni esterne.", "Controlla lo stato aggiornato e continua solo con un passaggio consentito."]
+      : ["The run moved to the next permitted step.", "Its history was extended without changing earlier events.", "No further decision is needed unless the new step asks for one.", "The transition does not widen permissions or authorize external actions.", "Review the updated status and continue only with a permitted step."],
+    instance_shown: italian
+      ? ["Lo stato dell’esecuzione è stato ricostruito dalla sua cronologia.", "Puoi vedere dove si trova e quali passaggi sono disponibili.", "Questa consultazione non richiede una decisione.", "La cronologia e i permessi non sono stati modificati.", "Scegli un passaggio successivo solo tra quelli consentiti."]
+      : ["The run status was reconstructed from its recorded history.", "You can see where it is and which next steps are available.", "This view needs no decision.", "Its history and permissions were not changed.", "Choose a next step only from those permitted."],
+  };
+  const [result, impact, required_decision, protection_boundary, next_action] = copy[kind] || copy.shown;
+  return { result, impact, required_decision, protection_boundary, next_action, details: settings };
+}
+
+function outputWorkflowResult(options, payload, kind, details = []) {
+  output(options, payload, humanGuidanceLines(workflowGuidance(options, kind), details, options));
+}
+
+function callWorkflowDomain(label, callback) {
+  try {
+    return callback();
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    fail(`${label}: ${error.message}`);
+  }
+}
+
+function workflowDefinitionSummary(definition, source = "project") {
+  return {
+    id: definition.id,
+    version: definition.version,
+    status: definition.status,
+    name: definition.name || definition.title || definition.label || definition.id,
+    description: definition.description || definition.summary || null,
+    initial_state: definition.initial_state,
+    state_count: Array.isArray(definition.states) ? definition.states.length : Object.keys(definition.states || {}).length,
+    transition_count: Array.isArray(definition.transitions) ? definition.transitions.length : 0,
+    source,
+    definition_hash: definition.definition_hash,
+  };
+}
+
+function listWorkflowDefinitionsCommand(context, options) {
+  ensureInitialized(context);
+  const projectRecords = listVersionedWorkflowRecords(context, workflowDefinitionsRoot(context));
+  const presets = callWorkflowDomain("Unable to list included ways of working", () => listWorkflowPresets());
+  const included = presets.map((preset) => {
+    const id = typeof preset === "string" ? preset : preset.id;
+    const descriptor = typeof preset === "string" ? getWorkflowPreset(preset) : preset;
+    return {
+      id,
+      version: descriptor.version || "1",
+      status: descriptor.status || "included",
+      name: descriptor.name || descriptor.title || descriptor.label || id,
+      description: descriptor.description || descriptor.summary || null,
+      source: "included",
+    };
+  });
+  const definitions = projectRecords.map(({ record, path: filePath }) => ({
+    ...workflowDefinitionSummary(record),
+    path: toProjectPath(context, filePath),
+  }));
+  outputWorkflowResult(options, {
+    schema_version: "workflow-definition-list:v1",
+    status: "ready",
+    included,
+    definitions,
+  }, "listed", [
+    `Included choices: ${included.map((entry) => entry.id).join(", ") || "none"}`,
+    `Project definitions: ${definitions.length}`,
+  ]);
+}
+
+function showWorkflowDefinition(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const requestedVersion = getOptionString(options, "definition-version");
+  let resolved;
+  try {
+    resolved = resolveWorkflowRecord(context, { kind: "definition", id, version: requestedVersion });
+    validateWorkflowDefinitionRecord(resolved.record, `workflow definition ${id}`);
+  } catch (error) {
+    if (!(error instanceof UserError) || !/does not exist/u.test(error.message)) throw error;
+    const preset = callWorkflowDomain(`Workflow definition ${id} does not exist`, () =>
+      buildWorkflowPreset(id, {
+        ...(requestedVersion ? { version: Number(normalizeWorkflowVersion(requestedVersion, "definition-version")) } : {}),
+      }));
+    resolved = { id, version: preset.version, path: null, record: preset, included: true };
+  }
+  outputWorkflowResult(options, {
+    schema_version: "workflow-definition-view:v1",
+    status: resolved.record.status || "ready",
+    source: resolved.included ? "included" : "project",
+    path: resolved.path ? toProjectPath(context, resolved.path) : null,
+    definition: resolved.record,
+  }, "shown", [
+    `Definition: ${resolved.record.id} version ${resolved.record.version}`,
+    `Status: ${resolved.record.status || "included"}`,
+    `Initial state: ${resolved.record.initial_state}`,
+    `States: ${Array.isArray(resolved.record.states) ? resolved.record.states.map((state) => state.id || state).join(", ") : Object.keys(resolved.record.states || {}).join(", ")}`,
+    ...(resolved.path ? [`Path: ${toProjectPath(context, resolved.path)}`] : ["Source: included preset"]),
+  ]);
+}
+
+function proposeWorkflowDefinition(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const version = normalizeWorkflowVersion(requireOption(options, "definition-version"), "definition-version");
+  const presetId = getOptionString(options, "workflow-preset");
+  const hasCustomInput = Boolean(getOptionString(options, "definition-file") || getOptionString(options, "definition-json"));
+  if (Boolean(presetId) === hasCustomInput) {
+    fail("Workflow definition proposal needs exactly one of --workflow-preset, --definition-file, or --definition-json.");
+  }
+  let input;
+  if (presetId) {
+    const preset = callWorkflowDomain(`Unknown workflow preset '${presetId}'`, () =>
+      buildWorkflowPreset(presetId, { version: Number(version), created_at: now() }));
+    const {
+      definition_hash: ignoredHash,
+      approval: ignoredApproval,
+      approved_at: ignoredApprovedAt,
+      approved_by: ignoredApprovedBy,
+      ...presetInput
+    } = preset;
+    input = { ...presetInput, id, version: Number(version), status: "proposed" };
+  } else {
+    const custom = parseWorkflowJsonInput(context, options, {
+      fileOption: "definition-file",
+      jsonOption: "definition-json",
+      label: "workflow definition",
+    });
+    if (!custom || typeof custom !== "object" || Array.isArray(custom)) fail("Workflow definition JSON must be an object.");
+    input = { ...custom, id, version: Number(version), status: "proposed", created_at: custom.created_at || now() };
+  }
+  const summary = getOptionString(options, "summary");
+  if (summary) input = { ...input, description: input.description || summary };
+  const definition = callWorkflowDomain("Unable to prepare workflow definition", () => buildWorkflowDefinition(input));
+  validateWorkflowDefinitionRecord(definition, `workflow definition ${id}`);
+  const filePath = workflowDefinitionPath(context, id, version);
+  writeJsonFile(filePath, definition, { force: false });
+  const attribution = buildAttribution(context, options, "workflow.definition.propose");
+  appendTraceEvent(context, null, {
+    type: "decision",
+    outcome: "ready",
+    summary: `Proposed workflow definition ${id} version ${version}`,
+    action: "workflow.definition.propose",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, filePath)],
+    related: [id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-definition-proposal:v1",
+    status: "proposed",
+    path: toProjectPath(context, filePath),
+    definition,
+  }, "proposed", [
+    `Definition: ${id} version ${version}`,
+    `Path: ${toProjectPath(context, filePath)}`,
+    `Content hash: ${definition.definition_hash}`,
+    `Approve: agentic-sdlc workflow definition approve --id ${id} --definition-version ${version} --actor-type human --approval-source explicit-user --summary "Approved the displayed steps, checks, and limits"`,
+  ]);
+}
+
+function approveWorkflowDefinitionCommand(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const version = normalizeWorkflowVersion(requireOption(options, "definition-version"), "definition-version");
+  const resolved = resolveWorkflowRecord(context, { kind: "definition", id, version });
+  if (resolved.record.status !== "proposed") {
+    fail(`Workflow definition ${id} version ${version} is '${resolved.record.status}', expected proposed.`);
+  }
+  validateWorkflowDefinitionRecord(resolved.record, `workflow definition ${id}`);
+  const attribution = buildAttribution(context, options, "workflow.definition.approve");
+  requireFormalApprovalActor(context, options, attribution, "Approving a workflow definition");
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: resolved.record,
+    subject_id_field: "definition_id",
+    subject_id: id,
+    scope: "workflow-definition-version",
+    label: `workflow definition ${id} version ${version}`,
+    artifact_types: ["workflow-definition"],
+  });
+  const approved = callWorkflowDomain("Unable to approve workflow definition", () =>
+    approveWorkflowDefinition(resolved.record, { approval: workflowApprovalForDomain(approval) }));
+  validateWorkflowDefinitionRecord(approved, `approved workflow definition ${id}`);
+  writeJsonFile(resolved.path, approved, { force: true });
+  appendTraceEvent(context, null, {
+    type: "gate",
+    outcome: "passed",
+    summary: approval.summary || `Approved workflow definition ${id} version ${version}`,
+    action: "workflow.definition.approve",
+    actor: attribution.actor,
+    authorization_ref: approval.authorization_ref,
+    evidence: [toProjectPath(context, resolved.path), ...approval.evidence.map((entry) => entry.path)],
+    related: [id, approval.id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-definition-approval:v1",
+    status: "approved",
+    path: toProjectPath(context, resolved.path),
+    definition: approved,
+    approval,
+  }, "approved", [
+    `Definition: ${id} version ${version}`,
+    `Approval: ${approval.id}`,
+    `Path: ${toProjectPath(context, resolved.path)}`,
+  ]);
+}
+
+function workflowDefinitionRef(definition) {
+  return {
+    id: definition.id,
+    version: definition.version,
+    definition_hash: definition.definition_hash,
+  };
+}
+
+function proposeWorkflowOverlay(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const version = normalizeWorkflowVersion(requireOption(options, "overlay-version"), "overlay-version");
+  const definitionId = normalizeId(requireOption(options, "definition"));
+  const definitionVersion = normalizeWorkflowVersion(requireOption(options, "definition-version"), "definition-version");
+  const definitionEntry = resolveWorkflowDefinitionForRuntime(context, definitionId, definitionVersion);
+  const definition = definitionEntry.record;
+  if (definition.status !== "approved") {
+    fail(`Workflow definition ${definitionId} version ${definitionVersion} must be approved before proposing an adjustment.`);
+  }
+  validateWorkflowDefinitionRecord(definition, `workflow definition ${definitionId}`);
+  const custom = parseWorkflowJsonInput(context, options, {
+    fileOption: "overlay-file",
+    jsonOption: "overlay-json",
+    label: "workflow overlay",
+  });
+  if (!custom || typeof custom !== "object" || Array.isArray(custom)) fail("Workflow overlay JSON must be an object.");
+  const summary = getOptionString(options, "summary");
+  const input = {
+    ...custom,
+    id,
+    version: Number(version),
+    status: "proposed",
+    definition_ref: workflowDefinitionRef(definition),
+    created_at: custom.created_at || now(),
+    ...(summary && !custom.description ? { description: summary } : {}),
+  };
+  const overlay = callWorkflowDomain("Unable to prepare workflow overlay", () =>
+    buildWorkflowOverlay(input, { definition }));
+  validateWorkflowOverlayRecord(overlay, definition, `workflow overlay ${id}`);
+  const effective = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
+    applyWorkflowOverlay(definition, overlay, { allow_proposed: true }));
+  const filePath = workflowOverlayPath(context, id, version);
+  writeJsonFile(filePath, overlay, { force: false });
+  const attribution = buildAttribution(context, options, "workflow.overlay.propose");
+  appendTraceEvent(context, null, {
+    type: "decision",
+    outcome: "ready",
+    summary: `Proposed workflow overlay ${id} version ${version}`,
+    action: "workflow.overlay.propose",
+    actor: attribution.actor,
+    evidence: [
+      toProjectPath(context, filePath),
+      ...(definitionEntry.path ? [toProjectPath(context, definitionEntry.path)] : []),
+    ],
+    related: [id, definitionId],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-overlay-proposal:v1",
+    status: "proposed",
+    path: toProjectPath(context, filePath),
+    overlay,
+    effective_summary: workflowDefinitionSummary(effective, "effective"),
+  }, "overlay_proposed", [
+    `Overlay: ${id} version ${version}`,
+    `Definition: ${definitionId} version ${definitionVersion}`,
+    `Path: ${toProjectPath(context, filePath)}`,
+    `Content hash: ${overlay.overlay_hash}`,
+    `Effective hash: ${effective.effective_hash}`,
+  ]);
+}
+
+function approveWorkflowOverlayCommand(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const version = normalizeWorkflowVersion(requireOption(options, "overlay-version"), "overlay-version");
+  const resolved = resolveWorkflowRecord(context, { kind: "overlay", id, version });
+  if (resolved.record.status !== "proposed") {
+    fail(`Workflow overlay ${id} version ${version} is '${resolved.record.status}', expected proposed.`);
+  }
+  const definitionEntry = workflowDefinitionForOverlay(context, resolved.record);
+  const definition = definitionEntry.record;
+  validateWorkflowOverlayRecord(resolved.record, definition, `workflow overlay ${id}`);
+  const attribution = buildAttribution(context, options, "workflow.overlay.approve");
+  requireFormalApprovalActor(context, options, attribution, "Approving a workflow overlay");
+  const approval = buildApprovalRecord(context, options, attribution, {
+    subject: resolved.record,
+    subject_id_field: "overlay_id",
+    subject_id: id,
+    scope: "workflow-overlay-version",
+    label: `workflow overlay ${id} version ${version}`,
+    artifact_types: ["workflow-overlay"],
+  });
+  const approved = callWorkflowDomain("Unable to approve workflow overlay", () =>
+    approveWorkflowOverlay(resolved.record, {
+      definition,
+      approval: workflowApprovalForDomain(approval),
+    }));
+  validateWorkflowOverlayRecord(approved, definition, `approved workflow overlay ${id}`);
+  writeJsonFile(resolved.path, approved, { force: true });
+  appendTraceEvent(context, null, {
+    type: "gate",
+    outcome: "passed",
+    summary: approval.summary || `Approved workflow overlay ${id} version ${version}`,
+    action: "workflow.overlay.approve",
+    actor: attribution.actor,
+    authorization_ref: approval.authorization_ref,
+    evidence: [toProjectPath(context, resolved.path), ...approval.evidence.map((entry) => entry.path)],
+    related: [id, definition.id, approval.id],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-overlay-approval:v1",
+    status: "approved",
+    path: toProjectPath(context, resolved.path),
+    overlay: approved,
+    approval,
+  }, "approved", [
+    `Overlay: ${id} version ${version}`,
+    `Approval: ${approval.id}`,
+    `Path: ${toProjectPath(context, resolved.path)}`,
+  ]);
+}
+
+function workflowDefinitionForOverlay(context, overlay) {
+  const ref = overlay.definition_ref || overlay.base_definition_ref || overlay.definition;
+  const id = ref?.id || ref?.definition_id || overlay.definition_id;
+  const version = ref?.version || ref?.definition_version || overlay.definition_version;
+  if (!id || !version) fail(`Workflow overlay ${overlay.id || "unknown"} does not identify its base definition.`);
+  const resolved = resolveWorkflowDefinitionForRuntime(context, id, String(version));
+  const expectedDefinitionHash = ref?.hash || ref?.definition_hash;
+  if (expectedDefinitionHash && resolved.record.definition_hash !== expectedDefinitionHash) {
+    fail(`Workflow overlay ${overlay.id || "unknown"} no longer matches its approved base definition.`);
+  }
+  return resolved;
+}
+
+function resolveWorkflowDefinitionForRuntime(context, id, version) {
+  try {
+    return resolveWorkflowRecord(context, { kind: "definition", id, version });
+  } catch (error) {
+    if (!(error instanceof UserError) || !/does not exist/u.test(error.message)) throw error;
+    if (String(version) !== "1") throw error;
+    const record = callWorkflowDomain(`Workflow definition ${id} version ${version} does not exist`, () =>
+      buildWorkflowPreset(id, { version: 1 }));
+    return { id: record.id, version: record.version, path: null, record, included: true };
+  }
+}
+
+function workflowOverlayChanges(overlay) {
+  if (Array.isArray(overlay.operations)) return overlay.operations;
+  if (Array.isArray(overlay.changes)) return overlay.changes;
+  if (overlay.patch && typeof overlay.patch === "object") {
+    return Object.keys(overlay.patch).sort().map((field) => ({ field, value: overlay.patch[field] }));
+  }
+  const ignored = new Set([
+    "id", "version", "status", "schema_version", "kind", "definition_ref", "base_definition_ref",
+    "overlay_hash", "hash_algorithm", "approval", "created_at", "updated_at", "summary",
+  ]);
+  return Object.entries(overlay)
+    .filter(([key]) => !ignored.has(key))
+    .sort(([left], [right]) => left.localeCompare(right, "en"))
+    .map(([field, value]) => ({ field, value }));
+}
+
+function explainWorkflowOverlay(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const version = getOptionString(options, "overlay-version");
+  const resolved = resolveWorkflowRecord(context, { kind: "overlay", id, version });
+  const definitionEntry = workflowDefinitionForOverlay(context, resolved.record);
+  validateWorkflowOverlayRecord(resolved.record, definitionEntry.record, `workflow overlay ${id}`);
+  const effective = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
+    applyWorkflowOverlay(definitionEntry.record, resolved.record, {
+      allow_proposed: resolved.record.status === "proposed",
+    }));
+  const changes = workflowOverlayChanges(resolved.record);
+  outputWorkflowResult(options, {
+    schema_version: "workflow-overlay-explanation:v1",
+    status: "ready",
+    path: toProjectPath(context, resolved.path),
+    overlay: resolved.record,
+    definition_ref: workflowDefinitionRef(definitionEntry.record),
+    changes,
+    effective_definition: effective,
+  }, "overlay_explained", [
+    `Overlay: ${resolved.record.id} version ${resolved.record.version}`,
+    `Status: ${resolved.record.status}`,
+    `Definition: ${definitionEntry.record.id} version ${definitionEntry.record.version}`,
+    `Changes: ${changes.length}`,
+    `Effective hash: ${effective.effective_hash}`,
+    `Path: ${toProjectPath(context, resolved.path)}`,
+  ]);
+}
+
+function startWorkflowInstance(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const definitionId = normalizeId(requireOption(options, "definition"));
+  const definitionVersion = normalizeWorkflowVersion(requireOption(options, "definition-version"), "definition-version");
+  const definitionEntry = resolveWorkflowDefinitionForRuntime(context, definitionId, definitionVersion);
+  const definition = definitionEntry.record;
+  if (definition.status !== "approved") {
+    fail(`Workflow definition ${definitionId} version ${definitionVersion} must be approved before a run can start.`);
+  }
+  validateWorkflowDefinitionRecord(definition, `workflow definition ${definitionId}`);
+  const overlayId = getOptionString(options, "overlay");
+  const overlayVersion = getOptionString(options, "overlay-version");
+  if (!overlayId && overlayVersion) fail("--overlay-version requires --overlay.");
+  let overlayEntry = null;
+  let effectiveDefinition = callWorkflowDomain("Unable to calculate the selected way of working", () =>
+    applyWorkflowOverlay(definition, null));
+  if (overlayId) {
+    overlayEntry = resolveWorkflowRecord(context, { kind: "overlay", id: overlayId, version: overlayVersion });
+    if (overlayEntry.record.status !== "approved") {
+      fail(`Workflow overlay ${overlayEntry.record.id} version ${overlayEntry.record.version} must be approved before a run can start.`);
+    }
+    const overlayDefinition = workflowDefinitionForOverlay(context, overlayEntry.record);
+    if (overlayDefinition.record.definition_hash !== definition.definition_hash) {
+      fail(`Workflow overlay ${overlayEntry.record.id} belongs to a different definition version.`);
+    }
+    effectiveDefinition = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
+      applyWorkflowOverlay(definition, overlayEntry.record));
+  }
+  const attribution = buildAttribution(context, options, "workflow.instance.start");
+  const summary = getOptionString(options, "summary");
+  const instance = callWorkflowDomain("Unable to start workflow instance", () => createWorkflowInstance({
+    id,
+    effective_definition: effectiveDefinition,
+    created_at: now(),
+    actor: attribution.actor,
+    ...(summary ? { metadata: { summary } } : {}),
+  }));
+  const instancePath = workflowInstancePath(context, id);
+  const eventsPath = workflowEventsPath(context, id);
+  if (fs.existsSync(workflowInstanceRoot(context, id))) {
+    fail(`Workflow instance ${id} already exists.`);
+  }
+  writeJsonFile(instancePath, instance, { force: false });
+  try {
+    writeTextFile(eventsPath, "", { force: false });
+  } catch (error) {
+    if (fs.existsSync(instancePath)) fs.rmSync(instancePath);
+    throw error;
+  }
+  appendTraceEvent(context, null, {
+    type: "implementation",
+    outcome: "ready",
+    summary: `Started workflow instance ${id}`,
+    action: "workflow.instance.start",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, instancePath), toProjectPath(context, eventsPath)],
+    related: [id, definition.id, ...(overlayEntry ? [overlayEntry.record.id] : [])],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-instance-start:v1",
+    status: "started",
+    instance_path: toProjectPath(context, instancePath),
+    events_path: toProjectPath(context, eventsPath),
+    instance,
+  }, "started", [
+    `Instance: ${id}`,
+    `Definition: ${definition.id} version ${definition.version}`,
+    ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
+    `Initial state: ${instance.current_state || instance.initial_state || effectiveDefinition.initial_state}`,
+    `Path: ${toProjectPath(context, instancePath)}`,
+  ]);
+}
+
+function readWorkflowEvents(context, instanceId) {
+  const filePath = workflowEventsPath(context, instanceId);
+  if (!fs.existsSync(filePath)) fail(`Workflow instance ${instanceId} is missing its event history.`);
+  const raw = readProjectText(context, filePath);
+  if (!raw.trim()) return [];
+  return raw.split(/\r?\n/u).filter(Boolean).map((line, index) => {
+    try {
+      return JSON.parse(line);
+    } catch (error) {
+      fail(`Workflow instance ${instanceId} event ${index + 1} is not valid JSON: ${error.message}`);
+    }
+  });
+}
+
+function readWorkflowInstance(context, id) {
+  const instancePath = workflowInstancePath(context, id);
+  if (!fs.existsSync(instancePath)) fail(`Workflow instance ${id} does not exist.`);
+  return { instancePath, instance: readProjectJson(context, instancePath) };
+}
+
+function instanceDefinitionReference(instance) {
+  return instance.definition_ref
+    || instance.workflow_definition_ref
+    || instance.effective_definition_ref?.definition_ref
+    || instance.definition;
+}
+
+function instanceOverlayReference(instance) {
+  return instance.overlay_ref
+    || instance.workflow_overlay_ref
+    || instance.effective_definition_ref?.overlay_ref
+    || instance.overlay
+    || null;
+}
+
+function referenceId(reference, prefix) {
+  return reference?.id || reference?.[`${prefix}_id`] || null;
+}
+
+function referenceVersion(reference, prefix) {
+  return reference?.version || reference?.[`${prefix}_version`] || null;
+}
+
+function loadEffectiveDefinitionForInstance(context, instance) {
+  const definitionRef = instanceDefinitionReference(instance);
+  const definitionId = referenceId(definitionRef, "definition");
+  const definitionVersion = referenceVersion(definitionRef, "definition");
+  if (!definitionId || !definitionVersion) fail(`Workflow instance ${instance.id || "unknown"} is missing its pinned definition reference.`);
+  const definitionEntry = resolveWorkflowDefinitionForRuntime(
+    context,
+    definitionId,
+    String(definitionVersion),
+  );
+  const expectedDefinitionHash = definitionRef.hash || definitionRef.definition_hash;
+  if (expectedDefinitionHash && definitionEntry.record.definition_hash !== expectedDefinitionHash) {
+    fail(`Workflow instance ${instance.id} definition changed after start.`);
+  }
+  const overlayRef = instanceOverlayReference(instance);
+  if (!overlayRef) {
+    const effectiveDefinition = callWorkflowDomain("Unable to reconstruct the pinned way of working", () =>
+      applyWorkflowOverlay(definitionEntry.record, null));
+    const expectedEffectiveHash = instance.effective_hash
+      || instance.effective_definition_hash
+      || instance.effective_definition_ref?.hash;
+    if (expectedEffectiveHash && effectiveDefinition.effective_hash !== expectedEffectiveHash) {
+      fail(`Workflow instance ${instance.id} effective definition no longer matches its start record.`);
+    }
+    return { definitionEntry, overlayEntry: null, effectiveDefinition };
+  }
+  const overlayId = referenceId(overlayRef, "overlay");
+  const overlayVersion = referenceVersion(overlayRef, "overlay");
+  if (!overlayId || !overlayVersion) fail(`Workflow instance ${instance.id} has an incomplete overlay reference.`);
+  const overlayEntry = resolveWorkflowRecord(context, { kind: "overlay", id: overlayId, version: String(overlayVersion) });
+  const expectedOverlayHash = overlayRef.hash || overlayRef.overlay_hash;
+  if (expectedOverlayHash && overlayEntry.record.overlay_hash !== expectedOverlayHash) {
+    fail(`Workflow instance ${instance.id} overlay changed after start.`);
+  }
+  const effectiveDefinition = callWorkflowDomain("Unable to reconstruct the pinned way of working", () =>
+    applyWorkflowOverlay(definitionEntry.record, overlayEntry.record));
+  const expectedEffectiveHash = instance.effective_hash
+    || instance.effective_definition_hash
+    || instance.effective_definition_ref?.hash;
+  if (expectedEffectiveHash && effectiveDefinition.effective_hash !== expectedEffectiveHash) {
+    fail(`Workflow instance ${instance.id} effective definition no longer matches its start record.`);
+  }
+  return { definitionEntry, overlayEntry, effectiveDefinition };
+}
+
+function appendWorkflowEventUnlocked(filePath, event) {
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_APPEND | NO_FOLLOW_FLAG);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    fs.writeFileSync(descriptor, `${JSON.stringify(event)}\n`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function parseWorkflowGuardContext(options) {
+  const raw = getOptionString(options, "guard-input-json");
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail("--guard-input-json must contain one JSON object.");
+    return parsed;
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    fail(`Unable to read --guard-input-json: ${error.message}`);
+  }
+}
+
+function transitionWorkflowInstance(context, options) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const to = requireOption(options, "to");
+  const idempotencyKey = normalizeId(requireOption(options, "request-id"));
+  const { instance } = readWorkflowInstance(context, id);
+  const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+  const eventsPath = workflowEventsPath(context, id);
+  const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+  let result;
+  let events;
+  try {
+    events = readWorkflowEvents(context, id);
+    const attribution = buildAttribution(context, options, "workflow.instance.transition");
+    result = callWorkflowDomain("Unable to move workflow instance", () => createWorkflowTransition({
+      instance,
+      effective_definition: effectiveDefinition,
+      events,
+      to,
+      timestamp: now(),
+      actor: attribution.actor,
+      idempotency_key: idempotencyKey,
+      context: parseWorkflowGuardContext(options),
+    }));
+    const alreadyRecorded = events.some((event) =>
+      event.event_hash === result.event.event_hash
+      || event.idempotency_key === result.event.idempotency_key);
+    if (!alreadyRecorded) appendWorkflowEventUnlocked(eventsPath, result.event);
+  } finally {
+    releaseLock();
+  }
+  const attribution = buildAttribution(context, options, "workflow.instance.transition");
+  appendTraceEvent(context, null, {
+    type: "implementation",
+    outcome: "passed",
+    summary: getOptionString(options, "summary") || `Transitioned workflow instance ${id} to ${to}`,
+    action: "workflow.instance.transition",
+    actor: attribution.actor,
+    evidence: [toProjectPath(context, eventsPath)],
+    related: [id, result.event.id || result.event.event_hash],
+    git: attribution.git,
+    run: attribution.run,
+  });
+  outputWorkflowResult(options, {
+    schema_version: "workflow-instance-transition:v1",
+    status: "transitioned",
+    instance_id: id,
+    events_path: toProjectPath(context, eventsPath),
+    event: result.event,
+    replay: result.replay,
+  }, "transitioned", [
+    `Instance: ${id}`,
+    `State: ${result.replay.current_state || result.replay.state || to}`,
+    `Sequence: ${result.event.sequence}`,
+    `Event hash: ${result.event.event_hash}`,
+    `Path: ${toProjectPath(context, eventsPath)}`,
+  ]);
+}
+
+function workflowCurrentState(replay, instance, definition) {
+  return replay.current_state || replay.state || replay.status?.current_state || instance.current_state || definition.initial_state;
+}
+
+function workflowNextStates(definition, currentState) {
+  return (definition.transitions || [])
+    .filter((transition) => transition.from === currentState)
+    .map((transition) => transition.to)
+    .filter((state, index, all) => all.indexOf(state) === index)
+    .sort((left, right) => String(left).localeCompare(String(right), "en"));
+}
+
+function showWorkflowInstance(context, options, { explain = false } = {}) {
+  ensureInitialized(context);
+  const id = normalizeId(requireOption(options, "id"));
+  const { instancePath, instance } = readWorkflowInstance(context, id);
+  const { definitionEntry, overlayEntry, effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+  const events = readWorkflowEvents(context, id);
+  const replay = callWorkflowDomain("Unable to reconstruct workflow instance", () => replayWorkflowEvents({
+    instance,
+    effective_definition: effectiveDefinition,
+    events,
+  }));
+  const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
+  const nextStates = workflowNextStates(effectiveDefinition, currentState);
+  outputWorkflowResult(options, {
+    schema_version: explain ? "workflow-instance-explanation:v1" : "workflow-instance-status:v1",
+    status: "ready",
+    instance,
+    current_state: currentState,
+    next_states: nextStates,
+    event_count: events.length,
+    integrity: replay.integrity || replay.status || "valid",
+    replay,
+    ...(explain ? { events } : {}),
+  }, "instance_shown", [
+    `Instance: ${id}`,
+    `Current state: ${currentState}`,
+    `Next states: ${nextStates.join(", ") || "none"}`,
+    `Events: ${events.length}`,
+    `Definition: ${definitionEntry.record.id} version ${definitionEntry.record.version}`,
+    ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
+    `Instance path: ${toProjectPath(context, instancePath)}`,
+    `Events path: ${toProjectPath(context, workflowEventsPath(context, id))}`,
+  ]);
 }
 
 function rawBooleanOptionRequested(argv, optionName) {
@@ -1783,6 +2718,9 @@ function commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, option
     subcommand === "status"
     || (subcommand === "proposal" && rest[0] === "status")
   )) return true;
+  if (command === "workflow" && subcommand === "definition" && ["list", "show"].includes(rest[0])) return true;
+  if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") return true;
+  if (command === "workflow" && subcommand === "instance" && ["status", "explain"].includes(rest[0])) return true;
   if (command === "budget" && subcommand === "status") return true;
   if (command === "requirement" && subcommand === "status") return true;
   if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") return true;
