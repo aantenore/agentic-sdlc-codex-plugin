@@ -1,0 +1,50 @@
+{
+  "$schema": "../schemas/release-artifact-policy.schema.json",
+  "schema_version": "agentic-sdlc.release-artifact-policy.v1",
+  "archive_limits": {
+    "max_compressed_bytes": 16777216,
+    "max_entries": 4096,
+    "max_file_bytes": 8388608,
+    "max_pax_bytes": 16384,
+    "max_total_file_bytes": 67108864,
+    "max_uncompressed_bytes": 83886080
+  },
+  "package": {
+    "name": "agentic-sdlc-codex-plugin",
+    "archive_root": "package",
+    "tag_prefix": "v",
+    "allowed_top_level": [
+      ".codex-plugin",
+      "LICENSE",
+      "README.md",
+      "assets",
+      "bin",
+      "config",
+      "docs",
+      "lib",
+      "package.json",
+      "schemas",
+      "scripts",
+      "skills",
+      "templates",
+      "ui"
+    ],
+    "required_files": [
+      ".codex-plugin/plugin.json",
+      "LICENSE",
+      "README.md",
+      "bin/agentic-sdlc.mjs",
+      "config/release-artifact-policy.json",
+      "package.json",
+      "schemas/release-artifact-policy.schema.json",
+      "scripts/install-personal-marketplace.py",
+      "scripts/verify-release-package.mjs",
+      "skills/agentic-sdlc/SKILL.md"
+    ],
+    "plugin_manifest": ".codex-plugin/plugin.json",
+    "installer": "scripts/install-personal-marketplace.py",
+    "bin": {
+      "agentic-sdlc": "./bin/agentic-sdlc.mjs"
+    }
+  }
+}

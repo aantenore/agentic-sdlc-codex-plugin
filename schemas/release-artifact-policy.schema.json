@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-artifact-policy.schema.json",
+  "title": "Agentic SDLC release artifact policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "archive_limits",
+    "package"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "agentic-sdlc.release-artifact-policy.v1"
+    },
+    "archive_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_compressed_bytes",
+        "max_entries",
+        "max_file_bytes",
+        "max_pax_bytes",
+        "max_total_file_bytes",
+        "max_uncompressed_bytes"
+      ],
+      "properties": {
+        "max_compressed_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_entries": { "$ref": "#/$defs/positiveInteger" },
+        "max_file_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_pax_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_total_file_bytes": { "$ref": "#/$defs/positiveInteger" },
+        "max_uncompressed_bytes": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "archive_root",
+        "tag_prefix",
+        "allowed_top_level",
+        "required_files",
+        "plugin_manifest",
+        "installer",
+        "bin"
+      ],
+      "properties": {
+        "name": {
+          "const": "agentic-sdlc-codex-plugin"
+        },
+        "archive_root": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "tag_prefix": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "allowed_top_level": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeRelativePath" }
+        },
+        "required_files": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeRelativePath" }
+        },
+        "plugin_manifest": { "$ref": "#/$defs/safeRelativePath" },
+        "installer": { "$ref": "#/$defs/safeRelativePath" },
+        "bin": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9._-]*$": {
+              "type": "string",
+              "pattern": "^\\./[A-Za-z0-9._/-]+$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[A-Za-z0-9._/-]+$"
+    }
+  }
+}
