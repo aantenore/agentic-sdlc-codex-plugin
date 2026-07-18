@@ -11,11 +11,13 @@ import {
   ENTERPRISE_CANONICAL_QUERY_WORKER_SCHEMA,
   ENTERPRISE_FOUNDATION_DEFAULT_SCALE,
   ENTERPRISE_OBSERVATORY_WORKER_SCHEMA,
+  evaluateEnterprisePerformanceBudgets,
   normalizeResourceMaxRssBytes,
   parseCanonicalQueryWorkerEnvelope,
   parseObservatoryServerCompletionEnvelope,
   parseObservatoryServerReadyMessage,
   parseObservatoryWorkerEnvelope,
+  platformThresholds,
   runEnterprisePerformanceBenchmark,
   sequentialWorkersAreIsolated,
   validateObservatoryColdResponse,
@@ -44,6 +46,57 @@ test("enterprise performance defaults preserve the approved production scale", (
     dependency_edges: 5_000,
     trace_events: 100_000,
   });
+});
+
+test("Windows performance policy separates the service target from a bounded regression budget", () => {
+  const thresholds = platformThresholds("win32");
+  assert.deepEqual(thresholds, {
+    query_ms: 4_000,
+    observatory_warm_target_p95_ms: 250,
+    observatory_warm_p95_ms: 275,
+    rss_bytes: 320 * 1024 * 1024,
+  });
+
+  assert.deepEqual(evaluateEnterprisePerformanceBudgets({
+    query_ms: 3_000,
+    observatory_warm_p95_ms: 258.387,
+    rss_bytes: 200 * 1024 * 1024,
+  }, thresholds), {
+    query_within_budget: true,
+    observatory_warm_target_met: false,
+    observatory_warm_within_budget: true,
+    rss_within_budget: true,
+  });
+
+  assert.equal(evaluateEnterprisePerformanceBudgets({
+    query_ms: 3_000,
+    observatory_warm_p95_ms: 275.001,
+    rss_bytes: 200 * 1024 * 1024,
+  }, thresholds).observatory_warm_within_budget, false);
+});
+
+test("performance policy rejects an incoherent or unbounded threshold profile", () => {
+  assert.throws(
+    () => evaluateEnterprisePerformanceBudgets({
+      query_ms: 1,
+      observatory_warm_p95_ms: 1,
+      rss_bytes: 1,
+    }, {
+      query_ms: 2,
+      observatory_warm_target_p95_ms: 10,
+      observatory_warm_p95_ms: 9,
+      rss_bytes: 2,
+    }),
+    /hard budget cannot be lower than its target/u,
+  );
+  assert.throws(
+    () => evaluateEnterprisePerformanceBudgets({
+      query_ms: Number.POSITIVE_INFINITY,
+      observatory_warm_p95_ms: 1,
+      rss_bytes: 1,
+    }, platformThresholds("linux")),
+    /query_ms must be a finite non-negative number/u,
+  );
 });
 
 test("package configuration preserves the enforcing enterprise benchmark command", () => {
@@ -496,6 +549,15 @@ test("benchmark validates one canonical catalog and conditional Observatory cach
   assert.equal(report.evaluation.one_catalog_build, true);
   assert.equal(report.evaluation.workloads_isolated, true);
   assert.equal(report.evaluation.conditional_cache_valid, true);
+  assert.equal(
+    report.evaluation.observatory_warm_target_met,
+    report.workloads.observatory.warm_p95_ms
+      <= report.thresholds.observatory_warm_target_p95_ms,
+  );
+  assert.equal(
+    report.performance_warnings.length,
+    report.evaluation.observatory_warm_target_met ? 0 : 1,
+  );
   assert.equal(report.evaluation.rss_observed_bytes, report.memory.max_rss_bytes);
   assert.equal(report.evaluation.passed, true);
 });
