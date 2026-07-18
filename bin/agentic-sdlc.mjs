@@ -165,6 +165,12 @@ import {
 import { renderHelp, UnknownCommandError } from "../lib/cli/help.mjs";
 import { generateCompletion, SUPPORTED_SHELLS } from "../lib/cli/completion.mjs";
 import {
+  catalogOptionMetadata,
+  commandMutationIntent,
+  createCommandHandlerRegistry,
+  resolveCommand,
+} from "../lib/cli/dispatch.mjs";
+import {
   CliPresetError,
   exportCliPresets,
   listCliPresets,
@@ -275,7 +281,8 @@ const OUTPUT_FORMAT_ALIASES = Object.freeze({
   csv: "csv",
   custom: "custom",
 });
-const BOOLEAN_OPTIONS = new Set([
+const CATALOG_OPTION_METADATA = catalogOptionMetadata();
+const LEGACY_BOOLEAN_OPTIONS = new Set([
   "allow-incomplete-contract",
   "allow-unapproved-contract-output",
   "allow-unapproved-output-ref",
@@ -299,8 +306,8 @@ const BOOLEAN_OPTIONS = new Set([
   "trust-custom-rtk-command",
   "version",
 ]);
-const KNOWN_OPTIONS = new Set([
-  ...BOOLEAN_OPTIONS,
+const LEGACY_KNOWN_OPTIONS = new Set([
+  ...LEGACY_BOOLEAN_OPTIONS,
   "acceptance",
   "action",
   "adapter",
@@ -523,7 +530,7 @@ const KNOWN_OPTIONS = new Set([
   "redaction-policy",
   "guard-input-json",
 ]);
-const REPEATABLE_OPTIONS = new Set([
+const LEGACY_REPEATABLE_OPTIONS = new Set([
   "acceptance",
   "approval-evidence",
   "allow-action",
@@ -570,6 +577,28 @@ const REPEATABLE_OPTIONS = new Set([
   "validation",
   "target-event",
   "write-path",
+]);
+const CATALOG_KNOWN_OPTIONS = new Set(CATALOG_OPTION_METADATA.known);
+const CLI_COMPATIBILITY_BOOLEAN_OPTIONS = new Set(
+  [...LEGACY_BOOLEAN_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const CLI_COMPATIBILITY_OPTIONS = new Set(
+  [...LEGACY_KNOWN_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const CLI_COMPATIBILITY_REPEATABLE_OPTIONS = new Set(
+  [...LEGACY_REPEATABLE_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const BOOLEAN_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.boolean,
+  ...CLI_COMPATIBILITY_BOOLEAN_OPTIONS,
+]);
+const KNOWN_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.known,
+  ...CLI_COMPATIBILITY_OPTIONS,
+]);
+const REPEATABLE_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.repeatable,
+  ...CLI_COMPATIBILITY_REPEATABLE_OPTIONS,
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const TERMINAL_STORY_STATUSES = new Set(["done"]);
@@ -671,6 +700,175 @@ const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready
 const CLI_OPERATION_CONTEXT = createOperationContext({ operation: "cli.run" });
 const OPERATIONAL_REDACTION_POLICY = createOperationalRedactionPolicy();
 
+function cliHandler(stage, handle) {
+  return { stage, handle };
+}
+
+function buildCliRuntimeHandlerRegistry() {
+  const bootstrap = (handle) => cliHandler("bootstrap", handle);
+  const preConfig = (handle) => cliHandler("pre-config", handle);
+  const project = (handle) => cliHandler("project", handle);
+  const call = (handler) => project(({ context, options }) => handler(context, options));
+
+  return createCommandHandlerRegistry({
+    help: bootstrap(({ options, resolution }) => {
+      console.log(renderHelp(resolution.args, {
+        locale: humanGuidanceLocale(options),
+        json: options.json === true,
+        version: VERSION,
+      }));
+    }),
+    completion: bootstrap(({ options, resolution }) => {
+      const [shell, ...extra] = resolution.args;
+      if (!shell || extra.length > 0 || !SUPPORTED_SHELLS.includes(String(shell).toLowerCase())) {
+        fail(`Completion needs exactly one shell: ${SUPPORTED_SHELLS.join(", ")}.`);
+      }
+      console.log(generateCompletion(shell, { json: options.json === true }));
+    }),
+    "preset.list": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("list", resolution.args, parsed)),
+    "preset.show": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("show", resolution.args, parsed)),
+    "preset.export": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("export", resolution.args, parsed)),
+    observe: bootstrap(runObserveFromCli),
+    "config.status": preConfig(({ context, options }) => showConfigStatus(context, options)),
+    "config.migrate": preConfig(({ context, options }) => migrateProjectConfig(context, options)),
+    init: preConfig(({ context, options }) => initProject(context, options)),
+    doctor: preConfig(({ context, options }) => runDoctor(context, options)),
+    "optimization.status": call(showOptimizationStatus),
+    "optimization.capture": call(captureOptimizationFromCommand),
+    "optimization.run": call(runOptimizedCommand),
+    "onboard.existing-project": call(onboardExistingProject),
+    "baseline.propose": call(proposeBaseline),
+    "baseline.approve": call(approveBaseline),
+    "baseline.status": call(showBaselineStatus),
+    "assessment.proposal.prepare": call(prepareAssessmentProposal),
+    "assessment.proposal.approve": call(approveAssessmentProposal),
+    "assessment.proposal.apply": call(applyAssessmentProposal),
+    "assessment.proposal.complete": call(completeAssessmentProposal),
+    "assessment.proposal.status": call(showAssessmentProposalStatus),
+    "workflow.definition.list": call(listWorkflowDefinitionsCommand),
+    "workflow.definition.show": call(showWorkflowDefinition),
+    "workflow.definition.propose": call(proposeWorkflowDefinition),
+    "workflow.definition.approve": call(approveWorkflowDefinitionCommand),
+    "workflow.overlay.propose": call(proposeWorkflowOverlay),
+    "workflow.overlay.approve": call(approveWorkflowOverlayCommand),
+    "workflow.overlay.explain": call(explainWorkflowOverlay),
+    "workflow.instance.start": call(startWorkflowInstance),
+    "workflow.instance.transition": call(transitionWorkflowInstance),
+    "workflow.instance.status": project(({ context, options }) => showWorkflowInstance(context, options, { explain: false })),
+    "workflow.instance.explain": project(({ context, options }) => showWorkflowInstance(context, options, { explain: true })),
+    "budget.usage.record": call(recordBudgetUsage),
+    "budget.meter.start": call(startBudgetMeter),
+    "budget.meter.record": call(recordBudgetMeter),
+    "budget.amend": call(amendAssessmentBudget),
+    "budget.status": call(showBudgetStatus),
+    "requirement.propose": project(({ context, options, resolution }) => proposeRequirement(context, options, {
+      legacyAlias: resolution.matched_path.join(" ") === "requirement create",
+    })),
+    "requirement.approve": call(approveRequirement),
+    "requirement.revise": call(reviseRequirement),
+    "requirement.supersede": call(supersedeRequirement),
+    "requirement.status": call(showRequirements),
+    "autonomy.requirement.status": call(showRequirementAutonomy),
+    "autonomy.delivery.propose": call(proposeDeliveryAutonomy),
+    "autonomy.delivery.approve": call(approveDeliveryAutonomy),
+    "autonomy.delivery.revoke": call(revokeDeliveryAutonomy),
+    "autonomy.delivery.action": call(evaluateDeliveryAction),
+    "autonomy.delivery.close": call(closeDeliveryAutonomy),
+    "autonomy.delivery.status": call(showDeliveryAutonomy),
+    "autonomy.delivery.explain": call(explainDeliveryAutonomy),
+    "contract.create": call(createContract),
+    "contract.approve": call(approveContract),
+    "story.create": call(createStory),
+    "story.claim": call(claimStory),
+    "story.release": call(releaseStoryClaim),
+    "story.complete-step": call(completeStoryStep),
+    "story.prepare-handoff": call(prepareStoryHandoff),
+    "story.handoff.close": call(closeHandoff),
+    "story.handoff": call(createStoryHandoff),
+    "story.deps": call(showStoryDependencies),
+    "work.item.create": call(createWorkItem),
+    "breakdown.policy.show": call(showBreakdownPolicy),
+    "breakdown.policy.set": call(setBreakdownPolicy),
+    "breakdown.propose": call(proposeBreakdown),
+    "breakdown.approve": call(approveBreakdown),
+    "breakdown.status": call(showBreakdownStatus),
+    "dependency.propose": call(proposeDependencyGraph),
+    "dependency.approve": call(approveDependencyGraph),
+    "dependency.status": call(showDependencyStatus),
+    "capability.profile.propose": call(proposeCapabilityProfile),
+    "capability.profile.approve": call(approveCapabilityProfile),
+    "capability.profile.status": call(showCapabilityStatus),
+    "capability.recommend": call(proposeCapabilityRecommendation),
+    "capability.approve": call(approveCapabilityRecommendation),
+    "capability.status": call(showCapabilityStatus),
+    "approval.requests": call(showApprovalRequests),
+    "authorization.grant": call(grantAuthorization),
+    "authorization.status": call(showAuthorizations),
+    "authorization.revoke": call(revokeAuthorization),
+    "task.start": call(startTask),
+    "handoff.close": call(closeHandoff),
+    "phase.lock": call(lockPhase),
+    "phase.release": call(releasePhaseLock),
+    "trace.append": call(appendTrace),
+    "trace.evidence.bind": call(bindHistoricalTraceEvidencePolicy),
+    "trace.compact": call(compactTraces),
+    "sync.record": call(recordSyncEvent),
+    "output.template.propose": call(proposeOutputTemplate),
+    "output.template.approve": call(approveOutputTemplate),
+    "output.resolve": call(resolveOutput),
+    "output.link": call(linkOutputArtifact),
+    "output.status": call(showOutputStatus),
+    "cache.rebuild": call(rebuildCache),
+    "cache.status": call(showCacheStatus),
+    "cache.clear": call(clearCache),
+    "manifest.rebuild": call(rebuildManifests),
+    "archive.closed": call(archiveClosedArtifacts),
+    "migration.active": call(migrateActiveReleaseScope),
+    "migration.identity": call(migrateIdentity),
+    "report.activity": call(reportActivity),
+    "report.query": call(reportQuery),
+    "index.rebuild": call(rebuildIndex),
+    "kb.search": project(({ context, options, resolution }) => searchKnowledgeBase(context, options, resolution.args)),
+    "gate.check": call(gateCheck),
+    "orchestrate.status": call(showOrchestrationStatus),
+    "orchestrate.plan": call(showOrchestrationPlan),
+    "route.decide": project(({ context, options, resolution }) => {
+      if (resolution.args.length > 0) {
+        fail(`Unknown command: ${resolution.input.slice(0, 2).join(" ")}`);
+      }
+      decideRoute(context, options);
+    }),
+    status: call(showStatus),
+  });
+}
+
+async function runObserveFromCli({ options, rawArgs }) {
+  try {
+    if (shouldLaunchDedicatedObservatory()) {
+      const termination = await launchDedicatedObservatory({
+        argv: rawArgs,
+        scriptPath: fileURLToPath(import.meta.url),
+      });
+      process.exitCode = termination.exitCode;
+      return;
+    }
+    await runObserveCommand({
+      projectRoot: path.resolve(String(options.root || process.cwd())),
+      host: options.host,
+      port: options.port,
+      openBrowser: options["no-open"] !== true,
+      json: options.json === true,
+      locale: humanGuidanceLocale(options),
+    }, {
+      parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
+        && process.env[OBSERVATORY_WORKER_MARKER] === "1",
+    });
+  } catch (error) {
+    if (error instanceof TypeError) fail(error.message);
+    throw error;
+  }
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const rawJsonRequested = rawBooleanOptionRequested(rawArgs, "json");
@@ -683,9 +881,10 @@ async function main() {
       console.log(VERSION);
       return;
     }
-    const [earlyCommand, earlySubcommand, ...earlyRest] = parsed.positionals;
-    if (parsed.help || earlyCommand === "help" || parsed.positionals.length === 0) {
-      const helpPath = earlyCommand === "help" ? parsed.positionals.slice(1) : parsed.positionals;
+    if (parsed.help || parsed.positionals.length === 0) {
+      const helpPath = parsed.positionals[0] === "help"
+        ? parsed.positionals.slice(1)
+        : parsed.positionals;
       console.log(renderHelp(helpPath, {
         locale: humanGuidanceLocale(parsed.options),
         json: parsed.options.json === true,
@@ -693,22 +892,26 @@ async function main() {
       }));
       return;
     }
-    if (earlyCommand === "completion") {
-      if (!earlySubcommand || earlyRest.length > 0 || !SUPPORTED_SHELLS.includes(String(earlySubcommand).toLowerCase())) {
-        fail(`Completion needs exactly one shell: ${SUPPORTED_SHELLS.join(", ")}.`);
-      }
-      console.log(generateCompletion(earlySubcommand, { json: parsed.options.json === true }));
+    const resolution = resolveCommand(parsed.positionals);
+    const registry = buildCliRuntimeHandlerRegistry();
+    const invocation = {
+      options: parsed.options,
+      parsed,
+      rawArgs,
+    };
+    const handler = resolution ? registry.get(resolution.canonical_action) : null;
+    if (handler?.stage === "bootstrap" && resolution.canonical_action !== "observe") {
+      await registry.dispatch(resolution, invocation);
       return;
     }
-    if (earlyCommand === "preset") {
-      handleCliPresetCommand(earlySubcommand, earlyRest, parsed);
+    if (!resolution && parsed.positionals[0] === "preset") {
+      const [, subcommand, ...rest] = parsed.positionals;
+      handleCliPresetCommand(subcommand, rest, parsed);
       return;
     }
 
-    const [command, subcommand, ...rest] = parsed.positionals;
     const resolvedRoot = path.resolve(String(parsed.options.root || process.cwd()));
-    const isIdentityRecovery = command === "migration"
-      && subcommand === "identity"
+    const isIdentityRecovery = resolution?.canonical_action === "migration.identity"
       && parsed.options.recover === true;
     const identityMigrationLockPath = path.join(resolvedRoot, ".sdlc-identity-migration.lock");
     if (pathEntryExistsNoFollow(identityMigrationLockPath) && !isIdentityRecovery) {
@@ -718,457 +921,23 @@ async function main() {
       );
     }
     if (isIdentityRecovery) {
-      migrateIdentity({ root: resolvedRoot }, parsed.options);
+      await registry.dispatch(resolution, { ...invocation, context: { root: resolvedRoot } });
       return;
     }
-    if (command === "observe") {
-      try {
-        if (shouldLaunchDedicatedObservatory()) {
-          const termination = await launchDedicatedObservatory({
-            argv: rawArgs,
-            scriptPath: fileURLToPath(import.meta.url),
-          });
-          process.exitCode = termination.exitCode;
-          return;
-        }
-        await runObserveCommand({
-          projectRoot: path.resolve(String(parsed.options.root || process.cwd())),
-          host: parsed.options.host,
-          port: parsed.options.port,
-          openBrowser: parsed.options["no-open"] !== true,
-          json: parsed.options.json === true,
-          locale: humanGuidanceLocale(parsed.options),
-        }, {
-          parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
-            && process.env[OBSERVATORY_WORKER_MARKER] === "1",
-        });
-      } catch (error) {
-        if (error instanceof TypeError) fail(error.message);
-        throw error;
-      }
+    if (resolution?.canonical_action === "observe") {
+      await registry.dispatch(resolution, invocation);
       return;
     }
     const context = buildContext(parsed.options);
-
-    if (command === "config" && subcommand === "status") {
-      showConfigStatus(context, parsed.options);
+    if (handler?.stage === "pre-config") {
+      await registry.dispatch(resolution, { ...invocation, context });
       return;
     }
-    if (command === "config" && subcommand === "migrate") {
-      migrateProjectConfig(context, parsed.options);
-      return;
-    }
-    if (command === "init") {
-      initProject(context, parsed.options);
-      return;
-    }
-    if (command === "doctor") {
-      await runDoctor(context, parsed.options);
-      return;
-    }
-    assertConfigAllowsCommand(context, command, subcommand, rest, parsed.options);
-    if (command === "optimization" && subcommand === "status") {
-      await showOptimizationStatus(context, parsed.options);
-      return;
-    }
-    if (command === "optimization" && subcommand === "capture") {
-      await captureOptimizationFromCommand(context, parsed.options);
-      return;
-    }
-    if (command === "optimization" && subcommand === "run") {
-      await runOptimizedCommand(context, parsed.options);
-      return;
-    }
-    if (command === "onboard" && subcommand === "existing-project") {
-      onboardExistingProject(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "propose") {
-      proposeBaseline(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "approve") {
-      approveBaseline(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "status") {
-      showBaselineStatus(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "prepare") {
-      prepareAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "approve") {
-      approveAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "apply") {
-      await applyAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "complete") {
-      await completeAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "status") {
-      showAssessmentProposalStatus(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "status") {
-      showAssessmentProposalStatus(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "list") {
-      listWorkflowDefinitionsCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "show") {
-      showWorkflowDefinition(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "propose") {
-      proposeWorkflowDefinition(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "approve") {
-      approveWorkflowDefinitionCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "propose") {
-      proposeWorkflowOverlay(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "approve") {
-      approveWorkflowOverlayCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") {
-      explainWorkflowOverlay(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "start") {
-      startWorkflowInstance(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "transition") {
-      transitionWorkflowInstance(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "status") {
-      showWorkflowInstance(context, parsed.options, { explain: false });
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "explain") {
-      showWorkflowInstance(context, parsed.options, { explain: true });
-      return;
-    }
-    if (command === "budget" && subcommand === "usage" && rest[0] === "record") {
-      await recordBudgetUsage(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "meter" && rest[0] === "start") {
-      await startBudgetMeter(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "meter" && rest[0] === "record") {
-      await recordBudgetMeter(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "amend") {
-      amendAssessmentBudget(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "status") {
-      await showBudgetStatus(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && ["create", "propose"].includes(subcommand)) {
-      proposeRequirement(context, parsed.options, { legacyAlias: subcommand === "create" });
-      return;
-    }
-    if (command === "requirement" && subcommand === "approve") {
-      approveRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "revise") {
-      reviseRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "supersede") {
-      supersedeRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "status") {
-      showRequirements(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") {
-      showRequirementAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "propose") {
-      proposeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "approve") {
-      approveDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "revoke") {
-      revokeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "action") {
-      evaluateDeliveryAction(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "close") {
-      closeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "status") {
-      showDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "explain") {
-      explainDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "contract" && subcommand === "create") {
-      createContract(context, parsed.options);
-      return;
-    }
-    if (command === "contract" && subcommand === "approve") {
-      approveContract(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "create") {
-      createStory(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "claim") {
-      claimStory(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "release") {
-      releaseStoryClaim(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "complete-step") {
-      completeStoryStep(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "prepare-handoff") {
-      prepareStoryHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "handoff" && rest[0] === "close") {
-      closeHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "handoff") {
-      createStoryHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "deps") {
-      showStoryDependencies(context, parsed.options);
-      return;
-    }
-    if (command === "work" && subcommand === "item" && rest[0] === "create") {
-      createWorkItem(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") {
-      showBreakdownPolicy(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "policy" && rest[0] === "set") {
-      setBreakdownPolicy(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "propose") {
-      proposeBreakdown(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "approve") {
-      approveBreakdown(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "status") {
-      showBreakdownStatus(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "propose") {
-      proposeDependencyGraph(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "approve") {
-      approveDependencyGraph(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "status") {
-      showDependencyStatus(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "propose") {
-      proposeCapabilityProfile(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "approve") {
-      approveCapabilityProfile(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "status") {
-      showCapabilityStatus(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "recommend") {
-      proposeCapabilityRecommendation(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "approve") {
-      approveCapabilityRecommendation(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "status") {
-      showCapabilityStatus(context, parsed.options);
-      return;
-    }
-    if (command === "approval" && subcommand === "requests") {
-      showApprovalRequests(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "grant") {
-      grantAuthorization(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "status") {
-      showAuthorizations(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "revoke") {
-      revokeAuthorization(context, parsed.options);
-      return;
-    }
-    if (command === "task" && subcommand === "start") {
-      startTask(context, parsed.options);
-      return;
-    }
-    if (command === "handoff" && subcommand === "close") {
-      closeHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "phase" && subcommand === "lock") {
-      lockPhase(context, parsed.options);
-      return;
-    }
-    if (command === "phase" && subcommand === "release") {
-      releasePhaseLock(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "append") {
-      appendTrace(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "evidence" && rest[0] === "bind") {
-      bindHistoricalTraceEvidencePolicy(context, parsed.options);
-      return;
-    }
-    if (command === "sync" && subcommand === "record") {
-      recordSyncEvent(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "template" && rest[0] === "propose") {
-      proposeOutputTemplate(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "template" && rest[0] === "approve") {
-      approveOutputTemplate(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "resolve") {
-      resolveOutput(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "link") {
-      linkOutputArtifact(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "status") {
-      showOutputStatus(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "rebuild") {
-      rebuildCache(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "status") {
-      showCacheStatus(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "clear") {
-      clearCache(context, parsed.options);
-      return;
-    }
-    if (command === "manifest" && subcommand === "rebuild") {
-      rebuildManifests(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "compact") {
-      compactTraces(context, parsed.options);
-      return;
-    }
-    if (command === "archive" && subcommand === "closed") {
-      archiveClosedArtifacts(context, parsed.options);
-      return;
-    }
-    if (command === "migration" && subcommand === "active") {
-      migrateActiveReleaseScope(context, parsed.options);
-      return;
-    }
-    if (command === "migration" && subcommand === "identity") {
-      migrateIdentity(context, parsed.options);
-      return;
-    }
-    if (command === "report" && subcommand === "activity") {
-      reportActivity(context, parsed.options);
-      return;
-    }
-    if (command === "report" && subcommand === "query") {
-      reportQuery(context, parsed.options);
-      return;
-    }
-    if (command === "index" && subcommand === "rebuild") {
-      rebuildIndex(context, parsed.options);
-      return;
-    }
-    if (command === "kb" && subcommand === "search") {
-      searchKnowledgeBase(context, parsed.options, rest);
-      return;
-    }
-    if (command === "gate" && subcommand === "check") {
-      gateCheck(context, parsed.options);
-      return;
-    }
-    if (command === "orchestrate" && subcommand === "status") {
-      showOrchestrationStatus(context, parsed.options);
-      return;
-    }
-    if (command === "orchestrate" && subcommand === "plan") {
-      showOrchestrationPlan(context, parsed.options);
-      return;
-    }
-    if (command === "route" && (!subcommand || subcommand === "decide")) {
-      decideRoute(context, parsed.options);
-      return;
-    }
-    if (command === "status") {
-      showStatus(context, parsed.options);
-      return;
+    assertConfigAllowsCommand(context, resolution, parsed.options, parsed.positionals);
+    if (!resolution || !handler) {
+      fail(`Unknown command: ${parsed.positionals.slice(0, 2).join(" ")}`);
     }
-
-    fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
+    await registry.dispatch(resolution, { ...invocation, context });
   } catch (error) {
     const jsonRequested = parsed.options?.json === true || rawJsonRequested;
     const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
@@ -5020,43 +4789,11 @@ function migrateProjectConfig(context, options) {
   ]);
 }
 
-function commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options) {
-  if (command === "status" || command === "doctor") return true;
-  if (command === "optimization" && subcommand === "status") return true;
-  if (command === "baseline" && subcommand === "status") return true;
-  if (command === "assessment" && (
-    subcommand === "status"
-    || (subcommand === "proposal" && rest[0] === "status")
-  )) return true;
-  if (command === "workflow" && subcommand === "definition" && ["list", "show"].includes(rest[0])) return true;
-  if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") return true;
-  if (command === "workflow" && subcommand === "instance" && ["status", "explain"].includes(rest[0])) return true;
-  if (command === "budget" && subcommand === "status") return true;
-  if (command === "requirement" && subcommand === "status") return true;
-  if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") return true;
-  if (command === "autonomy" && subcommand === "delivery" && ["status", "explain"].includes(rest[0])) return true;
-  if (command === "story" && subcommand === "deps") return true;
-  if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") return true;
-  if (command === "breakdown" && subcommand === "status") return true;
-  if (command === "dependency" && subcommand === "status") return true;
-  if (command === "capability" && subcommand === "status") return true;
-  if (command === "capability" && subcommand === "profile" && rest[0] === "status") return true;
-  if (command === "approval" && subcommand === "requests") return true;
-  if (command === "authorization" && subcommand === "status") return true;
-  if (command === "cache" && subcommand === "status") return true;
-  if (command === "output" && ["resolve", "status"].includes(subcommand)) return true;
-  if (command === "route" && (!subcommand || subcommand === "decide")) return true;
-  if (command === "kb" && subcommand === "search") return true;
-  if (command === "orchestrate" && ["status", "plan"].includes(subcommand)) return true;
-  if (command === "gate" && subcommand === "check" && !options.out) return true;
-  if (command === "report" && ["activity", "query"].includes(subcommand) && !options.out) return true;
-  if (command === "migration" && subcommand === "active" && !options.apply) return true;
-  return false;
-}
-
-function assertConfigAllowsCommand(context, command, subcommand, rest, options) {
+function assertConfigAllowsCommand(context, resolution, options, positionals = []) {
   if (!context.configState || context.configState.mutation_allowed !== false) return;
-  if (commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options)) return;
+  // Unknown commands and invalid metadata are deliberately treated as
+  // mutations: configuration recovery must never guess that they are safe.
+  if (resolution && commandMutationIntent(resolution, options) === false) return;
   const status = context.configState.status;
   fail([
     `This command was not run because the project configuration is ${status}.`,
@@ -5064,7 +4801,7 @@ function assertConfigAllowsCommand(context, command, subcommand, rest, options) 
     status === "drifted"
       ? "Next: run `agentic-sdlc config migrate`, review the exact plan, and apply its hash before retrying."
       : `Next: inspect ${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}, or restore the last valid config and lock before retrying.`,
-    `Technical detail: blocked command ${[command, subcommand, ...rest].filter(Boolean).join(" ")}.`,
+    `Technical detail: blocked command ${positionals.filter(Boolean).join(" ")}.`,
   ].join("\n"));
 }
 
