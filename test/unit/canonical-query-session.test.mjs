@@ -245,6 +245,12 @@ test("JSONL aggregates skip or reject invalid canonical JSON explicitly", (t) =>
       && error.code === "invalid_json"
       && /invalid-aggregate\.jsonl:2/u.test(error.message),
   );
+
+  const metrics = session.metrics();
+  assert.equal(metrics.aggregate_files_scanned, 2);
+  assert.equal(metrics.aggregate_json_line_parses, 6);
+  assert.equal(metrics.aggregate_valid_records, 3);
+  assert.equal(metrics.aggregate_invalid_records, 3);
 });
 
 test("JSONL aggregate predicates and projections use own prototype-named fields safely", (t) => {
