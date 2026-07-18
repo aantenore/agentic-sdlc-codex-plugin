@@ -10,6 +10,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 - [Change Observatory](change-observatory.md) — open and interpret the bundled visual request/change/decision lineage.
 - [Token efficiency](token-efficiency.md) — reduce derived JSON and shell-output context without changing canonical evidence.
 - [Configuration safety](configuration-safety.md) — keep project policy stable across plugin updates and apply only a reviewed migration plan.
+- [Self-service CLI](self-service-cli.md) — get focused help, one next action, safe presentation presets, shell completion, and deterministic JSON without learning internal record names.
 
 ## Find a page by goal
 
@@ -24,6 +25,7 @@ This page is the documentation map. Start with the goal that matches what you wa
 | Keep behavior stable across plugin updates | [Configuration safety](configuration-safety.md) | Config locks, safe previews, drift recovery, and exact plan application |
 | Understand the architecture and trust model | [Architecture](architecture.md) | Components, canonical records, validation, and release evidence |
 | Open visual project lineage | [Change Observatory](change-observatory.md) | Launch paths, explainability, raw evidence, and local security boundaries |
+| Find the next command or use machine output | [Self-service CLI](self-service-cli.md) | Focused help, compact status, safe presets, completion, and local plan/apply updates |
 | Understand `.sdlc/` storage | [Knowledge-base structure](kb-structure.md) | Which files are canonical, derived, append-only, or releasable |
 | Install, update, or repair the plugin | [Portable install](portable-install.md) | Cross-platform installation, local marketplace setup, and troubleshooting |
 | Understand the product assessment | [Product assessment](product-assessment.md) | Product intent, strengths, gaps, and improvement direction |
