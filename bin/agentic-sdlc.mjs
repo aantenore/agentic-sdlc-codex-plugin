@@ -92,6 +92,19 @@ import {
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
 import { buildTraceNarrative } from "../lib/trace-narrative.mjs";
 import {
+  sealTraceEvent,
+  verifyTraceIntegrity,
+} from "../lib/trace-integrity.mjs";
+import {
+  createOperationContext,
+  normalizeOperationalError,
+} from "../lib/observability/context.mjs";
+import {
+  createOperationalRedactionPolicy,
+  redactText,
+  redactValue,
+} from "../lib/observability/redaction.mjs";
+import {
   buildRequirementProposal,
   buildRequirementRef,
   buildRequirementRevision,
@@ -636,6 +649,8 @@ const TRACE_TYPES = new Set([
   "test",
 ]);
 const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready"]);
+const CLI_OPERATION_CONTEXT = createOperationContext({ operation: "cli.run" });
+const OPERATIONAL_REDACTION_POLICY = createOperationalRedactionPolicy();
 
 async function main() {
   const rawArgs = process.argv.slice(2);
@@ -1121,17 +1136,19 @@ async function main() {
 
     fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
   } catch (error) {
+    const jsonRequested = parsed.options?.json === true || rawJsonRequested;
     if (error instanceof UnknownCommandError) {
-      if (parsed.options?.json === true || rawJsonRequested) {
+      if (jsonRequested) {
         console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
         process.exitCode = 1;
         return;
       }
-      console.error(error.message);
+      console.error(`${redactText(error.message, OPERATIONAL_REDACTION_POLICY)}\nCorrelation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`);
       process.exitCode = 1;
       return;
     }
-    if (error instanceof UserError || error instanceof CliPresetError) {
+    const expected = error instanceof UserError || error instanceof CliPresetError;
+    {
       const italian = (() => {
         try {
           return humanGuidanceLocale(parsed.options) === "it";
@@ -1156,11 +1173,17 @@ async function main() {
             next: "Next step",
             details: "Technical details (optional)",
           };
-      if (parsed.options?.json === true || rawJsonRequested) {
+      if (jsonRequested) {
         console.error(JSON.stringify(buildCliErrorPayload(error, parsed.options), null, 2));
         process.exitCode = 1;
         return;
       }
+      const normalized = normalizeOperationalError(
+        expected
+          ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
+          : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
+        { context: CLI_OPERATION_CONTEXT, redactionPolicy: OPERATIONAL_REDACTION_POLICY },
+      );
       console.error([
         `${labels.outcome}: ${italian ? "Il comando non è stato completato." : "The command could not be completed."}`,
         `${labels.impact}: ${italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically."}`,
@@ -1169,12 +1192,12 @@ async function main() {
         `${labels.next}: ${italian ? "Consulta la diagnosi facoltativa, correggi il problema e riprova." : "Review the optional diagnosis, correct the problem, and try again."}`,
         "",
         `${labels.details}:`,
-        `- Error: ${error.message}`,
+        `- Error: ${normalized.error.message}`,
+        `- Correlation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`,
       ].join("\n"));
       process.exitCode = 1;
       return;
     }
-    throw error;
   }
 }
 
@@ -4115,14 +4138,23 @@ function buildCliErrorPayload(error, options = {}) {
     }
   })();
   const unknown = error instanceof UnknownCommandError;
+  const expected = unknown || error instanceof UserError || error instanceof CliPresetError;
+  const normalized = normalizeOperationalError(
+    expected
+      ? { code: "user_error", message: error.message, statusCode: 400, retryable: false }
+      : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
+    { context: CLI_OPERATION_CONTEXT, redactionPolicy: OPERATIONAL_REDACTION_POLICY },
+  );
   const code = unknown
     ? error.code
     : error instanceof CliPresetError
       ? "CLI_PRESET_ERROR"
-      : "USER_ERROR";
+      : error instanceof UserError
+        ? "USER_ERROR"
+        : "INTERNAL_ERROR";
   const message = unknown
-    ? `Unknown command: ${error.path || "(empty)"}`
-    : String(error.message || "The command could not be completed.");
+    ? redactText(`Unknown command: ${error.path || "(empty)"}`, OPERATIONAL_REDACTION_POLICY)
+    : normalized.error.message;
   const guidance = unknown
     ? {
         result: italian ? "Non ho trovato l’azione richiesta." : "The requested action was not found.",
@@ -4143,10 +4175,15 @@ function buildCliErrorPayload(error, options = {}) {
   return {
     schema_version: "agentic-sdlc-cli-error:v1",
     status: "error",
+    correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
     error: {
       code,
       message,
-      ...(unknown ? { path: error.path || "", suggestions: error.suggestions || [] } : {}),
+      retryable: normalized.error.retryable,
+      ...(unknown ? {
+        path: redactText(error.path || "", OPERATIONAL_REDACTION_POLICY),
+        suggestions: (error.suggestions || []).map((value) => redactText(value, OPERATIONAL_REDACTION_POLICY)),
+      } : {}),
     },
     human_guidance: guidance,
   };
@@ -23900,10 +23937,11 @@ function appendTrace(context, options) {
       event: gitEvent,
     },
     run: attribution.run,
+    correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
     created_at: now(),
   };
-  appendJsonLine(tracePath, event);
-  output(options, { status: "appended", trace_path: tracePath, event }, [`Appended ${type} trace ${event.id}`]);
+  const sealedEvent = sealGovernedTraceEvent(context, tracePath, event);
+  output(options, { status: "appended", trace_path: tracePath, event: sealedEvent }, [`Appended ${type} trace ${sealedEvent.id}`]);
 }
 
 function recordSyncEvent(context, options) {
@@ -28139,6 +28177,107 @@ function hashBuffer(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
+function sealGovernedTraceEvent(context, tracePath, event) {
+  const redactionPolicy = buildTraceRedactionPolicy(context);
+  const evidenceRefs = buildTraceEvidenceRefs(context, event, redactionPolicy);
+  const redacted = redactValue({
+    ...event,
+    evidence_refs: evidenceRefs,
+  }, redactionPolicy);
+  if (!redacted || typeof redacted !== "object" || Array.isArray(redacted)) {
+    fail("Trace redaction reached its safety limit; no event was persisted.");
+  }
+  try {
+    return sealTraceEvent({ tracePath, event: redacted }).event;
+  } catch (error) {
+    const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
+      ? error.code
+      : "trace_integrity_failed";
+    fail(`Trace integrity blocked the write (${code}). Run the integrity check before retrying.`);
+  }
+}
+
+function buildTraceRedactionPolicy(context) {
+  const configured = context.config.observability?.redaction;
+  const secretPatterns = normalizeTraceDetectorPatterns(configured?.secret_patterns, "configured_secret");
+  const piiPatterns = normalizeTraceDetectorPatterns(configured?.pii_patterns, "configured_pii");
+  try {
+    return createOperationalRedactionPolicy({
+      secretPatterns,
+      piiPatterns,
+    });
+  } catch {
+    fail("The configured observability redaction policy is invalid.");
+  }
+}
+
+function normalizeTraceDetectorPatterns(value, prefix) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail(`observability.redaction.${prefix === "configured_secret" ? "secret_patterns" : "pii_patterns"} must be an array`);
+  return value.map((entry, index) => {
+    if (typeof entry === "string") return { name: `${prefix}_${index + 1}`, pattern: entry };
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) return entry;
+    fail(`Observability redaction pattern ${prefix}_${index + 1} must be a string or object`);
+  });
+}
+
+function buildTraceEvidenceRefs(context, event, policy) {
+  const refs = [];
+  const evidence = Array.isArray(event.evidence) ? event.evidence : [];
+  for (const projectPath of evidence) {
+    let filePath;
+    try {
+      filePath = resolveProjectFilePath(context, projectPath, { mustExist: true, fileOnly: true });
+    } catch {
+      continue;
+    }
+    const representation = redactedEvidenceRepresentation(filePath, policy);
+    refs.push({
+      path: projectPath,
+      size_bytes: Buffer.byteLength(representation, "utf8"),
+      sha256: hashBuffer(Buffer.from(representation, "utf8")),
+      representation: "redacted_utf8_v1",
+      verification: shouldVerifyTraceEvidence(event, projectPath)
+        ? "current_content"
+        : "snapshot_only",
+    });
+  }
+  return refs;
+}
+
+function redactedEvidenceRepresentation(filePath, policy) {
+  const stats = fs.statSync(filePath);
+  const maximumBytes = 16 * 1024 * 1024;
+  if (stats.size > maximumBytes) {
+    fail("Trace evidence exceeds the 16 MiB integrity snapshot limit.");
+  }
+  assertNoSymlinkPathSegments(filePath);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const source = readFileFromStableParent(filePath, parentIdentity);
+  const extension = path.extname(filePath).toLowerCase();
+  try {
+    if (extension === ".json") {
+      return `${JSON.stringify(redactValue(JSON.parse(source), policy))}\n`;
+    }
+    if (extension === ".jsonl") {
+      const lines = source.split(/\r?\n/u);
+      return lines.map((line) => line.trim() ? JSON.stringify(redactValue(JSON.parse(line), policy)) : "").join("\n");
+    }
+  } catch {
+    // Malformed text remains bounded and is redacted as text without persisting raw bytes.
+  }
+  return redactText(source, policy);
+}
+
+function shouldVerifyTraceEvidence(event, projectPath) {
+  if (["test", "release"].includes(event.type)) return true;
+  if (["git.commit", "git.push", "pull_request.merge", "release.local"].includes(event.action)) {
+    return String(projectPath).replace(/\\/gu, "/").startsWith(`${SDLC_DIR}/autonomy/actions/`)
+      || String(projectPath).replace(/\\/gu, "/").includes("/evidence/");
+  }
+  return false;
+}
+
 function appendTraceEvent(context, storyId, event) {
   const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
   const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
@@ -28160,10 +28299,10 @@ function appendTraceEvent(context, storyId, event) {
     ...(event.narrative ? { narrative: event.narrative } : {}),
     git: event.git || buildGitMetadata(context.root),
     run: event.run || buildRunMetadata({}),
+    correlation_id: event.correlation_id || CLI_OPERATION_CONTEXT.correlation_id,
     created_at: event.created_at || now(),
   };
-  appendJsonLine(tracePath, traceEvent);
-  return traceEvent;
+  return sealGovernedTraceEvent(context, tracePath, traceEvent);
 }
 
 function rebuildIndex(context, options) {
@@ -30911,6 +31050,24 @@ function validateTraces(context, report, storyId = null) {
   const requireActor = context.config.trace_policy?.require_actor !== false;
   for (const filePath of files) {
     const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
+    try {
+      const integrity = verifyTraceIntegrity({ tracePath: filePath });
+      if (!integrity.valid) {
+        const entries = Array.isArray(integrity.errors) ? integrity.errors : [];
+        if (entries.length === 0) {
+          report.errors.push(`${label} failed local integrity verification`);
+        }
+        for (const entry of entries) {
+          report.errors.push(`${label} integrity ${entry.code || "invalid"} at ${entry.scope || "trace"}`);
+        }
+      }
+      if (integrity.initialized) report.checked.push(`${label} local integrity checkpoint`);
+    } catch (error) {
+      const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
+        ? error.code
+        : "verification_failed";
+      report.errors.push(`${label} local integrity verification failed (${code})`);
+    }
     const fileName = path.basename(filePath, ".jsonl");
     const expectedStoryId = fileName === "project" ? null : fileName;
     const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
@@ -30960,6 +31117,9 @@ function validateTraces(context, report, storyId = null) {
         report.errors.push(`${label}:${index + 1} is missing run metadata`);
       }
       validateProtectedAutonomyTrace(context, report, event, `${label}:${index + 1}`);
+      if (report.strict && event._trace_integrity) {
+        validateTraceEvidenceRefs(context, report, event, `${label}:${index + 1}`);
+      }
       if (report.strict && ["test", "release"].includes(event.type)) {
         validateTraceEvidence(context, report, event, `${label}:${index + 1}`);
         latestOutcomeEvents.set(event.type, { event, line: index + 1 });
@@ -31073,6 +31233,49 @@ function validateTraceEvidence(context, report, event, label) {
       report.errors.push(`${label} references missing evidence ${evidencePathValue}`);
     } else if (isDerivedArtifactPath(context, evidencePath)) {
       report.errors.push(`${label} uses derived cache/index evidence ${evidencePathValue}`);
+    }
+  }
+}
+
+function validateTraceEvidenceRefs(context, report, event, label) {
+  const refs = Array.isArray(event.evidence_refs) ? event.evidence_refs : [];
+  const evidence = Array.isArray(event.evidence) ? event.evidence.filter(Boolean) : [];
+  const byPath = new Map();
+  for (const ref of refs) {
+    if (!ref || typeof ref !== "object" || Array.isArray(ref) || typeof ref.path !== "string") {
+      report.errors.push(`${label} contains an invalid evidence integrity reference`);
+      continue;
+    }
+    if (byPath.has(ref.path)) {
+      report.errors.push(`${label} contains duplicate evidence integrity reference ${ref.path}`);
+      continue;
+    }
+    byPath.set(ref.path, ref);
+    if (!evidence.includes(ref.path)) {
+      report.errors.push(`${label} evidence integrity reference ${ref.path} is not listed as evidence`);
+    }
+    if (ref.verification !== "current_content") continue;
+    if (ref.representation !== "redacted_utf8_v1" || !/^[a-f0-9]{64}$/u.test(String(ref.sha256 || ""))) {
+      report.errors.push(`${label} evidence integrity reference ${ref.path} is malformed`);
+      continue;
+    }
+    try {
+      const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
+      const representation = redactedEvidenceRepresentation(filePath, buildTraceRedactionPolicy(context));
+      const actualSize = Buffer.byteLength(representation, "utf8");
+      const actualHash = hashBuffer(Buffer.from(representation, "utf8"));
+      if (actualSize !== ref.size_bytes || actualHash !== ref.sha256) {
+        report.errors.push(`${label} evidence content drift detected for ${ref.path}`);
+      }
+    } catch {
+      report.errors.push(`${label} cannot verify evidence content for ${ref.path}`);
+    }
+  }
+  if (["test", "release"].includes(event.type)) {
+    for (const evidencePath of evidence) {
+      if (byPath.get(evidencePath)?.verification !== "current_content") {
+        report.errors.push(`${label} requires a current-content integrity reference for ${evidencePath}`);
+      }
     }
   }
 }
@@ -32158,14 +32361,21 @@ function uniqueRecordSuffix() {
 
 function output(options, jsonPayload, lines) {
   if (options.json) {
-    console.log(JSON.stringify(jsonPayload, null, 2));
+    const payload = jsonPayload && typeof jsonPayload === "object" && !Array.isArray(jsonPayload)
+      ? { ...jsonPayload, correlation_id: jsonPayload.correlation_id ?? CLI_OPERATION_CONTEXT.correlation_id }
+      : { status: "ok", value: jsonPayload, correlation_id: CLI_OPERATION_CONTEXT.correlation_id };
+    console.log(JSON.stringify(payload, null, 2));
     return;
   }
   const requestedLines = Array.isArray(lines) ? lines.map((line) => String(line)) : [String(lines ?? "")];
   const renderedLines = isHumanGuidanceOutput(requestedLines)
     ? requestedLines
     : humanGuidanceLines(legacyOutputGuidance(jsonPayload, options), requestedLines, options);
-  for (const line of renderedLines) {
+  const correlationLabel = humanGuidanceLocale(options) === "it" ? "ID correlazione" : "Correlation ID";
+  const finalLines = renderedLines.some((line) => line.includes(CLI_OPERATION_CONTEXT.correlation_id))
+    ? renderedLines
+    : [...renderedLines, `- ${correlationLabel}: ${CLI_OPERATION_CONTEXT.correlation_id}`];
+  for (const line of finalLines) {
     console.log(line);
   }
 }

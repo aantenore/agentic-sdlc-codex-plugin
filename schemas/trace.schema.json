@@ -57,6 +57,27 @@
         "type": "string"
       }
     },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "size_bytes",
+          "sha256",
+          "representation",
+          "verification"
+        ],
+        "properties": {
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "representation": { "const": "redacted_utf8_v1" },
+          "verification": { "enum": ["snapshot_only", "current_content"] }
+        },
+        "additionalProperties": false
+      }
+    },
     "related": {
       "type": "array",
       "items": {
@@ -201,6 +222,32 @@
     "run": {
       "type": "object",
       "additionalProperties": true
+    },
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^corr-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    },
+    "_trace_integrity": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "mode",
+        "authenticity_claimed",
+        "hash_algorithm",
+        "sequence",
+        "previous_hash",
+        "event_hash"
+      ],
+      "properties": {
+        "schema_version": { "const": "trace-integrity-event:v1" },
+        "mode": { "const": "local_tamper_evidence" },
+        "authenticity_claimed": { "const": false },
+        "hash_algorithm": { "const": "sha256" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "previous_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "event_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
     },
     "created_at": {
       "type": "string"
