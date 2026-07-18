@@ -258,13 +258,14 @@ test("CLI warns clearly when audited work continues without a durable audit reco
   assert.doesNotThrow(() => JSON.parse(result.stdout));
   const warning = JSON.parse(result.stderr);
   assert.equal(warning.code, "MUTATION_AUDIT_RECORD_NOT_SAVED");
-  assert.match(warning.message, /command completed/u);
+  assert.match(warning.message, /command finished/u);
   assert.match(warning.message, /audit history is incomplete/u);
   assert.equal(fs.readFileSync(blockedAuditPath, "utf8"), "this path is intentionally not a directory\n");
 
   const failed = createStory(project, "ST-GOV-AUDIT-WARNING");
   assert.notEqual(failed.status, 0, failed.stdout);
   assert.match(failed.stderr, /MUTATION_AUDIT_RECORD_NOT_SAVED/u);
+  assert.match(failed.stderr, /command finished/u);
   assert.match(failed.stderr, /already exists|File already exists/u);
 });
 

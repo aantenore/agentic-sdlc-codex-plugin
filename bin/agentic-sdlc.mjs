@@ -974,7 +974,7 @@ function emitMutationAuditSinkWarning(governance, options) {
   const unavailable = governance.observations.some((outcome) =>
     outcome?.reason_codes?.includes("mutation.audit_sink_unavailable"));
   if (!unavailable) return;
-  const message = "The command completed, but its safety audit record could not be saved. "
+  const message = "The command finished, but its safety audit record could not be saved. "
     + "Check the configured audit-events directory; until it is fixed, the audit history is incomplete.";
   if (options.json) {
     console.error(JSON.stringify({
