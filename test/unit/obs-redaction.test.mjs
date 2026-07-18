@@ -5,6 +5,7 @@ import {
   REDACTION_LIMIT_PLACEHOLDER,
   REDACTION_PLACEHOLDER,
   createRedactionPolicy,
+  createOperationalRedactionPolicy,
   isAllowedIdentifier,
   redactText,
   redactValue,
@@ -58,6 +59,15 @@ test("explicit secrets and sensitive keys take precedence over identifier allowl
   assert.deepEqual(redactValue({ token: "a".repeat(64) }, policy), {
     token: REDACTION_PLACEHOLDER,
   });
+});
+
+test("operational credential context overrides SHA-shaped identifier allowlisting", () => {
+  const shaShapedSecret = "a".repeat(64);
+  const policy = createOperationalRedactionPolicy();
+
+  assert.equal(redactText(shaShapedSecret, policy), shaShapedSecret);
+  assert.equal(redactText(`token=${shaShapedSecret}`, policy), REDACTION_PLACEHOLDER);
+  assert.equal(redactText(`Bearer ${shaShapedSecret}`, policy), REDACTION_PLACEHOLDER);
 });
 
 test("redaction limits and cycles fail closed without retaining partial values", () => {
