@@ -719,6 +719,105 @@ test("retries when a live lock disappears or changes during its bounded read", (
   assert.equal(fs.existsSync(lockPath), false);
 });
 
+test("retries a transient exclusive-open permission race without weakening the lock", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const lockPath = `${paths.checkpointPath}.lock`;
+  let injected = false;
+  let inspectionInjected = false;
+  const openSync = (filePath, flags, mode) => {
+    if (!injected && filePath.endsWith(".lock")) {
+      injected = true;
+      const error = new Error("simulated transient exclusive-open collision");
+      error.code = "EPERM";
+      throw error;
+    }
+    return fs.openSync(filePath, flags, mode);
+  };
+  const lstatSync = (filePath, options) => {
+    if (injected && !inspectionInjected && filePath.endsWith(".lock")) {
+      inspectionInjected = true;
+      const error = new Error("simulated transient lock inspection collision");
+      error.code = "EPERM";
+      throw error;
+    }
+    return fs.lstatSync(filePath, options);
+  };
+
+  const result = sealTraceEvent(options(paths, {
+    event: { type: "after-transient-open-collision" },
+    dependencies: { lstatSync, openSync, platform: "win32" },
+  }));
+
+  assert.equal(injected, true);
+  assert.equal(inspectionInjected, true);
+  assert.equal(result.event._trace_integrity.sequence, 1);
+  assert.equal(verifyTraceIntegrity(options(paths)).valid, true);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("bounds a persistent Windows permission collision without creating trace state", (t) => {
+  const paths = fixture(t, { legacy: false });
+  const lockPath = `${paths.checkpointPath}.lock`;
+  const permissionError = () => {
+    const error = new Error("simulated persistent lock permission collision");
+    error.code = "EPERM";
+    return error;
+  };
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      event: { type: "must-not-be-written" },
+      lockRetryMs: 1,
+      lockTimeoutMs: 2,
+      dependencies: {
+        platform: "win32",
+        openSync(filePath, flags, mode) {
+          if (filePath.endsWith(".lock")) throw permissionError();
+          return fs.openSync(filePath, flags, mode);
+        },
+        lstatSync(filePath, options) {
+          if (filePath.endsWith(".lock")) throw permissionError();
+          return fs.lstatSync(filePath, options);
+        },
+      },
+    })),
+    (error) => error instanceof TraceIntegrityError && error.code === "lock_timeout",
+  );
+
+  assert.equal(fs.existsSync(paths.tracePath), false);
+  assert.equal(fs.existsSync(paths.checkpointPath), false);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("does not reinterpret a permanent POSIX permission failure as lock contention", (t) => {
+  const paths = fixture(t, { legacy: false });
+  let lockInspectionCalls = 0;
+  const error = new Error("simulated permanent lock permission failure");
+  error.code = "EACCES";
+
+  assert.throws(
+    () => sealTraceEvent(options(paths, {
+      event: { type: "must-fail-immediately" },
+      dependencies: {
+        platform: "darwin",
+        openSync(filePath, flags, mode) {
+          if (filePath.endsWith(".lock")) throw error;
+          return fs.openSync(filePath, flags, mode);
+        },
+        lstatSync(filePath, options) {
+          if (filePath.endsWith(".lock")) lockInspectionCalls += 1;
+          return fs.lstatSync(filePath, options);
+        },
+      },
+    })),
+    (actual) => actual === error,
+  );
+
+  assert.equal(lockInspectionCalls, 0);
+  assert.equal(fs.existsSync(paths.tracePath), false);
+  assert.equal(fs.existsSync(paths.checkpointPath), false);
+});
+
 test("serializes concurrent subprocess writers into one complete hash chain", async (t) => {
   const paths = fixture(t, { legacy: false });
   const writerCount = 8;
