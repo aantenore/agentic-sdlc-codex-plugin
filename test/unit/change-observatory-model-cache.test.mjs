@@ -786,9 +786,10 @@ test("fast validation enforces bounded concurrency", async (t) => {
   }
 });
 
-test("default fast validation keeps at most eight filesystem checks in flight", async (t) => {
+test("default fast validation uses the bounded platform filesystem pool", async (t) => {
   const fixture = await createCacheFixture(t);
-  for (let index = 0; index < 20; index += 1) {
+  const expectedConcurrency = process.platform === "win32" ? 32 : 8;
+  for (let index = 0; index < 40; index += 1) {
     await fs.writeFile(
       path.join(fixture.projectRoot, ".sdlc", `default-bound-${String(index).padStart(2, "0")}.json`),
       `${JSON.stringify({ index })}\n`,
@@ -816,8 +817,8 @@ test("default fast validation keeps at most eight filesystem checks in flight", 
 
   const cold = await cache.get();
   assert.equal(await cache.get(), cold);
-  assert.ok(starts > 8);
-  assert.equal(maximum, 8);
+  assert.ok(starts > expectedConcurrency);
+  assert.equal(maximum, expectedConcurrency);
   assert.equal(active, 0);
 });
 
