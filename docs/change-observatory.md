@@ -22,6 +22,53 @@ Use `--locale it` for Italian. The language choice is carried to the browser in
 the local URL; it does not weaken the per-run token or the loopback-only
 boundary.
 
+## Open An Explicit Project Portfolio
+
+To compare several local projects, create one JSON manifest inside their common
+parent folder. The list is explicit: Change Observatory does not scan sibling
+folders, infer projects, or fall back to a different file.
+
+For this layout:
+
+```text
+/work/
+  portfolio.json
+  booking-service/
+  payment-service/
+```
+
+`/work/portfolio.json` can contain:
+
+```json
+{
+  "schema_version": "portfolio-manifest:v1",
+  "projects": [
+    { "id": "booking", "path": "booking-service" },
+    { "id": "payments", "path": "payment-service" }
+  ]
+}
+```
+
+Launch only that list:
+
+```bash
+agentic-sdlc observe \
+  --root /work \
+  --portfolio-manifest portfolio.json
+```
+
+The manifest and every project path must be explicit, portable paths relative
+to `--root`. Absolute paths, parent traversal, environment variables, globs,
+URI paths, symlinks, duplicate IDs, duplicate paths, and two paths to the same
+physical directory are rejected. A manifest may list from 1 to 64 projects.
+
+The first screen reads bounded summaries only. Choose a project to load its
+detailed lineage; choosing **All projects** returns to the portfolio summary.
+If one project cannot be read safely, its card explains that it is unavailable
+while the other projects remain usable. Raw evidence links stay bound to the
+selected manifest project. Without `--portfolio-manifest`, the existing
+single-project view is unchanged.
+
 For a reader who does not know the plugin, every delivery-control record starts
 with five practical answers: what happened, what changes in practice, whether a
 decision is needed, what remains protected, and what to do next. Exact policy
@@ -66,6 +113,9 @@ reads from the URL fragment and keeps in session memory.
 | `/api/v1/ready` | Bearer token | Can the pinned project/UI boundaries and current canonical read model be validated now? Returns `503` when not ready. |
 | `/api/v1/observatory` | Bearer token | Returns the normalized read model, with `ETag` and conditional `304` support. |
 | `/api/v1/source?path=...` | Bearer token | Returns one allowed, bounded, presentation-redacted source record. |
+| `/api/v1/portfolio` | Bearer token | In explicit portfolio mode, returns the bounded manifest-order summary without project paths or raw-source references. |
+| `/api/v1/portfolio/project?project=...` | Bearer token | Lazily returns one selected project view from the loaded manifest. |
+| `/api/v1/portfolio/source?project=...&path=...` | Bearer token | Returns one bounded source record scoped to the selected manifest project. |
 | `/api/v1/metrics` | Bearer token | Returns the current process-local metric snapshot. |
 | `/api/v1/slo` | Bearer token | Evaluates advisory availability and readiness objectives over samples from this process. |
 | `/api/v1/support-bundle` | Bearer token | Returns allowlisted, redacted diagnostic sections plus a content-integrity digest. |
