@@ -66,8 +66,8 @@ function provenanceBadge(provenance) {
   });
 }
 
-function sourceButtonFor(item, label = "Source records") {
-  const target = rawTargetFor(item);
+function sourceButtonFor(item, label = "Source records", portfolioProjectId = null) {
+  const target = rawTargetFor(item, { portfolioProjectId });
   if (!target) return null;
   const display = displayTextForItem(item);
   return node(
@@ -142,7 +142,7 @@ export function renderProjectControls(model) {
   );
 }
 
-function renderSummaryAnswer(question, items) {
+function renderSummaryAnswer(question, items, portfolioProjectId = null) {
   const item = firstSummaryItem(items);
   const article = node("article", { className: "summary-answer" }, [
     node("h2", { text: question, i18n: true }),
@@ -163,7 +163,7 @@ function renderSummaryAnswer(question, items) {
   article.append(
     recordedAnswerForItem(item),
     humanGuidanceBlock(item),
-    technicalDetailsForItem(item),
+    technicalDetailsForItem(item, [], portfolioProjectId),
   );
   return article;
 }
@@ -184,11 +184,11 @@ function recordedAnswerForItem(item) {
   ]);
 }
 
-export function renderSummary(container, model) {
+export function renderSummary(container, model, { portfolioProjectId = null } = {}) {
   container.replaceChildren(
-    renderSummaryAnswer("What was asked?", model.summary.asked),
-    renderSummaryAnswer("What changed?", model.summary.changed),
-    renderSummaryAnswer("Why was it decided?", model.summary.decided),
+    renderSummaryAnswer("What was asked?", model.summary.asked, portfolioProjectId),
+    renderSummaryAnswer("What changed?", model.summary.changed, portfolioProjectId),
+    renderSummaryAnswer("Why was it decided?", model.summary.decided, portfolioProjectId),
   );
 }
 
@@ -272,7 +272,7 @@ export function phaseSelectionId(iterationId, phase) {
   return `phase:${iterationId}:${phase}`;
 }
 
-export function phaseSelectionItem(iteration, phaseState) {
+export function phaseSelectionItem(iteration, phaseState, portfolioProjectId = null) {
   const primarySource = phaseState.sourceRefs[0];
   const rawAvailable = primarySource?.rawAvailable !== false;
   return {
@@ -285,7 +285,9 @@ export function phaseSelectionItem(iteration, phaseState) {
     timestamp: iteration.timestamp,
     provenance: phaseState.provenance,
     sourceRefs: phaseState.sourceRefs,
-    rawHref: rawAvailable && primarySource ? rawHrefForPath(primarySource.path) : null,
+    rawHref: rawAvailable && primarySource
+      ? rawHrefForPath(primarySource.path, portfolioProjectId)
+      : null,
     ...(rawAvailable ? {} : { rawAvailable: false }),
     narrative: {
       inputSummary: null,
@@ -362,7 +364,11 @@ function lineagePanel(model, state) {
       ]),
     );
     for (const phase of iteration.phases) {
-      const selectionId = recordSelectionKey(phaseSelectionItem(iteration, phase));
+      const selectionId = recordSelectionKey(phaseSelectionItem(
+        iteration,
+        phase,
+        state.portfolioProjectId,
+      ));
       const associatedSelection =
         state.selectedIterationId === iteration.id
         && state.selectedItem?.phase === phase.phase
@@ -501,7 +507,11 @@ function dossierItem(item, sourceLane, laneKey, state, iterationId) {
       node("span", { className: "dossier-item-summary", text: display.summary }),
     ]),
     humanGuidanceBlock(item),
-    technicalDetailsForItem(item, isAutonomyRecord(item) ? [] : [dossierNarrative(item, laneKey)]),
+    technicalDetailsForItem(
+      item,
+      isAutonomyRecord(item) ? [] : [dossierNarrative(item, laneKey)],
+      state.portfolioProjectId,
+    ),
     node("footer", { className: "dossier-item-footer" }, [
       node("span", { className: "dossier-item-kind", text: itemKind }),
       statusText(display.status),
@@ -620,7 +630,13 @@ function dossierPanel(model, state) {
     node("div", { className: "dossier-meta-actions" }, [
       statusText(dossier?.status ?? "missing"),
       provenanceBadge(dossier?.provenance ?? "missing"),
-      dossier ? sourceButtonFor({ ...dossier, title: selectedIteration.title }, "Open dossier source") : null,
+      dossier
+        ? sourceButtonFor(
+            { ...dossier, title: selectedIteration.title },
+            "Open dossier source",
+            state.portfolioProjectId,
+          )
+        : null,
     ]),
   ]);
   panel.append(dossierMeta);
@@ -1004,7 +1020,7 @@ function inspectorEntriesSection(title, entries, tone = null) {
   return section;
 }
 
-function evidenceSection(item, narrative) {
+function evidenceSection(item, narrative, portfolioProjectId = null) {
   const entries = [
     ...narrative.evidence,
     ...item.sourceRefs.map((source) => ({
@@ -1026,7 +1042,7 @@ function evidenceSection(item, narrative) {
   unique.forEach((entry) => {
     const source = entry.sourceRefs?.find((candidate) =>
       candidate.rawAvailable !== false && candidate.path?.startsWith(".sdlc/"));
-    const href = source ? rawHrefForPath(source.path) : null;
+    const href = source ? rawHrefForPath(source.path, portfolioProjectId) : null;
     section.append(
       node("div", { className: "source-row" }, [
         node("span", { className: "source-path", text: entry.title }),
@@ -1074,8 +1090,8 @@ function humanGuidanceBlock(item) {
   return humanGuidanceSection(humanGuidanceForItem(item));
 }
 
-function technicalDetailsForItem(item, sections = []) {
-  const source = sourceButtonFor(item, "Open raw source");
+function technicalDetailsForItem(item, sections = [], portfolioProjectId = null) {
+  const source = sourceButtonFor(item, "Open raw source", portfolioProjectId);
   return node("details", { className: "technical-details" }, [
     node("summary", { text: "Technical details (optional)", i18n: true }),
     node("dl", { className: "technical-details-grid" }, [
@@ -1091,7 +1107,7 @@ function technicalDetailsForItem(item, sections = []) {
   ]);
 }
 
-export function renderInspector(container, item) {
+export function renderInspector(container, item, { portfolioProjectId = null } = {}) {
   if (!item) {
     container.replaceChildren(
       node("header", { className: "inspector-header" }, [
@@ -1126,7 +1142,7 @@ export function renderInspector(container, item) {
             i18n: true,
           }),
         ]),
-      ]),
+      ], portfolioProjectId),
     );
     return;
   }
@@ -1142,7 +1158,7 @@ export function renderInspector(container, item) {
         ]),
       ]),
       humanGuidanceBlock(item),
-      technicalDetailsForItem(item),
+      technicalDetailsForItem(item, [], portfolioProjectId),
     );
     return;
   }
@@ -1185,19 +1201,21 @@ export function renderInspector(container, item) {
         )
         : null,
       inspectorEntriesSection("Alternatives rejected", narrative.alternatives, "alternatives"),
-      evidenceSection(item, narrative),
-    ]),
+      evidenceSection(item, narrative, portfolioProjectId),
+    ], portfolioProjectId),
   ].filter(Boolean);
   container.replaceChildren(...sections);
 }
 
-export function renderFatalError(container, error) {
+export function renderFatalError(container, error, {
+  title = "Project lineage could not be loaded",
+} = {}) {
   const guidance = localizedErrorGuidance(error);
   container.replaceChildren(
     node("div", { className: "error-state", attrs: { role: "alert" } }, [
       icon("alert"),
       node("div", {}, [
-        node("strong", { text: "Project lineage could not be loaded", i18n: true }),
+        node("strong", { text: title, i18n: true }),
         node("dl", { className: "human-guidance-grid" }, [
           guidanceField("Outcome", guidance.outcome, { i18nText: true }),
           guidanceField("Impact", guidance.impact, { i18nText: true }),

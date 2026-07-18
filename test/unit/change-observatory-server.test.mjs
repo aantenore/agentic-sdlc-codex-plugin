@@ -432,6 +432,7 @@ test("carries a validated locale to the browser without exposing the access toke
   const access = new URL(running.accessUrl);
   assert.equal(access.hostname, "127.0.0.1");
   assert.equal(access.searchParams.get("locale"), "it");
+  assert.equal(access.searchParams.has("mode"), false);
   assert.equal(access.searchParams.has("access_token"), false);
   assert.match(access.hash, /^#access_token=[A-Za-z0-9_-]+$/u);
 });

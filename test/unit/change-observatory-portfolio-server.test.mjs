@@ -19,6 +19,7 @@ test("serves authenticated portfolio summary, detail, and isolated source repres
   t.after(() => running.close());
 
   assert.equal(running.modelUrl, running.portfolioUrl);
+  assert.equal(new URL(running.accessUrl).searchParams.get("mode"), "portfolio");
   const health = await request(running, "/api/v1/health", { authenticated: false });
   assert.equal(health.statusCode, 200);
   assert.equal(health.json.modelSchemaVersion, "change-observatory:portfolio:v1");

@@ -1,4 +1,8 @@
 import { normalizeViewModel, safeRawHref } from "./model.js";
+import {
+  normalizePortfolioSummary,
+  portfolioProjectHref,
+} from "./portfolio.js";
 
 const DEFAULT_ENDPOINT = "/api/v1/observatory";
 const MAX_RAW_CHARACTERS = 2_000_000;
@@ -106,6 +110,40 @@ export class ObservatoryApi {
     }
   }
 
+  async loadPortfolio({ signal } = {}) {
+    const response = await this.#request("/api/v1/portfolio", {
+      signal,
+      headers: { Accept: "application/json" },
+    });
+    const payload = await parseJsonResponse(response, "portfolio summary");
+    try {
+      return normalizePortfolioSummary(payload);
+    } catch (error) {
+      throw new ObservatoryApiError(error.message, {
+        status: response.status,
+        code: "UNSUPPORTED_PORTFOLIO_MODEL",
+        cause: error,
+      });
+    }
+  }
+
+  async loadProject(projectId, { signal } = {}) {
+    const response = await this.#request(portfolioProjectHref(projectId), {
+      signal,
+      headers: { Accept: "application/json" },
+    });
+    const payload = await parseJsonResponse(response, "project view");
+    try {
+      return normalizeViewModel(payload);
+    } catch (error) {
+      throw new ObservatoryApiError(error.message, {
+        status: response.status,
+        code: "UNSUPPORTED_VIEW_MODEL",
+        cause: error,
+      });
+    }
+  }
+
   async loadRaw(href, { signal } = {}) {
     const safeHref = safeRawHref(href);
     if (!safeHref) {
@@ -160,6 +198,18 @@ export class ObservatoryApi {
       throw await responseError(response);
     }
     return response;
+  }
+}
+
+async function parseJsonResponse(response, label) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new ObservatoryApiError(`The observatory API returned malformed ${label} JSON.`, {
+      status: response.status,
+      code: "MALFORMED_VIEW_MODEL",
+      cause: error,
+    });
   }
 }
 

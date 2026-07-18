@@ -807,12 +807,14 @@ test("API client loads and formats a canonical raw source", async () => {
 });
 
 test("shipped UI is build-free, self-contained, accessible, and gradient-free", async () => {
-  const [html, css, app, components, model] = await Promise.all([
+  const [html, css, app, components, model, portfolio, portfolioComponents] = await Promise.all([
     readFile(new URL("index.html", UI_ROOT), "utf8"),
     readFile(new URL("styles.css", UI_ROOT), "utf8"),
     readFile(new URL("app.js", UI_ROOT), "utf8"),
     readFile(new URL("components.js", UI_ROOT), "utf8"),
     readFile(new URL("model.js", UI_ROOT), "utf8"),
+    readFile(new URL("portfolio.js", UI_ROOT), "utf8"),
+    readFile(new URL("portfolio-components.js", UI_ROOT), "utf8"),
   ]);
 
   assert.match(html, /<script type="module" src="\.\/app\.js"><\/script>/);
@@ -864,6 +866,15 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(app, /filter === "dossier"/);
   assert.match(app, /localizedErrorGuidance/);
   assert.match(app, /rawSourceErrorText/);
+  assert.match(app, /LatestRequestCoordinator/);
+  assert.match(app, /loadPortfolioProject/);
+  assert.match(app, /portfolioProjectId/);
   assert.match(app, /Technical details \(optional\)/);
+  assert.match(portfolio, /mode=portfolio|modes\[0\] === "portfolio"/);
+  assert.match(portfolio, /controller\?\.abort/);
+  assert.match(portfolioComponents, /All projects/);
+  assert.match(portfolioComponents, /select-project/);
+  assert.match(portfolioComponents, /aria-label/);
   assert.doesNotMatch(app, /fixture|demo|mock/i);
+  assert.doesNotMatch(`${portfolio}\n${portfolioComponents}`, /https?:\/\//u);
 });

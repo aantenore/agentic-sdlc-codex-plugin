@@ -721,9 +721,18 @@ export function firstSummaryItem(items) {
   return arrayOrEmpty(items)[0] ?? null;
 }
 
-export function rawHrefForPath(path) {
+export function rawHrefForPath(path, portfolioProjectId = null) {
   const clean = readable(path, "");
   if (!isCanonicalEvidencePath(clean)) return null;
+  if (portfolioProjectId !== null) {
+    if (
+      typeof portfolioProjectId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(portfolioProjectId)
+    ) {
+      return null;
+    }
+    return `/api/v1/portfolio/source?project=${encodeURIComponent(portfolioProjectId)}&path=${encodeURIComponent(clean)}`;
+  }
   return `/api/v1/source?path=${encodeURIComponent(clean)}`;
 }
 
@@ -735,24 +744,56 @@ export function safeRawHref(value) {
   } catch {
     return null;
   }
-  if (url.origin !== "http://observatory.local" || url.pathname !== "/api/v1/source") return null;
-  const path = url.searchParams.get("path");
-  return rawHrefForPath(path);
+  if (url.origin !== "http://observatory.local" || url.hash !== "") return null;
+  const keys = [...url.searchParams.keys()];
+  if (url.pathname === "/api/v1/source") {
+    if (
+      keys.some((key) => key !== "path")
+      || url.searchParams.getAll("path").length !== 1
+    ) {
+      return null;
+    }
+    return rawHrefForPath(url.searchParams.get("path"));
+  }
+  if (url.pathname === "/api/v1/portfolio/source") {
+    if (
+      keys.some((key) => !["project", "path"].includes(key))
+      || url.searchParams.getAll("project").length !== 1
+      || url.searchParams.getAll("path").length !== 1
+    ) {
+      return null;
+    }
+    return rawHrefForPath(
+      url.searchParams.get("path"),
+      url.searchParams.get("project"),
+    );
+  }
+  return null;
 }
 
-export function rawTargetFor(item) {
+export function rawTargetFor(item, { portfolioProjectId = null } = {}) {
   if (!item) return null;
   if (item.rawAvailable === false) return null;
-  if (safeRawHref(item.rawHref)) {
+  const safeItemHref = safeRawHref(item.rawHref);
+  if (safeItemHref) {
+    const sourcePath = new URL(
+      safeItemHref,
+      "http://observatory.local",
+    ).searchParams.get("path");
     return {
-      href: safeRawHref(item.rawHref),
-      path: new URL(item.rawHref, "http://observatory.local").searchParams.get("path"),
+      href: portfolioProjectId === null
+        ? safeItemHref
+        : rawHrefForPath(sourcePath, portfolioProjectId),
+      path: sourcePath,
     };
   }
   const source = arrayOrEmpty(item.sourceRefs).find((ref) =>
     ref.rawAvailable !== false && isCanonicalEvidencePath(ref.path));
   if (!source) return null;
-  return { href: rawHrefForPath(source.path), path: source.path };
+  return {
+    href: rawHrefForPath(source.path, portfolioProjectId),
+    path: source.path,
+  };
 }
 
 export function isCanonicalEvidencePath(path) {

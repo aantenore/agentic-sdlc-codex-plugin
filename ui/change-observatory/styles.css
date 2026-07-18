@@ -1834,6 +1834,199 @@ svg {
   font-weight: 700;
 }
 
+.portfolio-summary-value {
+  display: block;
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.portfolio-view {
+  display: grid;
+  gap: 18px;
+}
+
+.portfolio-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.portfolio-heading h1,
+.portfolio-unavailable h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.portfolio-heading p,
+.portfolio-unavailable p {
+  max-width: 720px;
+  margin: 5px 0 0;
+  color: var(--ink-secondary);
+}
+
+.portfolio-readonly,
+.portfolio-health {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.portfolio-card {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.portfolio-card[data-status="unavailable"] {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  background: var(--warning-soft);
+  box-shadow: none;
+}
+
+.portfolio-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.portfolio-card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.portfolio-card[data-health="needs_attention"] .portfolio-health,
+.portfolio-card[data-health="review"] .portfolio-health,
+.portfolio-card[data-status="unavailable"] .portfolio-health {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.portfolio-counts {
+  display: grid;
+  margin: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.portfolio-counts > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.portfolio-counts dt {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-counts dd {
+  margin: 3px 0 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.portfolio-previews {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.portfolio-previews li {
+  min-width: 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--accent-soft);
+}
+
+.portfolio-preview-kind {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.portfolio-previews strong,
+.portfolio-previews p {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-previews p,
+.portfolio-card-message {
+  margin: 2px 0 0;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.portfolio-open {
+  width: fit-content;
+  margin-top: auto;
+}
+
+.portfolio-unavailable {
+  display: flex;
+  max-width: 760px;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line));
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+}
+
+.portfolio-unavailable strong {
+  display: block;
+  margin-top: 10px;
+}
+
+.portfolio-status-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--warning);
+  color: white;
+  font-weight: 800;
+}
+
+.nav-item:disabled,
+.outline-button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 @media (max-width: 1180px) {
   :root { --nav-width: 82px; }
 
@@ -1880,6 +2073,10 @@ svg {
 
   .overview-grid > :last-child {
     grid-column: 1 / -1;
+  }
+
+  .portfolio-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .summary-answer {
@@ -2038,6 +2235,15 @@ svg {
 
   .primary-view {
     padding: 10px;
+  }
+
+  .portfolio-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .portfolio-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .overview-grid {

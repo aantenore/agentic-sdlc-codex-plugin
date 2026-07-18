@@ -11,6 +11,17 @@ import {
 } from "./components.js";
 import { rawTargetFor, recordSelectionKey } from "./model.js";
 import {
+  LatestRequestCoordinator,
+  portfolioModeFromLocation,
+} from "./portfolio.js";
+import {
+  renderPortfolioControls,
+  renderPortfolioOverview,
+  renderPortfolioProjectLoading,
+  renderPortfolioSummary,
+  renderPortfolioUnavailable,
+} from "./portfolio-components.js";
+import {
   applyDocumentLocale,
   localeFromLocation,
   localizedErrorGuidance,
@@ -20,6 +31,7 @@ import {
 
 const locale = setLocale(localeFromLocation(window.location));
 applyDocumentLocale(document, locale);
+const portfolioMode = portfolioModeFromLocation(window.location);
 
 const VALID_VIEWS = new Set([
   "overview",
@@ -69,10 +81,14 @@ const state = {
   selectedId: null,
   selectedItem: null,
   records: new Map(),
-  loadController: null,
+  portfolioSummary: null,
+  selectedProjectId: "",
+  portfolioProjectId: null,
   rawController: null,
+  rawGeneration: 0,
   rawExpanded: false,
 };
+const loadCoordinator = new LatestRequestCoordinator();
 
 function viewFromHash() {
   const requested = window.location.hash.replace(/^#/, "");
@@ -104,7 +120,7 @@ function indexRecords(model) {
   });
   for (const iteration of model.iterations) {
     for (const phase of iteration.phases) {
-      const item = phaseSelectionItem(iteration, phase);
+      const item = phaseSelectionItem(iteration, phase, state.portfolioProjectId);
       records.set(recordSelectionKey(item), item);
     }
     if (iteration.dossier) {
@@ -135,7 +151,9 @@ function preferredSelection(model) {
   let selected = null;
   for (const iteration of model.iterations) {
     for (const phase of iteration.phases) {
-      if (phase.status === "inProgress") selected = phaseSelectionItem(iteration, phase);
+      if (phase.status === "inProgress") {
+        selected = phaseSelectionItem(iteration, phase, state.portfolioProjectId);
+      }
     }
   }
   return (
@@ -161,33 +179,20 @@ function render() {
   if (!state.model) return;
   updateNavigation();
   renderPrimary(elements.primary, state.model, state);
-  renderInspector(elements.inspector, state.selectedItem);
+  renderInspector(elements.inspector, state.selectedItem, {
+    portfolioProjectId: state.portfolioProjectId,
+  });
 }
 
 async function loadModel({ preserveSelection = false } = {}) {
-  state.loadController?.abort();
-  const controller = new AbortController();
-  state.loadController = controller;
+  const request = loadCoordinator.begin();
   elements.app.setAttribute("aria-busy", "true");
   setApiStatus("Connecting", "loading");
 
   try {
-    const model = await api.load({ signal: controller.signal });
-    if (controller.signal.aborted) return;
-    state.model = model;
-    indexRecords(model);
-    state.selectedIterationId = preferredIterationId(
-      model,
-      preserveSelection ? state.selectedIterationId : null,
-    );
-
-    if (preserveSelection && state.selectedId && state.records.has(state.selectedId)) {
-      state.selectedItem = state.records.get(state.selectedId);
-    } else {
-      state.selectedItem = preferredSelection(model);
-      state.selectedId = state.selectedItem ? recordSelectionKey(state.selectedItem) : null;
-    }
-
+    const model = await api.load({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    applyProjectModel(model, { preserveSelection });
     renderProjectControls(model);
     renderSummary(elements.summary, model);
     renderDiagnostics(elements.diagnostics, model.diagnostics);
@@ -196,21 +201,196 @@ async function loadModel({ preserveSelection = false } = {}) {
     document.title = `${model.project.name} · Change Observatory`;
   } catch (error) {
     if (error?.name === "AbortError") return;
-    state.model = null;
-    state.selectedItem = null;
-    state.selectedId = null;
-    state.selectedIterationId = null;
+    if (!request.isCurrent()) return;
+    clearProjectModel();
     renderFatalError(elements.primary, error);
     renderInspector(elements.inspector, null);
     elements.diagnostics.hidden = true;
     setApiStatus("Unavailable", "error");
   } finally {
-    if (!controller.signal.aborted) elements.app.setAttribute("aria-busy", "false");
+    if (request.isCurrent()) elements.app.setAttribute("aria-busy", "false");
+  }
+}
+
+function applyProjectModel(model, { preserveSelection = false } = {}) {
+  state.model = model;
+  indexRecords(model);
+  state.selectedIterationId = preferredIterationId(
+    model,
+    preserveSelection ? state.selectedIterationId : null,
+  );
+  if (preserveSelection && state.selectedId && state.records.has(state.selectedId)) {
+    state.selectedItem = state.records.get(state.selectedId);
+  } else {
+    state.selectedItem = preferredSelection(model);
+    state.selectedId = state.selectedItem ? recordSelectionKey(state.selectedItem) : null;
+  }
+}
+
+function clearProjectModel() {
+  state.model = null;
+  state.selectedItem = null;
+  state.selectedId = null;
+  state.selectedIterationId = null;
+  state.records = new Map();
+}
+
+function setDetailNavigationEnabled(enabled) {
+  for (const button of document.querySelectorAll("[data-view]")) {
+    button.disabled = !enabled;
+  }
+  document.querySelector('[data-action="open-first-raw"]').disabled = !enabled;
+}
+
+function disablePortfolioControls() {
+  const projectSelect = document.querySelector("#project-select");
+  const snapshotSelect = document.querySelector("#snapshot-select");
+  projectSelect.disabled = true;
+  const unavailable = document.createElement("option");
+  unavailable.value = "";
+  unavailable.textContent = t("Unavailable");
+  projectSelect.replaceChildren(unavailable);
+  snapshotSelect.disabled = true;
+  snapshotSelect.replaceChildren(unavailable.cloneNode(true));
+}
+
+function resetRawForProjectChange() {
+  state.rawController?.abort();
+  state.rawController = null;
+  state.rawGeneration += 1;
+  elements.rawPath.textContent = t("Select a source record");
+  elements.rawCode.textContent = t("No source record selected.");
+  setRawExpanded(false);
+}
+
+function renderPortfolioHome({ focus = false } = {}) {
+  if (!state.portfolioSummary) return;
+  loadCoordinator.cancel();
+  clearProjectModel();
+  state.selectedProjectId = "";
+  state.portfolioProjectId = null;
+  resetRawForProjectChange();
+  state.view = "overview";
+  renderPortfolioControls(state.portfolioSummary);
+  renderPortfolioSummary(elements.summary, state.portfolioSummary);
+  renderPortfolioOverview(elements.primary, state.portfolioSummary);
+  renderInspector(elements.inspector, null);
+  elements.diagnostics.hidden = true;
+  elements.diagnostics.replaceChildren();
+  setDetailNavigationEnabled(false);
+  updateNavigation();
+  setApiStatus("Portfolio · ready", "ready");
+  document.title = `${t("Portfolio overview")} · Change Observatory`;
+  elements.app.setAttribute("aria-busy", "false");
+  if (focus) elements.primary.focus({ preventScroll: true });
+}
+
+async function loadPortfolioSummary({ preserveProject = false, focus = false } = {}) {
+  const requestedProjectId = preserveProject ? state.selectedProjectId : "";
+  const request = loadCoordinator.begin();
+  elements.app.setAttribute("aria-busy", "true");
+  setApiStatus("Connecting", "loading");
+  try {
+    const summary = await api.loadPortfolio({ signal: request.signal });
+    if (!request.isCurrent()) return;
+    state.portfolioSummary = summary;
+    const requestedProject = summary.projects.find(
+      (project) => project.id === requestedProjectId,
+    );
+    if (requestedProject) {
+      await loadPortfolioProject(requestedProject.id, {
+        focus,
+        preserveSelection: true,
+      });
+      return;
+    }
+    renderPortfolioHome({ focus });
+  } catch (error) {
+    if (error?.name === "AbortError" || !request.isCurrent()) return;
+    state.portfolioSummary = null;
+    state.selectedProjectId = "";
+    state.portfolioProjectId = null;
+    clearProjectModel();
+    resetRawForProjectChange();
+    disablePortfolioControls();
+    renderFatalError(elements.primary, error, {
+      title: "Portfolio could not be loaded",
+    });
+    renderInspector(elements.inspector, null);
+    elements.diagnostics.hidden = true;
+    setDetailNavigationEnabled(false);
+    setApiStatus("Unavailable", "error");
+  } finally {
+    if (request.isCurrent()) elements.app.setAttribute("aria-busy", "false");
+  }
+}
+
+async function loadPortfolioProject(projectId, {
+  focus = true,
+  preserveSelection = false,
+} = {}) {
+  const project = state.portfolioSummary?.projects.find((item) => item.id === projectId);
+  if (!project) {
+    renderPortfolioHome({ focus });
+    return;
+  }
+  state.selectedProjectId = project.id;
+  state.portfolioProjectId = project.id;
+  if (!preserveSelection) state.filters = { iteration: "", phase: "" };
+  resetRawForProjectChange();
+  renderPortfolioControls(state.portfolioSummary, project.id);
+  renderPortfolioSummary(elements.summary, state.portfolioSummary);
+
+  if (project.status === "unavailable") {
+    loadCoordinator.cancel();
+    clearProjectModel();
+    renderPortfolioUnavailable(elements.primary, project);
+    renderInspector(elements.inspector, null);
+    elements.diagnostics.hidden = true;
+    setDetailNavigationEnabled(false);
+    setApiStatus("Portfolio · partly available", "warning");
+    elements.app.setAttribute("aria-busy", "false");
+    document.title = `${project.name} · Change Observatory`;
+    if (focus) elements.primary.focus({ preventScroll: true });
+    return;
+  }
+
+  const request = loadCoordinator.begin();
+  elements.app.setAttribute("aria-busy", "true");
+  renderPortfolioProjectLoading(elements.primary, project);
+  renderInspector(elements.inspector, null);
+  setDetailNavigationEnabled(false);
+  setApiStatus("Loading project…", "loading");
+  try {
+    const model = await api.loadProject(project.id, { signal: request.signal });
+    if (!request.isCurrent() || state.selectedProjectId !== project.id) return;
+    applyProjectModel(model, { preserveSelection });
+    renderPortfolioControls(state.portfolioSummary, project.id, model);
+    renderSummary(elements.summary, model, {
+      portfolioProjectId: project.id,
+    });
+    renderDiagnostics(elements.diagnostics, model.diagnostics);
+    setDetailNavigationEnabled(true);
+    render();
+    setApiStatus("Read-only · ready", "ready");
+    document.title = `${model.project.name} · Change Observatory`;
+    if (focus) elements.primary.focus({ preventScroll: true });
+  } catch (error) {
+    if (error?.name === "AbortError" || !request.isCurrent()) return;
+    clearProjectModel();
+    renderFatalError(elements.primary, error);
+    renderInspector(elements.inspector, null);
+    elements.diagnostics.hidden = true;
+    setDetailNavigationEnabled(false);
+    setApiStatus("Unavailable", "error");
+    if (focus) elements.primary.focus({ preventScroll: true });
+  } finally {
+    if (request.isCurrent()) elements.app.setAttribute("aria-busy", "false");
   }
 }
 
 function setView(view) {
-  if (!VALID_VIEWS.has(view)) return;
+  if (!VALID_VIEWS.has(view) || (portfolioMode && !state.model)) return;
   state.view = view;
   if (window.location.hash !== `#${view}`) window.history.pushState(null, "", `#${view}`);
   if (window.matchMedia("(max-width: 720px)").matches) setNavigationOpen(false);
@@ -258,14 +438,21 @@ async function openRaw(href, path) {
   state.rawController?.abort();
   const controller = new AbortController();
   state.rawController = controller;
+  const generation = ++state.rawGeneration;
   elements.rawPath.textContent = path || t("Canonical source");
   elements.rawCode.textContent = t("Loading canonical source…");
   setRawExpanded(true);
 
   try {
-    elements.rawCode.textContent = await api.loadRaw(href, { signal: controller.signal });
+    const raw = await api.loadRaw(href, { signal: controller.signal });
+    if (controller.signal.aborted || generation !== state.rawGeneration) return;
+    elements.rawCode.textContent = raw;
   } catch (error) {
-    if (error?.name === "AbortError") return;
+    if (
+      error?.name === "AbortError"
+      || controller.signal.aborted
+      || generation !== state.rawGeneration
+    ) return;
     elements.rawCode.textContent = rawSourceErrorText(error);
   }
 }
@@ -287,13 +474,15 @@ function rawSourceErrorText(error) {
 }
 
 function openFirstRaw() {
-  const selectedTarget = rawTargetFor(state.selectedItem);
+  const context = { portfolioProjectId: state.portfolioProjectId };
+  const selectedTarget = rawTargetFor(state.selectedItem, context);
   if (selectedTarget) {
     openRaw(selectedTarget.href, selectedTarget.path);
     return;
   }
-  const record = state.model?.records.find((candidate) => candidate.rawHref);
-  if (record) openRaw(record.rawHref, record.path);
+  const record = state.model?.records.find((candidate) => rawTargetFor(candidate, context));
+  const recordTarget = rawTargetFor(record, context);
+  if (recordTarget) openRaw(recordTarget.href, recordTarget.path);
 }
 
 function handleClick(event) {
@@ -307,7 +496,11 @@ function handleClick(event) {
   if (!actionElement) return;
   switch (actionElement.dataset.action) {
     case "refresh":
-      loadModel({ preserveSelection: true });
+      if (portfolioMode) loadPortfolioSummary({ preserveProject: true });
+      else loadModel({ preserveSelection: true });
+      break;
+    case "select-project":
+      if (portfolioMode) loadPortfolioProject(actionElement.dataset.projectId);
       break;
     case "toggle-navigation":
       setNavigationOpen(!elements.navigation.classList.contains("is-open"));
@@ -334,12 +527,19 @@ function handleClick(event) {
       setRawExpanded(!state.rawExpanded);
       break;
     case "close-raw":
+      state.rawController?.abort();
+      state.rawGeneration += 1;
       setRawExpanded(false);
       break;
   }
 }
 
 function handleChange(event) {
+  if (portfolioMode && event.target.id === "project-select") {
+    if (event.target.value === "") renderPortfolioHome({ focus: true });
+    else loadPortfolioProject(event.target.value);
+    return;
+  }
   const filter = event.target.dataset.filter;
   if (filter === "dossier") {
     selectIteration(event.target.value);
@@ -376,4 +576,5 @@ window.addEventListener("hashchange", () => {
   render();
 });
 
-loadModel();
+if (portfolioMode) loadPortfolioSummary();
+else loadModel();
