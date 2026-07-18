@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "governance-policy-use-receipt.schema.json",
+  "title": "Immutable use of an exact governance decision",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "decision_ref",
+    "policy_ref",
+    "subject_hash",
+    "action",
+    "actor",
+    "actor_identity_hash",
+    "decision_evaluated_at",
+    "decision_valid_until",
+    "used_at",
+    "evidence_refs",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "governance_policy_use_receipt" },
+    "schema_version": { "const": "governance-policy-use-receipt:v1" },
+    "version": { "const": 1 },
+    "id": { "$ref": "#/$defs/ref_id" },
+    "decision_ref": { "$ref": "#/$defs/hashed_ref" },
+    "policy_ref": { "$ref": "#/$defs/hashed_ref" },
+    "subject_hash": { "$ref": "#/$defs/sha256" },
+    "action": { "$ref": "#/$defs/exact_name" },
+    "actor": { "$ref": "#/$defs/actor" },
+    "actor_identity_hash": { "$ref": "#/$defs/sha256" },
+    "decision_evaluated_at": { "type": "string", "format": "date-time" },
+    "decision_valid_until": { "type": "string", "format": "date-time" },
+    "used_at": { "type": "string", "format": "date-time" },
+    "evidence_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/hashed_ref" }
+    },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "exact_name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "ref_id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))(?![^@]*@)[A-Za-z0-9.][A-Za-z0-9._:/+-]{0,511}$" },
+    "actor": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "$ref": "#/$defs/exact_name" },
+        "id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._:/@+-]{0,511}$" },
+        "issuer": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._:/@+-]{0,511}$" }
+      },
+      "additionalProperties": false
+    },
+    "hashed_ref": {
+      "type": "object",
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/exact_name" },
+        "id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))(?![^@]*@)[A-Za-z0-9.][A-Za-z0-9._:/+-]{0,511}$" },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

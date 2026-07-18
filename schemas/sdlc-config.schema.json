@@ -143,6 +143,12 @@
       ],
       "additionalProperties": true
     },
+    "governance_policy": {
+      "oneOf": [
+        { "$ref": "governance-policy.schema.json" },
+        { "$ref": "#/$defs/governance_policy_config" }
+      ]
+    },
     "autonomy_policy": {
       "$ref": "#/$defs/autonomy_policy"
     },
@@ -157,6 +163,42 @@
     }
   },
   "$defs": {
+    "governance_policy_config": {
+      "type": "object",
+      "required": [
+        "mode",
+        "policy_file",
+        "decision_receipts_root",
+        "use_receipts_root",
+        "revocations_root",
+        "fail_closed"
+      ],
+      "properties": {
+        "mode": { "const": "enforce" },
+        "policy_file": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "decision_receipts_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "use_receipts_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "revocations_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "fail_closed": { "const": true }
+      },
+      "additionalProperties": false
+    },
     "observability_policy": {
       "type": "object",
       "required": [
