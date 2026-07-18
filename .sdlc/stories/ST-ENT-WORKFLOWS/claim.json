@@ -1,0 +1,38 @@
+{
+  "story_id": "ST-ENT-WORKFLOWS",
+  "agent": "Codex",
+  "branch": "codex/ST-ENT-WORKFLOWS",
+  "status": "active",
+  "claimed_at": "2026-07-18T02:52:08.730Z",
+  "expires_at": "2026-07-19T02:52:08.730Z",
+  "notes": "Implement the approved configurable workflow story under AUT-PR-ENT-WORKFLOWS-V2.",
+  "audit": {
+    "claimed_by": {
+      "id": "Codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-WORKFLOWS",
+      "head_sha": "7f0ed38942faf3ceb5ce8996350a865e76865480",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.11.0"
+    }
+  }
+}
