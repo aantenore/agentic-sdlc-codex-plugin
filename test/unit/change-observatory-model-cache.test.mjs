@@ -733,6 +733,28 @@ test("async validation rescans after an entry disappears during a pooled check",
   assert.equal(builds, 2);
 });
 
+test("project root removal during fast validation preserves the boundary error", async (t) => {
+  const fixture = await createCacheFixture(t);
+  const movedRoot = `${fixture.projectRoot}-moved`;
+  let moved = false;
+  const cache = createObservatoryModelCache({
+    projectRoot: fixture.projectRoot,
+    buildModel: () => ({ stable: true }),
+    async onFastPathCheck(event) {
+      if (event.event !== "start" || moved) return;
+      moved = true;
+      await fs.rename(fixture.projectRoot, movedRoot);
+    },
+  });
+
+  await cache.get();
+  await assert.rejects(
+    () => cache.get(),
+    (error) => error?.code === "project_boundary_changed" && error?.statusCode === 409,
+  );
+  assert.equal(moved, true);
+});
+
 test("fast validation enforces bounded concurrency", async (t) => {
   const fixture = await createCacheFixture(t);
   for (let index = 0; index < 12; index += 1) {
