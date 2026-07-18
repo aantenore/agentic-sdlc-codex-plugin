@@ -6348,11 +6348,8 @@ function taskStartAutonomyChoiceLines(decision, italian) {
   return [
     "",
     italian
-      ? "Definisci prima la destinazione della consegna; la domanda applicabile sarà una delle due seguenti."
-      : "Define the delivery destination first; the applicable question will be one of the following.",
-    ...choiceLines("pull_request"),
-    "",
-    ...choiceLines("local_release"),
+      ? "Prima indica la destinazione esatta di questa consegna. Dopo che sarà definita, ti mostrerò una sola domanda con le tre scelte applicabili."
+      : "First identify this delivery's exact destination. Once it is defined, I will show one question with the three applicable choices.",
   ];
 }
 

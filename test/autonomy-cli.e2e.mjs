@@ -359,6 +359,34 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     contractId: "CONTRACT-PR-1",
     profileId: "AUT-PR-1",
   });
+  const destinationUnknownIntent = taskIntent("ST-PR-1");
+  const destinationUnknown = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+  ]);
+  assert.equal(destinationUnknown.contract_action, "select_delivery_autonomy");
+  assert.equal(destinationUnknown.delivery_kind, null);
+  const destinationUnknownEnglish = splitHumanGuidance(mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+  ]).stdout);
+  assert.match(destinationUnknownEnglish.primary, /First identify this delivery's exact destination/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /For this pull request, how independently should I work/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /For this local release, how independently should I work/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /(?:1\. Guided|2\. Autonomy with checks|3\. Full autonomy)/u);
+  const destinationUnknownHuman = splitHumanGuidance(mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+    "--locale", "it",
+  ]).stdout, "it");
+  assert.match(destinationUnknownHuman.primary, /Prima indica la destinazione esatta di questa consegna/u);
+  assert.match(destinationUnknownHuman.primary, /ti mostrerò una sola domanda con le tre scelte applicabili/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /Per questa PR, quanto vuoi che lavori in autonomia/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /Per questo rilascio locale, quanto vuoi che lavori in autonomia/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /(?:1\. Guidato|2\. Autonomia con controlli|3\. Autonomia completa)/u);
   mustRun([
     "story", "create",
     "--root", project,
