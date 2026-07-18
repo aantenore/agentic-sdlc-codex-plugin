@@ -1,0 +1,66 @@
+{
+  "id": "START-ST-ENT-UX-20260718003117373-62c46c",
+  "kind": "profile_task_start_receipt",
+  "schema_version": "profile-task-start-receipt:v1",
+  "story_id": "ST-ENT-UX",
+  "phase": "implementation",
+  "route": "claim_and_implement",
+  "contract_id": "contract-ST-ENT-UX-implementation",
+  "contract_approval_hash": "e38a4e424256236babecb87c6c1fd0685aa616fdd637726566c5d25832a19576",
+  "delivery_profile_ref": {
+    "id": "AUT-PR-ENT-UX-V2",
+    "path": ".sdlc/autonomy/deliveries/AUT-PR-ENT-UX-V2.json",
+    "hash": "ea87291deec8493087104db8bda903809350cd3cacfb2f80bc79013eab38d608"
+  },
+  "autonomy_decision_ref": {
+    "id": "AUT-DEC-20260718003117072-871327",
+    "path": ".sdlc/autonomy/decisions/AUT-DEC-20260718003117072-871327.json",
+    "hash": "bd02bb2567de88dcb67929a719c15ec17945f9deffc70e2d75581b962e1afe1d"
+  },
+  "delivery_start_receipt_ref": {
+    "id": "AUT-START-AUT-PR-ENT-UX-V2",
+    "path": ".sdlc/autonomy/executions/AUT-PR-ENT-UX-V2/start.json",
+    "hash": "5fe01a2c90de2b9a4e4ca769c168f8e7b294c1fd1229f2536b5194a447c844b2"
+  },
+  "autonomy_level": "checkpointed",
+  "start_basis": "checkpointed-profile",
+  "status": "confirmed",
+  "authorization_ref": null,
+  "authorization_use_ref": null,
+  "authority_assurance": {
+    "mode": "audit_only",
+    "receipt_ref": null,
+    "source": "declared_cli_attribution",
+    "verified": false
+  },
+  "confirmed_by": {
+    "id": "codex",
+    "type": "agent",
+    "name": "Codex",
+    "email": null,
+    "source": "cli"
+  },
+  "confirmed_at": "2026-07-18T00:31:17.373Z",
+  "audit": {
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/ST-ENT-UX",
+      "head_sha": "7465944ac2f22b335fafdae9a006d338509c31fc",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.11.0"
+    }
+  }
+}
