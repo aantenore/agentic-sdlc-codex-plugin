@@ -2790,42 +2790,45 @@ function runCanonicalQuery(session, manifest) {
     storyStatuses[status] = (storyStatuses[status] || 0) + 1;
   }
 
-  let records = 0;
-  let targetRecord = null;
-  for (const file of session.listFiles({
+  const recordAggregate = session.aggregateJsonLines({
     under: manifest.layout.records_root,
-    extensions: [".jsonl"],
-  })) {
-    for (const record of session.readJsonLines(file.path)) {
-      if (!record.valid) continue;
-      records += 1;
-      if (record.value.id === manifest.query_targets.record_id) {
-        targetRecord = {
-          id: record.value.id,
-          path: record.path,
-          line: record.line,
-          story_id: record.value.story_id,
-          sequence: record.value.sequence,
-        };
-      }
-    }
-  }
+    onInvalid: "skip",
+    operations: [
+      { id: "records", operation: "count" },
+      {
+        id: "target_record",
+        operation: "last",
+        where: { field: "id", equals: manifest.query_targets.record_id },
+        project: ["id", "story_id", "sequence"],
+        includeSource: true,
+      },
+    ],
+  });
+  const records = recordAggregate.results.records;
+  const selectedTargetRecord = recordAggregate.results.target_record;
+  const targetRecord = selectedTargetRecord.value === null
+    ? null
+    : {
+        ...selectedTargetRecord.value,
+        path: selectedTargetRecord.source.path,
+        line: selectedTargetRecord.source.line,
+      };
 
   const dependencyGraph = session.readJson(manifest.query_targets.dependency_path);
-  let traceEvents = 0;
-  let targetStoryTraceEvents = 0;
-  for (const file of session.listFiles({
+  const traceAggregate = session.aggregateJsonLines({
     under: manifest.layout.traces_root,
-    extensions: [".jsonl"],
-  })) {
-    for (const record of session.readJsonLines(file.path)) {
-      if (!record.valid) continue;
-      traceEvents += 1;
-      if (record.value.story_id === manifest.query_targets.story_id) {
-        targetStoryTraceEvents += 1;
-      }
-    }
-  }
+    onInvalid: "skip",
+    operations: [
+      { id: "trace_events", operation: "count" },
+      {
+        id: "target_story_trace_events",
+        operation: "count",
+        where: { field: "story_id", equals: manifest.query_targets.story_id },
+      },
+    ],
+  });
+  const traceEvents = traceAggregate.results.trace_events;
+  const targetStoryTraceEvents = traceAggregate.results.target_story_trace_events;
 
   return {
     canonical_files: session.catalog().files.length,

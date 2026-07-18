@@ -402,6 +402,10 @@ test("benchmark validates one canonical catalog and conditional Observatory cach
   assert.equal(report.workloads.canonical_query.dependency_edges, SMALL_SCALE.dependency_edges);
   assert.equal(report.workloads.canonical_query.trace_events, SMALL_SCALE.trace_events);
   assert.equal(report.workloads.canonical_query.session_metrics.catalog_builds, 1);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_json_lines_calls, 2);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_files_scanned, 21);
+  assert.equal(report.workloads.canonical_query.session_metrics.aggregate_records_retained, 1);
+  assert.equal(report.workloads.canonical_query.session_metrics.read_json_lines_calls, 0);
   assert.equal(
     report.workloads.canonical_query.manifest_sha256,
     report.fixture.manifest_sha256,
@@ -626,6 +630,10 @@ test("canonical query worker protocol is machine-readable and complete", () => {
       sequence: 4,
     });
     assert.equal(envelope.result.session_metrics.catalog_builds, 1);
+    assert.equal(envelope.result.session_metrics.aggregate_json_lines_calls, 2);
+    assert.equal(envelope.result.session_metrics.aggregate_files_scanned, 5);
+    assert.equal(envelope.result.session_metrics.aggregate_records_retained, 1);
+    assert.equal(envelope.result.session_metrics.read_json_lines_calls, 0);
     assert.ok(envelope.result.memory.max_rss_bytes > 0);
   } finally {
     fixture.cleanup();
