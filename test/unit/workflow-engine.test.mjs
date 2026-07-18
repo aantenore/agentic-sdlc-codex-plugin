@@ -176,6 +176,51 @@ test("only explicitly allowlisted declarative guards are accepted", () => {
   assert.equal(result.results[0].guard_id, "minimum-score");
 });
 
+test("built-in guard parameter contracts fail closed during definition build and runtime evaluation", () => {
+  const invalidGuards = [
+    [{ id: "always" }, /plain object/u],
+    [{ id: "always", parameters: { unexpected: true } }, /unsupported fields/u],
+    [{ id: "context-present", parameters: {} }, /key must be a non-empty string/u],
+    [{ id: "context-present", parameters: { key: "ticket", unexpected: true } }, /unsupported fields/u],
+    [{ id: "context-equals", parameters: { key: "approved" } }, /value is required/u],
+    [{ id: "context-equals", parameters: { key: "approved", value: true, unexpected: true } }, /unsupported fields/u],
+    [{ id: "context-equals", parameters: { key: "approved", value: Number.POSITIVE_INFINITY } }, /finite JSON number/u],
+    [{ id: "context-equals", parameters: { key: "approved", value: { nested: undefined } } }, /declared JSON value/u],
+    [{ id: "context-equals", parameters: { key: "approved", value: Object.assign([true], { extra: true }) } }, /dense JSON array/u],
+    [{ id: "checkpoint-approved", parameters: {} }, /checkpoint must be a non-empty string/u],
+    [{ id: "checkpoint-approved", parameters: { checkpoint: 42 } }, /checkpoint must be a non-empty string/u],
+    [{ id: "checkpoint-approved", parameters: { checkpoint: "review", unexpected: true } }, /unsupported fields/u],
+  ];
+
+  for (const [guard, expected] of invalidGuards) {
+    const input = definitionInput();
+    input.transitions[0].guards = [guard];
+    assert.throws(() => buildWorkflowDefinition(input), expected, `definition accepted ${guard.id}`);
+    assert.throws(() => evaluateWorkflowGuards([guard], {}), expected, `runtime accepted ${guard.id}`);
+  }
+});
+
+test("valid built-in guards preserve preset-compatible inputs and compare immutable JSON values", () => {
+  const structuredValue = { itinerary: { legs: ["FCO-LHR", "LHR-JFK"] }, refundable: true };
+  const guards = [
+    { id: "always", parameters: {} },
+    { id: "context-present", parameters: { key: "ticket" } },
+    { id: "context-equals", parameters: { key: "expected", value: structuredValue } },
+    { id: "checkpoint-approved", parameters: { checkpoint: "review" } },
+  ];
+  const input = definitionInput();
+  input.transitions[0].guards = guards;
+  const definition = buildWorkflowDefinition(input);
+
+  assert.equal(Object.isFrozen(definition.transitions[0].guards[2].parameters.value), true);
+  assert.equal(Object.isFrozen(definition.transitions[0].guards[2].parameters.value.itinerary.legs), true);
+  assert.equal(evaluateWorkflowGuards(guards, {
+    ticket: "TRAVEL-42",
+    expected: { refundable: true, itinerary: { legs: ["FCO-LHR", "LHR-JFK"] } },
+    checkpoint_approvals: { review: true },
+  }).allowed, true);
+});
+
 test("approval binds governance evidence without changing material definition identity", () => {
   const proposed = buildWorkflowDefinition(definitionInput());
   const approved = approveWorkflowDefinition(proposed, approvalOptions());
@@ -210,6 +255,36 @@ test("overlay is hash-bound and can change presentation and guard parameters onl
   assert.equal(effective.states[1].label, "Revisione");
   assert.deepEqual(effective.transitions[1].guards[0].parameters, { key: "accepted", value: true });
   assert.equal(Object.isFrozen(effective), true);
+});
+
+test("overlay guard parameter overrides use the same fail-closed built-in contracts", () => {
+  const definition = approvedDefinition();
+  const invalidParameters = [
+    { key: "accepted" },
+    { key: "accepted", value: true, unexpected: true },
+    { key: "accepted", value: Number.NaN },
+  ];
+  for (const parameters of invalidParameters) {
+    const input = overlayInput(definition);
+    input.transition_overrides[0].guard_parameters[0].parameters = parameters;
+    assert.throws(
+      () => buildWorkflowOverlay(input, { definition }),
+      /value is required|unsupported fields|finite JSON number/u,
+    );
+  }
+
+  const structuredValue = { accepted_by: ["travel", "security"], quorum: 2 };
+  const input = overlayInput(definition);
+  input.transition_overrides[0].guard_parameters[0].parameters = { key: "accepted", value: structuredValue };
+  const proposed = buildWorkflowOverlay(input, { definition });
+  const approved = approveWorkflowOverlay(proposed, { ...approvalOptions(), definition });
+  const effective = applyWorkflowOverlay(definition, approved);
+  const guard = effective.transitions.find(({ id }) => id === "approve").guards[0];
+
+  assert.equal(Object.isFrozen(guard.parameters.value), true);
+  assert.equal(evaluateWorkflowGuards([guard], {
+    accepted: { quorum: 2, accepted_by: ["travel", "security"] },
+  }).allowed, true);
 });
 
 test("overlay refuses stale references, unknown targets, and structural rewrites", () => {
