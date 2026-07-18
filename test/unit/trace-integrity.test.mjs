@@ -849,7 +849,7 @@ test("uses the deterministic Windows checkpoint replacement fallback", (t) => {
   const paths = fixture(t, { legacy: false });
   sealTraceEvent(options(paths, { event: { type: "first" } }));
   const canonicalCheckpointPath = path.join(
-    fs.realpathSync(path.dirname(paths.checkpointPath)),
+    (fs.realpathSync.native ?? fs.realpathSync)(path.dirname(paths.checkpointPath)),
     path.basename(paths.checkpointPath),
   );
   let fallbackTriggered = false;

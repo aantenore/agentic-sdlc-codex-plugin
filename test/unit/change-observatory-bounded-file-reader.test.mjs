@@ -22,6 +22,26 @@ test("reads one resolved regular file through a stable bounded handle", async ()
   assert.equal(content.toString("utf8"), '{"status":"ok"}\n');
 });
 
+test("uses the exact resolved identity when a Windows file ID is not number-safe", async () => {
+  const root = await fixture("exact-identity");
+  await fs.writeFile(path.join(root, "record.json"), '{"status":"ok"}\n');
+  const resolved = await resolveExistingFileWithin(root, "record.json");
+  const lossyIdentity = {
+    ...resolved,
+    stats: {
+      ...resolved.stats,
+      dev: Number(resolved.identity.dev),
+      ino: Number((1n << 60n) + 1n),
+      size: Number(resolved.identity.size),
+      isFile: () => true,
+    },
+  };
+
+  const content = await readResolvedFileBounded(lossyIdentity, { maxBytes: 1024 });
+
+  assert.equal(content.toString("utf8"), '{"status":"ok"}\n');
+});
+
 test("refuses a file that exceeds the hard response bound", async () => {
   const root = await fixture("oversize");
   await fs.writeFile(path.join(root, "record.txt"), "0123456789");

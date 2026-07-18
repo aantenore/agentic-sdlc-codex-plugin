@@ -31788,7 +31788,10 @@ function validateTraces(context, report, storyId = null, options = {}) {
   const files = [...candidates.keys()].sort();
   const requireActor = context.config.trace_policy?.require_actor !== false;
   for (const filePath of files) {
-    const label = `trace ${path.relative(context.sdlcRoot, filePath)}`;
+    // CLI diagnostics are a portable public contract. Do not leak the host
+    // path separator into JSON reports or human-readable gate output.
+    const relativeTracePath = path.relative(context.sdlcRoot, filePath).split(path.sep).join("/");
+    const label = `trace ${relativeTracePath}`;
     const traceExists = fs.existsSync(filePath);
     const checkpointExists = fs.existsSync(traceIntegrityCheckpointPath(filePath));
     if (!traceExists && !checkpointExists) {
