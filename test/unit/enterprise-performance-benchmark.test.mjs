@@ -1657,9 +1657,7 @@ async function assertSignalSupervisorCase({
   });
   let workerPid = null;
   try {
-    await waitForFile(markerPath, 10_000);
-    workerPid = Number(fs.readFileSync(markerPath, "utf8"));
-    assert.ok(Number.isSafeInteger(workerPid) && workerPid > 0);
+    [workerPid] = await waitForProcessIds(markerPath, 1, 10_000);
     if (process.platform === "win32") {
       parent.send({ type: "emit-signal", signal });
     } else {
@@ -1866,15 +1864,6 @@ function collectChildTermination(child, timeoutMs) {
       resolve({ code, signal, stdout, stderr });
     });
   });
-}
-
-async function waitForFile(filePath, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) return;
-    await delay(10);
-  }
-  throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 async function waitForProcessIds(filePath, expectedCount, timeoutMs) {
