@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +19,7 @@ import {
   npmCliCandidates,
   parseStrictJson,
   proveNoTreeWrites,
+  resolveExecutablePath,
   summarizeDoctorChecks,
   verifyReleaseArtifact,
 } from "../../lib/release/artifact-verifier.mjs";
@@ -169,6 +179,37 @@ test("prefers the npm CLI supplied by npm while retaining the setup-node fallbac
     "/opt/npm/lib/node_modules/npm/bin/npm-cli.js",
     "/opt/hostedtoolcache/node/24.0.0/x64/lib/node_modules/npm/bin/npm-cli.js",
   ]);
+});
+
+
+test("canonicalizes PATH symlinks and rejects non-file command targets", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "release-command-resolution-"));
+  try {
+    const bin = path.join(root, "bin");
+    const target = path.join(root, "python-real");
+    mkdirSync(bin);
+    writeFileSync(target, "#!/bin/sh\nexit 0\n");
+    chmodSync(target, 0o755);
+    symlinkSync(target, path.join(bin, "python3"));
+    mkdirSync(path.join(bin, "directory-command"));
+    symlinkSync(path.join(root, "missing"), path.join(bin, "broken-command"));
+
+    assert.equal(
+      resolveExecutablePath("python3", { environment: { PATH: bin } }),
+      realpathSync(target),
+    );
+    assert.equal(resolveExecutablePath(path.join(bin, "python3")), realpathSync(target));
+    expectCode("COMMAND_NOT_FOUND", () => resolveExecutablePath("directory-command", {
+      environment: { PATH: bin },
+    }));
+    expectCode("COMMAND_NOT_FOUND", () => resolveExecutablePath("broken-command", {
+      environment: { PATH: bin },
+    }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 

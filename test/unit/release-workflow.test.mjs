@@ -18,12 +18,15 @@ import { fileURLToPath } from "node:url";
 
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const ciWorkflowPath = path.join(repoRoot, ".github", "workflows", "ci.yml");
+const ciWorkflow = readFileSync(ciWorkflowPath, "utf8");
 const workflowPath = path.join(repoRoot, ".github", "workflows", "release.yml");
 const workflow = readFileSync(workflowPath, "utf8");
 
 const ACTION_PINS = new Map([
   ["actions/checkout", "df4cb1c069e1874edd31b4311f1884172cec0e10"],
   ["actions/setup-node", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
+  ["actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1"],
   ["actions/upload-artifact", "330a01c490aca151604b8cf639adc76d48f6c5d4"],
   ["actions/download-artifact", "018cc2cf5baa6db3ef3c5f8a56943fffe632ef53"],
   ["actions/attest-build-provenance", "96278af6caaf10aea03fd8d33a09a777ca52d62f"],
@@ -77,7 +80,7 @@ function releaseContractErrors(source) {
     || /id-token: write/u.test(publish)) errors.push("publish permissions");
 
   const actions = [...source.matchAll(/^\s+-?\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
-  if (actions.length !== 9) errors.push("action count");
+  if (actions.length !== 11) errors.push("action count");
   for (const action of actions) {
     const separator = action.lastIndexOf("@");
     const name = action.slice(0, separator);
@@ -92,6 +95,15 @@ function releaseContractErrors(source) {
 
   if (!/node: \[18\.18\.0, 20, 24\]/u.test(verify)) errors.push("node policy matrix");
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(verify)) errors.push("platform matrix");
+  const pythonAction = `actions/setup-python@${ACTION_PINS.get("actions/setup-python")}`;
+  if (actions.filter((action) => action === pythonAction).length !== 2
+    || (source.match(/python-version: "3\.13\.14"/gu) ?? []).length !== 2
+    || (source.match(/update-environment: false/gu) ?? []).length !== 2
+    || (verify.match(/PYTHON: \$\{\{ steps\.python\.outputs\.python-path \}\}/gu) ?? []).length !== 2
+    || (packageJob.match(/PYTHON: \$\{\{ steps\.python\.outputs\.python-path \}\}/gu) ?? []).length !== 1
+    || (source.match(/--python "\$PYTHON"/gu) ?? []).length !== 2) {
+    errors.push("explicit Python provisioning");
+  }
   if (!/scripts\/verify-release-package\.mjs/u.test(verify)
     || !/scripts\/verify-release-package\.mjs/u.test(packageJob)) errors.push("policy verifier");
   if (!/verification\.value\?\.smoke\?\.installer_v2_plan !== "passed"/u.test(packageJob)
@@ -200,6 +212,18 @@ test("release workflow is tag-only, least-privilege, ordered, and bounded", () =
 });
 
 
+test("CI pins and passes an exact Python interpreter to the cross-platform suite", () => {
+  assert.match(
+    ciWorkflow,
+    /- id: python\n\s+uses: actions\/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1\n\s+with:\n\s+python-version: "3\.13\.14"\n\s+update-environment: false/u,
+  );
+  assert.match(
+    ciWorkflow,
+    /- run: npm test\n\s+env:\n\s+PYTHON: \$\{\{ steps\.python\.outputs\.python-path \}\}/u,
+  );
+});
+
+
 test("all third-party actions use the approved immutable commit pins", () => {
   const actionRefs = [...workflow.matchAll(/^\s+-?\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
   for (const [name, sha] of ACTION_PINS) {
@@ -253,6 +277,11 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       name: "implicit setup-node cache",
       source: workflow.replace("          package-manager-cache: false\n", ""),
       expected: "setup-node cache policy",
+    },
+    {
+      name: "implicit Python interpreter",
+      source: workflow.replace('            --python "$PYTHON" \\\n', ""),
+      expected: "explicit Python provisioning",
     },
     {
       name: "digest format without enforcement",

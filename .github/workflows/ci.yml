@@ -21,7 +21,14 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
+      - id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13.14"
+          update-environment: false
       - run: npm run check
       - run: npm test
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
       - run: npm run doctor
       - run: npm pack --dry-run

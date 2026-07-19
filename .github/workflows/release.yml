@@ -37,13 +37,22 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
+      - name: Use the exact Python interpreter for installer verification
+        id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13.14"
+          update-environment: false
       - name: Check source and run the complete test suite
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
           npm run check
           npm test
       - name: Pack and verify the policy-controlled artifact
         env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
           RELEASE_POLICY: config/release-artifact-policy.json
         run: |
           set -euo pipefail
@@ -60,6 +69,7 @@ jobs:
             --artifact "$verify_dir/$archive_name" \
             --tag "$GITHUB_REF_NAME" \
             --policy "$RELEASE_POLICY" \
+            --python "$PYTHON" \
             --json
 
   package:
@@ -88,6 +98,12 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Use the exact Python interpreter for installer verification
+        id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13.14"
+          update-environment: false
       - name: Derive the strict release identity
         id: release_identity
         run: |
@@ -110,6 +126,7 @@ jobs:
       - name: Build and verify the release archive once
         id: pack
         env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
           RELEASE_POLICY: config/release-artifact-policy.json
         run: |
           set -euo pipefail
@@ -130,6 +147,7 @@ jobs:
             --artifact "$archive" \
             --tag "$GITHUB_REF_NAME" \
             --policy "$RELEASE_POLICY" \
+            --python "$PYTHON" \
             --json > release/release-verification.json
           (cd release && sha256sum "$archive_name" > "$archive_name.sha256")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
