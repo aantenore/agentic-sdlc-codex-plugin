@@ -156,6 +156,7 @@ function fakeGitHubEnv(project, values) {
   const fakeBin = path.join(project, "fake-gh-bin");
   fs.mkdirSync(fakeBin, { recursive: true });
   createNativeProviderShim(fakeBin, "gh");
+  const baseSha = values.baseSha ?? mustGit(project, ["rev-parse", "refs/remotes/origin/main"]);
   return {
     ...providerShimEnv("gh"),
     PATH: [fakeBin, process.env.PATH].filter(Boolean).join(path.delimiter),
@@ -165,6 +166,7 @@ function fakeGitHubEnv(project, values) {
     AUTONOMY_FAKE_GH_HEAD_SHA: values.headSha,
     AUTONOMY_FAKE_GH_HEAD: values.headBranch,
     AUTONOMY_FAKE_GH_BASE: values.baseBranch,
+    AUTONOMY_FAKE_GH_BASE_SHA: baseSha,
     AUTONOMY_FAKE_GH_MERGED_AT: values.mergedAt || "",
     AUTONOMY_FAKE_GH_MERGE_SHA: values.mergeSha || "",
   };
@@ -329,6 +331,161 @@ function createApprovedImplementationContract(project, { storyId, contractId, pr
     ...humanApproval(`Approve ${contractId}`),
   ]).contract;
   assert.equal(approved.status, "approved");
+}
+
+function prepareAuthorizedPullRequestMerge(suffix) {
+  const project = tmpProject(`pull-request-merge-${suffix}`);
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-PR-MERGE",
+    contractId: "CONTRACT-PR-MERGE",
+    profileId: "AUT-PR-MERGE",
+  });
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-PR-MERGE",
+    "--delivery", "PR-MERGE",
+    "--kind", "pull_request",
+    "--story", "ST-PR-MERGE",
+    "--contract", "CONTRACT-PR-MERGE",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+    "--allow-action", "pull_request.merge",
+    "--merge-allowed",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-PR-MERGE",
+    ...humanApproval("Approve checkpointed autonomy for this exact merge delivery"),
+  ]);
+
+  const proofPath = path.join(project, "src", "merge-proof.txt");
+  const approvalProofPath = path.join(project, "src", "merge-approval.txt");
+  const summaryPath = path.join(project, "src", "implementation-summary.md");
+  fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+  fs.writeFileSync(proofPath, "exact merge head\n", "utf8");
+  fs.writeFileSync(approvalProofPath, "exact human merge approval evidence\n", "utf8");
+  fs.writeFileSync(summaryPath, "# Implementation summary\n\nThe exact merge transition is verified.\n", "utf8");
+  mustGit(project, [
+    "add", "--",
+    "src/merge-proof.txt",
+    "src/merge-approval.txt",
+    "src/implementation-summary.md",
+  ]);
+  mustGit(project, ["commit", "-m", "test: establish exact merge head"]);
+  const headSha = mustGit(project, ["rev-parse", "HEAD"]);
+  const baseSha = mustGit(project, ["rev-parse", "refs/remotes/origin/main"]);
+
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-PR-MERGE"),
+    "--delivery-profile", "AUT-PR-MERGE",
+  ]);
+  assert.equal(started.execution_allowed, true);
+  mustRun([
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-PR-MERGE",
+    "--agent", "codex",
+    "--branch", "codex/ST-PR-MERGE",
+  ]);
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", "ST-PR-MERGE",
+    "--type", "implementation-summary",
+    "--artifact", "src/implementation-summary.md",
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", "REQ-AUTONOMY",
+  ]);
+
+  const prUrl = "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/999999";
+  const openState = {
+    state: "OPEN",
+    url: prUrl,
+    headSha,
+    headBranch: "codex/pr-1",
+    baseBranch: "main",
+    baseSha,
+  };
+  const authorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-MERGE",
+    "--action", "pull_request.merge",
+    "--pr-url", prUrl,
+    "--confirm-action",
+    "--approval-evidence", "src/merge-approval.txt",
+    ...humanApproval("Approve this exact open PR merge checkpoint"),
+  ], { env: fakeGitHubEnv(project, openState) });
+  const authorizedReceipt = authorization.action_receipt;
+  assert.equal(authorizedReceipt.runtime_target.base_sha, baseSha);
+  assert.equal(authorizedReceipt.action_details.merge.base_sha, baseSha);
+  assert.equal(authorizedReceipt.action_details.provider_operation.precondition_receipt.subject.base_sha, baseSha);
+  assert.equal(authorizedReceipt.action_details.provider_operation.precondition_receipt.proof.base_sha, baseSha);
+
+  return {
+    project,
+    proofPath,
+    approvalProofPath,
+    authorization,
+    openState,
+    baseSha,
+    headSha,
+  };
+}
+
+function completeAuthorizedPullRequestMerge(fixture, mergeSha, overrides = {}) {
+  const mergedAt = new Date(Date.parse(fixture.authorization.action_receipt.authorized_at) + 1_000).toISOString();
+  return mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", fixture.project,
+    "--id", "AUT-PR-MERGE",
+    "--action", "pull_request.merge",
+    "--outcome", "passed",
+    "--evidence", "src/merge-proof.txt",
+  ], {
+    env: fakeGitHubEnv(fixture.project, {
+      ...fixture.openState,
+      state: "MERGED",
+      mergedAt,
+      mergeSha,
+      ...overrides,
+    }),
+  });
+}
+
+function syntheticCommit(project, treeish, parents, message) {
+  return mustGit(project, [
+    "commit-tree",
+    `${treeish}^{tree}`,
+    ...parents.flatMap((parent) => ["-p", parent]),
+    "-m", message,
+  ]);
+}
+
+function assertMergeReceiptGateIntegrity(project) {
+  const gate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-MERGE",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(gate.error, undefined, gate.error?.message);
+  assert.equal(gate.signal, null, `merge receipt gate terminated by ${gate.signal}`);
+  assert.equal(gate.status, 0, gate.stderr || gate.stdout);
+  const report = JSON.parse(gate.stdout);
+  assert.deepEqual(report.errors, [], gate.stdout);
 }
 
 test("requirement ceiling and an exact PR profile govern task start without leaking autonomy to another PR", () => {
@@ -1585,12 +1742,20 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
 
   const proofPath = path.join(project, "src", "merge-proof.txt");
   const approvalProofPath = path.join(project, "src", "merge-approval.txt");
+  const summaryPath = path.join(project, "src", "implementation-summary.md");
   fs.mkdirSync(path.dirname(proofPath), { recursive: true });
   fs.writeFileSync(proofPath, "exact merge head\n", "utf8");
   fs.writeFileSync(approvalProofPath, "exact human merge approval evidence\n", "utf8");
-  mustGit(project, ["add", "--", "src/merge-proof.txt", "src/merge-approval.txt"]);
+  fs.writeFileSync(summaryPath, "# Implementation summary\n\nThe exact merge transition is verified.\n", "utf8");
+  mustGit(project, [
+    "add", "--",
+    "src/merge-proof.txt",
+    "src/merge-approval.txt",
+    "src/implementation-summary.md",
+  ]);
   mustGit(project, ["commit", "-m", "test: establish exact merge head"]);
   const headSha = mustGit(project, ["rev-parse", "HEAD"]);
+  const baseSha = mustGit(project, ["rev-parse", "refs/remotes/origin/main"]);
 
   const intent = taskIntent("ST-PR-MERGE");
   const started = mustRunJson([
@@ -1600,6 +1765,23 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     "--delivery-profile", "AUT-PR-MERGE",
   ]);
   assert.equal(started.execution_allowed, true);
+  mustRun([
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-PR-MERGE",
+    "--agent", "codex",
+    "--branch", "codex/ST-PR-MERGE",
+  ]);
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", "ST-PR-MERGE",
+    "--type", "implementation-summary",
+    "--artifact", "src/implementation-summary.md",
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", "REQ-AUTONOMY",
+  ]);
 
   const prUrl = "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/999999";
   const openState = {
@@ -1608,6 +1790,7 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     headSha,
     headBranch: "codex/pr-1",
     baseBranch: "main",
+    baseSha,
   };
   mustFail([
     "autonomy", "delivery", "action",
@@ -1638,6 +1821,11 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     ...humanApproval("Approve this exact open PR merge checkpoint"),
   ], { env: fakeGitHubEnv(project, openState) });
   assert.equal(authorization.status, "authorized");
+  assert.equal(authorization.action_receipt.action_details.merge.base_sha, baseSha);
+  assert.equal(
+    authorization.action_receipt.action_details.provider_operation.precondition_receipt.subject.base_sha,
+    baseSha,
+  );
   assert.equal(
     authorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
     "github-cli",
@@ -1666,6 +1854,7 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
   const close = JSON.parse(fs.readFileSync(path.join(project, completion.close_receipt_path), "utf8"));
   assert.equal(close.terminal_status, "merged");
   assert.equal(close.terminal_action_receipt_ref.id, completion.action_receipt.id);
+  assertMergeReceiptGateIntegrity(project);
 
   fs.writeFileSync(approvalProofPath, "tampered approval evidence\n", "utf8");
   const tamperedApprovalGate = run([
@@ -1681,6 +1870,131 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     `${tamperedApprovalGate.stdout}\n${tamperedApprovalGate.stderr}`,
     /approval evidence is invalid: .*evidence changed after approval/u,
   );
+});
+
+for (const topology of [
+  {
+    name: "fast-forward",
+    result(fixture) {
+      return fixture.headSha;
+    },
+  },
+  {
+    name: "two-parent merge commit",
+    result(fixture) {
+      return syntheticCommit(
+        fixture.project,
+        fixture.headSha,
+        [fixture.baseSha, fixture.headSha],
+        "test: exact merge result",
+      );
+    },
+  },
+  {
+    name: "single-parent squash",
+    result(fixture) {
+      return syntheticCommit(
+        fixture.project,
+        fixture.headSha,
+        [fixture.baseSha],
+        "test: exact squash result",
+      );
+    },
+  },
+]) {
+  test(`pull-request merge completion accepts an exact ${topology.name} base transition`, () => {
+    const fixture = prepareAuthorizedPullRequestMerge(topology.name.replaceAll(/[^a-z]+/gu, "-"));
+    const mergeSha = topology.result(fixture);
+    mustGit(fixture.project, ["update-ref", "refs/remotes/origin/main", mergeSha]);
+
+    const completion = completeAuthorizedPullRequestMerge(fixture, mergeSha);
+    assert.equal(completion.status, "completed");
+    assert.equal(completion.lifecycle_status, "terminal");
+    assert.equal(completion.action_receipt.runtime_target.base_sha, mergeSha);
+    assert.equal(completion.action_receipt.runtime_target.head_sha, fixture.headSha);
+    assert.equal(completion.action_receipt.action_details.provider_verification.base_sha, fixture.baseSha);
+    assert.equal(completion.action_receipt.action_details.provider_verification.merge_commit_sha, mergeSha);
+    assertMergeReceiptGateIntegrity(fixture.project);
+  });
+}
+
+test("pull-request merge completion rejects provider base drift and unproven local base transitions", () => {
+  const fixture = prepareAuthorizedPullRequestMerge("transition-rejections");
+  const mergedAt = new Date(Date.parse(fixture.authorization.action_receipt.authorized_at) + 1_000).toISOString();
+  const completionArgs = [
+    "autonomy", "delivery", "action",
+    "--root", fixture.project,
+    "--id", "AUT-PR-MERGE",
+    "--action", "pull_request.merge",
+    "--outcome", "passed",
+    "--evidence", "src/merge-proof.txt",
+  ];
+  const mergedState = {
+    ...fixture.openState,
+    state: "MERGED",
+    mergedAt,
+    mergeSha: fixture.headSha,
+  };
+
+  mustFail(completionArgs, /exact PR, source SHA, branches, and merged state/u, {
+    env: fakeGitHubEnv(fixture.project, { ...mergedState, baseSha: "e".repeat(40) }),
+  });
+
+  const afterMerge = syntheticCommit(
+    fixture.project,
+    fixture.headSha,
+    [fixture.headSha],
+    "test: advance main after exact merge",
+  );
+  mustGit(fixture.project, ["update-ref", "refs/remotes/origin/main", afterMerge]);
+  mustFail(completionArgs, /does not point to the exact merge result proven by GitHub/u, {
+    env: fakeGitHubEnv(fixture.project, mergedState),
+  });
+
+  const concurrentBase = syntheticCommit(
+    fixture.project,
+    fixture.baseSha,
+    [fixture.baseSha],
+    "test: concurrent base change",
+  );
+  const wrongMerge = syntheticCommit(
+    fixture.project,
+    fixture.headSha,
+    [concurrentBase, fixture.headSha],
+    "test: merge from a changed base",
+  );
+  mustGit(fixture.project, ["update-ref", "refs/remotes/origin/main", wrongMerge]);
+  mustFail(completionArgs, /neither a bounded fast-forward, merge commit, nor squash/u, {
+    env: fakeGitHubEnv(fixture.project, { ...mergedState, mergeSha: wrongMerge }),
+  });
+
+  const wrongSquash = syntheticCommit(
+    fixture.project,
+    fixture.headSha,
+    [concurrentBase],
+    "test: squash from a changed base",
+  );
+  mustGit(fixture.project, ["update-ref", "refs/remotes/origin/main", wrongSquash]);
+  mustFail(completionArgs, /neither a bounded fast-forward, merge commit, nor squash/u, {
+    env: fakeGitHubEnv(fixture.project, { ...mergedState, mergeSha: wrongSquash }),
+  });
+
+  const rebasedFirst = syntheticCommit(
+    fixture.project,
+    fixture.headSha,
+    [fixture.baseSha],
+    "test: first rewritten commit",
+  );
+  const rebasedTip = syntheticCommit(
+    fixture.project,
+    fixture.headSha,
+    [rebasedFirst],
+    "test: second rewritten commit",
+  );
+  mustGit(fixture.project, ["update-ref", "refs/remotes/origin/main", rebasedTip]);
+  mustFail(completionArgs, /neither a bounded fast-forward, merge commit, nor squash/u, {
+    env: fakeGitHubEnv(fixture.project, { ...mergedState, mergeSha: rebasedTip }),
+  });
 });
 
 test("local release autonomy requires a strict child target, smoke test, rollback, and supported sandbox", () => {

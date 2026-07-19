@@ -252,6 +252,7 @@ test("git-remote rejects option injection and unsafe refs before invoking the ru
 test("github-cli preserves exact merge precondition and completion verification", () => {
   const calls = [];
   let merged = false;
+  let observedBaseSha = SHA.base;
   const open = {
     url: "https://github.com/acme/travelops/pull/42",
     state: "OPEN",
@@ -259,6 +260,7 @@ test("github-cli preserves exact merge precondition and completion verification"
     headRefOid: SHA.head,
     headRefName: "provider-spi",
     baseRefName: "main",
+    baseRefOid: SHA.base,
   };
   const runner = (executable, args, options) => {
     calls.push({ executable, args, options });
@@ -267,10 +269,11 @@ test("github-cli preserves exact merge precondition and completion verification"
     assert.equal(args.includes("merge"), false);
     return JSON.stringify(merged ? {
       ...open,
+      baseRefOid: observedBaseSha,
       state: "MERGED",
       mergedAt: "2026-07-18T10:00:30.000Z",
       mergeCommit: { oid: SHA.merge },
-    } : open);
+    } : { ...open, baseRefOid: observedBaseSha });
   };
   const registry = createProviderRegistry([createGitHubCliProvider({ commandRunner: runner })]);
   const subject = {
@@ -278,6 +281,7 @@ test("github-cli preserves exact merge precondition and completion verification"
     pr_url: "https://github.com/acme/travelops/pull/42",
     head_branch: "provider-spi",
     base_branch: "main",
+    base_sha: SHA.base,
     source_sha: SHA.head,
     authorized_at: TIME.authorized,
   };
@@ -289,7 +293,7 @@ test("github-cli preserves exact merge precondition and completion verification"
   assert.equal(precondition.proof.is_draft, false);
   assert.deepEqual(calls[0].args, [
     "pr", "view", subject.pr_url,
-    "--json", "url,state,isDraft,headRefOid,headRefName,baseRefName",
+    "--json", "url,state,isDraft,headRefOid,headRefName,baseRefName,baseRefOid",
   ]);
 
   merged = true;
@@ -304,6 +308,39 @@ test("github-cli preserves exact merge precondition and completion verification"
   assert.equal(validateProviderOperationReceiptIntegrity(completion).valid, true);
   assertAgainstSchema(completion, "provider-operation-receipt");
   assert.equal(calls.every((call) => call.args.includes("merge") === false), true);
+
+  observedBaseSha = SHA.before;
+  assertProviderError(() => registry.verifyCompletion(
+    "github-cli",
+    operation("PR-MERGE-42", "pull_request.merge", subject, TIME.completed),
+    precondition,
+  ), "provider_completion_unproven");
+  merged = false;
+  assertProviderError(() => registry.observePrecondition(
+    "github-cli",
+    operation("PR-MERGE-BASE-DRIFT", "pull_request.merge", subject),
+  ), "provider_precondition_unproven");
+
+  observedBaseSha = SHA.base;
+  const { base_sha: _legacyBaseSha, ...legacySubject } = subject;
+  const legacyPrecondition = registry.observePrecondition(
+    "github-cli",
+    operation("PR-MERGE-LEGACY", "pull_request.merge", legacySubject),
+  );
+  merged = true;
+  const legacyCompletion = registry.verifyCompletion(
+    "github-cli",
+    operation("PR-MERGE-LEGACY", "pull_request.merge", legacySubject, TIME.completed),
+    legacyPrecondition,
+  );
+  assert.equal(Object.hasOwn(legacyCompletion.subject, "base_sha"), false);
+  assert.equal(legacyCompletion.proof.base_sha, SHA.base);
+  observedBaseSha = "";
+  assertProviderError(() => registry.verifyCompletion(
+    "github-cli",
+    operation("PR-MERGE-LEGACY", "pull_request.merge", legacySubject, TIME.completed),
+    legacyPrecondition,
+  ), "provider_completion_unproven");
 });
 
 test("github-cli proves create and update without exposing mutation commands", () => {
@@ -343,6 +380,10 @@ test("github-cli proves create and update without exposing mutation commands", (
     source_sha: SHA.head,
     authorized_at: TIME.authorized,
   };
+  assertProviderError(() => registry.observePrecondition(
+    "github-cli",
+    operation("PR-CREATE-WITH-MERGE-BASE", "pull_request.create", { ...createSubject, base_sha: SHA.base }),
+  ), "provider_operation_invalid");
   const createPrecondition = registry.observePrecondition(
     "github-cli",
     operation("PR-CREATE-43", "pull_request.create", createSubject),

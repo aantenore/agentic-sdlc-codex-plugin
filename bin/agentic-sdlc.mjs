@@ -10418,7 +10418,11 @@ function pullRequestChangedPaths(context, runtimeTarget, action) {
       execGit(context.root, ["ls-files", "--others", "--exclude-standard"]),
     ].filter(Boolean).join("\n");
   } else if (["git.push", "pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
-    output = execGit(context.root, ["diff", "--name-only", `${runtimeTarget.base_ref}...HEAD`]) || "";
+    output = execGit(context.root, [
+      "diff",
+      "--name-only",
+      `${runtimeTarget.base_sha}...${runtimeTarget.head_sha}`,
+    ]) || "";
   }
   return [...new Set(output.split(/\r?\n/u).map((item) => item.trim()).filter(Boolean))].sort();
 }
@@ -10535,7 +10539,12 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     const canonicalPrUrl = prUrl ? canonicalAbsoluteUrl(prUrl) : null;
     details.pull_request = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha };
     if (action === "pull_request.merge") {
-      details.merge = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha, force: false };
+      details.merge = {
+        pr_url: canonicalPrUrl,
+        source_sha: runtimeTarget.head_sha,
+        base_sha: runtimeTarget.base_sha,
+        force: false,
+      };
     }
     if (action === "pull_request.update") {
       const expected = {};
@@ -10574,6 +10583,98 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
 function gitRuntimeWithoutHead(runtimeTarget) {
   const { head_sha: _headSha, ...boundary } = runtimeTarget || {};
   return boundary;
+}
+
+function gitRuntimeWithoutBaseSha(runtimeTarget) {
+  const { base_sha: _baseSha, ...boundary } = runtimeTarget || {};
+  return boundary;
+}
+
+function validatePullRequestMergeRuntimeTransition(context, authorization, runtimeTarget, completionProof) {
+  const errors = [];
+  const authorizedRuntime = authorization?.runtime_target;
+  const merge = authorization?.action_details?.merge;
+  const providerPrecondition = authorization?.action_details?.provider_operation?.precondition_receipt;
+  const authorizedBaseSha = authorizedRuntime?.base_sha;
+  const observedBaseSha = runtimeTarget?.base_sha;
+  const sourceSha = merge?.source_sha;
+  const mergeCommitSha = completionProof?.merge_commit_sha;
+  const exactGitOid = (value) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value || "");
+
+  if (
+    stableJson(gitRuntimeWithoutBaseSha(authorizedRuntime))
+      !== stableJson(gitRuntimeWithoutBaseSha(runtimeTarget))
+  ) {
+    errors.push("the Git branch, source SHA, base ref, remote set, or remote identity changed after authorization");
+  }
+  if (
+    ![authorizedBaseSha, observedBaseSha, sourceSha, mergeCommitSha].every(exactGitOid)
+    || runtimeTarget?.head_sha !== sourceSha
+  ) {
+    errors.push("the merge runtime does not preserve its exact authorized base and source SHAs");
+  }
+  const providerSubject = providerPrecondition?.subject;
+  const providerProof = providerPrecondition?.proof;
+  const hasBaseBinding = [merge?.base_sha, providerSubject?.base_sha, providerProof?.base_sha]
+    .some((value) => value !== undefined);
+  if (hasBaseBinding && (
+    merge?.base_sha !== authorizedBaseSha
+    || providerSubject?.base_sha !== authorizedBaseSha
+    || providerProof?.base_sha !== authorizedBaseSha
+  )) {
+    errors.push("the merge authorization does not cross-bind its runtime, action, provider subject, and open-PR base SHA");
+  }
+  if (completionProof?.base_sha !== undefined && completionProof.base_sha !== authorizedBaseSha) {
+    errors.push("the merged PR proof reports a different base SHA from the authorization");
+  }
+  if (errors.length > 0) return { valid: false, mode: null, errors };
+
+  if (observedBaseSha === authorizedBaseSha) {
+    return { valid: true, mode: "base-tracking-stale", errors: [] };
+  }
+
+  if (
+    !hasBaseBinding
+    || merge?.base_sha !== authorizedBaseSha
+    || providerSubject?.base_sha !== authorizedBaseSha
+    || providerProof?.base_sha !== authorizedBaseSha
+    || completionProof?.base_sha !== authorizedBaseSha
+  ) {
+    errors.push("the advanced base is not bound to the exact GitHub base SHA observed at authorization and completion");
+  }
+  if (!mergeCommitSha || observedBaseSha !== mergeCommitSha) {
+    errors.push("the local base tracking ref does not point to the exact merge result proven by GitHub");
+  }
+  if (errors.length > 0) return { valid: false, mode: null, errors };
+
+  if (mergeCommitSha === sourceSha) {
+    if (execGit(context.root, ["merge-base", authorizedBaseSha, sourceSha]) !== authorizedBaseSha) {
+      errors.push("the proven fast-forward result is not descended from the authorized base SHA");
+      return { valid: false, mode: null, errors };
+    }
+    return { valid: true, mode: "fast-forward", errors: [] };
+  }
+
+  const parentLine = execGit(context.root, ["rev-list", "--parents", "-n", "1", mergeCommitSha]);
+  const commitAndParents = String(parentLine || "").split(/\s+/u).filter(Boolean);
+  if (
+    commitAndParents.length === 3
+    && commitAndParents[0] === mergeCommitSha
+    && commitAndParents[1] === authorizedBaseSha
+    && commitAndParents[2] === sourceSha
+  ) {
+    return { valid: true, mode: "merge-commit", errors: [] };
+  }
+  if (
+    commitAndParents.length === 2
+    && commitAndParents[0] === mergeCommitSha
+    && commitAndParents[1] === authorizedBaseSha
+  ) {
+    return { valid: true, mode: "squash", errors: [] };
+  }
+
+  errors.push("the exact GitHub merge result is neither a bounded fast-forward, merge commit, nor squash from the authorized base");
+  return { valid: false, mode: null, errors };
 }
 
 function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
@@ -10688,7 +10789,7 @@ function verifyLegacyCompletedGitHubMerge(profile, authorization) {
   try {
     raw = childProcess.execFileSync(
       "gh",
-      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName"],
+      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,mergedAt,mergeCommit,headRefOid,headRefName,baseRefName,baseRefOid"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (error) {
@@ -10710,6 +10811,7 @@ function verifyLegacyCompletedGitHubMerge(profile, authorization) {
     || observed.headRefOid !== merge.source_sha
     || observed.headRefName !== profile.pull_request_target.head_branch
     || observed.baseRefName !== profile.pull_request_target.base_branch
+    || (merge.base_sha !== undefined && observed.baseRefOid !== merge.base_sha)
     || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
     || !Number.isFinite(authorizedAt)
     || !Number.isFinite(mergedAt)
@@ -10725,6 +10827,7 @@ function verifyLegacyCompletedGitHubMerge(profile, authorization) {
     head_sha: observed.headRefOid,
     head_branch: observed.headRefName,
     base_branch: observed.baseRefName,
+    ...(typeof observed.baseRefOid === "string" ? { base_sha: observed.baseRefOid } : {}),
     merge_commit_sha: observed.mergeCommit.oid,
     merged_at: observed.mergedAt,
     verified_at: now(),
@@ -10820,6 +10923,9 @@ function deliveryProviderOperationSubject(context, profile, action, actionDetail
       authorized_at: authorizedAt,
     };
     if (action !== "pull_request.create") subject.pr_url = actionDetails.pull_request?.pr_url;
+    if (action === "pull_request.merge" && actionDetails.merge?.base_sha) {
+      subject.base_sha = actionDetails.merge.base_sha;
+    }
     if (action === "pull_request.update") subject.expected = actionDetails.pull_request?.expected;
     return subject;
   }
@@ -10978,6 +11084,16 @@ function assertDeliveryProviderAuthorization(context, profile, authorization) {
     || !deliveryProviderOperationSubjectsMatch(authorization.action, precondition.subject, expectedSubject)
   ) {
     fail(`Delivery action authorization ${authorization.id} provider proof does not match its exact action boundary.`);
+  }
+  if (authorization.action === "pull_request.merge" && authorization.action_details?.merge?.base_sha !== undefined) {
+    const authorizedBaseSha = authorization.runtime_target?.base_sha;
+    if (
+      authorization.action_details.merge.base_sha !== authorizedBaseSha
+      || precondition.subject?.base_sha !== authorizedBaseSha
+      || precondition.proof?.base_sha !== authorizedBaseSha
+    ) {
+      fail(`Delivery action authorization ${authorization.id} does not cross-bind its exact runtime and GitHub base SHA.`);
+    }
   }
 }
 
@@ -13135,7 +13251,7 @@ function evaluateDeliveryAction(context, options) {
       }, [`Recovered terminal close for ${profile.delivery_kind} ${profile.delivery_id}.`]);
       return;
     }
-    const runtimeTarget = profile.delivery_kind === "pull_request"
+    let runtimeTarget = profile.delivery_kind === "pull_request"
       ? validatePullRequestGitBoundary(context, profile.pull_request_target)
       : null;
     const { decision } = evaluateDeliveryAutonomy(context, profile, {
@@ -13310,24 +13426,6 @@ function evaluateDeliveryAction(context, options) {
         ? buildCompletedGitCommitDetails(context, priorAuthorization, runtimeTarget)
         : priorAuthorization.action_details;
     }
-    if (
-      completingAction
-      && profile.delivery_kind === "pull_request"
-      && (action !== "git.commit" || reportedOutcome === "failed")
-      && stableJson(priorAuthorization.runtime_target) !== stableJson(runtimeTarget)
-    ) {
-      fail(`Delivery action ${action} runtime Git target changed after authorization; request a fresh checkpoint.`);
-    }
-    if (completingAction && ["git.push", "pull_request.merge"].includes(action)) {
-      const currentDetails = buildDeliveryActionDetails(context, profile, action, runtimeTarget, {
-        ...options,
-        remote: priorAuthorization.action_details?.push?.remote,
-        "pr-url": priorAuthorization.action_details?.merge?.pr_url,
-      });
-      if (stableJson(currentDetails) !== stableJson(remoteAuthorizationProjection(action, priorAuthorization.action_details))) {
-        fail(`Delivery action ${action} exact operation changed after authorization; request a fresh checkpoint.`);
-      }
-    }
     if (completingAction && DELIVERY_PROVIDER_ACTIONS.has(action) && reportedOutcome === "passed") {
       const providerOperation = priorAuthorization.action_details?.provider_operation;
       if (providerOperation?.precondition_receipt) {
@@ -13357,6 +13455,40 @@ function evaluateDeliveryAction(context, options) {
         }
       } else {
         fail(`The authorization for ${action} has no verified starting state.`);
+      }
+    }
+    if (completingAction && action === "pull_request.merge" && reportedOutcome === "passed") {
+      runtimeTarget = validatePullRequestGitBoundary(context, profile.pull_request_target);
+    }
+    if (
+      completingAction
+      && profile.delivery_kind === "pull_request"
+      && (action !== "git.commit" || reportedOutcome === "failed")
+    ) {
+      if (action === "pull_request.merge" && reportedOutcome === "passed") {
+        const completionProof = actionDetails?.provider_operation?.completion_receipt?.proof
+          || actionDetails?.provider_verification;
+        const transition = validatePullRequestMergeRuntimeTransition(
+          context,
+          priorAuthorization,
+          runtimeTarget,
+          completionProof,
+        );
+        if (!transition.valid) {
+          fail(`Delivery action ${action} runtime Git target changed outside the exact proven merge transition: ${transition.errors.join("; ")}.`);
+        }
+      } else if (stableJson(priorAuthorization.runtime_target) !== stableJson(runtimeTarget)) {
+        fail(`Delivery action ${action} runtime Git target changed after authorization; request a fresh checkpoint.`);
+      }
+    }
+    if (completingAction && (action === "git.push" || (action === "pull_request.merge" && reportedOutcome !== "passed"))) {
+      const currentDetails = buildDeliveryActionDetails(context, profile, action, runtimeTarget, {
+        ...options,
+        remote: priorAuthorization.action_details?.push?.remote,
+        "pr-url": priorAuthorization.action_details?.merge?.pr_url,
+      });
+      if (stableJson(currentDetails) !== stableJson(remoteAuthorizationProjection(action, priorAuthorization.action_details))) {
+        fail(`Delivery action ${action} exact operation changed after authorization; request a fresh checkpoint.`);
       }
     }
     if (completingAction && evidence.length === 0) {
@@ -31497,7 +31629,14 @@ function validateCompletedProviderActionReceipt(context, report, profile, receip
     if (receipt.action === "pull_request.merge" && (
       completion.proof?.state !== "MERGED"
       || completion.proof?.head_sha !== precondition.subject.source_sha
+      || completion.proof?.head_branch !== precondition.subject.head_branch
+      || completion.proof?.base_branch !== precondition.subject.base_branch
+      || completion.proof?.pr_url !== precondition.subject.pr_url
       || !completion.proof?.merge_commit_sha
+      || (precondition.subject.base_sha !== undefined && (
+        precondition.proof?.base_sha !== precondition.subject.base_sha
+        || completion.proof?.base_sha !== precondition.subject.base_sha
+      ))
     )) {
       throw new Error("pull-request provider proof does not show the exact merged head");
     }
@@ -31527,8 +31666,14 @@ function validateCompletedProviderActionReceipt(context, report, profile, receip
       delete copy.provider_verification;
       return copy;
     };
+    const runtimeTransition = receipt.action === "pull_request.merge"
+      ? validatePullRequestMergeRuntimeTransition(context, authorization, receipt.runtime_target, completion.proof)
+      : {
+          valid: stableJson(receipt.runtime_target) === stableJson(authorization.runtime_target),
+          errors: ["the runtime target differs from its exact authorization"],
+        };
     if (
-      stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+      !runtimeTransition.valid
       || stableJson(stripCompletion(receipt.action_details)) !== stableJson(stripCompletion(authorization.action_details))
     ) {
       throw new Error("provider completion differs from the exact authorization boundary");
@@ -31552,8 +31697,13 @@ function validateCompletedRemoteActionReceipt(context, report, profile, receipt,
   }
   const verificationField = receipt.action === "git.push" ? "remote_verification" : "provider_verification";
   const { [verificationField]: verification, ...authorizedProjection } = receipt.action_details || {};
+  const runtimeTransition = receipt.action === "pull_request.merge" && verification
+    ? validatePullRequestMergeRuntimeTransition(context, authorization, receipt.runtime_target, verification)
+    : null;
   if (
-    stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+    (runtimeTransition
+      ? !runtimeTransition.valid
+      : stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target))
     || stableJson(authorizedProjection) !== stableJson(authorization.action_details)
     || !verification
   ) {
@@ -31600,6 +31750,10 @@ function validateCompletedRemoteActionReceipt(context, report, profile, receipt,
     || precondition.is_draft !== false
     || precondition.pr_url !== canonicalAbsoluteUrl(merge?.pr_url)
     || precondition.head_sha !== merge?.source_sha
+    || (merge?.base_sha !== undefined && (
+      precondition.base_sha !== merge.base_sha
+      || verification.base_sha !== merge.base_sha
+    ))
     || !Number.isFinite(authorizedAt)
     || !Number.isFinite(mergedAt)
     || mergedAt < authorizedAt

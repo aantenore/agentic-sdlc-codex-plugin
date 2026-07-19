@@ -37,6 +37,7 @@ if (provider === "gh" && ["gh", "gh.exe"].includes(invoked)) {
     headRefOid: process.env.AUTONOMY_FAKE_GH_HEAD_SHA,
     headRefName: process.env.AUTONOMY_FAKE_GH_HEAD,
     baseRefName: process.env.AUTONOMY_FAKE_GH_BASE,
+    baseRefOid: process.env.AUTONOMY_FAKE_GH_BASE_SHA,
     mergedAt: state === "MERGED" ? process.env.AUTONOMY_FAKE_GH_MERGED_AT : null,
     mergeCommit: state === "MERGED" ? { oid: process.env.AUTONOMY_FAKE_GH_MERGE_SHA } : null,
   };
