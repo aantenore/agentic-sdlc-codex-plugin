@@ -11,6 +11,7 @@ import {
   ENTERPRISE_CANONICAL_QUERY_WORKER_SCHEMA,
   ENTERPRISE_FOUNDATION_DEFAULT_SCALE,
   ENTERPRISE_OBSERVATORY_WORKER_SCHEMA,
+  collectCanonicalQuerySamples,
   evaluateEnterprisePerformanceBudgets,
   normalizeResourceMaxRssBytes,
   parseCanonicalQueryWorkerEnvelope,
@@ -19,7 +20,9 @@ import {
   parseObservatoryWorkerEnvelope,
   platformThresholds,
   runEnterprisePerformanceBenchmark,
+  sequentialWorkerSamplesAreIsolated,
   sequentialWorkersAreIsolated,
+  summarizeCanonicalQuerySamples,
   validateObservatoryColdResponse,
   validateObservatoryModelArtifact,
 } from "../../scripts/benchmark-enterprise-performance.mjs";
@@ -52,6 +55,7 @@ test("Windows performance policy separates the service target from a bounded reg
   const thresholds = platformThresholds("win32");
   assert.deepEqual(thresholds, {
     query_ms: 4_000,
+    query_sample_ceiling_ms: 4_800,
     observatory_warm_target_p95_ms: 250,
     observatory_warm_p95_ms: 275,
     rss_bytes: 320 * 1024 * 1024,
@@ -59,10 +63,12 @@ test("Windows performance policy separates the service target from a bounded reg
 
   assert.deepEqual(evaluateEnterprisePerformanceBudgets({
     query_ms: 3_000,
+    query_samples_ms: [4_100, 900, 3_000],
     observatory_warm_p95_ms: 258.387,
     rss_bytes: 200 * 1024 * 1024,
   }, thresholds), {
     query_within_budget: true,
+    query_samples_within_ceiling: true,
     observatory_warm_target_met: false,
     observatory_warm_within_budget: true,
     rss_within_budget: true,
@@ -83,6 +89,7 @@ test("performance policy rejects an incoherent or unbounded threshold profile", 
       rss_bytes: 1,
     }, {
       query_ms: 2,
+      query_sample_ceiling_ms: 2.4,
       observatory_warm_target_p95_ms: 10,
       observatory_warm_p95_ms: 9,
       rss_bytes: 2,
@@ -91,11 +98,102 @@ test("performance policy rejects an incoherent or unbounded threshold profile", 
   );
   assert.throws(
     () => evaluateEnterprisePerformanceBudgets({
+      query_ms: 1,
+      observatory_warm_p95_ms: 1,
+      rss_bytes: 1,
+    }, {
+      ...platformThresholds("win32"),
+      query_sample_ceiling_ms: 4_800.001,
+    }),
+    /cannot exceed 1\.20x/u,
+  );
+  assert.throws(
+    () => evaluateEnterprisePerformanceBudgets({
       query_ms: Number.POSITIVE_INFINITY,
       observatory_warm_p95_ms: 1,
       rss_bytes: 1,
     }, platformThresholds("linux")),
     /query_ms must be a finite non-negative number/u,
+  );
+});
+
+test("Windows canonical query sampling keeps the fast path and retries exactly twice after a miss", async () => {
+  for (const [firstDurationMs, expectedCalls] of [[4_000, 1], [4_000.001, 3]]) {
+    const invocations = [];
+    const samples = await collectCanonicalQuerySamples({
+      platform: "win32",
+      queryBudgetMs: 4_000,
+      runSample: async (sampleIndex) => {
+        invocations.push(sampleIndex);
+        return { result: { duration_ms: sampleIndex === 1 ? firstDurationMs : 1 } };
+      },
+    });
+    assert.equal(samples.length, expectedCalls);
+    assert.deepEqual(invocations, Array.from({ length: expectedCalls }, (_, index) => index + 1));
+  }
+
+  let nonWindowsCalls = 0;
+  const nonWindowsSamples = await collectCanonicalQuerySamples({
+    platform: "linux",
+    queryBudgetMs: 2_000,
+    runSample: async () => {
+      nonWindowsCalls += 1;
+      return { result: { duration_ms: 2_000.001 } };
+    },
+  });
+  assert.equal(nonWindowsCalls, 1);
+  assert.equal(nonWindowsSamples.length, 1);
+});
+
+test("benchmark platform simulation is restricted to an injected canonical worker", async () => {
+  const simulatedPlatform = process.platform === "win32" ? "linux" : "win32";
+  await assert.rejects(
+    runEnterprisePerformanceBenchmark({
+      platform: simulatedPlatform,
+      scale: SMALL_SCALE,
+      warmIterations: 2,
+    }),
+    /requires an injected canonicalWorkerScriptPath/u,
+  );
+});
+
+test("canonical query sampling uses a numeric median and an inclusive 1.20x sample ceiling", () => {
+  const thresholds = platformThresholds("win32");
+  const workers = (durations) => durations.map((duration_ms) => ({ result: { duration_ms } }));
+
+  const numericMedian = summarizeCanonicalQuerySamples(workers([4_100, 900, 4_000]), thresholds);
+  assert.equal(numericMedian.median_ms, 4_000);
+  assert.equal(numericMedian.median_sample_index, 3);
+  assert.equal(numericMedian.all_samples_within_ceiling, true);
+
+  assert.equal(
+    summarizeCanonicalQuerySamples(workers([4_800, 3_999, 4_000]), thresholds)
+      .all_samples_within_ceiling,
+    true,
+  );
+  const overCeiling = summarizeCanonicalQuerySamples(
+    workers([4_800.001, 3_999, 4_000]),
+    thresholds,
+  );
+  assert.equal(overCeiling.median_ms, 4_000);
+  assert.equal(overCeiling.all_samples_within_ceiling, false);
+  assert.equal(evaluateEnterprisePerformanceBudgets({
+    query_ms: overCeiling.median_ms,
+    query_samples_ms: overCeiling.durations_ms,
+    observatory_warm_p95_ms: 250,
+    rss_bytes: 1,
+  }, thresholds).query_samples_within_ceiling, false);
+
+  assert.equal(
+    summarizeCanonicalQuerySamples(workers([4_000.001, 3_999.999, 4_000]), thresholds).median_ms,
+    4_000,
+  );
+  assert.equal(
+    summarizeCanonicalQuerySamples(
+      workers([4_000.001, 3_999.999, 4_000.001]),
+      thresholds,
+    ).median_ms,
+    4_000.001,
   );
 });
 
@@ -437,6 +535,20 @@ test("sequential worker isolation permits safe operating-system PID reuse", () =
     sequentialWorkersAreIsolated(canonical, { ...observatory, pid: parentPid }, parentPid),
     false,
   );
+  assert.equal(
+    sequentialWorkerSamplesAreIsolated([canonical, canonical, canonical], observatory, parentPid),
+    true,
+  );
+  for (const invalidRetry of [
+    { ...canonical, terminated: false },
+    { ...canonical, parent_pid: parentPid + 1 },
+    { ...canonical, pid: parentPid },
+  ]) {
+    assert.equal(
+      sequentialWorkerSamplesAreIsolated([canonical, invalidRetry, canonical], observatory, parentPid),
+      false,
+    );
+  }
 });
 
 test("benchmark validates one canonical catalog and conditional Observatory cache", async () => {
@@ -476,6 +588,16 @@ test("benchmark validates one canonical catalog and conditional Observatory cach
   assert.equal(report.workloads.canonical_query.process.exit_code, 0);
   assert.equal(report.workloads.canonical_query.process.terminated, true);
   assert.equal(report.workloads.canonical_query.process.isolated_from_parent, true);
+  assert.equal(report.workloads.canonical_query.sampling.strategy, "single_sample_fast_path");
+  assert.equal(report.workloads.canonical_query.sampling.sample_count, 1);
+  assert.deepEqual(report.workloads.canonical_query.sampling.durations_ms, [
+    report.workloads.canonical_query.duration_ms,
+  ]);
+  assert.equal(report.workloads.canonical_query.sampling.samples.length, 1);
+  assert.equal(
+    report.workloads.canonical_query.sampling.samples[0].evaluation.counts_complete,
+    true,
+  );
   assert.equal(report.workloads.observatory.cold_status, 200);
   assert.equal(report.workloads.observatory.conditional_hits, 5);
   assert.equal(report.workloads.observatory.conditional_body_bytes, 0);
@@ -548,6 +670,7 @@ test("benchmark validates one canonical catalog and conditional Observatory cach
   assert.equal(report.evaluation.counts_complete, true);
   assert.equal(report.evaluation.one_catalog_build, true);
   assert.equal(report.evaluation.workloads_isolated, true);
+  assert.equal(report.evaluation.query_samples_within_ceiling, true);
   assert.equal(report.evaluation.conditional_cache_valid, true);
   assert.equal(
     report.evaluation.observatory_warm_target_met,
@@ -598,12 +721,134 @@ test("benchmark count gate rejects a wrong target-story trace distribution", asy
   try {
     const report = await runEnterprisePerformanceBenchmark({
       parentDirectory: temporary,
+      platform: "win32",
       scale: SMALL_SCALE,
       warmIterations: 2,
       canonicalWorkerScriptPath: fakeWorker,
     });
+    assert.equal(report.workloads.canonical_query.sampling.sample_count, 1);
     assert.equal(report.evaluation.counts_complete, false);
     assert.equal(report.evaluation.passed, false);
+    assert.deepEqual(enterpriseFixtureEntries(temporary), []);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("Windows retry report gates every canonical sample and uses worst-sample RSS", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-windows-query-samples-"));
+  const fakeWorker = path.join(temporary, "sequenced-canonical-worker.mjs");
+  const counterPath = path.join(temporary, "worker-count.txt");
+  const mebibyte = 1024 * 1024;
+  writeSequencedCanonicalWorker(fakeWorker, counterPath, [
+    {
+      duration_ms: 4_100,
+      memory: {
+        rss_bytes: 300 * mebibyte,
+        heap_used_bytes: 40 * mebibyte,
+        max_rss_bytes: 330 * mebibyte,
+      },
+    },
+    { duration_ms: 3_900, catalog_builds: 2, wrong_counts: true },
+    { duration_ms: 4_000 },
+  ]);
+  try {
+    const report = await runEnterprisePerformanceBenchmark({
+      parentDirectory: temporary,
+      platform: "win32",
+      scale: SMALL_SCALE,
+      warmIterations: 2,
+      canonicalWorkerScriptPath: fakeWorker,
+    });
+    const sampling = report.workloads.canonical_query.sampling;
+    assert.equal(report.platform.os, process.platform);
+    assert.deepEqual(report.platform.threshold_profile, {
+      os: "win32",
+      simulated: process.platform !== "win32",
+    });
+    assert.equal(fs.readFileSync(counterPath, "utf8"), "3");
+    assert.equal(sampling.strategy, "windows_retry_numeric_median");
+    assert.equal(sampling.sample_count, 3);
+    assert.deepEqual(sampling.durations_ms, [4_100, 3_900, 4_000]);
+    assert.equal(sampling.median_ms, 4_000);
+    assert.equal(sampling.median_sample_index, 3);
+    assert.equal(report.workloads.canonical_query.duration_ms, 4_000);
+    assert.equal(sampling.samples.every((sample) => sample.evaluation.isolated), true);
+    assert.equal(sampling.samples[1].evaluation.counts_complete, false);
+    assert.equal(sampling.samples[1].evaluation.one_catalog_build, false);
+    assert.equal(report.evaluation.counts_complete, false);
+    assert.equal(report.evaluation.one_catalog_build, false);
+    assert.equal(report.evaluation.workloads_isolated, true);
+    assert.equal(report.evaluation.query_within_budget, true);
+    assert.equal(report.evaluation.query_samples_within_ceiling, true);
+    assert.equal(report.workloads.canonical_query.memory.max_rss_bytes, 330 * mebibyte);
+    assert.equal(report.memory.max_rss_bytes, 330 * mebibyte);
+    assert.equal(report.evaluation.rss_observed_bytes, 330 * mebibyte);
+    assert.equal(report.evaluation.rss_within_budget, false);
+    assert.equal(report.evaluation.passed, false);
+    assert.deepEqual(enterpriseFixtureEntries(temporary), []);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("Windows retry fails an individual outlier above the 1.20x ceiling", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-windows-query-ceiling-"));
+  const fakeWorker = path.join(temporary, "sequenced-canonical-worker.mjs");
+  const counterPath = path.join(temporary, "worker-count.txt");
+  writeSequencedCanonicalWorker(fakeWorker, counterPath, [
+    { duration_ms: 4_800.001 },
+    { duration_ms: 3_999 },
+    { duration_ms: 4_000 },
+  ]);
+  try {
+    const report = await runEnterprisePerformanceBenchmark({
+      parentDirectory: temporary,
+      platform: "win32",
+      scale: SMALL_SCALE,
+      warmIterations: 2,
+      canonicalWorkerScriptPath: fakeWorker,
+    });
+    assert.equal(fs.readFileSync(counterPath, "utf8"), "3");
+    assert.equal(report.workloads.canonical_query.sampling.median_ms, 4_000);
+    assert.equal(report.evaluation.query_within_budget, true);
+    assert.equal(report.evaluation.query_samples_within_ceiling, false);
+    assert.equal(report.evaluation.passed, false);
+    assert.deepEqual(enterpriseFixtureEntries(temporary), []);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("Windows retry rejects a malformed later sample before starting Observatory", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-windows-query-malformed-"));
+  const fakeWorker = path.join(temporary, "sequenced-canonical-worker.mjs");
+  const counterPath = path.join(temporary, "worker-count.txt");
+  const observatoryWorker = path.join(temporary, "must-not-start.mjs");
+  const observatoryMarker = path.join(temporary, "observatory-started.txt");
+  writeSequencedCanonicalWorker(fakeWorker, counterPath, [
+    { duration_ms: 4_100 },
+    { malformed: true },
+    { duration_ms: 3_900 },
+  ]);
+  fs.writeFileSync(observatoryWorker, [
+    `import fs from "node:fs";`,
+    `fs.writeFileSync(${JSON.stringify(observatoryMarker)}, "started", "utf8");`,
+  ].join("\n"));
+  try {
+    await assert.rejects(
+      runEnterprisePerformanceBenchmark({
+        parentDirectory: temporary,
+        platform: "win32",
+        scale: SMALL_SCALE,
+        warmIterations: 2,
+        canonicalWorkerScriptPath: fakeWorker,
+        observatoryWorkerScriptPath: observatoryWorker,
+      }),
+      /unsupported schema version/u,
+    );
+    assert.equal(fs.readFileSync(counterPath, "utf8"), "2");
+    assert.equal(fs.existsSync(observatoryMarker), false);
     assert.deepEqual(enterpriseFixtureEntries(temporary), []);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
@@ -1422,6 +1667,58 @@ function coldResponseForBody(body) {
 
 function sha256FileHex(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function writeSequencedCanonicalWorker(filePath, counterPath, samples) {
+  fs.writeFileSync(filePath, [
+    `import crypto from "node:crypto";`,
+    `import fs from "node:fs";`,
+    `const samples = ${JSON.stringify(samples)};`,
+    `const counterPath = ${JSON.stringify(counterPath)};`,
+    `const sampleIndex = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, "utf8")) : 0;`,
+    `fs.writeFileSync(counterPath, String(sampleIndex + 1), "utf8");`,
+    `const sample = samples[sampleIndex];`,
+    `if (!sample) throw new Error("unexpected canonical query sample");`,
+    `if (sample.malformed) {`,
+    `  process.stdout.write(JSON.stringify({ schema_version: "unsupported-worker:v1" }));`,
+    `} else {`,
+    `  const manifestPath = process.argv[process.argv.indexOf("--fixture-manifest") + 1];`,
+    `  const manifestBytes = fs.readFileSync(manifestPath);`,
+    `  const manifest = JSON.parse(manifestBytes);`,
+    `  const targetIndex = Math.floor(manifest.scale.records / 2);`,
+    `  const storyWidth = Math.max(6, String(manifest.scale.stories - 1).length);`,
+    `  const targetStory = "ST-ENT-" + String(targetIndex % manifest.scale.stories).padStart(storyWidth, "0");`,
+    `  const memory = sample.memory || {`,
+    `    rss_bytes: 32 * 1024 * 1024,`,
+    `    heap_used_bytes: 8 * 1024 * 1024,`,
+    `    max_rss_bytes: 32 * 1024 * 1024,`,
+    `  };`,
+    `  process.stdout.write(JSON.stringify({`,
+    `    schema_version: "enterprise-performance-canonical-query-worker:v1",`,
+    `    ok: true, workload: "canonical_query",`,
+    `    process: { pid: process.pid, parent_pid: process.ppid },`,
+    `    result: {`,
+    `      manifest_sha256: crypto.createHash("sha256").update(manifestBytes).digest("hex"),`,
+    `      duration_ms: sample.duration_ms,`,
+    `      canonical_files: manifest.file_counts.canonical_files,`,
+    `      source_files: manifest.scale.source_files, stories: manifest.scale.stories,`,
+    `      records: manifest.scale.records, dependency_edges: manifest.scale.dependency_edges,`,
+    `      trace_events: manifest.scale.trace_events,`,
+    `      target_story_trace_events: sample.wrong_counts`,
+    `        ? 0`,
+    `        : Math.ceil(manifest.scale.trace_events / manifest.file_counts.trace_files),`,
+    `      target_record_found: true,`,
+    `      target_record: {`,
+    `        id: manifest.query_targets.record_id, path: manifest.query_targets.record_shard_path,`,
+    `        line: (targetIndex % manifest.layout.records_per_shard) + 1,`,
+    `        story_id: targetStory, sequence: targetIndex,`,
+    `      },`,
+    `      session_metrics: { catalog_builds: sample.catalog_builds ?? 1 },`,
+    `      memory,`,
+    `    },`,
+    `  }));`,
+    `}`,
+  ].join("\n"));
 }
 
 function writeFakeObservatoryServerWorker(filePath, { mode, eventTimestampPath = null }) {

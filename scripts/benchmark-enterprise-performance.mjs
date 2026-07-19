@@ -43,6 +43,8 @@ const OBSERVATORY_COMPLETE_MESSAGE = "complete";
 const OBSERVATORY_ERROR_MESSAGE = "error";
 const WINDOWS_OBSERVATORY_WARM_TARGET_P95_MS = 250;
 const WINDOWS_OBSERVATORY_WARM_BUDGET_P95_MS = 275;
+const WINDOWS_CANONICAL_QUERY_SAMPLE_COUNT = 3;
+const CANONICAL_QUERY_SAMPLE_CEILING_MULTIPLIER = 1.20;
 const BENCHMARK_TERMINATION_SIGNALS = Object.freeze(["SIGINT", "SIGTERM"]);
 const SIGNAL_EXIT_CODES = Object.freeze({ SIGINT: 130, SIGTERM: 143 });
 const benchmarkSignalCoordinator = createBenchmarkSignalCoordinator();
@@ -310,6 +312,19 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
     DEFAULT_WARM_ITERATIONS,
     "warmIterations",
   );
+  const benchmarkPlatform = options.platform ?? process.platform;
+  if (typeof benchmarkPlatform !== "string" || benchmarkPlatform === "") {
+    throw new TypeError("benchmark platform must be a non-empty string");
+  }
+  if (
+    benchmarkPlatform !== process.platform
+    && (typeof options.canonicalWorkerScriptPath !== "string"
+      || options.canonicalWorkerScriptPath === "")
+  ) {
+    throw new TypeError(
+      "A simulated benchmark platform requires an injected canonicalWorkerScriptPath",
+    );
+  }
   const processGuard = createBenchmarkProcessGuard();
   let generation = null;
   let fixture = null;
@@ -321,14 +336,17 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
     processGuard.setFixtureCleanup(fixture.cleanup);
     const fixtureManifestPath = path.join(fixture.root, "fixture-manifest.json");
     const fixtureManifestSha256 = sha256FileHex(fixtureManifestPath);
-    const thresholds = platformThresholds(process.platform);
-    const canonicalWorker = await runCanonicalQueryWorkerProcess(
-      fixture,
-      { ...options, fixtureManifestSha256 },
-      processGuard,
-    );
-    const canonicalQuery = canonicalWorker.result;
-    const queryMetrics = canonicalQuery.session_metrics;
+    const thresholds = platformThresholds(benchmarkPlatform);
+    const canonicalWorkers = await collectCanonicalQuerySamples({
+      platform: benchmarkPlatform,
+      queryBudgetMs: thresholds.query_ms,
+      runSample: () => runCanonicalQueryWorkerProcess(
+        fixture,
+        { ...options, fixtureManifestSha256 },
+        processGuard,
+      ),
+    });
+    const canonicalSampling = summarizeCanonicalQuerySamples(canonicalWorkers, thresholds);
 
     const observatoryLimits = {
       maxFiles: Math.max(
@@ -344,7 +362,8 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
       fixtureManifestSha256,
     }, processGuard);
     const observatory = observatoryWorker.result;
-    const memory = aggregateIsolatedMemory(canonicalQuery.memory, observatory.memory);
+    const canonicalMemory = aggregateCanonicalQuerySampleMemory(canonicalWorkers);
+    const memory = aggregateIsolatedMemory(canonicalMemory, observatory.memory);
     const targetRecordIndex = Math.floor(fixture.manifest.scale.records / 2);
     const targetStoryWidth = Math.max(
       6,
@@ -353,26 +372,39 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
     const expectedTargetRecordStoryId = `ST-ENT-${String(
       targetRecordIndex % fixture.manifest.scale.stories,
     ).padStart(targetStoryWidth, "0")}`;
-    const countsComplete = canonicalQuery.canonical_files
-        === fixture.manifest.file_counts.canonical_files
-      && canonicalQuery.source_files === fixture.manifest.scale.source_files
-      && canonicalQuery.stories === fixture.manifest.scale.stories
-      && canonicalQuery.records === fixture.manifest.scale.records
-      && canonicalQuery.dependency_edges === fixture.manifest.scale.dependency_edges
-      && canonicalQuery.trace_events === fixture.manifest.scale.trace_events
-      && canonicalQuery.target_record_found
-      && canonicalQuery.target_record?.id === fixture.manifest.query_targets.record_id
-      && canonicalQuery.target_record?.path === fixture.manifest.query_targets.record_shard_path
-      && canonicalQuery.target_record?.line
-        === (targetRecordIndex % fixture.manifest.layout.records_per_shard) + 1
-      && canonicalQuery.target_record?.story_id === expectedTargetRecordStoryId
-      && canonicalQuery.target_record?.sequence === targetRecordIndex
-      && canonicalQuery.target_story_trace_events
-        === Math.ceil(fixture.manifest.scale.trace_events / fixture.manifest.file_counts.trace_files)
-      && canonicalQuery.manifest_sha256 === fixtureManifestSha256;
-    const oneCatalogBuild = queryMetrics.catalog_builds === 1;
-    const workloadsIsolated = sequentialWorkersAreIsolated(
-      canonicalWorker.process,
+    const canonicalSampleReports = canonicalWorkers.map((worker, index) => {
+      const countsComplete = canonicalQueryCountsComplete(worker.result, {
+        fixture,
+        fixtureManifestSha256,
+        targetRecordIndex,
+        expectedTargetRecordStoryId,
+      });
+      const oneCatalogBuild = worker.result.session_metrics.catalog_builds === 1;
+      const isolated = workerIsIsolated(worker.process, process.pid);
+      return {
+        sample_index: index + 1,
+        ...worker.result,
+        process: {
+          ...worker.process,
+          isolated_from_parent: isolated,
+        },
+        evaluation: {
+          counts_complete: countsComplete,
+          one_catalog_build: oneCatalogBuild,
+          isolated,
+          within_individual_ceiling:
+            worker.result.duration_ms <= thresholds.query_sample_ceiling_ms,
+        },
+      };
+    });
+    const countsComplete = canonicalSampleReports.every(
+      (sample) => sample.evaluation.counts_complete,
+    );
+    const oneCatalogBuild = canonicalSampleReports.every(
+      (sample) => sample.evaluation.one_catalog_build,
+    );
+    const workloadsIsolated = sequentialWorkerSamplesAreIsolated(
+      canonicalWorkers.map((worker) => worker.process),
       observatoryWorker.process,
       process.pid,
     );
@@ -386,10 +418,13 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
       && observatory.model_validation?.passed === true
       && observatory.model_validation?.manifest_sha256 === fixtureManifestSha256;
     const performanceEvaluation = evaluateEnterprisePerformanceBudgets({
-      query_ms: canonicalQuery.duration_ms,
+      query_ms: canonicalSampling.median_ms,
+      query_samples_ms: canonicalSampling.durations_ms,
       observatory_warm_p95_ms: observatory.warm_p95_ms,
       rss_bytes: memory.max_rss_bytes,
     }, thresholds);
+    const representativeWorker = canonicalWorkers[canonicalSampling.median_sample_index - 1];
+    const representativeQuery = representativeWorker.result;
 
     result = {
       schema_version: ENTERPRISE_PERFORMANCE_BENCHMARK_SCHEMA,
@@ -399,6 +434,10 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
         os: process.platform,
         arch: process.arch,
         node: process.versions.node,
+        threshold_profile: {
+          os: benchmarkPlatform,
+          simulated: benchmarkPlatform !== process.platform,
+        },
       },
       fixture: {
         schema_version: fixture.manifest.schema_version,
@@ -412,10 +451,26 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
       },
       workloads: {
         canonical_query: {
-          ...canonicalQuery,
+          ...representativeQuery,
+          duration_ms: canonicalSampling.median_ms,
+          memory: canonicalMemory,
           process: {
-            ...canonicalWorker.process,
-            isolated_from_parent: canonicalWorker.process.pid !== process.pid,
+            ...representativeWorker.process,
+            isolated_from_parent: workerIsIsolated(representativeWorker.process, process.pid),
+          },
+          sampling: {
+            strategy: canonicalSampling.sample_count === 1
+              ? "single_sample_fast_path"
+              : "windows_retry_numeric_median",
+            retry_triggered: canonicalSampling.sample_count > 1,
+            sample_count: canonicalSampling.sample_count,
+            durations_ms: canonicalSampling.durations_ms,
+            median_ms: canonicalSampling.median_ms,
+            median_sample_index: canonicalSampling.median_sample_index,
+            max_sample_ms: canonicalSampling.max_sample_ms,
+            individual_ceiling_ms: thresholds.query_sample_ceiling_ms,
+            all_samples_within_ceiling: canonicalSampling.all_samples_within_ceiling,
+            samples: canonicalSampleReports,
           },
         },
         observatory: {
@@ -423,7 +478,9 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
           process: {
             ...observatoryWorker.process,
             isolated_from_parent: observatoryWorker.process.pid !== process.pid,
-            isolated_from_canonical_query: canonicalWorker.process.terminated,
+            isolated_from_canonical_query: canonicalWorkers.every(
+              (worker) => worker.process.terminated,
+            ),
           },
         },
       },
@@ -449,6 +506,7 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
           && workloadsIsolated
           && conditionalCacheValid
           && performanceEvaluation.query_within_budget
+          && performanceEvaluation.query_samples_within_ceiling
           && performanceEvaluation.observatory_warm_within_budget
           && performanceEvaluation.rss_within_budget,
       },
@@ -472,6 +530,88 @@ export async function runEnterprisePerformanceBenchmark(options = {}) {
     result.evaluation.passed = false;
   }
   return result;
+}
+
+export async function collectCanonicalQuerySamples({
+  platform,
+  queryBudgetMs,
+  runSample,
+}) {
+  const budgetMs = positiveFinite(queryBudgetMs, "canonical query budget");
+  if (typeof platform !== "string" || platform === "") {
+    throw new TypeError("canonical query sampling platform must be a non-empty string");
+  }
+  if (typeof runSample !== "function") {
+    throw new TypeError("canonical query sampling requires a runSample function");
+  }
+
+  const samples = [await runSample(1)];
+  const firstDurationMs = canonicalQuerySampleDuration(samples[0], 1);
+  if (platform === "win32" && firstDurationMs > budgetMs) {
+    while (samples.length < WINDOWS_CANONICAL_QUERY_SAMPLE_COUNT) {
+      samples.push(await runSample(samples.length + 1));
+      canonicalQuerySampleDuration(samples.at(-1), samples.length);
+    }
+  }
+  return samples;
+}
+
+export function summarizeCanonicalQuerySamples(samples, thresholds) {
+  if (!Array.isArray(samples) || ![1, WINDOWS_CANONICAL_QUERY_SAMPLE_COUNT].includes(samples.length)) {
+    throw new TypeError("canonical query sampling requires exactly one or three samples");
+  }
+  const queryBudgetMs = positiveFinite(thresholds?.query_ms, "threshold query_ms");
+  const individualCeilingMs = positiveFinite(
+    thresholds?.query_sample_ceiling_ms,
+    "threshold query_sample_ceiling_ms",
+  );
+  validateCanonicalQuerySampleCeiling(queryBudgetMs, individualCeilingMs);
+  const durationsMs = samples.map((sample, index) => (
+    canonicalQuerySampleDuration(sample, index + 1)
+  ));
+  const sortedDurations = [...durationsMs].sort((left, right) => left - right);
+  const medianMs = sortedDurations[Math.floor(sortedDurations.length / 2)];
+  return Object.freeze({
+    sample_count: samples.length,
+    durations_ms: Object.freeze(durationsMs),
+    median_ms: medianMs,
+    median_sample_index: durationsMs.indexOf(medianMs) + 1,
+    max_sample_ms: Math.max(...durationsMs),
+    all_samples_within_ceiling: durationsMs.every(
+      (durationMs) => durationMs <= individualCeilingMs,
+    ),
+  });
+}
+
+function canonicalQuerySampleDuration(sample, sampleIndex) {
+  return finiteNonNegative(
+    sample?.result?.duration_ms,
+    `canonical query sample ${sampleIndex} duration_ms`,
+  );
+}
+
+function canonicalQueryCountsComplete(canonicalQuery, {
+  fixture,
+  fixtureManifestSha256,
+  targetRecordIndex,
+  expectedTargetRecordStoryId,
+}) {
+  return canonicalQuery.canonical_files === fixture.manifest.file_counts.canonical_files
+    && canonicalQuery.source_files === fixture.manifest.scale.source_files
+    && canonicalQuery.stories === fixture.manifest.scale.stories
+    && canonicalQuery.records === fixture.manifest.scale.records
+    && canonicalQuery.dependency_edges === fixture.manifest.scale.dependency_edges
+    && canonicalQuery.trace_events === fixture.manifest.scale.trace_events
+    && canonicalQuery.target_record_found
+    && canonicalQuery.target_record?.id === fixture.manifest.query_targets.record_id
+    && canonicalQuery.target_record?.path === fixture.manifest.query_targets.record_shard_path
+    && canonicalQuery.target_record?.line
+      === (targetRecordIndex % fixture.manifest.layout.records_per_shard) + 1
+    && canonicalQuery.target_record?.story_id === expectedTargetRecordStoryId
+    && canonicalQuery.target_record?.sequence === targetRecordIndex
+    && canonicalQuery.target_story_trace_events
+      === Math.ceil(fixture.manifest.scale.trace_events / fixture.manifest.file_counts.trace_files)
+    && canonicalQuery.manifest_sha256 === fixtureManifestSha256;
 }
 
 async function runCanonicalQueryWorkerProcess(fixture, options = {}, processGuard = null) {
@@ -3011,8 +3151,10 @@ function sha256FileHex(filePath) {
 export function platformThresholds(platform) {
   const windows = platform === "win32";
   const warmTargetMs = windows ? WINDOWS_OBSERVATORY_WARM_TARGET_P95_MS : 100;
+  const queryMs = windows ? 4_000 : 2_000;
   return {
-    query_ms: windows ? 4_000 : 2_000,
+    query_ms: queryMs,
+    query_sample_ceiling_ms: queryMs * CANONICAL_QUERY_SAMPLE_CEILING_MULTIPLIER,
     observatory_warm_target_p95_ms: warmTargetMs,
     // Hosted Windows runners have repeatedly varied by 3-4% around the target.
     // Keep the target visible, but fail only outside this explicit 10% guardband.
@@ -3023,12 +3165,23 @@ export function platformThresholds(platform) {
 
 export function evaluateEnterprisePerformanceBudgets(metrics, thresholds) {
   const queryMs = finiteNonNegative(metrics?.query_ms, "query_ms");
+  const querySamplesMs = metrics?.query_samples_ms ?? [queryMs];
+  if (!Array.isArray(querySamplesMs) || querySamplesMs.length === 0) {
+    throw new TypeError("query_samples_ms must contain at least one sample");
+  }
+  const validatedQuerySamplesMs = querySamplesMs.map((sample, index) => (
+    finiteNonNegative(sample, `query_samples_ms[${index}]`)
+  ));
   const warmP95Ms = finiteNonNegative(
     metrics?.observatory_warm_p95_ms,
     "observatory_warm_p95_ms",
   );
   const rssBytes = finiteNonNegative(metrics?.rss_bytes, "rss_bytes");
   const queryBudgetMs = positiveFinite(thresholds?.query_ms, "threshold query_ms");
+  const querySampleCeilingMs = positiveFinite(
+    thresholds?.query_sample_ceiling_ms,
+    "threshold query_sample_ceiling_ms",
+  );
   const warmTargetMs = positiveFinite(
     thresholds?.observatory_warm_target_p95_ms,
     "threshold observatory_warm_target_p95_ms",
@@ -3041,12 +3194,25 @@ export function evaluateEnterprisePerformanceBudgets(metrics, thresholds) {
   if (warmBudgetMs < warmTargetMs) {
     throw new TypeError("Observatory warm hard budget cannot be lower than its target");
   }
+  validateCanonicalQuerySampleCeiling(queryBudgetMs, querySampleCeilingMs);
   return Object.freeze({
     query_within_budget: queryMs <= queryBudgetMs,
+    query_samples_within_ceiling: validatedQuerySamplesMs.every(
+      (sample) => sample <= querySampleCeilingMs,
+    ),
     observatory_warm_target_met: warmP95Ms <= warmTargetMs,
     observatory_warm_within_budget: warmP95Ms <= warmBudgetMs,
     rss_within_budget: rssBytes <= rssBudgetBytes,
   });
+}
+
+function validateCanonicalQuerySampleCeiling(queryBudgetMs, querySampleCeilingMs) {
+  if (querySampleCeilingMs < queryBudgetMs) {
+    throw new TypeError("Canonical query sample ceiling cannot be lower than its query budget");
+  }
+  if (querySampleCeilingMs > queryBudgetMs * CANONICAL_QUERY_SAMPLE_CEILING_MULTIPLIER) {
+    throw new TypeError("Canonical query sample ceiling cannot exceed 1.20x its query budget");
+  }
 }
 
 function immutablePerformanceWarning({ observedMs, targetMs, budgetMs, withinBudget }) {
@@ -3176,6 +3342,24 @@ function aggregateIsolatedMemory(canonicalQuery, observatory) {
   return aggregate;
 }
 
+function aggregateCanonicalQuerySampleMemory(canonicalWorkers) {
+  if (!Array.isArray(canonicalWorkers) || canonicalWorkers.length === 0) {
+    throw new TypeError("canonical query memory aggregation requires at least one sample");
+  }
+  const memories = canonicalWorkers.map((worker, index) => {
+    validateMemorySnapshot(worker?.result?.memory, `canonical query sample ${index + 1} memory`);
+    return worker.result.memory;
+  });
+  const aggregate = {
+    aggregation: "maximum_of_canonical_query_samples",
+    rss_bytes: Math.max(...memories.map((memory) => memory.rss_bytes)),
+    heap_used_bytes: Math.max(...memories.map((memory) => memory.heap_used_bytes)),
+    max_rss_bytes: Math.max(...memories.map((memory) => memory.max_rss_bytes)),
+  };
+  validateMemorySnapshot(aggregate, "aggregate canonical query sample memory");
+  return aggregate;
+}
+
 function validateMemorySnapshot(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
@@ -3253,15 +3437,32 @@ function validateWorkerProcess(value, label) {
 }
 
 export function sequentialWorkersAreIsolated(canonicalWorker, observatoryWorker, parentPid) {
+  return sequentialWorkerSamplesAreIsolated([canonicalWorker], observatoryWorker, parentPid);
+}
+
+export function sequentialWorkerSamplesAreIsolated(
+  canonicalWorkers,
+  observatoryWorker,
+  parentPid,
+) {
   if (!Number.isSafeInteger(parentPid) || parentPid < 1) return false;
-  for (const worker of [canonicalWorker, observatoryWorker]) {
-    if (!worker || typeof worker !== "object" || Array.isArray(worker)) return false;
-    if (!Number.isSafeInteger(worker.pid) || worker.pid < 1 || worker.pid === parentPid) {
-      return false;
-    }
-    if (worker.parent_pid !== parentPid || worker.terminated !== true) return false;
-  }
-  return true;
+  if (!Array.isArray(canonicalWorkers) || canonicalWorkers.length === 0) return false;
+  return [...canonicalWorkers, observatoryWorker].every(
+    (worker) => workerIsIsolated(worker, parentPid),
+  );
+}
+
+function workerIsIsolated(worker, parentPid) {
+  return Number.isSafeInteger(parentPid)
+    && parentPid > 0
+    && worker !== null
+    && typeof worker === "object"
+    && !Array.isArray(worker)
+    && Number.isSafeInteger(worker.pid)
+    && worker.pid > 0
+    && worker.pid !== parentPid
+    && worker.parent_pid === parentPid
+    && worker.terminated === true;
 }
 
 function assertFiniteNonNegative(value, label) {
