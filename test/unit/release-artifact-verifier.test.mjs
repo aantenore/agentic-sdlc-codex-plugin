@@ -133,12 +133,49 @@ test("requires package, plugin, tag, and bin metadata to agree", () => {
   );
   withFixture(binMismatch, (artifactPath) => expectCode("BIN_CONTRACT_MISMATCH", () => verify(artifactPath)));
 
-  const nonExecutableBin = replaceEntry(
+  const windowsPackedBin = replaceEntry(
     validReleaseFixtureEntries({ version: packageVersion }),
     "package/bin/agentic-sdlc.mjs",
     { mode: 0o644 },
   );
-  withFixture(nonExecutableBin, (artifactPath) => expectCode("BIN_TARGET_NOT_EXECUTABLE", () => verify(artifactPath)));
+  withFixture(windowsPackedBin, (artifactPath) => assert.equal(verify(artifactPath).status, "passed"));
+});
+
+
+test("requires portable bin modes and a canonical Node shebang", () => {
+  for (const mode of [0o644, 0o700, 0o750, 0o755]) {
+    const portable = replaceEntry(
+      validReleaseFixtureEntries({ version: packageVersion }),
+      "package/bin/agentic-sdlc.mjs",
+      { mode },
+    );
+    withFixture(portable, (artifactPath) => assert.equal(verify(artifactPath).status, "passed"));
+  }
+
+  for (const mode of [0o600, 0o640]) {
+    const nonPortable = replaceEntry(
+      validReleaseFixtureEntries({ version: packageVersion }),
+      "package/bin/agentic-sdlc.mjs",
+      { mode },
+    );
+    withFixture(nonPortable, (artifactPath) => expectCode("BIN_TARGET_MODE_NOT_PORTABLE", () => verify(artifactPath)));
+  }
+
+  const crlfShebang = replaceEntry(
+    validReleaseFixtureEntries({ version: packageVersion }),
+    "package/bin/agentic-sdlc.mjs",
+    { data: "#!/usr/bin/env node\r\n" },
+  );
+  withFixture(crlfShebang, (artifactPath) => assert.equal(verify(artifactPath).status, "passed"));
+
+  for (const data of ["console.log('missing shebang');\n", "#!/usr/bin/node\n"]) {
+    const invalidShebang = replaceEntry(
+      validReleaseFixtureEntries({ version: packageVersion }),
+      "package/bin/agentic-sdlc.mjs",
+      { data },
+    );
+    withFixture(invalidShebang, (artifactPath) => expectCode("BIN_TARGET_INVALID_SHEBANG", () => verify(artifactPath)));
+  }
 });
 
 

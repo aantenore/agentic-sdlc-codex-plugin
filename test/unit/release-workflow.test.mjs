@@ -19,9 +19,16 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ciWorkflowPath = path.join(repoRoot, ".github", "workflows", "ci.yml");
-const ciWorkflow = readFileSync(ciWorkflowPath, "utf8");
 const workflowPath = path.join(repoRoot, ".github", "workflows", "release.yml");
-const workflow = readFileSync(workflowPath, "utf8");
+
+
+function normalizeLineEndings(source) {
+  return source.replace(/\r\n?/gu, "\n");
+}
+
+
+const ciWorkflow = normalizeLineEndings(readFileSync(ciWorkflowPath, "utf8"));
+const workflow = normalizeLineEndings(readFileSync(workflowPath, "utf8"));
 
 const ACTION_PINS = new Map([
   ["actions/checkout", "df4cb1c069e1874edd31b4311f1884172cec0e10"],
@@ -209,6 +216,18 @@ function sha256(file) {
 test("release workflow is tag-only, least-privilege, ordered, and bounded", () => {
   assert.deepEqual(releaseContractErrors(workflow), []);
   assert.equal(workflow.includes("\t"), false, "workflow must not contain tab indentation");
+});
+
+
+test("workflow source normalization accepts Windows checkouts", () => {
+  for (const source of [ciWorkflow, workflow]) {
+    const crlf = source.replace(/\n/gu, "\r\n");
+    assert.equal(normalizeLineEndings(crlf), source);
+  }
+  assert.deepEqual(
+    releaseContractErrors(normalizeLineEndings(workflow.replace(/\n/gu, "\r\n"))),
+    [],
+  );
 });
 
 
