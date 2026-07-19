@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Agentic SDLC 0.11.0 current project state after governance PR #9 merged to main with the complete Node 18/20/24 matrix and GitGuardian green; this refresh binds the portfolio delivery to the provider-neutral governance and human-readable autonomy boundary now on main.
+Agentic SDLC 0.11.0 current project state after governance PR #9 and the approved portfolio implementation scope are present in this worktree; the refreshed snapshot binds the exact current source, documentation, schema, UI and test evidence before portfolio delivery begins.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
@@ -25,7 +25,7 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 ## Key Files
 - .github/workflows/ci.yml (59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3)
 - .github/workflows/release.yml (5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4)
-- package.json (732375a522ddf62e6e6189dbf11d30445cfdf17605a71f41637a847deb03fa1c)
+- package.json (373951d0289aa2da6b3a10f4a35467cae805ae1ec00f92385ef2d5d2ff4d2a64)
 - README.md (02acf5b1105dacd6877f1fb6ff6f55dfaec9c20aa2bec456fa5f14fb26c5e608)
 
 ## Imported Documents

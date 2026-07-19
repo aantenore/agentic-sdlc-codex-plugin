@@ -4,7 +4,7 @@
   "schema_version": "0.1.0",
   "status": "draft",
   "phase": "design",
-  "contract_id": "contract-ST-ENT-PORTFOLIO-R2-implementation-v2",
+  "contract_id": "contract-ST-ENT-PORTFOLIO-R2-implementation-v3",
   "work_breakdown_id": null,
   "acceptance": [
     "An explicit manifest aggregates up to 64 projects in declared order without discovery and isolates unavailable roots.",
@@ -26,29 +26,29 @@
   ],
   "requirement_refs": [
     {
-      "content_hash": "8e5bc8482eece070c0a025b0bbd6e305def26687ee420622e48146e2429f17b1",
-      "id": "REQ-ENT-PORTFOLIO",
-      "path": ".sdlc/requirements/REQ-ENT-PORTFOLIO.json",
-      "revision": 1
+      "content_hash": "da40e6ac092e2d2c7c866ffd614e3a6fc80cc1accc43b5b5ae3213eba53a9c8e",
+      "id": "REQ-ENT-PORTFOLIO-R2",
+      "path": ".sdlc/requirements/REQ-ENT-PORTFOLIO-R2.json",
+      "revision": 2
     }
   ],
   "autonomy_ceiling": "bounded-autonomous",
   "links": {
     "requirements": [
-      "REQ-ENT-PORTFOLIO"
+      "REQ-ENT-PORTFOLIO-R2"
     ],
     "decisions": [],
     "tests": []
   },
-  "created_at": "2026-07-19T00:51:36.567Z",
-  "updated_at": "2026-07-19T00:52:04.774Z",
+  "created_at": "2026-07-19T00:57:28.781Z",
+  "updated_at": "2026-07-19T00:58:03.711Z",
   "audit": {
     "created_by": {
-      "id": "codex",
-      "type": "agent",
-      "name": "Codex",
-      "email": null,
-      "source": "default"
+      "id": "antonioantenore",
+      "type": "human",
+      "name": "Antonio Antenore",
+      "email": "antonio.antenore@gmail.com",
+      "source": "environment"
     },
     "updated_by": {
       "id": "codex",
@@ -60,7 +60,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "a135641fa474e623ac07ccd428d4bd9eff438dc2",
+      "head_sha": "d7989cc527815dec128134ba018a47fb25f35021",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
