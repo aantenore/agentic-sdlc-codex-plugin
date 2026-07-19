@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refresh the trusted enterprise platform snapshot for Agentic SDLC 0.12.0 after integrating policy-bound package verification, reversible Installer V2, retry-safe release publication, complete lifecycle help and exact post-merge receipt verification.
+Trusted Agentic SDLC 0.12.0 release snapshot after Linux Python-link and Windows npm-package portability fixes, with policy-bound package verification, reversible Installer V2, retry-safe publication and exact merge verification.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
@@ -23,8 +23,8 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 - automation: npm-scripts (package.json)
 
 ## Key Files
-- .github/workflows/ci.yml (59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3)
-- .github/workflows/release.yml (82c9c51e7dfc1a8ad1c516f0503e32cc27055286ac3ee60e5d234e992bb8c3df)
+- .github/workflows/ci.yml (96225d558f0e34de093a4e3b1af1a7b8826aa514d6d07b7cbdf2bfa708d9ee6e)
+- .github/workflows/release.yml (381650a73f3552fa108b8ad75c6466281470d0aafaa6dd818472865b29209406)
 - package.json (2a59b63443c123e8e4a91f1914fc985885c2710fc51d5384ae0c6550d58ab27d)
 - README.md (0d45b8d6d8a09029e6fb230cf26e3a03284d5e558380b410bd7ce1548c8424c8)
 
