@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import {
   appendFileSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -107,7 +108,7 @@ function releaseContractErrors(source) {
     || !/spdx-json=/u.test(packageJob)
     || !/cyclonedx-json=/u.test(packageJob)
     || /anchore\/sbom-action|raw\.githubusercontent\.com\/anchore\/syft\/main/u.test(packageJob)
-    || !/CycloneDX SBOM does not match/u.test(publish)) errors.push("SBOM gates");
+    || !/validateReleaseBundleDirectory/u.test(publish)) errors.push("SBOM gates");
   if (!/actions\/attest-build-provenance@/u.test(packageJob)
     || !/gh attestation verify/u.test(packageJob)
     || !/gh attestation verify/u.test(publish)) errors.push("provenance gates");
@@ -119,14 +120,18 @@ function releaseContractErrors(source) {
     || !/test "\$actual_artifact_digest" = "\$expected_artifact_digest"/u.test(publish)
     || !/actions\/download-artifact@/u.test(publish)) errors.push("immutable artifact handoff");
   if ((source.match(/package-manager-cache: false/gu) ?? []).length !== 3) errors.push("setup-node cache policy");
+  const recoveryValidation = packageJob.indexOf("const result = validateMatchingReleaseBundles");
+  const recoveryDeletion = packageJob.indexOf('gh release delete "$GITHUB_REF_NAME" --yes');
   if (!/GITHUB_RUN_ID-attempt-\$GITHUB_RUN_ATTEMPT/u.test(packageJob)
-    || !/existing release is not the exact workflow-owned draft/u.test(packageJob)
+    || recoveryValidation < 0
+    || recoveryDeletion < recoveryValidation
+    || !/already_published=/u.test(packageJob)
+    || (packageJob.match(/steps\.remote_state\.outputs\.already_published != 'true'/gu) ?? []).length !== 2
     || !/gh release delete "\$GITHUB_REF_NAME" --yes/u.test(packageJob)
     || /--cleanup-tag/u.test(packageJob)) errors.push("retry recovery");
   if (!source.includes("[A-Za-z0-9._+-]*\\.tgz")
     || !/parseReleaseTag/u.test(packageJob)
     || !/EXPECTED_PRERELEASE/u.test(packageJob)
-    || !/EXPECTED_PRERELEASE/u.test(publish)
     || /includes\("-"\)|== \*-\*/u.test(source)) errors.push("strict SemVer identity");
   if (!/gh release create/u.test(packageJob)
     || !/--draft/u.test(packageJob)
@@ -134,11 +139,19 @@ function releaseContractErrors(source) {
     || /--draft=false/u.test(packageJob)) errors.push("draft-first package gate");
   if (!/gh release download/u.test(packageJob)
     || !/gh release download/u.test(publish)
-    || !/cmp --silent/u.test(packageJob)
-    || !/cmp --silent/u.test(publish)) errors.push("remote byte verification");
+    || (source.match(/const result = validateMatchingReleaseBundles/gu) ?? []).length < 4) errors.push("remote byte verification");
+  const publishValidation = publish.indexOf("const result = validateMatchingReleaseBundles");
+  const publishEdit = publish.indexOf('gh release edit "$GITHUB_REF_NAME" --draft=false');
+  const finalPublishValidation = publish.lastIndexOf("const result = validateMatchingReleaseBundles");
   if (!/startsWith\(github\.ref, 'refs\/tags\/v'\)/u.test(publish)
     || (source.match(/git rev-parse --verify/gu) ?? []).length !== 4
-    || !/gh release edit "\$GITHUB_REF_NAME" --draft=false/u.test(publish)) errors.push("publish gate");
+    || !/gh release edit "\$GITHUB_REF_NAME" --draft=false/u.test(publish)
+    || publishValidation < 0
+    || publishEdit < publishValidation
+    || finalPublishValidation < publishEdit
+    || !/ALREADY_PUBLISHED/u.test(publish)
+    || !/timeout --signal=TERM --kill-after=15s 60s/u.test(publish)
+    || !/publication_deadline=\$\(\(SECONDS \+ 120\)\)/u.test(publish)) errors.push("publish gate");
   return errors;
 }
 
@@ -242,6 +255,21 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       source: workflow.replace("          test \"$actual_artifact_digest\" = \"$expected_artifact_digest\"\n", ""),
       expected: "immutable artifact handoff",
     },
+    {
+      name: "draft deletion before complete byte proof",
+      source: workflow.replace("const result = validateMatchingReleaseBundles({", "const result = validateReleaseMetadata({"),
+      expected: "retry recovery",
+    },
+    {
+      name: "published rerun forced through draft creation",
+      source: workflow.replace("        if: ${{ steps.remote_state.outputs.already_published != 'true' }}\n", ""),
+      expected: "retry recovery",
+    },
+    {
+      name: "unbounded publication client",
+      source: workflow.replace("timeout --signal=TERM --kill-after=15s 60s", "gh-timeout-removed"),
+      expected: "publish gate",
+    },
   ];
   for (const fixture of fixtures) {
     assert.ok(
@@ -258,6 +286,11 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     const releaseRoot = path.join(temporary, "release");
     mkdirSync(releaseRoot);
     mkdirSync(path.join(temporary, "config"));
+    mkdirSync(path.join(temporary, "lib", "release"), { recursive: true });
+    copyFileSync(
+      path.join(repoRoot, "lib", "release", "workflow-guard.mjs"),
+      path.join(temporary, "lib", "release", "workflow-guard.mjs"),
+    );
     writeFileSync(
       path.join(temporary, "config", "release-artifact-policy.json"),
       readFileSync(path.join(repoRoot, "config", "release-artifact-policy.json")),
@@ -284,7 +317,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     })}\n`);
     writeFileSync(verificationPath, `${JSON.stringify({
       status: "passed",
-      package: { name: "agentic-sdlc-codex-plugin", tag: "v1.2.3" },
+      package: { name: "agentic-sdlc-codex-plugin", version: "1.2.3", tag: "v1.2.3" },
       artifact: { sha256: sha256(archivePath) },
       smoke: {
         npm_install: "passed",
@@ -299,9 +332,11 @@ test("the exact inline seal and publish validators accept a valid fixture and re
       ARCHIVE_NAME: archiveName,
       ARCHIVE_PATH: archivePath,
       CYCLONEDX_PATH: cyclonedxPath,
+      EXPECTED_ARCHIVE_NAME: archiveName,
       GITHUB_OUTPUT: outputPath,
       GITHUB_REF_NAME: "v1.2.3",
       GITHUB_REPOSITORY: "aantenore/agentic-sdlc-codex-plugin",
+      GITHUB_RUN_ID: "123456789",
       GITHUB_SHA: sourceSha,
       POLICY_PATH: "config/release-artifact-policy.json",
       SBOM_PATH: sbomPath,
@@ -328,7 +363,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     appendFileSync(archivePath, "tampered\n");
     const changedArchive = validate();
     assert.notEqual(changedArchive.status, 0);
-    assert.match(changedArchive.stderr, /archive does not match the sealed manifest/u);
+    assert.match(changedArchive.stderr, /asset does not match its sealed record/u);
     writeFileSync(archivePath, Buffer.from("immutable release archive fixture\n"));
 
     const unexpectedPath = path.join(releaseRoot, "unexpected.txt");
@@ -351,7 +386,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     const falseCyclonedxIdentity = validate();
     assert.notEqual(falseCyclonedxIdentity.status, 0);
-    assert.match(falseCyclonedxIdentity.stderr, /CycloneDX SBOM does not match/u);
+    assert.match(falseCyclonedxIdentity.stderr, /CycloneDX SBOM does not describe/u);
     writeFileSync(cyclonedxPath, originalCyclonedx);
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     manifest.cyclonedx.bytes = readFileSync(cyclonedxPath).length;
@@ -367,7 +402,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     const weakenedGate = validate();
     assert.notEqual(weakenedGate.status, 0);
-    assert.match(weakenedGate.stderr, /verification report is incomplete/u);
+    assert.match(weakenedGate.stderr, /verification does not prove every required smoke gate/u);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

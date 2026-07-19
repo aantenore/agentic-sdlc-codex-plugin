@@ -525,6 +525,8 @@ Canonical KB and trace paths always use `/` separators so the same records remai
 
 Release tags run the complete Linux, macOS, and Windows matrix for every supported Node line before the package job can publish. The package regression test creates a real tarball, installs it into a clean prefix, and runs the installed CLI doctor so source-tree success cannot hide a missing packaged resource.
 
+The release workflow parses the tag as complete SemVer; prerelease status comes from the parsed prerelease field, so uppercase identifiers and hyphenated build metadata remain valid without turning a stable build into a prerelease. A rerun may recover a draft only when its exact asset inventory, every downloaded byte, sealed source identity, and workflow-run owner all match the newly verified bundle. An already-published matching release is treated as an idempotent success. Publication is bounded by client and convergence timeouts, and both the pre-publication and final server state are byte-verified before the workflow succeeds.
+
 ```mermaid
 flowchart TB
   Gate["gate check --strict"] --> Contracts["Contracts approved"]

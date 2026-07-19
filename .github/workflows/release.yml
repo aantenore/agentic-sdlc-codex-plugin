@@ -287,6 +287,11 @@ jobs:
             repository: process.env.GITHUB_REPOSITORY,
             tag: process.env.GITHUB_REF_NAME,
             source_sha: process.env.GITHUB_SHA,
+            producer: {
+              schema_version: "agentic-sdlc.github-actions-release-owner.v1",
+              workflow_path: ".github/workflows/release.yml",
+              run_id: process.env.GITHUB_RUN_ID,
+            },
             archive: {
               name: process.env.ARCHIVE_NAME,
               bytes: archive.size,
@@ -352,66 +357,72 @@ jobs:
           overwrite: false
           include-hidden-files: false
           retention-days: 30
-      - name: Recover only an exact matching draft from an earlier attempt
+      - name: Recover only a fully verified workflow-owned release
+        id: remote_state
         env:
           ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
-          EXPECTED_PRERELEASE: ${{ steps.release_identity.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prior_metadata="$RUNNER_TEMP/prior-draft-release.json"
-          prior_error="$RUNNER_TEMP/prior-draft-release.err"
+          prior_metadata="$RUNNER_TEMP/prior-release.json"
+          prior_error="$RUNNER_TEMP/prior-release.err"
           if gh release view "$GITHUB_REF_NAME" \
-            --json assets,isDraft,isPrerelease,tagName > "$prior_metadata" 2> "$prior_error"; then
+            --json assets,author,isDraft,isPrerelease,tagName > "$prior_metadata" 2> "$prior_error"; then
             PRIOR_METADATA="$prior_metadata" node --input-type=module <<'NODE'
-            import fs from "node:fs";
+          import fs from "node:fs";
+          import { validateReleaseMetadata } from "./lib/release/workflow-guard.mjs";
 
-            const release = JSON.parse(fs.readFileSync(process.env.PRIOR_METADATA, "utf8"));
-            const expectedAssets = [
-              process.env.ARCHIVE_NAME,
-              `${process.env.ARCHIVE_NAME}.sha256`,
-              `${process.env.ARCHIVE_NAME}.cdx.json`,
-              `${process.env.ARCHIVE_NAME}.spdx.json`,
-              "release-manifest.json",
-              "release-verification.json",
-            ].sort();
-            const actualAssets = release.assets.map((asset) => asset.name).sort();
-            if (release.tagName !== process.env.GITHUB_REF_NAME
-              || release.isDraft !== true
-              || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
-              || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
-              throw new Error("an existing release is not the exact workflow-owned draft expected for recovery");
-            }
-            NODE
-            prior_assets="$RUNNER_TEMP/prior-draft-assets"
+          const release = JSON.parse(fs.readFileSync(process.env.PRIOR_METADATA, "utf8"));
+          validateReleaseMetadata(release, {
+            archiveName: process.env.ARCHIVE_NAME,
+            expectedState: "either",
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          NODE
+            prior_assets="$RUNNER_TEMP/prior-release-assets"
             mkdir "$prior_assets"
             gh release download "$GITHUB_REF_NAME" --dir "$prior_assets"
-            PRIOR_ASSETS="$prior_assets" node --input-type=module <<'NODE'
-            import crypto from "node:crypto";
-            import fs from "node:fs";
-            import path from "node:path";
+            prior_state="$RUNNER_TEMP/prior-release-state"
+            PRIOR_ASSETS="$prior_assets" \
+            PRIOR_METADATA="$prior_metadata" \
+            PRIOR_STATE="$prior_state" \
+            node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { validateMatchingReleaseBundles } from "./lib/release/workflow-guard.mjs";
 
-            const local = JSON.parse(fs.readFileSync("release/release-manifest.json", "utf8"));
-            const remote = JSON.parse(fs.readFileSync(path.join(process.env.PRIOR_ASSETS, "release-manifest.json"), "utf8"));
-            const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-            if (remote?.schema_version !== "agentic-sdlc.release-bundle.v1"
-              || remote?.repository !== process.env.GITHUB_REPOSITORY
-              || remote?.tag !== process.env.GITHUB_REF_NAME
-              || remote?.source_sha !== process.env.GITHUB_SHA
-              || remote?.archive?.name !== process.env.ARCHIVE_NAME
-              || remote?.archive?.sha256 !== local?.archive?.sha256
-              || sha256(path.join(process.env.PRIOR_ASSETS, process.env.ARCHIVE_NAME)) !== remote.archive.sha256) {
-              throw new Error("existing draft is not bound to this exact source and verified archive");
-            }
-            NODE
-            gh release delete "$GITHUB_REF_NAME" --yes
+          const metadata = JSON.parse(fs.readFileSync(process.env.PRIOR_METADATA, "utf8"));
+          const result = validateMatchingReleaseBundles({
+            archiveName: process.env.ARCHIVE_NAME,
+            localRoot: "release",
+            metadata,
+            remoteRoot: process.env.PRIOR_ASSETS,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          fs.writeFileSync(process.env.PRIOR_STATE, `${result.state}\n`, { encoding: "utf8", flag: "wx" });
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `already_published=${result.state === "published"}\n`, "utf8");
+          NODE
+            read -r release_state < "$prior_state"
+            if [[ "$release_state" == "draft" ]]; then
+              gh release delete "$GITHUB_REF_NAME" --yes
+            elif [[ "$release_state" != "published" ]]; then
+              printf 'Unexpected verified release state: %s\n' "$release_state" >&2
+              exit 1
+            fi
           else
             if ! grep -Eiq 'release not found|HTTP 404|not found' "$prior_error"; then
               cat "$prior_error" >&2
               exit 1
             fi
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Create the verified draft release
+        if: ${{ steps.remote_state.outputs.already_published != 'true' }}
         env:
           ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
           ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
@@ -438,51 +449,55 @@ jobs:
           gh release create "${release_args[@]}"
           printf 'Actions artifact digest: %s\n' "$ARTIFACT_DIGEST"
       - name: Verify the remote draft and every uploaded byte
+        if: ${{ steps.remote_state.outputs.already_published != 'true' }}
         env:
           ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
-          EXPECTED_PRERELEASE: ${{ steps.release_identity.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/draft-release.json"
           gh release view "$GITHUB_REF_NAME" \
-            --json assets,isDraft,isPrerelease,tagName > "$metadata"
+            --json assets,author,isDraft,isPrerelease,tagName > "$metadata"
           RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
           import fs from "node:fs";
+          import { validateReleaseMetadata } from "./lib/release/workflow-guard.mjs";
 
           const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
-          const expectedAssets = [
-            process.env.ARCHIVE_NAME,
-            `${process.env.ARCHIVE_NAME}.sha256`,
-            `${process.env.ARCHIVE_NAME}.cdx.json`,
-            `${process.env.ARCHIVE_NAME}.spdx.json`,
-            "release-manifest.json",
-            "release-verification.json",
-          ].sort();
-          const actualAssets = release.assets.map((asset) => asset.name).sort();
-          if (release.tagName !== process.env.GITHUB_REF_NAME
-            || release.isDraft !== true
-            || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
-            || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
-            throw new Error("remote draft release metadata or asset inventory does not match the sealed bundle");
-          }
+          validateReleaseMetadata(release, {
+            archiveName: process.env.ARCHIVE_NAME,
+            expectedState: "draft",
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
           NODE
           draft_assets="$RUNNER_TEMP/draft-release-assets"
           mkdir "$draft_assets"
           gh release download "$GITHUB_REF_NAME" --dir "$draft_assets"
-          for item in \
-            "$ARCHIVE_NAME" \
-            "$ARCHIVE_NAME.sha256" \
-            "$ARCHIVE_NAME.cdx.json" \
-            "$ARCHIVE_NAME.spdx.json" \
-            release-manifest.json \
-            release-verification.json; do
-            cmp --silent "release/$item" "$draft_assets/$item"
-          done
-          (cd "$draft_assets" && sha256sum --check "$ARCHIVE_NAME.sha256")
+          DRAFT_ASSETS="$draft_assets" \
+          RELEASE_METADATA="$metadata" \
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { validateMatchingReleaseBundles } from "./lib/release/workflow-guard.mjs";
+
+          const metadata = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          const result = validateMatchingReleaseBundles({
+            archiveName: process.env.ARCHIVE_NAME,
+            localRoot: "release",
+            metadata,
+            remoteRoot: process.env.DRAFT_ASSETS,
+            repository: process.env.GITHUB_REPOSITORY,
+            requireExactMatch: true,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          if (result.state !== "draft") throw new Error("new release is not a draft");
+          NODE
 
   publish:
-    name: Publish verified draft release
+    name: Publish verified release
     needs: package
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     permissions:
@@ -510,6 +525,7 @@ jobs:
       - name: Validate the artifact identity and sealed bundle
         id: validate
         env:
+          EXPECTED_ARCHIVE_NAME: ${{ needs.package.outputs.archive_name }}
           EXPECTED_ARTIFACT_DIGEST: ${{ needs.package.outputs.artifact_digest }}
           EXPECTED_ARTIFACT_ID: ${{ needs.package.outputs.artifact_id }}
           GH_TOKEN: ${{ github.token }}
@@ -526,97 +542,23 @@ jobs:
           expected_artifact_digest="${EXPECTED_ARTIFACT_DIGEST#sha256:}"
           test "$actual_artifact_digest" = "$expected_artifact_digest"
           node --input-type=module <<'NODE'
-          import crypto from "node:crypto";
+          import { createHash } from "node:crypto";
           import fs from "node:fs";
-          import path from "node:path";
+          import { validateReleaseBundleDirectory } from "./lib/release/workflow-guard.mjs";
 
-          const root = fs.realpathSync("release");
-          const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-          const readBoundedJson = (name, limit) => {
-            if (!/^[a-z0-9][a-z0-9._+-]*$/u.test(name)) throw new Error(`unsafe bundle filename: ${name}`);
-            const file = path.join(root, name);
-            const stat = fs.lstatSync(file);
-            if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > limit) {
-              throw new Error(`invalid bundle file: ${name}`);
-            }
-            return { file, size: stat.size, value: JSON.parse(fs.readFileSync(file, "utf8")) };
-          };
-          const manifestRecord = readBoundedJson("release-manifest.json", 64 * 1024);
-          const manifest = manifestRecord.value;
-          if (manifest?.schema_version !== "agentic-sdlc.release-bundle.v1"
-            || manifest?.repository !== process.env.GITHUB_REPOSITORY
-            || manifest?.tag !== process.env.GITHUB_REF_NAME
-            || manifest?.source_sha !== process.env.GITHUB_SHA
-            || manifest?.policy?.path !== "config/release-artifact-policy.json"
-            || !/^[0-9a-f]{64}$/u.test(manifest?.policy?.sha256 ?? "")
-            || sha256(path.resolve(manifest.policy.path)) !== manifest.policy.sha256
-            || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(manifest?.archive?.name ?? "")
-            || manifest?.sbom?.name !== `${manifest?.archive?.name}.spdx.json`
-            || manifest?.cyclonedx?.name !== `${manifest?.archive?.name}.cdx.json`
-            || manifest?.verification?.name !== "release-verification.json") {
-            throw new Error("release manifest identity is invalid");
-          }
-
-          const archiveName = manifest.archive.name;
-          const archivePath = path.join(root, archiveName);
-          const archiveStat = fs.lstatSync(archivePath);
-          if (!archiveStat.isFile() || archiveStat.isSymbolicLink()
-            || archiveStat.size !== manifest.archive.bytes
-            || sha256(archivePath) !== manifest.archive.sha256) {
-            throw new Error("release archive does not match the sealed manifest");
-          }
-          const checksumName = `${archiveName}.sha256`;
-          const checksumPath = path.join(root, checksumName);
-          if (fs.readFileSync(checksumPath, "utf8") !== `${manifest.archive.sha256}  ${archiveName}\n`) {
-            throw new Error("release checksum does not match the sealed archive");
-          }
-
-          const sbom = readBoundedJson(manifest.sbom.name, 32 * 1024 * 1024);
-          if (sbom.size !== manifest.sbom.bytes
-            || sha256(sbom.file) !== manifest.sbom.sha256
-            || sbom.value?.spdxVersion !== "SPDX-2.3"
-            || sbom.value?.dataLicense !== "CC0-1.0"
-            || !Array.isArray(sbom.value?.packages)
-            || !sbom.value.packages.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")) {
-            throw new Error("SBOM does not match the sealed manifest");
-          }
-          const cyclonedx = readBoundedJson(manifest.cyclonedx.name, 32 * 1024 * 1024);
-          if (cyclonedx.size !== manifest.cyclonedx.bytes
-            || sha256(cyclonedx.file) !== manifest.cyclonedx.sha256
-            || cyclonedx.value?.bomFormat !== "CycloneDX"
-            || !/^1\.[4-9]$/u.test(cyclonedx.value?.specVersion ?? "")
-            || !Array.isArray(cyclonedx.value?.components)
-            || !cyclonedx.value.components.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")) {
-            throw new Error("CycloneDX SBOM does not match the sealed manifest");
-          }
-
-          const verification = readBoundedJson(manifest.verification.name, 1024 * 1024);
-          if (verification.size !== manifest.verification.bytes
-            || sha256(verification.file) !== manifest.verification.sha256
-            || verification.value?.status !== "passed"
-            || verification.value?.package?.name !== "agentic-sdlc-codex-plugin"
-            || verification.value?.package?.tag !== process.env.GITHUB_REF_NAME
-            || verification.value?.artifact?.sha256 !== manifest.archive.sha256
-            || verification.value?.smoke?.npm_install !== "passed"
-            || verification.value?.smoke?.cli_help !== "passed"
-            || verification.value?.smoke?.doctor !== "passed"
-            || verification.value?.smoke?.installer_plan !== "passed"
-            || verification.value?.smoke?.installer_zero_write !== true) {
-            throw new Error("release verification report is incomplete or does not match the archive");
-          }
-
-          const expectedFiles = [
+          const archiveName = process.env.EXPECTED_ARCHIVE_NAME;
+          const bundle = validateReleaseBundleDirectory("release", {
             archiveName,
-            checksumName,
-            manifest.cyclonedx.name,
-            manifest.sbom.name,
-            manifest.verification.name,
-            "release-manifest.json",
-          ].sort();
-          const actualFiles = fs.readdirSync(root, { withFileTypes: true });
-          if (actualFiles.some((entry) => !entry.isFile())
-            || JSON.stringify(actualFiles.map((entry) => entry.name).sort()) !== JSON.stringify(expectedFiles)) {
-            throw new Error("immutable release bundle contains an unexpected entry");
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          const policySha = createHash("sha256")
+            .update(fs.readFileSync(bundle.manifest.policy.path))
+            .digest("hex");
+          if (policySha !== bundle.manifest.policy.sha256) {
+            throw new Error("release policy does not match the sealed manifest");
           }
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `archive_name=${archiveName}\n`, "utf8");
           NODE
@@ -630,61 +572,121 @@ jobs:
           event_commit="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
           test "$tag_commit" = "$event_commit"
           gh attestation verify "release/$ARCHIVE_NAME" --repo "$GITHUB_REPOSITORY"
-      - name: Prove the remote draft is unchanged
+      - name: Prove the remote release is unchanged
+        id: remote_state
         env:
           ARCHIVE_NAME: ${{ steps.validate.outputs.archive_name }}
-          EXPECTED_PRERELEASE: ${{ needs.package.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/pre-publish-release.json"
           gh release view "$GITHUB_REF_NAME" \
-            --json assets,isDraft,isPrerelease,tagName > "$metadata"
+            --json assets,author,isDraft,isPrerelease,tagName > "$metadata"
           RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
           import fs from "node:fs";
+          import { validateReleaseMetadata } from "./lib/release/workflow-guard.mjs";
 
           const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
-          const expectedAssets = [
-            process.env.ARCHIVE_NAME,
-            `${process.env.ARCHIVE_NAME}.sha256`,
-            `${process.env.ARCHIVE_NAME}.cdx.json`,
-            `${process.env.ARCHIVE_NAME}.spdx.json`,
-            "release-manifest.json",
-            "release-verification.json",
-          ].sort();
-          const actualAssets = release.assets.map((asset) => asset.name).sort();
-          if (release.tagName !== process.env.GITHUB_REF_NAME
-            || release.isDraft !== true
-            || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
-            || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
-            throw new Error("draft release changed after package verification");
-          }
+          validateReleaseMetadata(release, {
+            archiveName: process.env.ARCHIVE_NAME,
+            expectedState: "either",
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
           NODE
           remote_assets="$RUNNER_TEMP/pre-publish-assets"
           mkdir "$remote_assets"
           gh release download "$GITHUB_REF_NAME" --dir "$remote_assets"
-          for item in \
-            "$ARCHIVE_NAME" \
-            "$ARCHIVE_NAME.sha256" \
-            "$ARCHIVE_NAME.cdx.json" \
-            "$ARCHIVE_NAME.spdx.json" \
-            release-manifest.json \
-            release-verification.json; do
-            cmp --silent "release/$item" "$remote_assets/$item"
-          done
-          (cd "$remote_assets" && sha256sum --check "$ARCHIVE_NAME.sha256")
-      - name: Publish the verified draft
+          RELEASE_METADATA="$metadata" \
+          REMOTE_ASSETS="$remote_assets" \
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { validateMatchingReleaseBundles } from "./lib/release/workflow-guard.mjs";
+
+          const metadata = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          const result = validateMatchingReleaseBundles({
+            archiveName: process.env.ARCHIVE_NAME,
+            localRoot: "release",
+            metadata,
+            remoteRoot: process.env.REMOTE_ASSETS,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `already_published=${result.state === "published"}\n`, "utf8");
+          NODE
+      - name: Publish or confirm the fully verified release
         env:
+          ALREADY_PUBLISHED: ${{ steps.remote_state.outputs.already_published }}
+          ARCHIVE_NAME: ${{ steps.validate.outputs.archive_name }}
+          GH_HTTP_TIMEOUT: 15
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          edit_status=0
+          if [[ "$ALREADY_PUBLISHED" != "true" ]]; then
+            set +e
+            timeout --signal=TERM --kill-after=15s 60s \
+              gh release edit "$GITHUB_REF_NAME" --draft=false
+            edit_status=$?
+            set -e
+          fi
+
+          publication_deadline=$((SECONDS + 120))
+          publication_complete=false
           metadata="$RUNNER_TEMP/published-release.json"
-          gh release view "$GITHUB_REF_NAME" --json isDraft,tagName > "$metadata"
-          RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
+          while (( SECONDS < publication_deadline )); do
+            if timeout --signal=TERM --kill-after=5s 20s \
+              gh release view "$GITHUB_REF_NAME" \
+                --json assets,author,isDraft,isPrerelease,tagName > "$metadata"; then
+              if RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
           import fs from "node:fs";
-          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
-          if (release.tagName !== process.env.GITHUB_REF_NAME || release.isDraft !== false) {
-            throw new Error("release publication did not reach the expected final state");
-          }
+          import { validateReleaseMetadata } from "./lib/release/workflow-guard.mjs";
+
+          const metadata = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          validateReleaseMetadata(metadata, {
+            archiveName: process.env.ARCHIVE_NAME,
+            expectedState: "published",
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          NODE
+              then
+                publication_complete=true
+                break
+              fi
+            fi
+            sleep 5
+          done
+          if [[ "$publication_complete" != "true" ]]; then
+            printf 'Release publication did not converge within 120 seconds (edit status %s).\n' "$edit_status" >&2
+            exit 1
+          fi
+
+          published_assets="$RUNNER_TEMP/published-release-assets"
+          mkdir "$published_assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$published_assets"
+          PUBLISHED_ASSETS="$published_assets" \
+          RELEASE_METADATA="$metadata" \
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { validateMatchingReleaseBundles } from "./lib/release/workflow-guard.mjs";
+
+          const metadata = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          const result = validateMatchingReleaseBundles({
+            archiveName: process.env.ARCHIVE_NAME,
+            localRoot: "release",
+            metadata,
+            remoteRoot: process.env.PUBLISHED_ASSETS,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            sourceSha: process.env.GITHUB_SHA,
+            tag: process.env.GITHUB_REF_NAME,
+          });
+          if (result.state !== "published") throw new Error("release publication did not reach the final state");
           NODE
