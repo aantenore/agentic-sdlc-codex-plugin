@@ -444,6 +444,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(proposed.delivery_kind, "pull_request");
   assert.equal(proposed.delivery_id, "PR-1");
   assert.equal(proposed.schema_version, "delivery-execution-profile:v2");
+  assert.deepEqual(proposed.pull_request_target.allowed_actions, [
+    "git.commit",
+    "git.push",
+    "pull_request.create",
+    "pull_request.update",
+    "repository.read",
+    "repository.write",
+    "test.run",
+  ]);
   assert.deepEqual(proposed.provider_bindings, [
     { action: "git.push", provider_id: "git-remote" },
     { action: "pull_request.create", provider_id: "github-cli" },

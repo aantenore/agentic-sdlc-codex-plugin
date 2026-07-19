@@ -10253,7 +10253,15 @@ function deliveryTargetFromOptions(context, kind, options) {
         head_branch: requireOption(options, "head"),
         allowed_actions: (allowedActions.length > 0
           ? allowedActions
-          : ["repository.read", "repository.write", "test.run", "git.commit", "git.push", "pull_request.update"]).sort(),
+          : [
+              "repository.read",
+              "repository.write",
+              "test.run",
+              "git.commit",
+              "git.push",
+              "pull_request.create",
+              "pull_request.update",
+            ]).sort(),
         merge_allowed: options["merge-allowed"] === true,
       },
       local_release_target: null,
