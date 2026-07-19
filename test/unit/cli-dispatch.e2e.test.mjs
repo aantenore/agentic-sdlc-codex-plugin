@@ -46,6 +46,8 @@ test("runtime registry dispatches help, presets, completion, and Observatory boo
   const observeHelp = JSON.parse(mustRun(["help", "observe", "--json"]).stdout);
   const observeFlags = new Set(observeHelp.options.map((descriptor) => descriptor.flag));
   assert.equal(observeFlags.has("--portfolio-manifest"), true);
+  const portfolioHelp = JSON.parse(mustRun(["help", "portfolio", "status", "--json"]).stdout);
+  assert.equal(portfolioHelp.options.some((descriptor) => descriptor.flag === "--manifest"), true);
 
   const presets = JSON.parse(mustRun(["preset", "list", "--json"]).stdout);
   assert.equal(presets.schema_version, "agentic-sdlc-cli-preset-list-v1");
@@ -72,6 +74,40 @@ test("runtime registry dispatches help, presets, completion, and Observatory boo
   const missingError = JSON.parse(missingManifest.stderr);
   assert.match(missingError.error.message, /portfolio could not be opened/u);
   assert.match(missingError.error.message, /--portfolio-manifest/u);
+});
+
+test("portfolio status emits compact path-free JSON and exits without a server token", () => {
+  const root = fs.realpathSync(temporaryProject("portfolio-status"));
+  for (const id of ["alpha", "beta"]) {
+    const projectRoot = path.join(root, "projects", id, ".sdlc");
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, "project.json"), `${JSON.stringify({
+      project_id: id,
+      project_name: id.toUpperCase(),
+    })}\n`);
+  }
+  fs.writeFileSync(path.join(root, "portfolio.json"), `${JSON.stringify({
+    schema_version: "portfolio-manifest:v1",
+    projects: [
+      { id: "alpha", path: "projects/alpha" },
+      { id: "beta", path: "projects/beta" },
+    ],
+  })}\n`);
+
+  const result = mustRun([
+    "portfolio", "status",
+    "--root", root,
+    "--manifest", "portfolio.json",
+    "--json",
+  ]);
+  const status = JSON.parse(result.stdout);
+
+  assert.equal(status.schema_version, "agentic-sdlc:portfolio-status:v1");
+  assert.equal(status.project_count, 2);
+  assert.deepEqual(status.projects.map((project) => project.id), ["alpha", "beta"]);
+  assert.doesNotMatch(result.stdout, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  assert.doesNotMatch(result.stdout, /access_token|bearer|127\.0\.0\.1/u);
+  assert.equal(result.stderr, "");
 });
 
 test("catalog options and explicit compatibility options remain accepted by the parser", () => {

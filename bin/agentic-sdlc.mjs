@@ -90,6 +90,7 @@ import {
   validateContextOptimizationLineage,
 } from "../lib/context-optimization.mjs";
 import { runObserveCommand } from "../lib/change-observatory/cli.mjs";
+import { createPortfolioRuntime } from "../lib/change-observatory/portfolio-runtime.mjs";
 import {
   launchDedicatedObservatory,
   OBSERVATORY_WORKER_MARKER,
@@ -761,6 +762,7 @@ function buildCliRuntimeHandlerRegistry() {
     "preset.show": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("show", resolution.args, parsed)),
     "preset.export": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("export", resolution.args, parsed)),
     observe: bootstrap(runObserveFromCli),
+    "portfolio.status": bootstrap(runPortfolioStatusFromCli),
     "config.status": preConfig(({ context, options }) => showConfigStatus(context, options)),
     "config.migrate": preConfig(({ context, options }) => migrateProjectConfig(context, options)),
     init: preConfig(({ context, options }) => initProject(context, options)),
@@ -905,6 +907,51 @@ async function runObserveFromCli({ options, rawArgs }) {
       );
     }
     throw error;
+  }
+}
+
+async function runPortfolioStatusFromCli({ options, resolution }) {
+  if (resolution.args.length > 0) {
+    fail(`Unknown command: ${resolution.input.slice(0, 3).join(" ")}`);
+  }
+  const manifestPath = getOptionString(options, "manifest");
+  if (!manifestPath) fail("portfolio status needs --manifest with one explicit relative JSON path");
+  let runtime;
+  try {
+    runtime = await createPortfolioRuntime({
+      portfolioRoot: path.resolve(String(options.root || process.cwd())),
+      manifestPath,
+    });
+    const representation = await runtime.getSummaryRepresentation();
+    const summary = JSON.parse(representation.body.toString("utf8"));
+    if (options.json === true) {
+      console.log(JSON.stringify({
+        schema_version: "agentic-sdlc:portfolio-status:v1",
+        status: summary.status,
+        health: summary.health,
+        generated_at: summary.generatedAt,
+        project_count: summary.projectCount,
+        available_project_count: summary.availableProjectCount,
+        unavailable_project_count: summary.unavailableProjectCount,
+        needs_attention_project_count: summary.needsAttentionProjectCount,
+        review_project_count: summary.reviewProjectCount,
+        aggregates: summary.aggregates,
+        projects: summary.projects,
+      }));
+      return;
+    }
+    console.log(`Portfolio: ${summary.health} (${summary.availableProjectCount}/${summary.projectCount} projects available)`);
+    for (const project of summary.projects) {
+      console.log(`- ${project.id}: ${project.health}`);
+    }
+  } catch (error) {
+    if (error instanceof TypeError) fail(error.message);
+    if (error instanceof ObservatoryPathError) {
+      fail(`The portfolio status could not be read safely: ${error.message}`);
+    }
+    throw error;
+  } finally {
+    await runtime?.dispose().catch(() => {});
   }
 }
 
@@ -34490,6 +34537,7 @@ function printHelp() {
 Usage:
   agentic-sdlc observe [--root path] [--portfolio-manifest relative.json]
       [--host 127.0.0.1] [--port 0] [--no-open] [--json]
+  agentic-sdlc portfolio status [--root path] --manifest relative.json [--json]
   agentic-sdlc doctor [--root path] [--json]
   agentic-sdlc config status [--root path] [--json]
   agentic-sdlc config migrate [--root path] [--json]

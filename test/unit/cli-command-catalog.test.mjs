@@ -37,6 +37,7 @@ test("catalog covers the dispatch families and the self-service commands", () =>
     "preset show",
     "preset export",
     "observe",
+    "portfolio status",
     "config status",
     "config migrate",
     "init",
