@@ -5522,11 +5522,19 @@ test("story step completion requires linked outputs and prepares releasable hand
     "functional-analysis",
     "--summary",
     "Functional analysis accepted for implementation",
+    "--artifact",
+    artifact,
     "--json",
   ]).stdout);
   assert.equal(completed.step.status, "completed");
   assert.equal(completed.step.output_links.length, 1);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-001", "steps", "functional-analysis.json")), true);
+  const completedTrace = readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl")).at(-1);
+  assert.deepEqual(completedTrace.evidence, [
+    ".sdlc/stories/ST-001/steps/functional-analysis.json",
+    artifact,
+  ]);
+  assert.deepEqual(completedTrace.evidence_refs.map((item) => item.path), completedTrace.evidence);
 
   const handoff = JSON.parse(mustRun([
     "story",

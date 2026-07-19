@@ -24440,12 +24440,12 @@ function completeStoryStep(context, options) {
     summary: summary || `Completed ${step} for ${storyId}`,
     action: "story.complete-step",
     actor: attribution.actor,
-    evidence: [
+    evidence: Array.from(new Set([
       relativeStepPath,
       ...record.artifacts.map((item) => item.path),
       ...record.evidence.map((item) => item.path),
       ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
-    ],
+    ])),
     related: [storyId, step, ...record.output_links.map((item) => item.id)],
     git: attribution.git,
     run: attribution.run,
