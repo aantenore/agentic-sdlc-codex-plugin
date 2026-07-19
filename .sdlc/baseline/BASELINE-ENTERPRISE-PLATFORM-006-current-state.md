@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refresh the trusted enterprise platform snapshot after the portfolio governance lineage and exact PR creation boundary fixes.
+Refresh the trusted enterprise platform snapshot after the final Windows path, loaded-runner, and process-marker reliability fixes.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.

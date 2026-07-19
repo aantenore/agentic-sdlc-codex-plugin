@@ -4,13 +4,13 @@
   "sdlc_version": "0.11.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Refresh the trusted enterprise platform snapshot after the portfolio governance lineage and exact PR creation boundary fixes.",
+  "summary": "Refresh the trusted enterprise platform snapshot after the final Windows path, loaded-runner, and process-marker reliability fixes.",
   "repository_snapshot": {
     "root_name": "worktree",
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
+      "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -904,9 +904,9 @@
     "lib/change-observatory/model-cache.mjs": "b9926a7c3e36b87fa3d9ebd21397f8b34bca58f15eff730189f9c06c69cdaca7",
     "lib/change-observatory/normalizer.mjs": "dd24cdc9c1d2aff66383f3f54e6f58813cb8697874be01f31882a0a3c33f6763",
     "lib/change-observatory/operations.mjs": "8dd2cc548a03177b9b19dd486447489529223967867e1df03a88c073ce5060d8",
-    "lib/change-observatory/path-safety.mjs": "960d96462fe2d8ba78c49a51e28018d8481047b3b3c6d0a4e6fd4dad7fcd2f7c",
+    "lib/change-observatory/path-safety.mjs": "0aa3b53a94b7ea91627667fa7859590a659d43cf0b8dc6d99bf1a6ba32204245",
     "lib/change-observatory/portfolio-collector.mjs": "25a65c5603d2c634c4b2631ca6872c19de9a7212d0187406fea02638c2e3839c",
-    "lib/change-observatory/portfolio-manifest.mjs": "a06bfa0fb75c9ff6a5e0504aa0741357ff64df8f01844d97d46f2b5bae82dbe4",
+    "lib/change-observatory/portfolio-manifest.mjs": "ceaeb295c3958e6896e9150961876be103e2bec8ff3a789da7346220ac75e149",
     "lib/change-observatory/portfolio-project-summary.mjs": "57a4401a5ca8e4a54757949fd20c6d7d58fb2d05ceb57d5a63cfdec24d255c6b",
     "lib/change-observatory/portfolio-runtime.mjs": "ba9edebf7c454734ebddd4f747a9e676641ceb680959734c4ddbd7648f388e04",
     "lib/change-observatory/project-runtime.mjs": "cf2396668f14280b52b18adcbc9f098704e14deb675805b63479c78bee80a505",
@@ -995,7 +995,7 @@
     "test/unit/change-observatory-ui.test.mjs": "41b2d1b9e8bc41677b660dcfbd0712ef37778e0c144f23334e92964e8cc8a0ed",
     "test/unit/cli-command-catalog.test.mjs": "d07ae33826df20843feab2e6e306c6407a58e33b76c2c0d697510b24e3c3acb5",
     "test/unit/cli-completion.test.mjs": "22b4eaefc5424f07969ef1003c534398207aded717383159e0315341249f6472",
-    "test/unit/cli-dispatch.e2e.test.mjs": "3eda3034cddf0718d1e77138a6fd9ddb3c3f3be0172ee3587170fa551fea450f",
+    "test/unit/cli-dispatch.e2e.test.mjs": "94f3b61773dad618aedee2dec1de2fc1a5aa5394dff24ef2a4b98c3100b4c9c4",
     "test/unit/cli-dispatch.test.mjs": "fb69aef84388b6f3f192d785ffc0afd1ac97f582a14bcccc9cb8ec2318f7f6cc",
     "test/unit/cli-help.test.mjs": "27d96aedd7f0374b2fe78af199f5ba8795916f06174c16ac69c76889a5e9c70b",
     "test/unit/cli-observability.test.mjs": "56e2437abe2c3ffcb0f424c5f313dafbdb7f568c7e2b833bc3de4d2c4750cf20",
@@ -1006,9 +1006,9 @@
     "test/unit/delivery-provider-registry.test.mjs": "8a66d8b0a67e522b4b54ad9e48d91d059c4c700af93ed21988d5b8df3517b59c",
     "test/unit/effective-config.test.mjs": "344e221770f3a243751a144d3a0341de199ebb784a805b68606cb28f81c60d08",
     "test/unit/enterprise-foundation-fixture.test.mjs": "8306ffd859216f21ef2c22570ed00de4802d35512243e72b9e4004d885e30ca1",
-    "test/unit/enterprise-performance-benchmark.test.mjs": "402c4afbae4ca78736e39ec9c9b10e456a8f238b2572ef64b0e35896a4d9e48e",
+    "test/unit/enterprise-performance-benchmark.test.mjs": "76f7dbc0f9a1aa8f29beb10e56de00d771015d5d5c7580b5db5ab6757b2202ac",
     "test/unit/execution-budget.test.mjs": "b59e2b57e88036f8cf3493ecb596ef695a2463643dca488548d7119122c2fdcf",
-    "test/unit/governance-mutation-cli.test.mjs": "e73c8f448464b752e85235249fc8abfe66cd04b67747c96daab2f409a97389f6",
+    "test/unit/governance-mutation-cli.test.mjs": "80a5789cc6469728606ffd380113d6dd3422603998137e57260cc63462a391af",
     "test/unit/governance-mutation-guard.test.mjs": "2b7ed896843c5e5e631136a4e3dccfe7e239da7cfe740c0f6e7590c35a7cbfd5",
     "test/unit/governance-policy-engine.test.mjs": "81791f2a412980f072b3be3aa38b0e7d181872005ddd775b659143afccabc94c",
     "test/unit/human-guidance.test.mjs": "eeaf4ce8807205f1105168947048f043906ee86fa845630c6dd9908025f09ee6",
@@ -1037,10 +1037,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260719015321-b7903e",
+      "id": "APR-20260719024005-033f02",
       "baseline_id": "BASELINE-ENTERPRISE-PLATFORM-006",
       "status": "approved",
-      "summary": "Antonio authorized all in-scope refreshes and approvals needed to complete this implementation autonomously; approve this exact refreshed project snapshot.",
+      "summary": "Antonio authorized the autonomous completion of this delivery; approve this exact refreshed project snapshot after all final reliability fixes.",
       "scope": {
         "principle": "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
         "subject_id": "BASELINE-ENTERPRISE-PLATFORM-006",
@@ -1057,19 +1057,19 @@
       "authorization_action": null,
       "explicit_user_confirmation": true,
       "provisional": false,
-      "approved_content_hash": "eccc2e7d37a0e3ff12e09ba2c449e6b06a5726725705e6b670de197450de858d",
+      "approved_content_hash": "226e433418ef75b2736c5ae38ca8a144babfb879057732915a79ddfebc3ed786",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "antonioantenore",
         "type": "human",
         "name": "Antonio Antenore",
         "email": "antonio.antenore@gmail.com",
-        "source": "environment"
+        "source": "cli"
       },
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PORTFOLIO",
-        "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
+        "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -1086,11 +1086,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-19T01:53:21.142Z"
+      "created_at": "2026-07-19T02:40:05.764Z"
     }
   ],
-  "created_at": "2026-07-19T01:53:16.644Z",
-  "updated_at": "2026-07-19T01:53:21.142Z",
+  "created_at": "2026-07-19T02:39:59.937Z",
+  "updated_at": "2026-07-19T02:40:05.764Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -1102,7 +1102,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
+      "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -1124,7 +1124,7 @@
       "type": "human",
       "name": "Antonio Antenore",
       "email": "antonio.antenore@gmail.com",
-      "source": "environment"
+      "source": "cli"
     }
   }
 }
