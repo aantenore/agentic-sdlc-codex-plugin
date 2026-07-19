@@ -101,8 +101,18 @@ no sibling-directory discovery or fallback is performed:
 agentic-sdlc observe --root /path/to/workspace --portfolio-manifest portfolio.json
 ```
 
+For a compact read-only status that exits without opening a server or creating
+an access token:
+
+```bash
+agentic-sdlc portfolio status --root /path/to/workspace --manifest portfolio.json --json
+```
+
 The portfolio starts with bounded summary cards and loads a project's detailed
-lineage only after it is selected. See [Change Observatory](docs/change-observatory.md#open-an-explicit-project-portfolio)
+lineage only after it is selected. Its versioned summary reports bounded active
+workflows, blockers, risks, budgets, dependencies, and releases; an eight-entry
+LRU disposes full project caches as the reader moves across larger manifests.
+See [Change Observatory](docs/change-observatory.md#open-an-explicit-project-portfolio)
 for the manifest format and path protections.
 
 The server binds only to `127.0.0.1`, selects an ephemeral port by default, protects evidence APIs with a per-run token carried in the URL fragment, and makes no project writes. Plain-language explanations retain their `codex-generated`, `deterministic`, or `human-authored` label and contain only stored summaries, rationale, alternatives, inputs, outputs, and evidence—never private chain-of-thought. See [Change Observatory](docs/change-observatory.md) for the full model.

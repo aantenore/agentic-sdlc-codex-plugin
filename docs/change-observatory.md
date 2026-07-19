@@ -57,13 +57,36 @@ agentic-sdlc observe \
   --portfolio-manifest portfolio.json
 ```
 
+For CI or a quick terminal check, use the one-shot read-only command instead:
+
+```bash
+agentic-sdlc portfolio status \
+  --root /work \
+  --manifest portfolio.json \
+  --json
+```
+
+It prints compact status JSON and exits. It does not start an HTTP server,
+create a bearer token, or emit absolute project paths.
+
 The manifest and every project path must be explicit, portable paths relative
 to `--root`. Absolute paths, parent traversal, environment variables, globs,
 URI paths, symlinks, duplicate IDs, duplicate paths, and two paths to the same
 physical directory are rejected. A manifest may list from 1 to 64 projects.
 
-The first screen reads bounded summaries only. Choose a project to load its
-detailed lineage; choosing **All projects** returns to the portfolio summary.
+The first screen reads bounded summaries only. Summary collection is a separate
+projection and never builds a project's full Observatory model. It reads only
+the canonical project, requirement, story/workflow, risk, budget, dependency,
+release, and gate-report locations needed for the cards. Per project it reads
+at most 256 files, 64 KiB per file, and 2 MiB in total, and retains at most
+eight preview items per aggregate. The versioned
+`change-observatory:portfolio-aggregates:v1` projection reports active
+workflows, blockers, risks, budgets, dependencies, and releases. Blockers,
+failed releases, exceeded budgets, malformed summary evidence, and unresolved
+risks determine the displayed project and portfolio health rather than a
+generic count alone.
+
+Choose a project to load its detailed lineage; choosing **All projects** returns to the portfolio summary.
 If one project cannot be read safely, its card explains that it is unavailable
 while the other projects remain usable. Raw evidence links stay bound to the
 selected manifest project. Without `--portfolio-manifest`, the existing
@@ -100,7 +123,10 @@ and UI boundaries and can build the current read model. A damaged or temporarily
 changing `.sdlc` tree may therefore leave `/live` at `200` while `/ready`
 returns `503`; this is intentional and makes the failure diagnosable without
 pretending the evidence is usable. Startup performs the readiness warm-up
-before announcing `observatory.ready`.
+before announcing `observatory.ready`. In portfolio mode that warm-up builds
+only the lightweight summary. The four-worker collection ceiling is validated
+before the server binds, so an invalid concurrency setting cannot produce a
+false-ready process.
 
 All routes accept only `GET` and `HEAD` and are available only on the loopback
 server. “Bearer token” below means the random per-run token that the browser
@@ -285,6 +311,15 @@ pattern should be as narrow as its contract and can never disable a known
 credential detector or an explicit privacy rule.
 
 The server keeps one serialized read model for the current canonical revision. Concurrent requests share one rebuild, and subsequent requests receive a strong `ETag`; an unchanged conditional `GET` or `HEAD` returns `304` without serializing or transferring the model again. Before every reuse, the server rechecks the project boundary and a deterministic, bounded snapshot of canonical source content. Changes during a rebuild cause a retry rather than publishing a mixed revision. Derived cache and index directories never participate in the revision.
+
+Portfolio project runtimes use an access-ordered LRU with eight cached projects
+by default and no more than four concurrent summary reads. Evicted runtimes
+clear their full-model caches, and server shutdown disposes every remaining or
+in-flight runtime. Cache hits, misses, evictions, clears, and disposal are
+reported through the existing closed-cardinality local cache metric. Filesystem
+device and inode identities remain exact bigint values throughout capture and
+comparison, including Windows file IDs larger than JavaScript's safe integer
+range.
 
 The browser keeps only the matching model and `ETag` in memory. It sends
 `If-None-Match` on refresh and reuses that exact model after `304`. It does not
