@@ -2,13 +2,25 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   verify:
+    name: Verify (${{ matrix.os }}, Node ${{ matrix.node }})
+    permissions:
+      contents: read
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -16,48 +28,639 @@ jobs:
         node: [18.18.0, 20, 24]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - name: Check out the tagged source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: ${{ matrix.node }}
-      - run: npm run check
-      - run: npm test
-      - run: npm run doctor
-      - run: npm pack --dry-run
+          package-manager-cache: false
+      - name: Check source and run the complete test suite
+        run: |
+          set -euo pipefail
+          npm run check
+          npm test
+      - name: Pack and verify the policy-controlled artifact
+        env:
+          RELEASE_POLICY: config/release-artifact-policy.json
+        run: |
+          set -euo pipefail
+          verify_dir="$RUNNER_TEMP/release-verify-${{ matrix.os }}-${{ matrix.node }}"
+          mkdir "$verify_dir"
+          npm pack --json --ignore-scripts --pack-destination "$verify_dir" > "$verify_dir/npm-pack.json"
+          archive_name="$(node --input-type=module -e '
+            import fs from "node:fs";
+            const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!Array.isArray(report) || report.length !== 1 || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
+            process.stdout.write(report[0].filename);
+          ' "$verify_dir/npm-pack.json")"
+          node scripts/verify-release-package.mjs \
+            --artifact "$verify_dir/$archive_name" \
+            --tag "$GITHUB_REF_NAME" \
+            --policy "$RELEASE_POLICY" \
+            --json
 
   package:
     needs: verify
+    name: Build immutable release bundle
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    timeout-minutes: 15
     runs-on: ubuntu-latest
+    outputs:
+      archive_name: ${{ steps.pack.outputs.archive_name }}
+      artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - name: Check out the exact tagged source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
-      - name: Verify tag and package version
-        shell: bash
+          package-manager-cache: false
+      - name: Build and verify the release archive once
+        id: pack
+        env:
+          RELEASE_POLICY: config/release-artifact-policy.json
         run: |
-          test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-      - name: Build package and checksum
-        id: package
-        shell: bash
-        run: |
-          archive="$(npm pack)"
-          sha256sum "$archive" > "$archive.sha256"
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "${GITHUB_REF_NAME}^{commit}")"
+          event_commit="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+          test "$tag_commit" = "$event_commit"
+          mkdir release
+          npm pack --json --ignore-scripts --pack-destination release > release/npm-pack.json
+          archive_name="$(node --input-type=module -e '
+            import fs from "node:fs";
+            const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (!Array.isArray(report) || report.length !== 1 || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
+            process.stdout.write(report[0].filename);
+          ' release/npm-pack.json)"
+          archive="release/$archive_name"
+          test -f "$archive"
+          node scripts/verify-release-package.mjs \
+            --artifact "$archive" \
+            --tag "$GITHUB_REF_NAME" \
+            --policy "$RELEASE_POLICY" \
+            --json > release/release-verification.json
+          (cd release && sha256sum "$archive_name" > "$archive_name.sha256")
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v5
+          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
+      - name: Prepare the exact installed tree for content SBOMs
+        id: sbom_source
+        env:
+          ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
+        run: |
+          set -euo pipefail
+          install_root="$RUNNER_TEMP/release-sbom-install"
+          cache_root="$RUNNER_TEMP/release-sbom-cache"
+          mkdir "$install_root" "$cache_root"
+          npm install \
+            --ignore-scripts \
+            --offline \
+            --no-audit \
+            --no-fund \
+            --no-package-lock \
+            --cache "$cache_root" \
+            --prefix "$install_root" \
+            "$ARCHIVE_PATH"
+          sbom_source="$install_root/node_modules/agentic-sdlc-codex-plugin"
+          test -d "$sbom_source"
+          test ! -L "$sbom_source"
+          SOURCE_PATH="$sbom_source" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const installed = JSON.parse(fs.readFileSync(path.join(process.env.SOURCE_PATH, "package.json"), "utf8"));
+          const verification = JSON.parse(fs.readFileSync("release/release-verification.json", "utf8"));
+          if (installed?.name !== verification?.package?.name
+            || installed?.version !== verification?.package?.version) {
+            throw new Error("installed SBOM source does not match the verified archive identity");
+          }
+          NODE
+          echo "path=$sbom_source" >> "$GITHUB_OUTPUT"
+      - name: Install checksum-pinned Syft 1.42.3
+        id: syft
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in
+            X64)
+              syft_asset="syft_1.42.3_linux_amd64.tar.gz"
+              syft_sha256="0d6be741479eddd2c8644a288990c04f3df0d609bbc1599a005532a9dff63509"
+              ;;
+            ARM64)
+              syft_asset="syft_1.42.3_linux_arm64.tar.gz"
+              syft_sha256="dc630590c953347789d08f8ebf57c7d8094db89100785fcd94b1cddeac791804"
+              ;;
+            *)
+              printf 'Unsupported runner architecture: %s\n' "$RUNNER_ARCH" >&2
+              exit 1
+              ;;
+          esac
+          syft_root="$RUNNER_TEMP/syft-1.42.3"
+          mkdir "$syft_root"
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --retry 3 \
+            --show-error \
+            --silent \
+            --tlsv1.2 \
+            "https://github.com/anchore/syft/releases/download/v1.42.3/$syft_asset" \
+            --output "$syft_root/$syft_asset"
+          printf '%s  %s\n' "$syft_sha256" "$syft_root/$syft_asset" | sha256sum --check --strict
+          tar -xzf "$syft_root/$syft_asset" -C "$syft_root" syft
+          test -f "$syft_root/syft"
+          test ! -L "$syft_root/syft"
+          SYFT_PATH="$syft_root/syft" node --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
+
+          const result = JSON.parse(execFileSync(process.env.SYFT_PATH, ["version", "-o", "json"], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }));
+          if (result?.version !== "1.42.3") throw new Error("checksum-pinned Syft reports an unexpected version");
+          NODE
+          echo "path=$syft_root/syft" >> "$GITHUB_OUTPUT"
+      - name: Generate archive-content SPDX and CycloneDX SBOMs
+        env:
+          SBOM_SOURCE: ${{ steps.sbom_source.outputs.path }}
+          SYFT_PATH: ${{ steps.syft.outputs.path }}
+        run: |
+          set -euo pipefail
+          "$SYFT_PATH" scan "dir:$SBOM_SOURCE" \
+            --override-default-catalogers javascript-package-cataloger \
+            --output "spdx-json=${{ steps.pack.outputs.archive }}.spdx.json" \
+            --output "cyclonedx-json=${{ steps.pack.outputs.archive }}.cdx.json"
+      - name: Verify both SBOMs and seal the release manifest
+        env:
+          ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
+          ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
+          CYCLONEDX_PATH: ${{ steps.pack.outputs.archive }}.cdx.json
+          POLICY_PATH: config/release-artifact-policy.json
+          SBOM_PATH: ${{ steps.pack.outputs.archive }}.spdx.json
+          VERIFICATION_PATH: release/release-verification.json
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+          const boundedJson = (file, limit) => {
+            const size = fs.statSync(file).size;
+            if (size < 2 || size > limit) throw new Error(`${file} has an invalid size`);
+            return { value: JSON.parse(fs.readFileSync(file, "utf8")), size };
+          };
+          const boundedFile = (file, limit) => {
+            const stat = fs.statSync(file);
+            if (!stat.isFile() || stat.size < 2 || stat.size > limit) throw new Error(`${file} has an invalid size`);
+            return { size: stat.size };
+          };
+
+          const sbom = boundedJson(process.env.SBOM_PATH, 32 * 1024 * 1024);
+          if (sbom.value?.spdxVersion !== "SPDX-2.3"
+            || sbom.value?.dataLicense !== "CC0-1.0"
+            || typeof sbom.value?.documentNamespace !== "string"
+            || !Array.isArray(sbom.value?.packages)
+            || sbom.value.packages.length < 1
+            || !sbom.value.packages.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")
+            || !Array.isArray(sbom.value?.creationInfo?.creators)
+            || !sbom.value.creationInfo.creators.some((entry) => typeof entry === "string" && entry.startsWith("Tool:"))) {
+            throw new Error("generated SPDX SBOM is incomplete or does not describe the release package");
+          }
+          const cyclonedx = boundedJson(process.env.CYCLONEDX_PATH, 32 * 1024 * 1024);
+          if (cyclonedx.value?.bomFormat !== "CycloneDX"
+            || !/^1\.[4-9]$/u.test(cyclonedx.value?.specVersion ?? "")
+            || !Array.isArray(cyclonedx.value?.components)
+            || !cyclonedx.value.components.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")) {
+            throw new Error("generated CycloneDX SBOM is incomplete or does not describe the release package");
+          }
+
+          const archive = boundedFile(process.env.ARCHIVE_PATH, 16 * 1024 * 1024);
+          const verification = boundedJson(process.env.VERIFICATION_PATH, 1024 * 1024);
+          const archiveSha = sha256(process.env.ARCHIVE_PATH);
+          if (verification.value?.status !== "passed"
+            || verification.value?.package?.tag !== process.env.GITHUB_REF_NAME
+            || verification.value?.artifact?.sha256 !== archiveSha
+            || verification.value?.smoke?.npm_install !== "passed"
+            || verification.value?.smoke?.cli_help !== "passed"
+            || verification.value?.smoke?.doctor !== "passed"
+            || verification.value?.smoke?.installer_plan !== "passed"
+            || verification.value?.smoke?.installer_zero_write !== true) {
+            throw new Error("policy-driven release verification did not pass every smoke gate");
+          }
+
+          const manifest = {
+            schema_version: "agentic-sdlc.release-bundle.v1",
+            repository: process.env.GITHUB_REPOSITORY,
+            tag: process.env.GITHUB_REF_NAME,
+            source_sha: process.env.GITHUB_SHA,
+            archive: {
+              name: process.env.ARCHIVE_NAME,
+              bytes: archive.size,
+              sha256: archiveSha,
+            },
+            sbom: {
+              name: path.basename(process.env.SBOM_PATH),
+              bytes: sbom.size,
+              sha256: sha256(process.env.SBOM_PATH),
+            },
+            cyclonedx: {
+              name: path.basename(process.env.CYCLONEDX_PATH),
+              bytes: cyclonedx.size,
+              sha256: sha256(process.env.CYCLONEDX_PATH),
+            },
+            verification: {
+              name: path.basename(process.env.VERIFICATION_PATH),
+              bytes: verification.size,
+              sha256: sha256(process.env.VERIFICATION_PATH),
+            },
+            policy: {
+              path: process.env.POLICY_PATH,
+              sha256: sha256(process.env.POLICY_PATH),
+            },
+          };
+          fs.writeFileSync(
+            "release/release-manifest.json",
+            `${JSON.stringify(manifest, null, 2)}\n`,
+            { encoding: "utf8", flag: "wx", mode: 0o600 },
+          );
+          NODE
+      - name: Attest build provenance for the archive
+        id: provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
         with:
-          name: agentic-sdlc-${{ github.ref_name }}
+          subject-path: ${{ steps.pack.outputs.archive }}
+      - name: Verify the published provenance
+        env:
+          ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "$ARCHIVE_PATH" --repo "$GITHUB_REPOSITORY"
+      - name: Define the immutable Actions artifact identity
+        id: identity
+        run: |
+          set -euo pipefail
+          echo "artifact_name=release-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Upload the immutable release bundle
+        id: upload
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
           path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.archive }}.sha256
+            ${{ steps.pack.outputs.archive }}
+            ${{ steps.pack.outputs.archive }}.sha256
+            ${{ steps.pack.outputs.archive }}.cdx.json
+            ${{ steps.pack.outputs.archive }}.spdx.json
+            release/release-verification.json
+            release/release-manifest.json
           if-no-files-found: error
-      - name: Publish GitHub release
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+          retention-days: 30
+      - name: Recover only an exact matching draft from an earlier attempt
+        env:
+          ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prior_metadata="$RUNNER_TEMP/prior-draft-release.json"
+          prior_error="$RUNNER_TEMP/prior-draft-release.err"
+          if gh release view "$GITHUB_REF_NAME" \
+            --json assets,isDraft,isPrerelease,tagName > "$prior_metadata" 2> "$prior_error"; then
+            PRIOR_METADATA="$prior_metadata" node --input-type=module <<'NODE'
+            import fs from "node:fs";
+
+            const release = JSON.parse(fs.readFileSync(process.env.PRIOR_METADATA, "utf8"));
+            const expectedAssets = [
+              process.env.ARCHIVE_NAME,
+              `${process.env.ARCHIVE_NAME}.sha256`,
+              `${process.env.ARCHIVE_NAME}.cdx.json`,
+              `${process.env.ARCHIVE_NAME}.spdx.json`,
+              "release-manifest.json",
+              "release-verification.json",
+            ].sort();
+            const actualAssets = release.assets.map((asset) => asset.name).sort();
+            if (release.tagName !== process.env.GITHUB_REF_NAME
+              || release.isDraft !== true
+              || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+              || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
+              throw new Error("an existing release is not the exact workflow-owned draft expected for recovery");
+            }
+            NODE
+            prior_assets="$RUNNER_TEMP/prior-draft-assets"
+            mkdir "$prior_assets"
+            gh release download "$GITHUB_REF_NAME" --dir "$prior_assets"
+            PRIOR_ASSETS="$prior_assets" node --input-type=module <<'NODE'
+            import crypto from "node:crypto";
+            import fs from "node:fs";
+            import path from "node:path";
+
+            const local = JSON.parse(fs.readFileSync("release/release-manifest.json", "utf8"));
+            const remote = JSON.parse(fs.readFileSync(path.join(process.env.PRIOR_ASSETS, "release-manifest.json"), "utf8"));
+            const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+            if (remote?.schema_version !== "agentic-sdlc.release-bundle.v1"
+              || remote?.repository !== process.env.GITHUB_REPOSITORY
+              || remote?.tag !== process.env.GITHUB_REF_NAME
+              || remote?.source_sha !== process.env.GITHUB_SHA
+              || remote?.archive?.name !== process.env.ARCHIVE_NAME
+              || remote?.archive?.sha256 !== local?.archive?.sha256
+              || sha256(path.join(process.env.PRIOR_ASSETS, process.env.ARCHIVE_NAME)) !== remote.archive.sha256) {
+              throw new Error("existing draft is not bound to this exact source and verified archive");
+            }
+            NODE
+            gh release delete "$GITHUB_REF_NAME" --yes
+          else
+            if ! grep -Eiq 'release not found|HTTP 404|not found' "$prior_error"; then
+              cat "$prior_error" >&2
+              exit 1
+            fi
+          fi
+      - name: Create the verified draft release
+        env:
+          ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_args=(
+            "$GITHUB_REF_NAME"
+            "$ARCHIVE_PATH"
+            "$ARCHIVE_PATH.sha256"
+            "$ARCHIVE_PATH.cdx.json"
+            "$ARCHIVE_PATH.spdx.json"
+            "release/release-verification.json"
+            "release/release-manifest.json"
+            --draft
+            --generate-notes
+            --target "$GITHUB_SHA"
+            --verify-tag
+          )
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "${release_args[@]}"
+          printf 'Actions artifact digest: %s\n' "$ARTIFACT_DIGEST"
+      - name: Verify the remote draft and every uploaded byte
+        env:
+          ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/draft-release.json"
+          gh release view "$GITHUB_REF_NAME" \
+            --json assets,isDraft,isPrerelease,tagName > "$metadata"
+          RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          const expectedAssets = [
+            process.env.ARCHIVE_NAME,
+            `${process.env.ARCHIVE_NAME}.sha256`,
+            `${process.env.ARCHIVE_NAME}.cdx.json`,
+            `${process.env.ARCHIVE_NAME}.spdx.json`,
+            "release-manifest.json",
+            "release-verification.json",
+          ].sort();
+          const actualAssets = release.assets.map((asset) => asset.name).sort();
+          if (release.tagName !== process.env.GITHUB_REF_NAME
+            || release.isDraft !== true
+            || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+            || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
+            throw new Error("remote draft release metadata or asset inventory does not match the sealed bundle");
+          }
+          NODE
+          draft_assets="$RUNNER_TEMP/draft-release-assets"
+          mkdir "$draft_assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$draft_assets"
+          for item in \
+            "$ARCHIVE_NAME" \
+            "$ARCHIVE_NAME.sha256" \
+            "$ARCHIVE_NAME.cdx.json" \
+            "$ARCHIVE_NAME.spdx.json" \
+            release-manifest.json \
+            release-verification.json; do
+            cmp --silent "release/$item" "$draft_assets/$item"
+          done
+          (cd "$draft_assets" && sha256sum --check "$ARCHIVE_NAME.sha256")
+
+  publish:
+    name: Publish verified draft release
+    needs: package
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact tag for final validation
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Download the immutable release bundle
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: release
+      - name: Validate the artifact identity and sealed bundle
+        id: validate
+        env:
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.package.outputs.artifact_digest }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.package.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          artifact_zip="$RUNNER_TEMP/actions-artifact-$EXPECTED_ARTIFACT_ID.zip"
+          gh api \
+            --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_ARTIFACT_ID/zip" > "$artifact_zip"
+          actual_artifact_digest="$(sha256sum "$artifact_zip" | cut -d ' ' -f 1)"
+          expected_artifact_digest="${EXPECTED_ARTIFACT_DIGEST#sha256:}"
+          test "$actual_artifact_digest" = "$expected_artifact_digest"
+          node --input-type=module <<'NODE'
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const root = fs.realpathSync("release");
+          const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+          const readBoundedJson = (name, limit) => {
+            if (!/^[a-z0-9][a-z0-9._+-]*$/u.test(name)) throw new Error(`unsafe bundle filename: ${name}`);
+            const file = path.join(root, name);
+            const stat = fs.lstatSync(file);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > limit) {
+              throw new Error(`invalid bundle file: ${name}`);
+            }
+            return { file, size: stat.size, value: JSON.parse(fs.readFileSync(file, "utf8")) };
+          };
+          const manifestRecord = readBoundedJson("release-manifest.json", 64 * 1024);
+          const manifest = manifestRecord.value;
+          if (manifest?.schema_version !== "agentic-sdlc.release-bundle.v1"
+            || manifest?.repository !== process.env.GITHUB_REPOSITORY
+            || manifest?.tag !== process.env.GITHUB_REF_NAME
+            || manifest?.source_sha !== process.env.GITHUB_SHA
+            || manifest?.policy?.path !== "config/release-artifact-policy.json"
+            || !/^[0-9a-f]{64}$/u.test(manifest?.policy?.sha256 ?? "")
+            || sha256(path.resolve(manifest.policy.path)) !== manifest.policy.sha256
+            || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(manifest?.archive?.name ?? "")
+            || manifest?.sbom?.name !== `${manifest?.archive?.name}.spdx.json`
+            || manifest?.cyclonedx?.name !== `${manifest?.archive?.name}.cdx.json`
+            || manifest?.verification?.name !== "release-verification.json") {
+            throw new Error("release manifest identity is invalid");
+          }
+
+          const archiveName = manifest.archive.name;
+          const archivePath = path.join(root, archiveName);
+          const archiveStat = fs.lstatSync(archivePath);
+          if (!archiveStat.isFile() || archiveStat.isSymbolicLink()
+            || archiveStat.size !== manifest.archive.bytes
+            || sha256(archivePath) !== manifest.archive.sha256) {
+            throw new Error("release archive does not match the sealed manifest");
+          }
+          const checksumName = `${archiveName}.sha256`;
+          const checksumPath = path.join(root, checksumName);
+          if (fs.readFileSync(checksumPath, "utf8") !== `${manifest.archive.sha256}  ${archiveName}\n`) {
+            throw new Error("release checksum does not match the sealed archive");
+          }
+
+          const sbom = readBoundedJson(manifest.sbom.name, 32 * 1024 * 1024);
+          if (sbom.size !== manifest.sbom.bytes
+            || sha256(sbom.file) !== manifest.sbom.sha256
+            || sbom.value?.spdxVersion !== "SPDX-2.3"
+            || sbom.value?.dataLicense !== "CC0-1.0"
+            || !Array.isArray(sbom.value?.packages)
+            || !sbom.value.packages.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")) {
+            throw new Error("SBOM does not match the sealed manifest");
+          }
+          const cyclonedx = readBoundedJson(manifest.cyclonedx.name, 32 * 1024 * 1024);
+          if (cyclonedx.size !== manifest.cyclonedx.bytes
+            || sha256(cyclonedx.file) !== manifest.cyclonedx.sha256
+            || cyclonedx.value?.bomFormat !== "CycloneDX"
+            || !/^1\.[4-9]$/u.test(cyclonedx.value?.specVersion ?? "")
+            || !Array.isArray(cyclonedx.value?.components)
+            || !cyclonedx.value.components.some((entry) => entry?.name === "agentic-sdlc-codex-plugin")) {
+            throw new Error("CycloneDX SBOM does not match the sealed manifest");
+          }
+
+          const verification = readBoundedJson(manifest.verification.name, 1024 * 1024);
+          if (verification.size !== manifest.verification.bytes
+            || sha256(verification.file) !== manifest.verification.sha256
+            || verification.value?.status !== "passed"
+            || verification.value?.package?.name !== "agentic-sdlc-codex-plugin"
+            || verification.value?.package?.tag !== process.env.GITHUB_REF_NAME
+            || verification.value?.artifact?.sha256 !== manifest.archive.sha256
+            || verification.value?.smoke?.npm_install !== "passed"
+            || verification.value?.smoke?.cli_help !== "passed"
+            || verification.value?.smoke?.doctor !== "passed"
+            || verification.value?.smoke?.installer_plan !== "passed"
+            || verification.value?.smoke?.installer_zero_write !== true) {
+            throw new Error("release verification report is incomplete or does not match the archive");
+          }
+
+          const expectedFiles = [
+            archiveName,
+            checksumName,
+            manifest.cyclonedx.name,
+            manifest.sbom.name,
+            manifest.verification.name,
+            "release-manifest.json",
+          ].sort();
+          const actualFiles = fs.readdirSync(root, { withFileTypes: true });
+          if (actualFiles.some((entry) => !entry.isFile())
+            || JSON.stringify(actualFiles.map((entry) => entry.name).sort()) !== JSON.stringify(expectedFiles)) {
+            throw new Error("immutable release bundle contains an unexpected entry");
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `archive_name=${archiveName}\n`, "utf8");
+          NODE
+      - name: Verify tag identity and artifact provenance
+        env:
+          ARCHIVE_NAME: ${{ steps.validate.outputs.archive_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "${GITHUB_REF_NAME}^{commit}")"
+          event_commit="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+          test "$tag_commit" = "$event_commit"
+          gh attestation verify "release/$ARCHIVE_NAME" --repo "$GITHUB_REPOSITORY"
+      - name: Prove the remote draft is unchanged
+        env:
+          ARCHIVE_NAME: ${{ steps.validate.outputs.archive_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/pre-publish-release.json"
+          gh release view "$GITHUB_REF_NAME" \
+            --json assets,isDraft,isPrerelease,tagName > "$metadata"
+          RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          const expectedAssets = [
+            process.env.ARCHIVE_NAME,
+            `${process.env.ARCHIVE_NAME}.sha256`,
+            `${process.env.ARCHIVE_NAME}.cdx.json`,
+            `${process.env.ARCHIVE_NAME}.spdx.json`,
+            "release-manifest.json",
+            "release-verification.json",
+          ].sort();
+          const actualAssets = release.assets.map((asset) => asset.name).sort();
+          if (release.tagName !== process.env.GITHUB_REF_NAME
+            || release.isDraft !== true
+            || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+            || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
+            throw new Error("draft release changed after package verification");
+          }
+          NODE
+          remote_assets="$RUNNER_TEMP/pre-publish-assets"
+          mkdir "$remote_assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$remote_assets"
+          for item in \
+            "$ARCHIVE_NAME" \
+            "$ARCHIVE_NAME.sha256" \
+            "$ARCHIVE_NAME.cdx.json" \
+            "$ARCHIVE_NAME.spdx.json" \
+            release-manifest.json \
+            release-verification.json; do
+            cmp --silent "release/$item" "$remote_assets/$item"
+          done
+          (cd "$remote_assets" && sha256sum --check "$ARCHIVE_NAME.sha256")
+      - name: Publish the verified draft
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "${{ steps.package.outputs.archive }}" \
-            "${{ steps.package.outputs.archive }}.sha256" \
-            --generate-notes \
-            --verify-tag
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+          metadata="$RUNNER_TEMP/published-release.json"
+          gh release view "$GITHUB_REF_NAME" --json isDraft,tagName > "$metadata"
+          RELEASE_METADATA="$metadata" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_METADATA, "utf8"));
+          if (release.tagName !== process.env.GITHUB_REF_NAME || release.isDraft !== false) {
+            throw new Error("release publication did not reach the expected final state");
+          }
+          NODE
