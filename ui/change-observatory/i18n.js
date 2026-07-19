@@ -16,6 +16,9 @@ let activeLocale = "en";
 
 const ITALIAN = Object.freeze({
   "Skip to project lineage": "Vai alla storia del progetto",
+  "Skip to project evidence": "Vai alle prove del progetto",
+  "Skip to portfolio overview": "Vai alla panoramica del portfolio",
+  "Project evidence": "Prove del progetto",
   "Toggle navigation": "Apri o chiudi la navigazione",
   "Project controls": "Controlli del progetto",
   Project: "Progetto",

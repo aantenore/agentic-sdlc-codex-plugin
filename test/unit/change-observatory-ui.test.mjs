@@ -820,8 +820,13 @@ test("shipped UI is build-free, self-contained, accessible, and gradient-free", 
   assert.match(html, /<script type="module" src="\.\/app\.js"><\/script>/);
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /class="skip-link"/);
+  assert.match(html, /id="skip-link"[^>]*data-i18n="Skip to project evidence"/);
   assert.match(html, /aria-label="Change Observatory"/);
   assert.match(html, /aria-live="polite"/);
+  assert.match(html, /<main id="workspace"[^>]*aria-labelledby="workspace-heading"/);
+  assert.match(html, /<h1 id="workspace-heading"[^>]*>Project evidence<\/h1>/);
+  assert.equal((html.match(/<h1\b/gu) ?? []).length, 1);
+  assert.match(html, /id="primary-view"[^>]*aria-labelledby="workspace-heading"/);
   assert.match(html, /id="raw-drawer"[^>]*aria-labelledby="raw-heading"/);
   assert.match(html, /data-action="toggle-raw"[^>]*aria-expanded="false"[^>]*aria-controls="raw-content"/);
   assert.doesNotMatch(html, /role="listitem"[^>]*data-view|role="list"[^>]*nav-primary/);

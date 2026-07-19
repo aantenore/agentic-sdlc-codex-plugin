@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { ObservatoryApi } from "../../ui/change-observatory/api.js";
 import {
+  applyWorkspaceContext,
   renderPortfolioControls,
   renderPortfolioOverview,
   renderPortfolioUnavailable,
@@ -11,15 +12,65 @@ import {
   LatestRequestCoordinator,
   normalizePortfolioSummary,
   portfolioModeFromLocation,
+  portfolioProjectRouteFromLocation,
+  portfolioRouteHref,
 } from "../../ui/change-observatory/portfolio.js";
 import { rawTargetFor, safeRawHref } from "../../ui/change-observatory/model.js";
 import { setLocale } from "../../ui/change-observatory/i18n.js";
+import { createChangeObservatoryBrowser } from "../helpers/change-observatory-browser-dom.mjs";
 
 test("portfolio mode is enabled only by the explicit launch query", () => {
   assert.equal(portfolioModeFromLocation({ search: "?mode=portfolio" }), true);
   assert.equal(portfolioModeFromLocation({ search: "" }), false);
   assert.equal(portfolioModeFromLocation({ search: "?mode=project" }), false);
   assert.equal(portfolioModeFromLocation({ search: "?mode=portfolio&mode=portfolio" }), false);
+});
+
+test("portfolio project routes accept one bounded ID and preserve safe launch parameters", () => {
+  assert.deepEqual(
+    portfolioProjectRouteFromLocation({ search: "?mode=portfolio&project=alpha" }),
+    { projectId: "alpha", valid: true },
+  );
+  assert.deepEqual(
+    portfolioProjectRouteFromLocation({ search: "?mode=portfolio" }),
+    { projectId: null, valid: true },
+  );
+  for (const search of [
+    "?mode=portfolio&project=alpha&project=beta",
+    "?mode=portfolio&project=..%2Fbeta",
+    "?mode=portfolio&project=",
+  ]) {
+    assert.deepEqual(
+      portfolioProjectRouteFromLocation({ search }),
+      { projectId: null, valid: false },
+    );
+  }
+
+  assert.equal(
+    portfolioRouteHref(
+      {
+        pathname: "/index.html",
+        search: "?mode=portfolio&locale=it&project=alpha&access_token=discarded&extra=discarded",
+      },
+      { projectId: "beta", view: "intent-evidence" },
+    ),
+    "/index.html?mode=portfolio&locale=it&project=beta#intent-evidence",
+  );
+  assert.equal(
+    portfolioRouteHref(
+      { pathname: "/", search: "?mode=portfolio&project=alpha" },
+      { projectId: null, view: "overview" },
+    ),
+    "/?mode=portfolio#overview",
+  );
+  assert.throws(
+    () => portfolioRouteHref({}, { projectId: "../beta" }),
+    /project identifier is invalid/u,
+  );
+  assert.throws(
+    () => portfolioRouteHref({}, { projectId: "alpha", view: "#changes" }),
+    /view fragment is invalid/u,
+  );
 });
 
 test("normalizes a bounded manifest-order summary and rejects inconsistent counts", () => {
@@ -127,16 +178,65 @@ test("portfolio controls and cards are keyboard-native, labelled, and localized"
     assert.ok(actions.every((button) => button.attributes.get("aria-label")));
     assert.match(
       overview.textContent,
-      locale === "it" ? /Panoramica del portfolio/u : /Portfolio overview/u,
+      locale === "it" ? /Scegli un progetto/u : /Choose a project/u,
     );
+    assert.equal(descendants(overview, (node) => node.tagName === "h1").length, 0);
 
     const unavailable = new FakeNode("main");
     renderPortfolioUnavailable(unavailable, summary.projects[1]);
     assert.equal(unavailable.children[0].attributes.get("role"), "status");
+    assert.equal(descendants(unavailable, (node) => node.tagName === "h1").length, 0);
     assert.match(
       unavailable.textContent,
       locale === "it" ? /non sono disponibili/u : /evidence is unavailable/u,
     );
+  }
+});
+
+test("workspace heading, region, and skip link stay contextual in English and Italian", (t) => {
+  const previousDocument = globalThis.document;
+  const browser = createChangeObservatoryBrowser("http://127.0.0.1/?mode=portfolio");
+  globalThis.document = browser.document;
+  t.after(() => {
+    globalThis.document = previousDocument;
+    setLocale("en");
+  });
+
+  for (const locale of ["en", "it"]) {
+    setLocale(locale);
+    const portfolioCopy = applyWorkspaceContext({ portfolioOverview: true });
+    assert.equal(
+      portfolioCopy.heading,
+      locale === "it" ? "Panoramica del portfolio" : "Portfolio overview",
+    );
+    assert.equal(
+      portfolioCopy.skipLabel,
+      locale === "it"
+        ? "Vai alla panoramica del portfolio"
+        : "Skip to portfolio overview",
+    );
+
+    const projectCopy = applyWorkspaceContext({
+      projectName: "Alpha Project",
+      label: "Overview",
+    });
+    assert.equal(
+      projectCopy.heading,
+      locale === "it" ? "Alpha Project · Panoramica" : "Alpha Project · Overview",
+    );
+    assert.equal(
+      projectCopy.skipLabel,
+      locale === "it"
+        ? "Vai alle prove del progetto: Alpha Project"
+        : "Skip to project evidence: Alpha Project",
+    );
+    assert.equal(browser.document.querySelectorAll("h1").length, 1);
+    for (const selector of ["#workspace", "#primary-view"]) {
+      assert.equal(
+        browser.document.querySelector(selector).getAttribute("aria-labelledby"),
+        "workspace-heading",
+      );
+    }
   }
 });
 

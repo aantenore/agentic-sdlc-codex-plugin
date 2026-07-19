@@ -92,6 +92,19 @@ while the other projects remain usable. Raw evidence links stay bound to the
 selected manifest project. Without `--portfolio-manifest`, the existing
 single-project view is unchanged.
 
+The selected project is represented by one validated `project` parameter in
+the local browser URL. This makes a project view reloadable and lets browser
+Back and Forward restore the previous portfolio selection. Missing, duplicated,
+malformed, or unknown project IDs fall back to **All projects**; they are never
+used to construct a project or source path. While a different project is
+loading, the prior model, selection, diagnostics, inspector, and raw-source
+links are cleared immediately, so changing views cannot relabel one project's
+evidence as another project's evidence.
+
+The page exposes one contextual heading and named content region. Its heading
+and skip-link label distinguish the portfolio overview from the selected
+project and follow the requested English or Italian locale.
+
 For a reader who does not know the plugin, every delivery-control record starts
 with five practical answers: what happened, what changes in practice, whether a
 decision is needed, what remains protected, and what to do next. Exact policy

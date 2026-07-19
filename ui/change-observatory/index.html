@@ -12,7 +12,7 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <a class="skip-link" href="#workspace" data-i18n="Skip to project lineage">Skip to project lineage</a>
+    <a id="skip-link" class="skip-link" href="#workspace" data-i18n="Skip to project evidence">Skip to project evidence</a>
 
     <svg class="icon-sprite" aria-hidden="true">
       <symbol id="icon-observatory" viewBox="0 0 24 24">
@@ -127,7 +127,10 @@
         </div>
       </nav>
 
-      <main id="workspace" class="workspace" tabindex="-1">
+      <main id="workspace" class="workspace" tabindex="-1" aria-labelledby="workspace-heading">
+        <header class="workspace-context">
+          <h1 id="workspace-heading" data-i18n="Project evidence">Project evidence</h1>
+        </header>
         <section id="summary-region" class="summary-strip" aria-label="Change summary" data-i18n-aria-label="Change summary">
           <article class="summary-answer">
             <h2 data-i18n="What was asked?">What was asked?</h2>
@@ -146,7 +149,7 @@
         <div id="diagnostics-region" class="diagnostics-region" hidden></div>
 
         <div class="evidence-workspace">
-          <section id="primary-view" class="primary-view" aria-live="polite" aria-atomic="false" tabindex="-1">
+          <section id="primary-view" class="primary-view" aria-labelledby="workspace-heading" aria-live="polite" aria-atomic="false" tabindex="-1">
             <div class="loading-state" role="status">
               <span class="loading-pulse" aria-hidden="true"></span>
               <div>

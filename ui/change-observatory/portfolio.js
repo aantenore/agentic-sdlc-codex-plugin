@@ -4,6 +4,8 @@ const MAX_PROJECTS = 64;
 const MAX_PREVIEWS = 8;
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/u;
+const VIEW_FRAGMENT_PATTERN = /^[a-z]+(?:-[a-z]+)*$/u;
+const LOCALE_QUERY_PATTERN = /^(?:en|it)(?:[-_][A-Za-z0-9]{1,8})?$/iu;
 const COUNT_KEYS = Object.freeze([
   "asked",
   "changed",
@@ -20,6 +22,51 @@ export function portfolioModeFromLocation(locationLike = {}) {
   const params = new URLSearchParams(String(locationLike.search ?? ""));
   const modes = params.getAll("mode");
   return modes.length === 1 && modes[0] === "portfolio";
+}
+
+export function portfolioProjectRouteFromLocation(locationLike = {}) {
+  const params = new URLSearchParams(String(locationLike.search ?? ""));
+  const projects = params.getAll("project");
+  if (projects.length === 0) {
+    return Object.freeze({ projectId: null, valid: true });
+  }
+  if (projects.length !== 1) {
+    return Object.freeze({ projectId: null, valid: false });
+  }
+  try {
+    return Object.freeze({
+      projectId: normalizePortfolioProjectId(projects[0]),
+      valid: true,
+    });
+  } catch {
+    return Object.freeze({ projectId: null, valid: false });
+  }
+}
+
+export function portfolioRouteHref(locationLike = {}, {
+  projectId = null,
+  view = "overview",
+} = {}) {
+  if (typeof view !== "string" || !VIEW_FRAGMENT_PATTERN.test(view)) {
+    throw new TypeError("The portfolio view fragment is invalid.");
+  }
+  const pathname = typeof locationLike.pathname === "string"
+    && locationLike.pathname.startsWith("/")
+    ? locationLike.pathname
+    : "/";
+  const current = new URLSearchParams(String(locationLike.search ?? ""));
+  const params = new URLSearchParams();
+  const modes = current.getAll("mode");
+  if (modes.length === 1 && modes[0] === "portfolio") params.set("mode", "portfolio");
+  const locales = current.getAll("locale");
+  if (locales.length === 1 && LOCALE_QUERY_PATTERN.test(locales[0])) {
+    params.set("locale", locales[0]);
+  }
+  if (projectId !== null && projectId !== "") {
+    params.set("project", normalizePortfolioProjectId(projectId));
+  }
+  const query = params.toString();
+  return `${pathname}${query ? `?${query}` : ""}#${view}`;
 }
 
 export function normalizePortfolioProjectId(value) {

@@ -457,6 +457,18 @@ svg {
   background: var(--canvas);
 }
 
+.workspace-context {
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.workspace-context h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1854,13 +1866,6 @@ svg {
   gap: 18px;
 }
 
-.portfolio-heading h1,
-.portfolio-unavailable h1 {
-  margin: 0;
-  font-size: 22px;
-  letter-spacing: -0.02em;
-}
-
 .portfolio-heading p,
 .portfolio-unavailable p {
   max-width: 720px;
@@ -2217,6 +2222,10 @@ svg {
 
   .summary-strip {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-context {
+    padding: 15px 16px;
   }
 
   .summary-answer {

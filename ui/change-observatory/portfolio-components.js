@@ -15,6 +15,31 @@ function node(tag, options = {}, children = []) {
   return element;
 }
 
+export function applyWorkspaceContext({
+  portfolioOverview = false,
+  projectName = null,
+  label = "Project evidence",
+} = {}) {
+  const heading = document.querySelector("#workspace-heading");
+  const skipLink = document.querySelector("#skip-link");
+  const workspace = document.querySelector("#workspace");
+  const primary = document.querySelector("#primary-view");
+  if (!heading || !skipLink || !workspace || !primary) {
+    throw new TypeError("The Change Observatory workspace landmarks are incomplete.");
+  }
+  const headingText = portfolioOverview
+    ? t("Portfolio overview")
+    : (projectName ? `${projectName} · ${t(label)}` : t(label));
+  const skipText = portfolioOverview
+    ? t("Skip to portfolio overview")
+    : `${t("Skip to project evidence")}${projectName ? `: ${projectName}` : ""}`;
+  heading.textContent = headingText;
+  skipLink.textContent = skipText;
+  workspace.setAttribute("aria-labelledby", "workspace-heading");
+  primary.setAttribute("aria-labelledby", "workspace-heading");
+  return Object.freeze({ heading: headingText, skipLabel: skipText });
+}
+
 export function renderPortfolioControls(summary, selectedProjectId = "", model = null) {
   const projectSelect = document.querySelector("#project-select");
   const snapshotSelect = document.querySelector("#snapshot-select");
@@ -55,13 +80,9 @@ export function renderPortfolioSummary(container, summary) {
 
 export function renderPortfolioOverview(container, summary) {
   const cards = summary.projects.map(projectCard);
-  const section = node("section", {
-    className: "portfolio-view",
-    attrs: { "aria-labelledby": "portfolio-heading" },
-  }, [
+  const section = node("div", { className: "portfolio-view" }, [
     node("header", { className: "portfolio-heading" }, [
       node("div", {}, [
-        node("h1", { text: t("Portfolio overview"), attrs: { id: "portfolio-heading" } }),
         node("p", { text: t("Choose a project to load its detailed evidence. Project details are read only when you open them.") }),
       ]),
       node("span", {
@@ -80,14 +101,10 @@ export function renderPortfolioOverview(container, summary) {
 export function renderPortfolioUnavailable(container, project) {
   container.replaceChildren(node("section", {
     className: "portfolio-unavailable",
-    attrs: { role: "status", "aria-labelledby": "portfolio-unavailable-heading" },
+    attrs: { role: "status", "aria-label": project.name },
   }, [
     node("span", { className: "portfolio-status-mark", text: "!", attrs: { "aria-hidden": "true" } }),
     node("div", {}, [
-      node("h1", {
-        text: project.name,
-        attrs: { id: "portfolio-unavailable-heading" },
-      }),
       node("strong", { text: t("This project’s evidence is unavailable.") }),
       node("p", { text: t("Other projects remain available. Choose All projects to continue browsing the portfolio.") }),
     ]),
