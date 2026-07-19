@@ -139,6 +139,38 @@ test("respects a lower configured parsed-record bound", async (t) => {
   assert.equal(summary.health, "review");
 });
 
+test("redacts state-like fields and keeps fallback record identifiers opaque", async (t) => {
+  const root = await fixture(t, "aggregate-redaction");
+  const accessToken = `ghp_${"A".repeat(30)}`;
+  const bearerToken = `Bearer ${"B".repeat(32)}`;
+  await writeJson(root, ".sdlc/project.json", { project_id: "redaction" });
+  await writeJson(root, `.sdlc/risks/${accessToken}.json`, {
+    type: "risk",
+    status: accessToken,
+    severity: bearerToken,
+  });
+  await writeJson(root, ".sdlc/stories/ST-SECRET/story.json", {
+    story_id: "ST-SECRET",
+    status: accessToken,
+    phase: bearerToken,
+  });
+  await writeJson(root, ".sdlc/dependencies/DEP-1.json", {
+    id: "DEP-1",
+    required_state: accessToken,
+  });
+
+  const summary = await buildProjectPortfolioSummary(root);
+  const serialized = JSON.stringify(summary);
+
+  assert.doesNotMatch(serialized, /ghp_|Bearer|A{20}|B{20}/u);
+  assert.match(summary.aggregates.risks.items[0].id, /^record-[a-f0-9]{16}$/u);
+  assert.equal(summary.aggregates.risks.items[0].status, "open");
+  assert.equal(summary.aggregates.risks.items[0].severity, undefined);
+  assert.equal(summary.aggregates.activeWorkflows.items[0].status, "active");
+  assert.equal(summary.aggregates.activeWorkflows.items[0].phase, undefined);
+  assert.equal(summary.aggregates.dependencies.items[0].status, "recorded");
+});
+
 async function fixture(t, name) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), `portfolio-summary-${name}-`)));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
