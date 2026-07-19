@@ -1,5 +1,21 @@
 # Agentic SDLC Codex Plugin
 
+## In plain English
+
+Agentic SDLC helps people understand and trust work performed by a coding agent. It turns a request into an agreed scope, records the important decisions and contracts, verifies the delivered files, and preserves enough evidence for someone else to reconstruct what happened later.
+
+**Example:** a product owner asks Codex to assess an existing service and produce an architecture report. The plugin records what was requested, what Codex inferred, the approved boundaries, the report it created, and the checks it ran. The bundled Change Observatory then presents that history as a readable timeline for both technical and non-technical reviewers.
+
+| Feature | What it means for a team |
+| --- | --- |
+| Guided project understanding | Stakeholders can correct facts and assumptions before they shape the work. |
+| Explicit scope and contracts | The agent's freedom stays inside a visible, agreed boundary. |
+| Verified deliverables | A completed task includes the real output and evidence of the checks performed on it. |
+| Change Observatory | Reviewers can see what was asked, decided, changed, and verified without reading raw internal records. |
+| Repository-local lineage | Project history travels with the code instead of living only in a transient chat. |
+
+## Technical summary
+
 Agentic SDLC 0.12.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
