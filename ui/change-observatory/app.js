@@ -397,6 +397,7 @@ async function loadPortfolioSummary({
     setPortfolioHomeContext();
     resetRawForProjectChange();
     disablePortfolioControls();
+    elements.summary.replaceChildren();
     renderFatalError(elements.primary, error, {
       title: "Portfolio could not be loaded",
     });

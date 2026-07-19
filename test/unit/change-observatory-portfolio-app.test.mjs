@@ -15,13 +15,17 @@ test("portfolio app owns project state across delayed navigation and browser his
   );
   const delayedBeta = deferred();
   let betaRequests = 0;
+  let failPortfolioSummary = false;
   const calls = [];
 
   globalThis.document = browser.document;
   globalThis.window = browser.window;
   globalThis.fetch = async (url) => {
     calls.push(String(url));
-    if (url === "/api/v1/portfolio") return jsonResponse(portfolioSummary());
+    if (url === "/api/v1/portfolio") {
+      if (failPortfolioSummary) throw new Error("Portfolio refresh failed.");
+      return jsonResponse(portfolioSummary());
+    }
     const projectId = new URL(String(url), "http://observatory.invalid").searchParams.get("project");
     if (projectId === "beta" && betaRequests++ === 0) return delayedBeta.promise;
     return jsonResponse(projectView(projectId));
@@ -111,6 +115,20 @@ test("portfolio app owns project state across delayed navigation and browser his
   assert.deepEqual(rawHrefs(browser.document), []);
   assert.ok(calls.includes("/api/v1/portfolio/project?project=alpha"));
   assert.ok(calls.includes("/api/v1/portfolio/project?project=beta"));
+
+  failPortfolioSummary = true;
+  browser.document.dispatch(
+    "click",
+    browser.document.querySelector('[data-action="refresh"]'),
+  );
+  await waitForBrowser(
+    () => /Portfolio could not be loaded/u.test(
+      browser.document.querySelector("#primary-view").textContent,
+    ),
+    "a failed refresh did not replace the portfolio presentation",
+  );
+  assert.equal(browser.document.querySelector("#summary-region").textContent, "");
+  assert.equal(browser.document.querySelector("#workspace-heading").textContent, "Portfolio overview");
 });
 
 function rawHrefs(document) {
