@@ -148,9 +148,12 @@ function portfolioSummary() {
     schemaVersion: "change-observatory:portfolio:v1",
     generatedAt: "2026-07-19T12:00:00.000Z",
     status: "ready",
+    health: "ready",
     projectCount: 2,
     availableProjectCount: 2,
     unavailableProjectCount: 0,
+    needsAttentionProjectCount: 0,
+    reviewProjectCount: 0,
     projects: ["alpha", "beta"].map((id) => ({
       id,
       status: "available",
