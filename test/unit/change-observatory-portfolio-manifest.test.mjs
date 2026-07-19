@@ -10,6 +10,7 @@ import {
   assertPortfolioManifestBoundaries,
   loadPortfolioManifest,
 } from "../../lib/change-observatory/portfolio-manifest.mjs";
+import { captureDirectoryIdentity } from "../../lib/change-observatory/path-safety.mjs";
 
 async function fixture(t, name = "valid") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `observatory-portfolio-${name}-`));
@@ -355,3 +356,39 @@ test("fails closed when a project directory swaps between resolution and identit
   t.mock.restoreAll();
   assert.equal(swapped, true);
 });
+
+test("preserves Windows-sized device and inode identities above 2^53 end to end", async (t) => {
+  const root = await fixture(t, "bigint-identities");
+  await writeManifest(root, manifest());
+  const alpha = path.join(root, "projects", "alpha");
+  const beta = path.join(root, "projects", "beta");
+  const exact = new Map([
+    [root, { dev: 9_007_199_254_740_993n, ino: 9_007_199_254_741_101n }],
+    [alpha, { dev: 9_007_199_254_740_993n, ino: 9_007_199_254_741_103n }],
+    [beta, { dev: 9_007_199_254_740_993n, ino: 9_007_199_254_741_104n }],
+  ]);
+  const originalStat = fs.stat.bind(fs);
+  t.mock.method(fs, "stat", async (target, options) => {
+    const result = await originalStat(target, options);
+    const identity = exact.get(String(target));
+    if (!identity) return result;
+    return statsWithIdentity(result, identity, options?.bigint === true);
+  });
+
+  const identity = await captureDirectoryIdentity(alpha);
+  assert.equal(identity.device, "9007199254740993");
+  assert.equal(identity.inode, "9007199254741103");
+
+  const loaded = await loadPortfolioManifest(root, "portfolio.json");
+  assert.deepEqual(loaded.projects.map((project) => project.id), ["alpha", "beta"]);
+  await assertPortfolioManifestBoundaries(loaded);
+});
+
+function statsWithIdentity(stats, identity, bigint) {
+  const clone = Object.create(stats);
+  Object.defineProperties(clone, {
+    dev: { value: bigint ? identity.dev : Number(identity.dev), enumerable: true },
+    ino: { value: bigint ? identity.ino : Number(identity.ino), enumerable: true },
+  });
+  return clone;
+}
