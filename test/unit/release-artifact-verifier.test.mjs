@@ -141,14 +141,26 @@ test("rejects unsafe permission bits and duplicate JSON keys", () => {
 test("resolves the standard setup-node npm CLI layout on Windows and POSIX", () => {
   assert.deepEqual(npmCliCandidates({
     nodeExecutable: "C:\\hostedtoolcache\\node\\24.0.0\\x64\\node.exe",
-    npmExecPath: undefined,
+    npmExecPath: null,
     platform: "win32",
   }), ["C:\\hostedtoolcache\\node\\24.0.0\\x64\\node_modules\\npm\\bin\\npm-cli.js"]);
   assert.deepEqual(npmCliCandidates({
     nodeExecutable: "/opt/hostedtoolcache/node/24.0.0/x64/bin/node",
-    npmExecPath: undefined,
+    npmExecPath: null,
     platform: "linux",
   }), ["/opt/hostedtoolcache/node/24.0.0/x64/lib/node_modules/npm/bin/npm-cli.js"]);
+});
+
+
+test("prefers the npm CLI supplied by npm while retaining the setup-node fallback", () => {
+  assert.deepEqual(npmCliCandidates({
+    nodeExecutable: "/opt/hostedtoolcache/node/24.0.0/x64/bin/node",
+    npmExecPath: "/opt/npm/lib/node_modules/npm/bin/npm-cli.js",
+    platform: "linux",
+  }), [
+    "/opt/npm/lib/node_modules/npm/bin/npm-cli.js",
+    "/opt/hostedtoolcache/node/24.0.0/x64/lib/node_modules/npm/bin/npm-cli.js",
+  ]);
 });
 
 
