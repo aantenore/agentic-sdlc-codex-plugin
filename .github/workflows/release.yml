@@ -53,7 +53,7 @@ jobs:
           archive_name="$(node --input-type=module -e '
             import fs from "node:fs";
             const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            if (!Array.isArray(report) || report.length !== 1 || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
+            if (!Array.isArray(report) || report.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
             process.stdout.write(report[0].filename);
           ' "$verify_dir/npm-pack.json")"
           node scripts/verify-release-package.mjs \
@@ -76,6 +76,7 @@ jobs:
       artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
       artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
       artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      is_prerelease: ${{ steps.release_identity.outputs.is_prerelease }}
     steps:
       - name: Check out the exact tagged source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -87,6 +88,25 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Derive the strict release identity
+        id: release_identity
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { parseReleaseTag } from "./lib/release/workflow-guard.mjs";
+
+          const identity = parseReleaseTag(process.env.GITHUB_REF_NAME);
+          const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          if (packageJson?.version !== identity.version) {
+            throw new Error("release tag and package version do not match");
+          }
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `version=${identity.version}\nis_prerelease=${identity.isPrerelease}\n`,
+            "utf8",
+          );
+          NODE
       - name: Build and verify the release archive once
         id: pack
         env:
@@ -101,7 +121,7 @@ jobs:
           archive_name="$(node --input-type=module -e '
             import fs from "node:fs";
             const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            if (!Array.isArray(report) || report.length !== 1 || !/^[a-z0-9][a-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
+            if (!Array.isArray(report) || report.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
             process.stdout.write(report[0].filename);
           ' release/npm-pack.json)"
           archive="release/$archive_name"
@@ -335,6 +355,7 @@ jobs:
       - name: Recover only an exact matching draft from an earlier attempt
         env:
           ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
+          EXPECTED_PRERELEASE: ${{ steps.release_identity.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -357,7 +378,7 @@ jobs:
             const actualAssets = release.assets.map((asset) => asset.name).sort();
             if (release.tagName !== process.env.GITHUB_REF_NAME
               || release.isDraft !== true
-              || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+              || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
               || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
               throw new Error("an existing release is not the exact workflow-owned draft expected for recovery");
             }
@@ -394,6 +415,7 @@ jobs:
         env:
           ARCHIVE_PATH: ${{ steps.pack.outputs.archive }}
           ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
+          EXPECTED_PRERELEASE: ${{ steps.release_identity.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -410,7 +432,7 @@ jobs:
             --target "$GITHUB_SHA"
             --verify-tag
           )
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [[ "$EXPECTED_PRERELEASE" == "true" ]]; then
             release_args+=(--prerelease)
           fi
           gh release create "${release_args[@]}"
@@ -418,6 +440,7 @@ jobs:
       - name: Verify the remote draft and every uploaded byte
         env:
           ARCHIVE_NAME: ${{ steps.pack.outputs.archive_name }}
+          EXPECTED_PRERELEASE: ${{ steps.release_identity.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -439,7 +462,7 @@ jobs:
           const actualAssets = release.assets.map((asset) => asset.name).sort();
           if (release.tagName !== process.env.GITHUB_REF_NAME
             || release.isDraft !== true
-            || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+            || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
             || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
             throw new Error("remote draft release metadata or asset inventory does not match the sealed bundle");
           }
@@ -610,6 +633,7 @@ jobs:
       - name: Prove the remote draft is unchanged
         env:
           ARCHIVE_NAME: ${{ steps.validate.outputs.archive_name }}
+          EXPECTED_PRERELEASE: ${{ needs.package.outputs.is_prerelease }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -631,7 +655,7 @@ jobs:
           const actualAssets = release.assets.map((asset) => asset.name).sort();
           if (release.tagName !== process.env.GITHUB_REF_NAME
             || release.isDraft !== true
-            || release.isPrerelease !== process.env.GITHUB_REF_NAME.includes("-")
+            || release.isPrerelease !== (process.env.EXPECTED_PRERELEASE === "true")
             || JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
             throw new Error("draft release changed after package verification");
           }

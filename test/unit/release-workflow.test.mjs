@@ -123,7 +123,11 @@ function releaseContractErrors(source) {
     || !/existing release is not the exact workflow-owned draft/u.test(packageJob)
     || !/gh release delete "\$GITHUB_REF_NAME" --yes/u.test(packageJob)
     || /--cleanup-tag/u.test(packageJob)) errors.push("retry recovery");
-  if (!source.includes("[a-z0-9._+-]*\\.tgz")) errors.push("build metadata filename");
+  if (!source.includes("[A-Za-z0-9._+-]*\\.tgz")
+    || !/parseReleaseTag/u.test(packageJob)
+    || !/EXPECTED_PRERELEASE/u.test(packageJob)
+    || !/EXPECTED_PRERELEASE/u.test(publish)
+    || /includes\("-"\)|== \*-\*/u.test(source)) errors.push("strict SemVer identity");
   if (!/gh release create/u.test(packageJob)
     || !/--draft/u.test(packageJob)
     || !/remote draft/u.test(packageJob)
