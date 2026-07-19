@@ -100,14 +100,17 @@ test("explains audit-only narrowing on a proposal bound to one PR and no execute
 
   assertCanonicalCodesOnlyInDetails(guidance);
   assert.match(guidance.result, /working choice .* ready for your review/u);
-  assert.match(guidance.impact, /You asked me to finish one delivery/u);
-  assert.match(guidance.impact, /may only continue between the review moments we agreed/u);
-  assert.match(guidance.impact, /If you approve this choice, the approval will be recorded/u);
+  assert.match(guidance.impact, /^You chose full autonomy within the agreed limits\./u);
+  assert.match(guidance.impact, /can use only autonomy with checks/u);
+  assert.match(guidance.impact, /cannot digitally verify who gave it/u);
   assert.match(guidance.impact, /project “Travel Operations”/u);
   assert.match(guidance.impact, /destination is “codex\/human-guidance” in repository “github\.com\/example\/travel-operations”, starting from “main”/u);
   assert.match(guidance.impact, /change only “lib” and “test”/u);
-  assert.doesNotMatch(guidance.impact, /Your approval is recorded/u);
-  assert.match(guidance.required_decision, /Approve or change this one-delivery choice/u);
+  assert.match(guidance.required_decision, /For this pull request, how independently should I work\?/u);
+  assert.match(guidance.required_decision, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(guidance.required_decision, /2\. Autonomy with checks: I proceed independently/u);
+  assert.match(guidance.required_decision, /3\. Full autonomy within these limits: I complete this pull request/u);
+  assert.match(guidance.required_decision, /applies only to this pull request and will not be reused/u);
   assert.match(guidance.required_decision, /before the pull request is merged and before anything is deployed outside the local machine/u);
   assert.match(guidance.required_decision, /expires on December 31, 2099/u);
   assert.match(guidance.protection_boundary, /only to the identified pull request/u);
@@ -123,6 +126,12 @@ test("explains audit-only narrowing on a proposal bound to one PR and no execute
   assert.deepEqual(guidance.details.allowed_write_paths, ["lib", "test"]);
   assert.deepEqual(guidance.details.review_moments, ["pull_request.merge", "deploy.remote"]);
   assert.equal(guidance.details.expires_at, "2099-12-31T23:59:00.000Z");
+  assert.deepEqual(guidance.details.choice_mapping, {
+    guided: "supervised",
+    autonomy_with_checks: "checkpointed",
+    full_autonomy_within_limits: "bounded-autonomous",
+  });
+  assert.match(guidance.details.digital_approver_verification.enable_with.join("\n"), /host-receipt-file/u);
 });
 
 test("describes an Italian local-release proposal with its real boundary before technical details", () => {
@@ -149,6 +158,12 @@ test("describes an Italian local-release proposal with its real boundary before 
   assert.match(guidance.impact, /“\/opt\/travel-operations\/local-release\/app” e “\/opt\/travel-operations\/local-release\/config”/u);
   assert.match(guidance.required_decision, /prima di completare il rilascio locale/u);
   assert.match(guidance.required_decision, /scade il 31 dicembre 2099/u);
+  assert.match(guidance.required_decision, /Per questo rilascio locale, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(guidance.required_decision, /1\. Guidato: ti chiedo conferma prima dei passaggi importanti/u);
+  assert.match(guidance.required_decision, /2\. Autonomia con controlli: procedo da solo/u);
+  assert.match(guidance.required_decision, /3\. Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie/u);
+  assert.match(guidance.required_decision, /Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata/u);
+  assert.doesNotMatch(guidance.required_decision, /Per questa PR|PR o rilascio locale/u);
   assert.equal(guidance.details.target_root, "/opt/travel-operations/local-release");
   assert.deepEqual(guidance.details.review_moments, ["release.local"]);
   assert.equal(guidance.details.expires_at, "2099-12-31T23:59:00.000Z");
@@ -206,6 +221,24 @@ test("reports active and terminal delivery status with an explicit single-delive
   assert.match(closed.required_decision, /Decide a new one-time working choice/u);
   assert.match(closed.next_action, /Create and approve a new one-delivery choice/u);
   assert.equal(closed.details.merge_executed, true);
+});
+
+test("uses the exact Italian downgrade explanation before optional technical details", () => {
+  const guidance = deliveryAutonomyStatusGuidance({
+    status: "active",
+    delivery_kind: "pull_request",
+    requested_level: "bounded-autonomous",
+    effective_level: "checkpointed",
+    authority_mode: "audit_only",
+  }, { locale: "it" });
+
+  assertCanonicalCodesOnlyInDetails(guidance);
+  assert.match(
+    guidance.impact,
+    /^Hai scelto autonomia completa entro i limiti concordati\. In questa installazione posso però usare soltanto autonomia con controlli, perché il sistema registra l'approvazione ma non può verificare digitalmente chi l'ha data\.$/u,
+  );
+  assert.equal(guidance.details.digital_approver_verification.current_effect.includes("checkpointed"), true);
+  assert.match(guidance.details.digital_approver_verification.enable_with.join("\n"), /authority_policy\.mode.*host_verified/u);
 });
 
 test("distinguishes audit-only and host-verified action checkpoints without executing merge", () => {
@@ -392,7 +425,9 @@ test("renders golden English and Italian journeys with jargon only after the tec
   });
   const [englishPrimary, englishTechnical] = englishText.split("\nTechnical details (optional):\n");
   assert.match(englishPrimary, /^Outcome: A working choice for one pull request is ready for your review\./u);
-  assert.match(englishPrimary, /What you need to decide: Approve or change this one-delivery choice/u);
+  assert.match(englishPrimary, /What you need to decide: For this pull request, how independently should I work\?/u);
+  assert.match(englishPrimary, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(englishPrimary, /This choice applies only to this pull request and will not be reused/u);
   assert.match(englishPrimary, /What remains protected: This choice applies only to the identified pull request/u);
   assert.deepEqual(findForbiddenHumanGuidanceTerms(englishPrimary), []);
   assert.match(englishTechnical, /AUT-PR-ENT-UX/u);

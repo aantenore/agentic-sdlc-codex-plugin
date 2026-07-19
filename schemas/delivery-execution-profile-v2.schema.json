@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "delivery-execution-profile-v2.schema.json",
+  "title": "Agentic SDLC Delivery Execution Profile v2",
+  "description": "Per-delivery autonomy with explicit, hash-bound verification-provider bindings. Provider bindings prove state but never execute delivery operations.",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "status",
+    "delivery_id",
+    "delivery_kind",
+    "requirement_profile_refs",
+    "story_refs",
+    "contract_refs",
+    "material_scope",
+    "material_scope_hash",
+    "requested_level",
+    "phase_levels",
+    "constraints",
+    "checkpoints",
+    "use_policy",
+    "pull_request_target",
+    "local_release_target",
+    "provider_bindings",
+    "provider_bindings_hash",
+    "authority_assurance",
+    "approval_ref",
+    "valid_from",
+    "expires_at",
+    "created_at",
+    "updated_at",
+    "extensions",
+    "profile_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "delivery_execution_profile" },
+    "schema_version": { "const": "delivery-execution-profile:v2" },
+    "version": { "const": 2 },
+    "id": { "$ref": "delivery-execution-profile.schema.json#/properties/id" },
+    "status": { "$ref": "delivery-execution-profile.schema.json#/properties/status" },
+    "delivery_id": { "$ref": "delivery-execution-profile.schema.json#/properties/delivery_id" },
+    "delivery_kind": { "$ref": "delivery-execution-profile.schema.json#/properties/delivery_kind" },
+    "requirement_profile_refs": { "$ref": "delivery-execution-profile.schema.json#/properties/requirement_profile_refs" },
+    "story_refs": { "$ref": "delivery-execution-profile.schema.json#/properties/story_refs" },
+    "contract_refs": { "$ref": "delivery-execution-profile.schema.json#/properties/contract_refs" },
+    "material_scope": { "$ref": "delivery-execution-profile.schema.json#/properties/material_scope" },
+    "material_scope_hash": { "$ref": "delivery-execution-profile.schema.json#/properties/material_scope_hash" },
+    "requested_level": { "$ref": "delivery-execution-profile.schema.json#/properties/requested_level" },
+    "phase_levels": { "$ref": "delivery-execution-profile.schema.json#/properties/phase_levels" },
+    "constraints": { "$ref": "delivery-execution-profile.schema.json#/properties/constraints" },
+    "checkpoints": { "$ref": "delivery-execution-profile.schema.json#/properties/checkpoints" },
+    "use_policy": { "$ref": "delivery-execution-profile.schema.json#/properties/use_policy" },
+    "pull_request_target": { "$ref": "delivery-execution-profile.schema.json#/properties/pull_request_target" },
+    "local_release_target": { "$ref": "delivery-execution-profile.schema.json#/properties/local_release_target" },
+    "provider_bindings": { "type": "array", "uniqueItems": true },
+    "provider_bindings_hash": { "$ref": "delivery-execution-profile.schema.json#/$defs/sha256" },
+    "authority_assurance": { "$ref": "delivery-execution-profile.schema.json#/properties/authority_assurance" },
+    "approval_ref": { "$ref": "delivery-execution-profile.schema.json#/properties/approval_ref" },
+    "valid_from": { "$ref": "delivery-execution-profile.schema.json#/properties/valid_from" },
+    "expires_at": { "$ref": "delivery-execution-profile.schema.json#/properties/expires_at" },
+    "created_at": { "$ref": "delivery-execution-profile.schema.json#/properties/created_at" },
+    "updated_at": { "$ref": "delivery-execution-profile.schema.json#/properties/updated_at" },
+    "extensions": { "$ref": "delivery-execution-profile.schema.json#/properties/extensions" },
+    "profile_hash": { "$ref": "delivery-execution-profile.schema.json#/properties/profile_hash" },
+    "hash_algorithm": { "$ref": "delivery-execution-profile.schema.json#/properties/hash_algorithm" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "active" } }, "required": ["status"] },
+      "then": { "properties": { "approval_ref": { "$ref": "delivery-execution-profile.schema.json#/$defs/hashed_ref" } } }
+    },
+    {
+      "if": { "properties": { "delivery_kind": { "const": "pull_request" } }, "required": ["delivery_kind"] },
+      "then": {
+        "properties": {
+          "pull_request_target": { "$ref": "delivery-execution-profile.schema.json#/$defs/pull_request_target" },
+          "local_release_target": { "type": "null" },
+          "provider_bindings": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "prefixItems": [
+              { "$ref": "#/$defs/git_push_binding" },
+              { "$ref": "#/$defs/pr_create_binding" },
+              { "$ref": "#/$defs/pr_merge_binding" },
+              { "$ref": "#/$defs/pr_update_binding" }
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "pull_request_target": { "type": "null" },
+          "local_release_target": { "$ref": "delivery-execution-profile.schema.json#/$defs/local_release_target" },
+          "provider_bindings": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "prefixItems": [{ "$ref": "#/$defs/local_release_binding" }]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "requested_level": { "const": "supervised" } }, "required": ["requested_level"] },
+      "then": { "properties": { "phase_levels": { "$ref": "delivery-execution-profile.schema.json#/$defs/supervised_phase_levels" } } }
+    },
+    {
+      "if": { "properties": { "requested_level": { "const": "checkpointed" } }, "required": ["requested_level"] },
+      "then": { "properties": { "phase_levels": { "$ref": "delivery-execution-profile.schema.json#/$defs/checkpointed_phase_levels" } } }
+    }
+  ],
+  "$defs": {
+    "provider_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "git_push_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "git.push" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "pr_create_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "pull_request.create" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "pr_merge_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "pull_request.merge" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "pr_update_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "pull_request.update" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "local_release_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "release.local" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -143,6 +143,12 @@
       ],
       "additionalProperties": true
     },
+    "governance_policy": {
+      "oneOf": [
+        { "$ref": "governance-policy.schema.json" },
+        { "$ref": "#/$defs/governance_policy_config" }
+      ]
+    },
     "autonomy_policy": {
       "$ref": "#/$defs/autonomy_policy"
     },
@@ -157,6 +163,54 @@
     }
   },
   "$defs": {
+    "governance_policy_config": {
+      "type": "object",
+      "required": [
+        "mode",
+        "policy_file",
+        "decision_receipts_root",
+        "use_receipts_root",
+        "revocations_root",
+        "fail_closed"
+      ],
+      "properties": {
+        "mode": { "enum": ["audit", "enforce"] },
+        "policy_file": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "decision_receipts_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "use_receipts_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "revocations_root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "audit_events_root": {
+          "description": "Optional operational audit-event root. Defaults outside .sdlc so identity-tree replacement cannot discard events.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._/-]*$"
+        },
+        "fail_closed": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "enforce" } }, "required": ["mode"] },
+          "then": { "properties": { "fail_closed": { "const": true } } }
+        }
+      ],
+      "additionalProperties": false
+    },
     "observability_policy": {
       "type": "object",
       "required": [
@@ -290,6 +344,7 @@
         "storage_root": { "type": "string", "minLength": 1 },
         "requirement_profile_schema": { "const": "schemas/requirement-execution-profile.schema.json" },
         "delivery_profile_schema": { "const": "schemas/delivery-execution-profile.schema.json" },
+        "delivery_profile_schema_v2": { "const": "schemas/delivery-execution-profile-v2.schema.json" },
         "decision_schema": { "const": "schemas/autonomy-decision.schema.json" },
         "allowed_levels": {
           "type": "array",
@@ -324,6 +379,16 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
+        "delivery_providers": {
+          "type": "object",
+          "required": ["git_push", "pull_request", "local_release"],
+          "properties": {
+            "git_push": { "$ref": "#/$defs/delivery_provider_id" },
+            "pull_request": { "$ref": "#/$defs/delivery_provider_id" },
+            "local_release": { "$ref": "#/$defs/delivery_provider_id" }
+          },
+          "additionalProperties": false
+        },
         "pull_request": { "type": "object", "additionalProperties": { "type": "boolean" } },
         "local_release": { "type": "object", "additionalProperties": { "type": "boolean" } }
       },
@@ -331,6 +396,10 @@
     },
     "autonomy_level": {
       "enum": ["supervised", "checkpointed", "bounded-autonomous"]
+    },
+    "delivery_provider_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
     },
     "autonomy_preset": {
       "type": "object",

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "governance-policy-revocation.schema.json",
+  "title": "Immutable exact governance revocation",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "version",
+    "id",
+    "target",
+    "effective_at",
+    "reason",
+    "revoked_by",
+    "created_at",
+    "revocation_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "kind": { "const": "governance_policy_revocation" },
+    "schema_version": { "const": "governance-policy-revocation:v1" },
+    "version": { "const": 1 },
+    "id": { "$ref": "#/$defs/ref_id" },
+    "target": {
+      "type": "object",
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": { "enum": ["approval", "decision", "policy", "role_binding", "rule"] },
+        "id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))(?![^@]*@)[A-Za-z0-9.][A-Za-z0-9._:/+-]{0,511}$" },
+        "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "effective_at": { "type": "string", "format": "date-time" },
+    "reason": { "type": "string", "minLength": 1 },
+    "revoked_by": { "$ref": "#/$defs/actor" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "revocation_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "exact_name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "ref_id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))(?![^@]*@)[A-Za-z0-9.][A-Za-z0-9._:/+-]{0,511}$" },
+    "actor": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "$ref": "#/$defs/exact_name" },
+        "id": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._:/@+-]{0,511}$" },
+        "issuer": { "type": "string", "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9.][A-Za-z0-9._:/@+-]{0,511}$" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

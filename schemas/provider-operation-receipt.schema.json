@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "provider-operation-receipt.schema.json",
+  "title": "Delivery Provider Operation Receipt v1",
+  "description": "Immutable proof that a provider observed an exact precondition or verified an exact completion. Provider adapters never execute the operation.",
+  "type": "object",
+  "required": [
+    "id",
+    "kind",
+    "schema_version",
+    "version",
+    "provider",
+    "operation",
+    "subject",
+    "subject_hash",
+    "precondition_receipt_ref",
+    "status",
+    "proof",
+    "observed_at",
+    "receipt_hash",
+    "hash_algorithm"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "const": "provider_operation_receipt" },
+    "schema_version": { "const": "provider-operation-receipt:v1" },
+    "version": { "const": 1 },
+    "provider": {
+      "type": "object",
+      "required": ["id", "adapter_version", "spi_version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/provider_id" },
+        "adapter_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "spi_version": { "const": "delivery-provider:v1" }
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "required": ["id", "action", "phase"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "phase": { "enum": ["precondition", "completion"] }
+      },
+      "additionalProperties": false
+    },
+    "subject": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "subject_hash": { "$ref": "#/$defs/sha256" },
+    "precondition_receipt_ref": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["id", "hash"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "hash": { "$ref": "#/$defs/sha256" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "status": { "const": "verified" },
+    "proof": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "receipt_hash": { "$ref": "#/$defs/sha256" },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "properties": { "phase": { "const": "precondition" } },
+            "required": ["phase"]
+          }
+        }
+      },
+      "then": { "properties": { "precondition_receipt_ref": { "type": "null" } } },
+      "else": { "properties": { "precondition_receipt_ref": { "type": "object" } } }
+    }
+  ],
+  "$defs": {
+    "provider_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": false
+}

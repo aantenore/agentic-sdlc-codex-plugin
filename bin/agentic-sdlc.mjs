@@ -127,6 +127,7 @@ import {
 import {
   AUTONOMY_LEVELS,
   buildDeliveryExecutionProfile,
+  buildDeliveryExecutionProfileV2,
   buildRequirementExecutionProfile,
   mostRestrictiveAutonomyLevel,
   evaluateAutonomyPolicy,
@@ -136,9 +137,21 @@ import {
   validateRequirementExecutionProfileIntegrity,
 } from "../lib/autonomy-policy.mjs";
 import {
+  providerBindingForAction,
+} from "../lib/delivery/provider-compatibility.mjs";
+import {
+  DeliveryProviderError,
+  assertProviderOperationReceiptIntegrity,
+} from "../lib/delivery/provider-registry.mjs";
+import {
+  DEFAULT_DELIVERY_PROVIDER_SELECTION,
+  createDefaultDeliveryProviderRegistry,
+} from "../lib/delivery/default-providers.mjs";
+import {
   IdentityMigrationError,
   applyIdentityMigration,
   planIdentityMigration,
+  prepareIdentityMigrationRecovery,
   publicIdentityMigrationPlan,
   recoverIdentityMigration,
   validateIdentityMigrationReceipt,
@@ -164,6 +177,23 @@ import {
 } from "../lib/human-guidance.mjs";
 import { renderHelp, UnknownCommandError } from "../lib/cli/help.mjs";
 import { generateCompletion, SUPPORTED_SHELLS } from "../lib/cli/completion.mjs";
+import {
+  catalogOptionMetadata,
+  commandMutationIntent,
+  createCommandHandlerRegistry,
+  resolveCommand,
+} from "../lib/cli/dispatch.mjs";
+import {
+  MutationGovernanceError,
+  appendJsonLineNoFollow,
+  assertMutationExecutionAuthorized,
+  consumeBootstrapMutationGrant,
+  createBootstrapMutationGrant,
+  createProjectMutationGovernance,
+  runWithMutationGovernance,
+  withGovernedMutation,
+  withGovernedMutationBatch,
+} from "../lib/governance/mutation-guard.mjs";
 import {
   CliPresetError,
   exportCliPresets,
@@ -275,7 +305,8 @@ const OUTPUT_FORMAT_ALIASES = Object.freeze({
   csv: "csv",
   custom: "custom",
 });
-const BOOLEAN_OPTIONS = new Set([
+const CATALOG_OPTION_METADATA = catalogOptionMetadata();
+const LEGACY_BOOLEAN_OPTIONS = new Set([
   "allow-incomplete-contract",
   "allow-unapproved-contract-output",
   "allow-unapproved-output-ref",
@@ -299,8 +330,8 @@ const BOOLEAN_OPTIONS = new Set([
   "trust-custom-rtk-command",
   "version",
 ]);
-const KNOWN_OPTIONS = new Set([
-  ...BOOLEAN_OPTIONS,
+const LEGACY_KNOWN_OPTIONS = new Set([
+  ...LEGACY_BOOLEAN_OPTIONS,
   "acceptance",
   "action",
   "adapter",
@@ -371,10 +402,15 @@ const KNOWN_OPTIONS = new Set([
   "execution-note",
   "expires-at",
   "environment",
+  "expected-pr-base",
+  "expected-pr-body-sha256",
+  "expected-pr-state",
+  "expected-pr-title",
   "from",
   "from-email",
   "format",
   "git-event",
+  "git-provider",
   "handoff-id",
   "host",
   "host-receipt-file",
@@ -390,6 +426,7 @@ const KNOWN_OPTIONS = new Set([
   "integration",
   "level",
   "limit",
+  "local-release-provider",
   "locale",
   "levels",
   "metric",
@@ -418,6 +455,7 @@ const KNOWN_OPTIONS = new Set([
   "parent",
   "phase",
   "pr-url",
+  "pull-request-provider",
   "preset",
   "pricing-ref",
   "plan-hash",
@@ -523,7 +561,7 @@ const KNOWN_OPTIONS = new Set([
   "redaction-policy",
   "guard-input-json",
 ]);
-const REPEATABLE_OPTIONS = new Set([
+const LEGACY_REPEATABLE_OPTIONS = new Set([
   "acceptance",
   "approval-evidence",
   "allow-action",
@@ -570,6 +608,28 @@ const REPEATABLE_OPTIONS = new Set([
   "validation",
   "target-event",
   "write-path",
+]);
+const CATALOG_KNOWN_OPTIONS = new Set(CATALOG_OPTION_METADATA.known);
+const CLI_COMPATIBILITY_BOOLEAN_OPTIONS = new Set(
+  [...LEGACY_BOOLEAN_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const CLI_COMPATIBILITY_OPTIONS = new Set(
+  [...LEGACY_KNOWN_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const CLI_COMPATIBILITY_REPEATABLE_OPTIONS = new Set(
+  [...LEGACY_REPEATABLE_OPTIONS].filter((name) => !CATALOG_KNOWN_OPTIONS.has(name)),
+);
+const BOOLEAN_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.boolean,
+  ...CLI_COMPATIBILITY_BOOLEAN_OPTIONS,
+]);
+const KNOWN_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.known,
+  ...CLI_COMPATIBILITY_OPTIONS,
+]);
+const REPEATABLE_OPTIONS = new Set([
+  ...CATALOG_OPTION_METADATA.repeatable,
+  ...CLI_COMPATIBILITY_REPEATABLE_OPTIONS,
 ]);
 const STORY_STATUSES = new Set(["draft", "ready", "analysis", "design", "implementation", "in_progress", "review", "validation", "release", "done", "blocked"]);
 const TERMINAL_STORY_STATUSES = new Set(["done"]);
@@ -671,6 +731,262 @@ const TRACE_OUTCOMES = new Set(["passed", "failed", "blocked", "skipped", "ready
 const CLI_OPERATION_CONTEXT = createOperationContext({ operation: "cli.run" });
 const OPERATIONAL_REDACTION_POLICY = createOperationalRedactionPolicy();
 
+function cliHandler(stage, handle) {
+  return { stage, handle };
+}
+
+function buildCliRuntimeHandlerRegistry() {
+  const bootstrap = (handle) => cliHandler("bootstrap", handle);
+  const preConfig = (handle) => cliHandler("pre-config", handle);
+  const project = (handle) => cliHandler("project", handle);
+  const call = (handler) => project(({ context, options }) => handler(context, options));
+
+  return createCommandHandlerRegistry({
+    help: bootstrap(({ options, resolution }) => {
+      console.log(renderHelp(resolution.args, {
+        locale: humanGuidanceLocale(options),
+        json: options.json === true,
+        version: VERSION,
+      }));
+    }),
+    completion: bootstrap(({ options, resolution }) => {
+      const [shell, ...extra] = resolution.args;
+      if (!shell || extra.length > 0 || !SUPPORTED_SHELLS.includes(String(shell).toLowerCase())) {
+        fail(`Completion needs exactly one shell: ${SUPPORTED_SHELLS.join(", ")}.`);
+      }
+      console.log(generateCompletion(shell, { json: options.json === true }));
+    }),
+    "preset.list": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("list", resolution.args, parsed)),
+    "preset.show": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("show", resolution.args, parsed)),
+    "preset.export": bootstrap(({ parsed, resolution }) => handleCliPresetCommand("export", resolution.args, parsed)),
+    observe: bootstrap(runObserveFromCli),
+    "config.status": preConfig(({ context, options }) => showConfigStatus(context, options)),
+    "config.migrate": preConfig(({ context, options }) => migrateProjectConfig(context, options)),
+    init: preConfig(({ context, options }) => initProject(context, options)),
+    doctor: preConfig(({ context, options }) => runDoctor(context, options)),
+    "optimization.status": call(showOptimizationStatus),
+    "optimization.capture": call(captureOptimizationFromCommand),
+    "optimization.run": call(runOptimizedCommand),
+    "onboard.existing-project": call(onboardExistingProject),
+    "baseline.propose": call(proposeBaseline),
+    "baseline.approve": call(approveBaseline),
+    "baseline.status": call(showBaselineStatus),
+    "assessment.proposal.prepare": call(prepareAssessmentProposal),
+    "assessment.proposal.approve": call(approveAssessmentProposal),
+    "assessment.proposal.apply": call(applyAssessmentProposal),
+    "assessment.proposal.complete": call(completeAssessmentProposal),
+    "assessment.proposal.status": call(showAssessmentProposalStatus),
+    "workflow.definition.list": call(listWorkflowDefinitionsCommand),
+    "workflow.definition.show": call(showWorkflowDefinition),
+    "workflow.definition.propose": call(proposeWorkflowDefinition),
+    "workflow.definition.approve": call(approveWorkflowDefinitionCommand),
+    "workflow.overlay.propose": call(proposeWorkflowOverlay),
+    "workflow.overlay.approve": call(approveWorkflowOverlayCommand),
+    "workflow.overlay.explain": call(explainWorkflowOverlay),
+    "workflow.instance.start": call(startWorkflowInstance),
+    "workflow.instance.transition": call(transitionWorkflowInstance),
+    "workflow.instance.status": project(({ context, options }) => showWorkflowInstance(context, options, { explain: false })),
+    "workflow.instance.explain": project(({ context, options }) => showWorkflowInstance(context, options, { explain: true })),
+    "budget.usage.record": call(recordBudgetUsage),
+    "budget.meter.start": call(startBudgetMeter),
+    "budget.meter.record": call(recordBudgetMeter),
+    "budget.amend": call(amendAssessmentBudget),
+    "budget.status": call(showBudgetStatus),
+    "requirement.propose": project(({ context, options, resolution }) => proposeRequirement(context, options, {
+      legacyAlias: resolution.matched_path.join(" ") === "requirement create",
+    })),
+    "requirement.approve": call(approveRequirement),
+    "requirement.revise": call(reviseRequirement),
+    "requirement.supersede": call(supersedeRequirement),
+    "requirement.status": call(showRequirements),
+    "autonomy.requirement.status": call(showRequirementAutonomy),
+    "autonomy.delivery.propose": call(proposeDeliveryAutonomy),
+    "autonomy.delivery.approve": call(approveDeliveryAutonomy),
+    "autonomy.delivery.revoke": call(revokeDeliveryAutonomy),
+    "autonomy.delivery.action": call(evaluateDeliveryAction),
+    "autonomy.delivery.close": call(closeDeliveryAutonomy),
+    "autonomy.delivery.status": call(showDeliveryAutonomy),
+    "autonomy.delivery.explain": call(explainDeliveryAutonomy),
+    "contract.create": call(createContract),
+    "contract.approve": call(approveContract),
+    "story.create": call(createStory),
+    "story.claim": call(claimStory),
+    "story.release": call(releaseStoryClaim),
+    "story.complete-step": call(completeStoryStep),
+    "story.prepare-handoff": call(prepareStoryHandoff),
+    "story.handoff.close": call(closeHandoff),
+    "story.handoff": call(createStoryHandoff),
+    "story.deps": call(showStoryDependencies),
+    "work.item.create": call(createWorkItem),
+    "breakdown.policy.show": call(showBreakdownPolicy),
+    "breakdown.policy.set": call(setBreakdownPolicy),
+    "breakdown.propose": call(proposeBreakdown),
+    "breakdown.approve": call(approveBreakdown),
+    "breakdown.status": call(showBreakdownStatus),
+    "dependency.propose": call(proposeDependencyGraph),
+    "dependency.approve": call(approveDependencyGraph),
+    "dependency.status": call(showDependencyStatus),
+    "capability.profile.propose": call(proposeCapabilityProfile),
+    "capability.profile.approve": call(approveCapabilityProfile),
+    "capability.profile.status": call(showCapabilityStatus),
+    "capability.recommend": call(proposeCapabilityRecommendation),
+    "capability.approve": call(approveCapabilityRecommendation),
+    "capability.status": call(showCapabilityStatus),
+    "approval.requests": call(showApprovalRequests),
+    "authorization.grant": call(grantAuthorization),
+    "authorization.status": call(showAuthorizations),
+    "authorization.revoke": call(revokeAuthorization),
+    "task.start": call(startTask),
+    "handoff.close": call(closeHandoff),
+    "phase.lock": call(lockPhase),
+    "phase.release": call(releasePhaseLock),
+    "trace.append": call(appendTrace),
+    "trace.evidence.bind": call(bindHistoricalTraceEvidencePolicy),
+    "trace.compact": call(compactTraces),
+    "sync.record": call(recordSyncEvent),
+    "output.template.propose": call(proposeOutputTemplate),
+    "output.template.approve": call(approveOutputTemplate),
+    "output.resolve": call(resolveOutput),
+    "output.link": call(linkOutputArtifact),
+    "output.status": call(showOutputStatus),
+    "cache.rebuild": call(rebuildCache),
+    "cache.status": call(showCacheStatus),
+    "cache.clear": call(clearCache),
+    "manifest.rebuild": call(rebuildManifests),
+    "archive.closed": call(archiveClosedArtifacts),
+    "migration.active": call(migrateActiveReleaseScope),
+    "migration.identity": call(migrateIdentity),
+    "report.activity": call(reportActivity),
+    "report.query": call(reportQuery),
+    "index.rebuild": call(rebuildIndex),
+    "kb.search": project(({ context, options, resolution }) => searchKnowledgeBase(context, options, resolution.args)),
+    "gate.check": call(gateCheck),
+    "orchestrate.status": call(showOrchestrationStatus),
+    "orchestrate.plan": call(showOrchestrationPlan),
+    "route.decide": project(({ context, options, resolution }) => {
+      if (resolution.args.length > 0) {
+        fail(`Unknown command: ${resolution.input.slice(0, 2).join(" ")}`);
+      }
+      decideRoute(context, options);
+    }),
+    status: call(showStatus),
+  });
+}
+
+async function runObserveFromCli({ options, rawArgs }) {
+  try {
+    if (shouldLaunchDedicatedObservatory()) {
+      const termination = await launchDedicatedObservatory({
+        argv: rawArgs,
+        scriptPath: fileURLToPath(import.meta.url),
+      });
+      process.exitCode = termination.exitCode;
+      return;
+    }
+    await runObserveCommand({
+      projectRoot: path.resolve(String(options.root || process.cwd())),
+      host: options.host,
+      port: options.port,
+      openBrowser: options["no-open"] !== true,
+      json: options.json === true,
+      locale: humanGuidanceLocale(options),
+    }, {
+      parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
+        && process.env[OBSERVATORY_WORKER_MARKER] === "1",
+    });
+  } catch (error) {
+    if (error instanceof TypeError) fail(error.message);
+    throw error;
+  }
+}
+
+function mutationGovernanceActor(options) {
+  const assertedId = getOptionString(options, "actor")
+    || getOptionString(options, "actor-name")
+    || "local-cli";
+  const assertedType = getOptionString(options, "actor-type")
+    || (getOptionString(options, "actor") ? "agent" : "system");
+  return { type: assertedType, id: assertedId };
+}
+
+function verifiedMutationGovernanceActor() {
+  let credential;
+  let assurance;
+  try {
+    if (typeof process.getuid === "function") {
+      credential = `uid:${process.getuid()}`;
+    } else {
+      credential = `user:${os.userInfo().username}`;
+    }
+    assurance = "host_os_identity";
+  } catch {
+    return null;
+  }
+  const identityHash = crypto.createHash("sha256")
+    .update(`${process.platform}\0${credential}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    verified: true,
+    assurance,
+    actor: {
+      type: "system",
+      id: `host-user-${identityHash}`,
+      issuer: `os-${process.platform}`,
+    },
+  };
+}
+
+function mutationGovernanceEvidencePaths(options) {
+  return [
+    ...normalizeRawListOption(options.evidence),
+    ...normalizeRawListOption(options["approval-evidence"]),
+  ];
+}
+
+async function dispatchWithMutationGovernance(registry, resolution, invocation) {
+  const { context, options } = invocation;
+  const governance = createProjectMutationGovernance({
+    root: context.root,
+    governance_policy: context.config?.governance_policy,
+    canonical_action: resolution?.canonical_action,
+    command_path: resolution?.canonical_path?.join(" "),
+    actor: mutationGovernanceActor(options),
+    verified_actor: verifiedMutationGovernanceActor(),
+    evidence_paths: mutationGovernanceEvidencePaths(options),
+  });
+  context.mutationGovernanceObservations = governance.observations;
+  try {
+    return await runWithMutationGovernance(
+      governance,
+      () => registry.dispatch(resolution, invocation),
+    );
+  } finally {
+    try {
+      emitMutationAuditSinkWarning(governance, options);
+    } catch {
+      // A warning channel must never replace the command's primary result.
+    }
+  }
+}
+
+function emitMutationAuditSinkWarning(governance, options) {
+  const unavailable = governance.observations.some((outcome) =>
+    outcome?.reason_codes?.includes("mutation.audit_sink_unavailable"));
+  if (!unavailable) return;
+  const message = "The command finished, but its safety audit record could not be saved. "
+    + "Check the configured audit-events directory; until it is fixed, the audit history is incomplete.";
+  if (options.json) {
+    console.error(JSON.stringify({
+      kind: "agentic_sdlc_warning",
+      code: "MUTATION_AUDIT_RECORD_NOT_SAVED",
+      message,
+    }));
+    return;
+  }
+  console.error(`Warning: ${message}`);
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const rawJsonRequested = rawBooleanOptionRequested(rawArgs, "json");
@@ -683,9 +999,10 @@ async function main() {
       console.log(VERSION);
       return;
     }
-    const [earlyCommand, earlySubcommand, ...earlyRest] = parsed.positionals;
-    if (parsed.help || earlyCommand === "help" || parsed.positionals.length === 0) {
-      const helpPath = earlyCommand === "help" ? parsed.positionals.slice(1) : parsed.positionals;
+    if (parsed.help || parsed.positionals.length === 0) {
+      const helpPath = parsed.positionals[0] === "help"
+        ? parsed.positionals.slice(1)
+        : parsed.positionals;
       console.log(renderHelp(helpPath, {
         locale: humanGuidanceLocale(parsed.options),
         json: parsed.options.json === true,
@@ -693,22 +1010,26 @@ async function main() {
       }));
       return;
     }
-    if (earlyCommand === "completion") {
-      if (!earlySubcommand || earlyRest.length > 0 || !SUPPORTED_SHELLS.includes(String(earlySubcommand).toLowerCase())) {
-        fail(`Completion needs exactly one shell: ${SUPPORTED_SHELLS.join(", ")}.`);
-      }
-      console.log(generateCompletion(earlySubcommand, { json: parsed.options.json === true }));
+    const resolution = resolveCommand(parsed.positionals);
+    const registry = buildCliRuntimeHandlerRegistry();
+    const invocation = {
+      options: parsed.options,
+      parsed,
+      rawArgs,
+    };
+    const handler = resolution ? registry.get(resolution.canonical_action) : null;
+    if (handler?.stage === "bootstrap" && resolution.canonical_action !== "observe") {
+      await registry.dispatch(resolution, invocation);
       return;
     }
-    if (earlyCommand === "preset") {
-      handleCliPresetCommand(earlySubcommand, earlyRest, parsed);
+    if (!resolution && parsed.positionals[0] === "preset") {
+      const [, subcommand, ...rest] = parsed.positionals;
+      handleCliPresetCommand(subcommand, rest, parsed);
       return;
     }
 
-    const [command, subcommand, ...rest] = parsed.positionals;
     const resolvedRoot = path.resolve(String(parsed.options.root || process.cwd()));
-    const isIdentityRecovery = command === "migration"
-      && subcommand === "identity"
+    const isIdentityRecovery = resolution?.canonical_action === "migration.identity"
       && parsed.options.recover === true;
     const identityMigrationLockPath = path.join(resolvedRoot, ".sdlc-identity-migration.lock");
     if (pathEntryExistsNoFollow(identityMigrationLockPath) && !isIdentityRecovery) {
@@ -718,457 +1039,35 @@ async function main() {
       );
     }
     if (isIdentityRecovery) {
-      migrateIdentity({ root: resolvedRoot }, parsed.options);
+      // Deliberate bootstrap exception: the identity module must restore the
+      // shadowed .sdlc tree before project config can be trusted or dispatched.
+      // Its transaction is independently bound to the exact journal, nonce,
+      // plan hash, canonical roots, and recovery claim; no other command enters
+      // this branch. createBootstrapMutationGrant tests the same exact boundary.
+      await registry.dispatch(resolution, { ...invocation, context: { root: resolvedRoot } });
       return;
     }
-    if (command === "observe") {
-      try {
-        if (shouldLaunchDedicatedObservatory()) {
-          const termination = await launchDedicatedObservatory({
-            argv: rawArgs,
-            scriptPath: fileURLToPath(import.meta.url),
-          });
-          process.exitCode = termination.exitCode;
-          return;
-        }
-        await runObserveCommand({
-          projectRoot: path.resolve(String(parsed.options.root || process.cwd())),
-          host: parsed.options.host,
-          port: parsed.options.port,
-          openBrowser: parsed.options["no-open"] !== true,
-          json: parsed.options.json === true,
-          locale: humanGuidanceLocale(parsed.options),
-        }, {
-          parentIpcExpected: Object.hasOwn(process.env, OBSERVATORY_WORKER_MARKER)
-            && process.env[OBSERVATORY_WORKER_MARKER] === "1",
-        });
-      } catch (error) {
-        if (error instanceof TypeError) fail(error.message);
-        throw error;
-      }
+    if (resolution?.canonical_action === "observe") {
+      await registry.dispatch(resolution, invocation);
       return;
     }
     const context = buildContext(parsed.options);
-
-    if (command === "config" && subcommand === "status") {
-      showConfigStatus(context, parsed.options);
-      return;
-    }
-    if (command === "config" && subcommand === "migrate") {
-      migrateProjectConfig(context, parsed.options);
-      return;
-    }
-    if (command === "init") {
-      initProject(context, parsed.options);
-      return;
-    }
-    if (command === "doctor") {
-      await runDoctor(context, parsed.options);
-      return;
-    }
-    assertConfigAllowsCommand(context, command, subcommand, rest, parsed.options);
-    if (command === "optimization" && subcommand === "status") {
-      await showOptimizationStatus(context, parsed.options);
-      return;
-    }
-    if (command === "optimization" && subcommand === "capture") {
-      await captureOptimizationFromCommand(context, parsed.options);
-      return;
-    }
-    if (command === "optimization" && subcommand === "run") {
-      await runOptimizedCommand(context, parsed.options);
-      return;
-    }
-    if (command === "onboard" && subcommand === "existing-project") {
-      onboardExistingProject(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "propose") {
-      proposeBaseline(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "approve") {
-      approveBaseline(context, parsed.options);
-      return;
-    }
-    if (command === "baseline" && subcommand === "status") {
-      showBaselineStatus(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "prepare") {
-      prepareAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "approve") {
-      approveAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "apply") {
-      await applyAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "complete") {
-      await completeAssessmentProposal(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "proposal" && rest[0] === "status") {
-      showAssessmentProposalStatus(context, parsed.options);
-      return;
-    }
-    if (command === "assessment" && subcommand === "status") {
-      showAssessmentProposalStatus(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "list") {
-      listWorkflowDefinitionsCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "show") {
-      showWorkflowDefinition(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "propose") {
-      proposeWorkflowDefinition(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "definition" && rest[0] === "approve") {
-      approveWorkflowDefinitionCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "propose") {
-      proposeWorkflowOverlay(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "approve") {
-      approveWorkflowOverlayCommand(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") {
-      explainWorkflowOverlay(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "start") {
-      startWorkflowInstance(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "transition") {
-      transitionWorkflowInstance(context, parsed.options);
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "status") {
-      showWorkflowInstance(context, parsed.options, { explain: false });
-      return;
-    }
-    if (command === "workflow" && subcommand === "instance" && rest[0] === "explain") {
-      showWorkflowInstance(context, parsed.options, { explain: true });
-      return;
-    }
-    if (command === "budget" && subcommand === "usage" && rest[0] === "record") {
-      await recordBudgetUsage(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "meter" && rest[0] === "start") {
-      await startBudgetMeter(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "meter" && rest[0] === "record") {
-      await recordBudgetMeter(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "amend") {
-      amendAssessmentBudget(context, parsed.options);
-      return;
-    }
-    if (command === "budget" && subcommand === "status") {
-      await showBudgetStatus(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && ["create", "propose"].includes(subcommand)) {
-      proposeRequirement(context, parsed.options, { legacyAlias: subcommand === "create" });
-      return;
-    }
-    if (command === "requirement" && subcommand === "approve") {
-      approveRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "revise") {
-      reviseRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "supersede") {
-      supersedeRequirement(context, parsed.options);
-      return;
-    }
-    if (command === "requirement" && subcommand === "status") {
-      showRequirements(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") {
-      showRequirementAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "propose") {
-      proposeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "approve") {
-      approveDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "revoke") {
-      revokeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "action") {
-      evaluateDeliveryAction(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "close") {
-      closeDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "status") {
-      showDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "autonomy" && subcommand === "delivery" && rest[0] === "explain") {
-      explainDeliveryAutonomy(context, parsed.options);
-      return;
-    }
-    if (command === "contract" && subcommand === "create") {
-      createContract(context, parsed.options);
-      return;
-    }
-    if (command === "contract" && subcommand === "approve") {
-      approveContract(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "create") {
-      createStory(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "claim") {
-      claimStory(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "release") {
-      releaseStoryClaim(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "complete-step") {
-      completeStoryStep(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "prepare-handoff") {
-      prepareStoryHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "handoff" && rest[0] === "close") {
-      closeHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "handoff") {
-      createStoryHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "story" && subcommand === "deps") {
-      showStoryDependencies(context, parsed.options);
-      return;
-    }
-    if (command === "work" && subcommand === "item" && rest[0] === "create") {
-      createWorkItem(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") {
-      showBreakdownPolicy(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "policy" && rest[0] === "set") {
-      setBreakdownPolicy(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "propose") {
-      proposeBreakdown(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "approve") {
-      approveBreakdown(context, parsed.options);
-      return;
-    }
-    if (command === "breakdown" && subcommand === "status") {
-      showBreakdownStatus(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "propose") {
-      proposeDependencyGraph(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "approve") {
-      approveDependencyGraph(context, parsed.options);
-      return;
-    }
-    if (command === "dependency" && subcommand === "status") {
-      showDependencyStatus(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "propose") {
-      proposeCapabilityProfile(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "approve") {
-      approveCapabilityProfile(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "profile" && rest[0] === "status") {
-      showCapabilityStatus(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "recommend") {
-      proposeCapabilityRecommendation(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "approve") {
-      approveCapabilityRecommendation(context, parsed.options);
-      return;
-    }
-    if (command === "capability" && subcommand === "status") {
-      showCapabilityStatus(context, parsed.options);
-      return;
-    }
-    if (command === "approval" && subcommand === "requests") {
-      showApprovalRequests(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "grant") {
-      grantAuthorization(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "status") {
-      showAuthorizations(context, parsed.options);
-      return;
-    }
-    if (command === "authorization" && subcommand === "revoke") {
-      revokeAuthorization(context, parsed.options);
-      return;
-    }
-    if (command === "task" && subcommand === "start") {
-      startTask(context, parsed.options);
-      return;
-    }
-    if (command === "handoff" && subcommand === "close") {
-      closeHandoff(context, parsed.options);
-      return;
-    }
-    if (command === "phase" && subcommand === "lock") {
-      lockPhase(context, parsed.options);
-      return;
-    }
-    if (command === "phase" && subcommand === "release") {
-      releasePhaseLock(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "append") {
-      appendTrace(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "evidence" && rest[0] === "bind") {
-      bindHistoricalTraceEvidencePolicy(context, parsed.options);
-      return;
-    }
-    if (command === "sync" && subcommand === "record") {
-      recordSyncEvent(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "template" && rest[0] === "propose") {
-      proposeOutputTemplate(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "template" && rest[0] === "approve") {
-      approveOutputTemplate(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "resolve") {
-      resolveOutput(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "link") {
-      linkOutputArtifact(context, parsed.options);
-      return;
-    }
-    if (command === "output" && subcommand === "status") {
-      showOutputStatus(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "rebuild") {
-      rebuildCache(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "status") {
-      showCacheStatus(context, parsed.options);
-      return;
-    }
-    if (command === "cache" && subcommand === "clear") {
-      clearCache(context, parsed.options);
-      return;
-    }
-    if (command === "manifest" && subcommand === "rebuild") {
-      rebuildManifests(context, parsed.options);
-      return;
-    }
-    if (command === "trace" && subcommand === "compact") {
-      compactTraces(context, parsed.options);
-      return;
-    }
-    if (command === "archive" && subcommand === "closed") {
-      archiveClosedArtifacts(context, parsed.options);
-      return;
-    }
-    if (command === "migration" && subcommand === "active") {
-      migrateActiveReleaseScope(context, parsed.options);
-      return;
-    }
-    if (command === "migration" && subcommand === "identity") {
-      migrateIdentity(context, parsed.options);
-      return;
-    }
-    if (command === "report" && subcommand === "activity") {
-      reportActivity(context, parsed.options);
-      return;
-    }
-    if (command === "report" && subcommand === "query") {
-      reportQuery(context, parsed.options);
-      return;
-    }
-    if (command === "index" && subcommand === "rebuild") {
-      rebuildIndex(context, parsed.options);
-      return;
-    }
-    if (command === "kb" && subcommand === "search") {
-      searchKnowledgeBase(context, parsed.options, rest);
-      return;
-    }
-    if (command === "gate" && subcommand === "check") {
-      gateCheck(context, parsed.options);
-      return;
-    }
-    if (command === "orchestrate" && subcommand === "status") {
-      showOrchestrationStatus(context, parsed.options);
-      return;
-    }
-    if (command === "orchestrate" && subcommand === "plan") {
-      showOrchestrationPlan(context, parsed.options);
-      return;
-    }
-    if (command === "route" && (!subcommand || subcommand === "decide")) {
-      decideRoute(context, parsed.options);
-      return;
-    }
-    if (command === "status") {
-      showStatus(context, parsed.options);
-      return;
-    }
-
-    fail(`Unknown command: ${[command, subcommand].filter(Boolean).join(" ")}`);
+    if (handler?.stage === "pre-config") {
+      if (resolution?.canonical_action === "config.migrate" && parsed.options.apply === true) {
+        // Deliberate bootstrap exception: only the exact reviewed plan hash may
+        // enter migrateProjectConfig's transactional grant. The current config
+        // is the object being repaired, so it cannot authorize its own repair.
+        await registry.dispatch(resolution, { ...invocation, context });
+        return;
+      }
+      await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
+      return;
+    }
+    assertConfigAllowsCommand(context, resolution, parsed.options, parsed.positionals);
+    if (!resolution || !handler) {
+      fail(`Unknown command: ${parsed.positionals.slice(0, 2).join(" ")}`);
+    }
+    await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
   } catch (error) {
     const jsonRequested = parsed.options?.json === true || rawJsonRequested;
     const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
@@ -1186,7 +1085,9 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    const expected = error instanceof UserError || error instanceof CliPresetError;
+    const expected = error instanceof UserError
+      || error instanceof CliPresetError
+      || error instanceof MutationGovernanceError;
     {
       const italian = (() => {
         try {
@@ -2865,6 +2766,12 @@ function prepareWorkflowStartStaging(context, journal) {
 }
 
 function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName) {
+  return withGovernedMutation({ operation: "file.write", path: filePath }, () =>
+    writeWorkflowStartStagingFileDurablyAuthorized(filePath, expectedBytes, fileName));
+}
+
+function writeWorkflowStartStagingFileDurablyAuthorized(filePath, expectedBytes, fileName) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
   const parentIdentity = captureDirectoryIdentity(parentPath);
@@ -2889,6 +2796,7 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
         fail(`Workflow start staging entry differs from its durable journal: ${fileName}`);
       }
     } else {
+      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
       descriptor = fs.openSync(
         filePath,
         fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
@@ -2897,17 +2805,22 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
       verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
     }
     if (writeRequired) {
+      assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
       fs.ftruncateSync(descriptor, 0);
       if (
         process.env.NODE_ENV === "test"
         && process.env.AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE === `during-staging-${fileName}`
         && expectedBytes.length > 1
       ) {
-        writeWorkflowBufferAtStart(descriptor, expectedBytes.subarray(0, Math.floor(expectedBytes.length / 2)));
+        writeWorkflowBufferAtStart(
+          descriptor,
+          expectedBytes.subarray(0, Math.floor(expectedBytes.length / 2)),
+          filePath,
+        );
         fs.fsyncSync(descriptor);
         process.kill(process.pid, "SIGKILL");
       }
-      writeWorkflowBufferAtStart(descriptor, expectedBytes);
+      writeWorkflowBufferAtStart(descriptor, expectedBytes, filePath);
       fs.fsyncSync(descriptor);
     }
   } finally {
@@ -2916,9 +2829,11 @@ function writeWorkflowStartStagingFileDurably(filePath, expectedBytes, fileName)
   syncWorkflowDirectory(parentPath);
 }
 
-function writeWorkflowBufferAtStart(descriptor, bytes) {
+function writeWorkflowBufferAtStart(descriptor, bytes, filePath) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   let offset = 0;
   while (offset < bytes.length) {
+    assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
     const written = fs.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
     if (written <= 0) fail("Workflow staging write made no progress.");
     offset += written;
@@ -2938,7 +2853,7 @@ function completeWorkflowStartTransactionLocked(context, journal) {
   } else {
     prepareWorkflowStartStaging(context, journal);
     maybeCrashWorkflowStartForTest("after-staging-before-publish");
-    fs.renameSync(stagingRoot, finalRoot);
+    renamePathGoverned(stagingRoot, finalRoot);
     syncWorkflowDirectory(path.dirname(stagingRoot));
     syncWorkflowDirectory(workflowInstancesRoot(context));
   }
@@ -3800,9 +3715,12 @@ function ensureWorkflowDirectoryDurably(directoryPath) {
   }
   const parentPath = path.dirname(directoryPath);
   ensureWorkflowDirectoryDurably(parentPath);
-  fs.mkdirSync(directoryPath);
-  syncWorkflowDirectory(parentPath);
-  return true;
+  return withGovernedMutation({ operation: "directory.create", path: directoryPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: directoryPath });
+    fs.mkdirSync(directoryPath);
+    syncWorkflowDirectory(parentPath);
+    return true;
+  });
 }
 
 function workflowTraceBytes(filePath) {
@@ -3903,12 +3821,19 @@ function workflowEventRecordStateLocked(filePath, value, anchor) {
 }
 
 function truncateWorkflowFileDurably(filePath, size) {
+  return withGovernedMutation({ operation: "file.truncate", path: filePath }, () =>
+    truncateWorkflowFileDurablyAuthorized(filePath, size));
+}
+
+function truncateWorkflowFileDurablyAuthorized(filePath, size) {
+  assertMutationExecutionAuthorized({ operation: "file.truncate", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   let descriptor;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDWR | NO_FOLLOW_FLAG);
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    assertMutationExecutionAuthorized({ operation: "file.truncate", path: filePath });
     fs.ftruncateSync(descriptor, size);
     fs.fsyncSync(descriptor);
   } finally {
@@ -3918,17 +3843,25 @@ function truncateWorkflowFileDurably(filePath, size) {
 }
 
 function appendWorkflowJsonLineUnlocked(filePath, value) {
+  return withGovernedMutation({ operation: "file.append", path: filePath }, () =>
+    appendWorkflowJsonLineUnlockedAuthorized(filePath, value));
+}
+
+function appendWorkflowJsonLineUnlockedAuthorized(filePath, value) {
+  assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   ensureWorkflowDirectoryDurably(path.dirname(filePath));
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   let descriptor;
   try {
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
     descriptor = fs.openSync(
       filePath,
       fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | NO_FOLLOW_FLAG,
       0o600,
     );
     verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
     fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
     fs.fsyncSync(descriptor);
   } finally {
@@ -4076,14 +4009,14 @@ function removeWorkflowFileDurably(filePath) {
   if (!fs.existsSync(filePath)) return false;
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
-  fs.rmSync(filePath);
+  removePathGoverned(filePath);
   syncWorkflowDirectory(parentPath);
   return true;
 }
 
 function removeWorkflowDirectoryIfEmptyDurably(directoryPath) {
   try {
-    fs.rmdirSync(directoryPath);
+    removeEmptyDirectoryGoverned(directoryPath);
     syncWorkflowDirectory(path.dirname(directoryPath));
     return true;
   } catch (error) {
@@ -4314,7 +4247,10 @@ function buildCliErrorPayload(
   const unknown = error instanceof UnknownCommandError;
   const errorRedactionPolicy = errorRedaction.policy;
   const describeUnknown = unknown && !errorRedaction.withholdDetails;
-  const expected = unknown || error instanceof UserError || error instanceof CliPresetError;
+  const expected = unknown
+    || error instanceof UserError
+    || error instanceof CliPresetError
+    || error instanceof MutationGovernanceError;
   const normalized = normalizeOperationalError(
     errorRedaction.withholdDetails
       ? {
@@ -4336,6 +4272,8 @@ function buildCliErrorPayload(
       ? "CLI_PRESET_ERROR"
       : error instanceof UserError
         ? "USER_ERROR"
+      : error instanceof MutationGovernanceError
+        ? error.code
       : "INTERNAL_ERROR";
   const redactedUnknownPath = describeUnknown
     ? redactText(error.path || "", errorRedactionPolicy)
@@ -4361,7 +4299,13 @@ function buildCliErrorPayload(
         required_decision: italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected.",
         protection_boundary: italian ? "Le regole di sicurezza e i limiti già concordati restano invariati." : "Existing safety rules and agreed limits remain unchanged.",
         next_action: italian ? "Correggi il problema descritto nella diagnosi e riprova." : "Correct the problem described in the diagnosis and try again.",
-        details: { code, message },
+        details: {
+          code,
+          message,
+          ...(error instanceof MutationGovernanceError
+            ? { mutation: redactValue(error.details, errorRedactionPolicy) }
+            : {}),
+        },
       };
   return {
     schema_version: "agentic-sdlc-cli-error:v1",
@@ -4852,6 +4796,35 @@ function migrateProjectConfig(context, options) {
     ].join("\n"));
   }
 
+  if (options.apply && options.__bootstrapGrantConsumed !== true) {
+    const expectedPlanHash = getOptionString(options, "plan-hash");
+    if (expectedPlanHash) {
+      const currentPlan = prepareProjectConfigMigration(
+        context,
+        context.rawProjectConfig,
+        context.projectConfigLock,
+      );
+      if (expectedPlanHash !== currentPlan.plan_hash) {
+        fail([
+          "The configuration was not changed because the reviewed plan no longer matches.",
+          "Impact: the existing config and lock remain untouched.",
+          "Next: run `agentic-sdlc config migrate` again and review the new plan.",
+        ].join("\n"));
+      }
+      const grant = createBootstrapMutationGrant({
+        root: context.root,
+        canonical_action: "config.migrate",
+        plan_hash: expectedPlanHash,
+        expected_plan_hash: currentPlan.plan_hash,
+        exact_mutations: configMigrationBootstrapMutations(context, currentPlan),
+      });
+      return consumeBootstrapMutationGrant(
+        grant,
+        () => migrateProjectConfig(context, { ...options, __bootstrapGrantConsumed: true }),
+      );
+    }
+  }
+
   if (!options.apply) {
     const plan = prepareProjectConfigMigration(
       context,
@@ -4958,10 +4931,10 @@ function migrateProjectConfig(context, options) {
         if (lockExisted) {
           writeTextFile(context.configLockPath, lockBefore, { force: true });
         } else if (fs.existsSync(context.configLockPath)) {
-          fs.rmSync(context.configLockPath, { force: true });
+          removePathGoverned(context.configLockPath, { force: true });
         }
         if (receiptWritten && receiptPath && fs.existsSync(receiptPath)) {
-          fs.rmSync(receiptPath, { force: true });
+          removePathGoverned(receiptPath, { force: true });
         }
       } catch (rollbackError) {
         fail(`Configuration migration failed and rollback also failed: ${rollbackError.message}`);
@@ -5020,43 +4993,66 @@ function migrateProjectConfig(context, options) {
   ]);
 }
 
-function commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options) {
-  if (command === "status" || command === "doctor") return true;
-  if (command === "optimization" && subcommand === "status") return true;
-  if (command === "baseline" && subcommand === "status") return true;
-  if (command === "assessment" && (
-    subcommand === "status"
-    || (subcommand === "proposal" && rest[0] === "status")
-  )) return true;
-  if (command === "workflow" && subcommand === "definition" && ["list", "show"].includes(rest[0])) return true;
-  if (command === "workflow" && subcommand === "overlay" && rest[0] === "explain") return true;
-  if (command === "workflow" && subcommand === "instance" && ["status", "explain"].includes(rest[0])) return true;
-  if (command === "budget" && subcommand === "status") return true;
-  if (command === "requirement" && subcommand === "status") return true;
-  if (command === "autonomy" && subcommand === "requirement" && rest[0] === "status") return true;
-  if (command === "autonomy" && subcommand === "delivery" && ["status", "explain"].includes(rest[0])) return true;
-  if (command === "story" && subcommand === "deps") return true;
-  if (command === "breakdown" && subcommand === "policy" && rest[0] === "show") return true;
-  if (command === "breakdown" && subcommand === "status") return true;
-  if (command === "dependency" && subcommand === "status") return true;
-  if (command === "capability" && subcommand === "status") return true;
-  if (command === "capability" && subcommand === "profile" && rest[0] === "status") return true;
-  if (command === "approval" && subcommand === "requests") return true;
-  if (command === "authorization" && subcommand === "status") return true;
-  if (command === "cache" && subcommand === "status") return true;
-  if (command === "output" && ["resolve", "status"].includes(subcommand)) return true;
-  if (command === "route" && (!subcommand || subcommand === "decide")) return true;
-  if (command === "kb" && subcommand === "search") return true;
-  if (command === "orchestrate" && ["status", "plan"].includes(subcommand)) return true;
-  if (command === "gate" && subcommand === "check" && !options.out) return true;
-  if (command === "report" && ["activity", "query"].includes(subcommand) && !options.out) return true;
-  if (command === "migration" && subcommand === "active" && !options.apply) return true;
-  return false;
+function configMigrationBootstrapMutations(context, plan) {
+  const transactionLock = path.join(context.sdlcRoot, "locks", "config-migration.lock");
+  const receiptPath = path.join(
+    context.sdlcRoot,
+    "migrations",
+    "config",
+    `MIG-CONFIG-${plan.plan_hash.slice(0, 16)}.json`,
+  );
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const traceCheckpoint = traceIntegrityCheckpointPath(tracePath);
+  const traceCheckpointBackup = `${traceCheckpoint}.previous`;
+  const tracePolicy = buildTraceRedactionPolicy(context);
+  const tracePolicySource = describeRedactionPolicy(tracePolicy);
+  assertTraceEvidencePolicySourceSafety(tracePolicySource);
+  const tracePolicyBytes = `${JSON.stringify(tracePolicySource, null, 2)}\n`;
+  const tracePolicyPath = path.join(
+    context.root,
+    TRACE_EVIDENCE_POLICY_SOURCE_ROOT,
+    `${hashBuffer(Buffer.from(tracePolicyBytes, "utf8"))}.json`,
+  );
+  const exact = [
+    ["directory.create", path.join(context.sdlcRoot, "locks")],
+    ["lock.acquire", transactionLock],
+    ["lock.reclaim", transactionLock],
+    ["lock.release", transactionLock],
+    ["file.write", context.projectConfigPath],
+    ["file.write", context.configLockPath],
+    ["file.remove", context.configLockPath],
+    ["directory.create", path.join(context.sdlcRoot, "migrations")],
+    ["directory.create", path.join(context.sdlcRoot, "migrations", "config")],
+    ["file.write", receiptPath],
+    ["file.remove", receiptPath],
+    ["directory.create", path.dirname(tracePolicyPath)],
+    ["lock.acquire", `${tracePolicyPath}.lock`],
+    ["lock.release", `${tracePolicyPath}.lock`],
+    ["file.write", tracePolicyPath],
+    ["lock.acquire", `${tracePath}.lock`],
+    ["lock.release", `${tracePath}.lock`],
+    ["directory.create", path.dirname(traceCheckpoint)],
+    ["path.chmod", path.dirname(traceCheckpoint)],
+    ["lock.acquire", `${traceCheckpoint}.lock`],
+    ["lock.remove", `${traceCheckpoint}.lock`],
+    ["file.append", tracePath],
+    ["file.truncate", tracePath],
+    ["file.write", traceCheckpoint],
+    ["file.remove", traceCheckpoint],
+    ["path.rename.source", traceCheckpoint],
+    ["path.rename.target", traceCheckpoint],
+    ["path.rename.source", traceCheckpointBackup],
+    ["path.rename.target", traceCheckpointBackup],
+    ["file.remove", traceCheckpointBackup],
+  ].map(([operation, filePath]) => ({ operation, path: filePath }));
+  return [...new Map(exact.map((entry) => [`${entry.operation}\0${path.resolve(entry.path)}`, entry])).values()];
 }
 
-function assertConfigAllowsCommand(context, command, subcommand, rest, options) {
+function assertConfigAllowsCommand(context, resolution, options, positionals = []) {
   if (!context.configState || context.configState.mutation_allowed !== false) return;
-  if (commandIsReadOnlyDuringConfigRecovery(command, subcommand, rest, options)) return;
+  // Unknown commands and invalid metadata are deliberately treated as
+  // mutations: configuration recovery must never guess that they are safe.
+  if (resolution && commandMutationIntent(resolution, options) === false) return;
   const status = context.configState.status;
   fail([
     `This command was not run because the project configuration is ${status}.`,
@@ -5064,7 +5060,7 @@ function assertConfigAllowsCommand(context, command, subcommand, rest, options) 
     status === "drifted"
       ? "Next: run `agentic-sdlc config migrate`, review the exact plan, and apply its hash before retrying."
       : `Next: inspect ${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}, or restore the last valid config and lock before retrying.`,
-    `Technical detail: blocked command ${[command, subcommand, ...rest].filter(Boolean).join(" ")}.`,
+    `Technical detail: blocked command ${positionals.filter(Boolean).join(" ")}.`,
   ].join("\n"));
 }
 
@@ -5503,7 +5499,7 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id}`);
     writeJsonFile(receiptPath, receipt, { force: true });
   } catch (error) {
-    if (deliveryStartPath) fs.rmSync(deliveryStartPath, { force: true });
+    if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
     throw error;
   }
   return toProjectPath(context, receiptPath);
@@ -5542,6 +5538,7 @@ function buildTaskStartDecision(context, options) {
     delivery_profile_id: getOptionString(options, "delivery-profile")
       ? normalizeId(getOptionString(options, "delivery-profile"))
       : null,
+    delivery_kind: null,
     delivery_profile_path: null,
     autonomy_decision: null,
     autonomy_decision_path: null,
@@ -5853,6 +5850,16 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
   const explicitProfileId = getOptionString(options, "delivery-profile")
     ? normalizeId(getOptionString(options, "delivery-profile"))
     : null;
+  let plannedProfile = null;
+  try {
+    plannedProfile = contract.delivery_execution_profile_id
+      ? readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id, { missingOk: true })
+      : null;
+  } catch {
+    // The normal validation path below reports an invalid selected record.
+    plannedProfile = null;
+  }
+  result.delivery_kind = plannedProfile?.delivery_kind || null;
   if (policy.mode === "observe" && !explicitProfileId) {
     result.autonomy = {
       mode: "observe",
@@ -5866,8 +5873,11 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
     result.execution_allowed = false;
     result.contract_action = "select_delivery_autonomy";
     pushAllUnique(result.blocking_reasons, ["autonomy_selection_required"]);
+    const exactDeliveryLabel = result.delivery_kind === "local_release"
+      ? "this exact local release"
+      : result.delivery_kind === "pull_request" ? "this exact pull request" : "this exact delivery";
     pushAllUnique(result.questions, [
-      `Select the already reviewed autonomy profile for this exact pull request or local release. Contract ${contract.id} expects ${contract.delivery_execution_profile_id || "a new profile"}; the choice is never inferred from a previous delivery.`,
+      `Select the already reviewed autonomy profile for ${exactDeliveryLabel}. Contract ${contract.id} expects ${contract.delivery_execution_profile_id || "a new profile"}; the choice is never inferred from a previous delivery.`,
     ]);
     pushAllUnique(result.next_commands, [
       `agentic-sdlc autonomy delivery status${contract.delivery_execution_profile_id ? ` --id ${contract.delivery_execution_profile_id}` : ""}`,
@@ -5886,6 +5896,7 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
   }
   try {
     const profile = readDeliveryAutonomyProfile(context, explicitProfileId);
+    result.delivery_kind = profile.delivery_kind;
     const actualStory = result.story_id ? readStory(context, result.story_id) : null;
     const exactStoryRef = profile.story_refs.length === 1 ? profile.story_refs[0] : null;
     const exactContractRef = profile.contract_refs.length === 1 ? profile.contract_refs[0] : null;
@@ -6217,7 +6228,7 @@ function renderTaskStartAssistantMessage(decision) {
     ].filter(Boolean).join("\n");
   }
   const explanations = Array.from(new Set(
-    (decision.blocking_reasons || []).map((reason) => userFriendlyBlockingReason(reason, locale)),
+    (decision.blocking_reasons || []).map((reason) => userFriendlyBlockingReason(reason, locale, decision)),
   )).filter(Boolean);
   const lines = [
     italian ? "Mi serve una decisione rapida prima di continuare." : "I need one quick decision before I continue.",
@@ -6248,6 +6259,42 @@ function renderTaskStartAssistantMessage(decision) {
   return lines.filter(Boolean).join("\n");
 }
 
+function taskStartAutonomyCopy(deliveryKind, locale = "en") {
+  const italian = locale === "it";
+  const localRelease = deliveryKind === "local_release";
+  return italian
+    ? {
+        question: localRelease
+          ? "Per questo rilascio locale, quanto vuoi che lavori in autonomia?"
+          : "Per questa PR, quanto vuoi che lavori in autonomia?",
+        choices: [
+          "Guidato: ti chiedo conferma prima dei passaggi importanti.",
+          "Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate.",
+          localRelease
+            ? "Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie."
+            : "Autonomia completa entro questi limiti: completo questa PR senza pause ordinarie.",
+        ],
+        scope: localRelease
+          ? "Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata."
+          : "Questa scelta vale solo per questa PR e non sarà riutilizzata.",
+      }
+    : {
+        question: localRelease
+          ? "For this local release, how independently should I work?"
+          : "For this pull request, how independently should I work?",
+        choices: [
+          "Guided: I ask for confirmation before important steps.",
+          "Autonomy with checks: I proceed independently, but stop before the sensitive actions we agree.",
+          localRelease
+            ? "Full autonomy within these limits: I complete this local release without routine pauses."
+            : "Full autonomy within these limits: I complete this pull request without routine pauses.",
+        ],
+        scope: localRelease
+          ? "This choice applies only to this local release and will not be reused."
+          : "This choice applies only to this pull request and will not be reused.",
+      };
+}
+
 function taskDecisionExampleAnswer(decision, locale = "en") {
   const italian = locale === "it";
   switch (decision.contract_action) {
@@ -6270,9 +6317,12 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
         ? `“Avvia ${decision.story_id || "questa attività"} secondo ${decision.contract_id || "l’incarico approvato"}; fermati se devono cambiare ambito o budget.”`
         : `“Start ${decision.story_id || "this task"} under ${decision.contract_id || "the approved brief"}; stop and ask if scope or budget must change.”`;
     case "select_delivery_autonomy":
-      return italian
-        ? "“Per questa attività, chiedimi conferma a ogni passaggio importante / procedi da solo tra i momenti di revisione ma fermati prima dei passaggi delicati / completa questa pull request da solo entro i limiti mostrati.”"
-        : "“For this work, ask before every important step / work independently between review moments but pause before sensitive steps / complete this pull request independently within the displayed limits.”";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "“Indica prima la destinazione di questa consegna; poi scegli Guidato, Autonomia con controlli oppure Autonomia completa entro i limiti mostrati.”"
+          : "“Name this delivery's destination first, then choose Guided, Autonomy with checks, or Full autonomy within the displayed limits.”";
+      }
+      return `“${taskStartAutonomyCopy(decision.delivery_kind, locale).choices.join(" / ")}”`;
     case "repair_delivery_autonomy":
       return italian
         ? '“Mantieni separata questa consegna, correggi repository, branch, ambito o checkpoint esatti e rivalutala senza riutilizzare un’approvazione precedente.”'
@@ -6288,9 +6338,12 @@ function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
   const italian = locale === "it";
   switch (decision.contract_action) {
     case "select_delivery_autonomy":
-      return italian
-        ? "Quanto vuoi che proceda in autonomia per questa singola pull request o questo singolo rilascio locale?"
-        : "How independently should I work on this one pull request or local release?";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "Qual è la destinazione di questa consegna? Dopo averla definita, scegli quanto vuoi che lavori in autonomia."
+          : "What is this delivery's destination? Once it is defined, choose how independently I should work.";
+      }
+      return taskStartAutonomyCopy(decision.delivery_kind, locale).question;
     case "repair_delivery_autonomy":
       return italian
         ? "Confermi di correggere i limiti esatti di questa consegna e di rivalutarla senza riusare approvazioni precedenti?"
@@ -6308,25 +6361,22 @@ function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
 
 function taskStartAutonomyChoiceLines(decision, italian) {
   if (decision.contract_action !== "select_delivery_autonomy") return [];
-  return italian
-    ? [
-        "",
-        "Scelta per questa consegna:",
-        "- Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale?",
-        "  1. Chiedimi conferma prima di ogni passaggio importante.",
-        "  2. Procedi da solo tra un momento di revisione e l’altro, ma fermati prima dei passaggi delicati concordati.",
-        "  3. Completa questa consegna da solo entro i limiti mostrati; fermati se cambiano ambito, destinazione o rischio.",
-        "La scelta vale soltanto per questa consegna e non sarà riutilizzata per la successiva.",
-      ]
-    : [
-        "",
-        "Choice for this delivery:",
-        "- How independently should I work on this pull request or local release?",
-        "  1. Ask before every important step.",
-        "  2. Work independently between review moments, but pause before the sensitive steps we agree.",
-        "  3. Complete this delivery independently within the displayed limits; stop if scope, target, or risk changes.",
-        "This choice applies only to this delivery and will not be reused for the next one.",
-      ];
+  const locale = italian ? "it" : "en";
+  const choiceLines = (kind) => {
+    const copy = taskStartAutonomyCopy(kind, locale);
+    return [
+      copy.question,
+      ...copy.choices.map((choice, index) => `${index + 1}. ${choice}`),
+      copy.scope,
+    ];
+  };
+  if (decision.delivery_kind) return ["", ...choiceLines(decision.delivery_kind)];
+  return [
+    "",
+    italian
+      ? "Prima indica la destinazione esatta di questa consegna. Dopo che sarà definita, ti mostrerò una sola domanda con le tre scelte applicabili."
+      : "First identify this delivery's exact destination. Once it is defined, I will show one question with the three applicable choices.",
+  ];
 }
 
 function userFriendlyTaskStartIntro(decision, locale = "en") {
@@ -6358,9 +6408,18 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
         ? "Il lavoro è definito, ma prima di iniziare serve la tua conferma esplicita."
         : "The work is defined, but I need your explicit go-ahead before starting it.";
     case "select_delivery_autonomy":
-      return italian
-        ? "Il lavoro è definito, ma questa pull request o questo rilascio locale deve ancora avere una propria scelta del livello di autonomia."
-        : "The work is defined, but this pull request or local release still needs its own choice of how independently the agent may proceed.";
+      if (!decision.delivery_kind) {
+        return italian
+          ? "Il lavoro è definito, ma la destinazione di questa consegna e il relativo modo di lavorare devono ancora essere scelti."
+          : "The work is defined, but this delivery's destination and working mode still need to be chosen.";
+      }
+      return decision.delivery_kind === "local_release"
+        ? (italian
+            ? "Il lavoro è definito, ma questo rilascio locale deve ancora avere una scelta propria che non sarà riutilizzata."
+            : "The work is defined, but this local release still needs its own choice, which will not be reused.")
+        : (italian
+            ? "Il lavoro è definito, ma questa PR deve ancora avere una scelta propria che non sarà riutilizzata."
+            : "The work is defined, but this pull request still needs its own choice, which will not be reused.");
     case "repair_delivery_autonomy":
       return italian
         ? "La scelta di autonomia non corrisponde più al perimetro o allo stato esatto della consegna e deve essere corretta prima di continuare."
@@ -6376,7 +6435,22 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
   }
 }
 
-function userFriendlyBlockingReason(code, locale = "en") {
+function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
+  if (code === "autonomy_selection_required") {
+    if (decision.delivery_kind === "local_release") {
+      return locale === "it"
+        ? "Scegli quanto posso lavorare in autonomia per questo solo rilascio locale; nessuna scelta precedente viene riutilizzata."
+        : "Choose how independently I may work for this local release only; no earlier choice is reused.";
+    }
+    if (decision.delivery_kind === "pull_request") {
+      return locale === "it"
+        ? "Scegli quanto posso lavorare in autonomia per questa sola PR; nessuna scelta precedente viene riutilizzata."
+        : "Choose how independently I may work for this pull request only; no earlier choice is reused.";
+    }
+    return locale === "it"
+      ? "Definisci la destinazione di questa consegna e scegli un modo di lavorare valido soltanto per essa."
+      : "Define this delivery's destination and choose a working mode that applies only to it.";
+  }
   if (locale === "it") {
     const italianExplanations = {
       autonomy_checkpoint_required: "La consegna può procedere da sola tra i momenti di revisione concordati, ma ora ha raggiunto un passaggio che richiede una nuova conferma.",
@@ -7833,8 +7907,48 @@ function clamp01(value) {
 }
 
 function initProject(context, options) {
+  if (!fs.existsSync(context.sdlcRoot)) {
+    const exactMutations = initBootstrapMutations(context);
+    const grant = createBootstrapMutationGrant({
+      root: context.root,
+      canonical_action: "init",
+      first_time: true,
+      exact_mutations: exactMutations,
+    });
+    return consumeBootstrapMutationGrant(grant, () => {
+      const result = initializeProject(context, options);
+      output(options, result.payload, result.messages);
+    });
+  }
   const result = initializeProject(context, options);
   output(options, result.payload, result.messages);
+}
+
+function initBootstrapMutations(context) {
+  const directories = [
+    context.sdlcRoot,
+    ...context.config.kb_directories.map((directory) => path.join(context.sdlcRoot, directory)),
+    path.join(context.sdlcRoot, "output-contracts", "templates"),
+    path.join(context.sdlcRoot, "output-contracts", "decisions"),
+    path.join(context.sdlcRoot, "work-items", "epics"),
+    path.join(context.sdlcRoot, "work-items", "tasks"),
+  ];
+  const files = [
+    path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME),
+    path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME),
+    path.join(context.sdlcRoot, "project.json"),
+    path.join(context.sdlcRoot, "README.md"),
+    path.join(context.sdlcRoot, ".gitignore"),
+    path.join(context.sdlcRoot, "output-contracts", "registry.json"),
+    path.join(context.sdlcRoot, "dependencies", "graph.json"),
+    ...context.config.phase_order.map((phase) =>
+      path.join(context.sdlcRoot, "contracts", `contract-${phase}-v1.json`)),
+  ];
+  const exact = [
+    ...directories.map((directoryPath) => ({ operation: "directory.create", path: directoryPath })),
+    ...files.map((filePath) => ({ operation: "file.write", path: filePath })),
+  ];
+  return [...new Map(exact.map((entry) => [`${entry.operation}\0${path.resolve(entry.path)}`, entry])).values()];
 }
 
 async function runDoctor(context, options) {
@@ -9095,6 +9209,16 @@ function deliveryAutonomyPath(context, profileId) {
   return path.join(deliveryAutonomyRoot(context), `${normalizeId(profileId)}.json`);
 }
 
+function deliveryExecutionProfileSchemaName(profile) {
+  if (profile?.schema_version === "delivery-execution-profile:v2") {
+    return "delivery-execution-profile-v2.schema.json";
+  }
+  if (profile?.schema_version === "delivery-execution-profile:v1") {
+    return "delivery-execution-profile.schema.json";
+  }
+  fail(`Unsupported delivery profile schema '${profile?.schema_version || "missing"}'.`);
+}
+
 function readRequirementAutonomyProfile(context, profileId, options = {}) {
   const filePath = requirementAutonomyPath(context, profileId);
   if (!fs.existsSync(filePath)) {
@@ -9120,6 +9244,7 @@ function readDeliveryAutonomyProfile(context, profileId, options = {}) {
   if (!integrity.valid) {
     fail(`Delivery autonomy profile ${profileId} failed integrity validation: ${integrity.errors.join("; ")}`);
   }
+  assertRecordSchema(profile, deliveryExecutionProfileSchemaName(profile), `Delivery autonomy profile ${profileId}`);
   return profile;
 }
 
@@ -10117,6 +10242,68 @@ function deliveryConcreteIdentity(kind, target) {
   };
 }
 
+function configuredDeliveryProviderSelection(context) {
+  const configured = context.config.autonomy_policy?.delivery_providers || {};
+  return {
+    git_push: configured.git_push || DEFAULT_DELIVERY_PROVIDER_SELECTION.git_push,
+    pull_request: configured.pull_request || DEFAULT_DELIVERY_PROVIDER_SELECTION.pull_request,
+    local_release: configured.local_release || DEFAULT_DELIVERY_PROVIDER_SELECTION.local_release,
+  };
+}
+
+function normalizeDeliveryProviderId(value, label) {
+  const providerId = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]*$/u.test(providerId)) {
+    fail(`${label} must be a safe provider id, for example git-remote or github-cli.`);
+  }
+  return providerId;
+}
+
+function deliveryProviderBindingsFromOptions(context, kind, options) {
+  const configured = configuredDeliveryProviderSelection(context);
+  const selected = kind === "pull_request"
+    ? [
+        {
+          action: "git.push",
+          provider_id: normalizeDeliveryProviderId(
+            getOptionString(options, "git-provider") || configured.git_push,
+            "Git provider",
+          ),
+        },
+        ...["pull_request.create", "pull_request.merge", "pull_request.update"].map((action) => ({
+          action,
+          provider_id: normalizeDeliveryProviderId(
+            getOptionString(options, "pull-request-provider") || configured.pull_request,
+            "Pull-request provider",
+          ),
+        })),
+      ]
+    : [{
+        action: "release.local",
+        provider_id: normalizeDeliveryProviderId(
+          getOptionString(options, "local-release-provider") || configured.local_release,
+          "Local-release provider",
+        ),
+      }];
+  const registry = createDefaultDeliveryProviderRegistry();
+  for (const binding of selected) {
+    try {
+      if (
+        !registry.supports(binding.provider_id, binding.action, "precondition")
+        || !registry.supports(binding.provider_id, binding.action, "completion")
+      ) {
+        fail(`The selected provider cannot verify ${binding.action}; choose a compatible installed provider.`);
+      }
+    } catch (error) {
+      if (error instanceof DeliveryProviderError) {
+        fail(`The selected provider cannot verify ${binding.action}; choose a compatible installed provider.`);
+      }
+      throw error;
+    }
+  }
+  return selected.sort((left, right) => left.action.localeCompare(right.action));
+}
+
 function normalizeDeliveryAction(kind, value) {
   const raw = String(value || "").trim().toLowerCase();
   const aliases = {
@@ -10252,31 +10439,69 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
       delete: false,
     };
   }
-  if (action === "pull_request.merge") {
+  if (["pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
     const prUrl = getOptionString(options, "pr-url");
-    if (!prUrl) fail("pull_request.merge requires the exact --pr-url shown at the checkpoint.");
+    if (action !== "pull_request.create" && !prUrl) {
+      fail(`${action} requires the exact --pr-url shown at the checkpoint.`);
+    }
     let parsed;
-    try {
-      parsed = new URL(prUrl);
-    } catch {
-      fail("pull_request.merge --pr-url must be an absolute URL.");
+    if (prUrl) {
+      try {
+        parsed = new URL(prUrl);
+      } catch {
+        fail(`${action} --pr-url must be an absolute URL.`);
+      }
+      const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
+      const repository = segments.length >= 2
+        ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
+        : null;
+      if (
+        parsed.protocol !== "https:"
+        || parsed.search
+        || parsed.hash
+        || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
+        || segments[2] !== "pull"
+        || !/^\d+$/u.test(segments[3] || "")
+        || segments.length !== 4
+      ) {
+        fail(`${action} --pr-url does not match the exact approved repository.`);
+      }
     }
-    const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
-    const repository = segments.length >= 2
-      ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
-      : null;
-    if (
-      parsed.protocol !== "https:"
-      || parsed.search
-      || parsed.hash
-      || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
-      || segments[2] !== "pull"
-      || !/^\d+$/u.test(segments[3] || "")
-      || segments.length !== 4
-    ) {
-      fail("pull_request.merge --pr-url does not match the exact approved repository.");
+    const canonicalPrUrl = prUrl ? canonicalAbsoluteUrl(prUrl) : null;
+    details.pull_request = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha };
+    if (action === "pull_request.merge") {
+      details.merge = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha, force: false };
     }
-    details.merge = { pr_url: canonicalAbsoluteUrl(prUrl), source_sha: runtimeTarget.head_sha, force: false };
+    if (action === "pull_request.update") {
+      const expected = {};
+      const expectedTitle = getOptionString(options, "expected-pr-title");
+      const expectedBodyHash = getOptionString(options, "expected-pr-body-sha256");
+      const expectedState = getOptionString(options, "expected-pr-state");
+      const expectedBase = getOptionString(options, "expected-pr-base");
+      if (expectedTitle) expected.title = expectedTitle;
+      if (expectedBodyHash) {
+        if (!/^[a-f0-9]{64}$/u.test(expectedBodyHash)) {
+          fail("pull_request.update --expected-pr-body-sha256 must be a lowercase SHA-256 hash.");
+        }
+        expected.body_sha256 = expectedBodyHash;
+      }
+      if (expectedState) {
+        if (!["draft", "ready"].includes(expectedState)) {
+          fail("pull_request.update --expected-pr-state must be exactly draft or ready.");
+        }
+        expected.is_draft = expectedState === "draft";
+      }
+      if (expectedBase) {
+        if (expectedBase !== profile.pull_request_target.base_branch) {
+          fail("pull_request.update cannot retarget the pull request outside the approved base branch.");
+        }
+        expected.base_branch = expectedBase;
+      }
+      if (Object.keys(expected).length === 0) {
+        fail("pull_request.update requires at least one exact expected PR field.");
+      }
+      details.pull_request.expected = expected;
+    }
   }
   return details;
 }
@@ -10342,7 +10567,7 @@ function buildCompletedGitCommitDetails(context, authorization, runtimeTarget) {
   };
 }
 
-function verifyCompletedGitPush(context, authorization) {
+function verifyLegacyCompletedGitPush(context, authorization) {
   const push = authorization.action_details?.push;
   const precondition = authorization.action_details?.push_precondition;
   if (!push?.remote || !push.destination_ref || !push.source_sha) {
@@ -10380,73 +10605,7 @@ function verifyCompletedGitPush(context, authorization) {
   };
 }
 
-function observeGitPushPrecondition(context, actionDetails) {
-  const push = actionDetails?.push;
-  let output;
-  try {
-    output = childProcess.execFileSync(
-      "git",
-      ["-C", context.root, "ls-remote", "--heads", push.remote, push.destination_ref],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-  } catch (error) {
-    fail(`git.push precondition verification failed: ${String(error.stderr || error.message).trim()}`);
-  }
-  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
-    parts.length >= 2 && parts[1] === push.destination_ref);
-  if (matches.length > 1) {
-    fail(`git.push precondition returned multiple exact refs for ${push.destination_ref}.`);
-  }
-  const observedSha = matches[0]?.[0] || null;
-  if (observedSha === push.source_sha) {
-    fail(`git.push destination ${push.destination_ref} already equals ${push.source_sha}; no push transition is needed.`);
-  }
-  return {
-    provider: "git-remote",
-    remote: push.remote,
-    destination_ref: push.destination_ref,
-    observed_sha: observedSha,
-  };
-}
-
-function observeGitRemoteBasePrecondition(context, profile, actionDetails) {
-  const remote = actionDetails?.push?.remote;
-  const baseRef = `refs/heads/${profile.pull_request_target.base_branch}`;
-  let output;
-  try {
-    output = childProcess.execFileSync(
-      "git",
-      ["-C", context.root, "ls-remote", "--heads", remote, baseRef],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-  } catch (error) {
-    fail(`git.push base precondition verification failed: ${String(error.stderr || error.message).trim()}`);
-  }
-  const matches = output.split(/\r?\n/u).map((line) => line.trim().split(/\s+/u)).filter((parts) =>
-    parts.length >= 2 && parts[1] === baseRef);
-  if (matches.length !== 1 || !/^[a-f0-9]{40,64}$/u.test(matches[0][0])) {
-    fail(`git.push base precondition requires exactly one live remote ref for ${baseRef}.`);
-  }
-  return {
-    provider: "git-remote",
-    remote,
-    base_ref: baseRef,
-    observed_sha: matches[0][0],
-  };
-}
-
-function canonicalAbsoluteUrl(value) {
-  try {
-    const parsed = new URL(value);
-    parsed.hash = "";
-    parsed.search = "";
-    return parsed.toString().replace(/\/$/u, "");
-  } catch {
-    return null;
-  }
-}
-
-function verifyCompletedGitHubMerge(profile, authorization) {
+function verifyLegacyCompletedGitHubMerge(profile, authorization) {
   const merge = authorization.action_details?.merge;
   const precondition = authorization.action_details?.merge_precondition;
   if (!merge?.pr_url || !merge.source_sha) {
@@ -10507,43 +10666,15 @@ function verifyCompletedGitHubMerge(profile, authorization) {
   };
 }
 
-function observeGitHubMergePrecondition(profile, actionDetails) {
-  const merge = actionDetails?.merge;
-  let raw;
+function canonicalAbsoluteUrl(value) {
   try {
-    raw = childProcess.execFileSync(
-      "gh",
-      ["pr", "view", merge.pr_url, "--json", "url,state,isDraft,headRefOid,headRefName,baseRefName"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (error) {
-    fail(`pull_request.merge precondition requires authenticated GitHub CLI access: ${String(error.stderr || error.message).trim()}`);
-  }
-  let observed;
-  try {
-    observed = JSON.parse(raw);
+    const parsed = new URL(value);
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.toString().replace(/\/$/u, "");
   } catch {
-    fail("pull_request.merge precondition provider returned invalid JSON.");
+    return null;
   }
-  if (
-    observed.state !== "OPEN"
-    || observed.isDraft !== false
-    || observed.headRefOid !== merge.source_sha
-    || observed.headRefName !== profile.pull_request_target.head_branch
-    || observed.baseRefName !== profile.pull_request_target.base_branch
-    || canonicalAbsoluteUrl(observed.url) !== canonicalAbsoluteUrl(merge.pr_url)
-  ) {
-    fail("pull_request.merge precondition must be the exact open GitHub PR at the authorized head SHA and branches.");
-  }
-  return {
-    provider: "github-cli",
-    pr_url: canonicalAbsoluteUrl(observed.url),
-    state: observed.state,
-    is_draft: false,
-    head_sha: observed.headRefOid,
-    head_branch: observed.headRefName,
-    base_branch: observed.baseRefName,
-  };
 }
 
 function remoteAuthorizationProjection(action, actionDetails) {
@@ -10553,15 +10684,237 @@ function remoteAuthorizationProjection(action, actionDetails) {
       push_precondition: _pushPrecondition,
       base_precondition: _basePrecondition,
       commit_coverage: _commitCoverage,
+      provider_operation: _providerOperation,
+      remote_verification: _remoteVerification,
       ...projection
     } = operationDetails;
     return projection;
   }
   if (action === "pull_request.merge") {
-    const { merge_precondition: _precondition, ...projection } = operationDetails;
+    const {
+      merge_precondition: _precondition,
+      provider_operation: _providerOperation,
+      provider_verification: _providerVerification,
+      ...projection
+    } = operationDetails;
     return projection;
   }
   return operationDetails;
+}
+
+const DELIVERY_PROVIDER_ACTIONS = new Set([
+  "git.push",
+  "pull_request.create",
+  "pull_request.merge",
+  "pull_request.update",
+  "release.local",
+]);
+
+function resolveDeliveryProviderBinding(profile, action) {
+  if (!DELIVERY_PROVIDER_ACTIONS.has(action)) return null;
+  try {
+    const binding = providerBindingForAction(profile, action);
+    if (!binding) {
+      fail(`This delivery has no verification provider for ${action}; create a new delivery choice with an explicit provider.`);
+    }
+    if (binding.compatibility === "unsupported-fail-closed") {
+      fail(`This historical delivery cannot safely verify ${action}; create a new delivery choice with a compatible provider.`);
+    }
+    const registry = createDefaultDeliveryProviderRegistry();
+    if (
+      !registry.supports(binding.provider_id, action, "precondition")
+      || !registry.supports(binding.provider_id, action, "completion")
+    ) {
+      fail(`The provider selected for ${action} cannot verify both the before and after state.`);
+    }
+    return binding;
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`The delivery provider for ${action} is unavailable or incompatible.`);
+    }
+    throw error;
+  }
+}
+
+function deliveryProviderOperationSubject(context, profile, action, actionDetails, authorizedAt) {
+  if (action === "git.push") {
+    return {
+      cwd: context.root,
+      repository: profile.pull_request_target.repository,
+      remote: actionDetails.push.remote,
+      destination_ref: actionDetails.push.destination_ref,
+      base_ref: `refs/heads/${profile.pull_request_target.base_branch}`,
+      source_sha: actionDetails.push.source_sha,
+    };
+  }
+  if (["pull_request.create", "pull_request.merge", "pull_request.update"].includes(action)) {
+    const subject = {
+      repository: profile.pull_request_target.repository,
+      head_branch: profile.pull_request_target.head_branch,
+      base_branch: profile.pull_request_target.base_branch,
+      source_sha: actionDetails.source_sha,
+      authorized_at: authorizedAt,
+    };
+    if (action !== "pull_request.create") subject.pr_url = actionDetails.pull_request?.pr_url;
+    if (action === "pull_request.update") subject.expected = actionDetails.pull_request?.expected;
+    return subject;
+  }
+  if (action === "release.local") {
+    return {
+      root_path: profile.local_release_target.root_path,
+      allowed_write_paths: profile.local_release_target.allowed_write_paths,
+    };
+  }
+  return null;
+}
+
+function observeDeliveryProviderPrecondition(context, profile, action, actionDetails, operationId, authorizedAt) {
+  const binding = resolveDeliveryProviderBinding(profile, action);
+  if (!binding) return null;
+  const registry = createDefaultDeliveryProviderRegistry();
+  const subject = deliveryProviderOperationSubject(context, profile, action, actionDetails, authorizedAt);
+  try {
+    const receipt = registry.observePrecondition(binding.provider_id, {
+      id: operationId,
+      action,
+      subject,
+      observed_at: authorizedAt,
+    });
+    assertProviderOperationReceiptIntegrity(receipt);
+    assertRecordSchema(receipt, "provider-operation-receipt.schema.json", `${action} provider precondition`);
+    return {
+      binding: {
+        action,
+        provider_id: binding.provider_id,
+        source: binding.derived_only ? "legacy-v1" : "explicit-v2",
+        provider_bindings_hash: profile.provider_bindings_hash || null,
+      },
+      precondition_receipt: receipt,
+      completion_receipt: null,
+    };
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`Could not verify the safe starting state for ${action}. ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function verifyDeliveryProviderCompletion(profile, action, providerOperation, completedAt) {
+  const binding = resolveDeliveryProviderBinding(profile, action);
+  if (!binding || !providerOperation?.precondition_receipt) {
+    fail(`The authorization for ${action} has no verified starting state.`);
+  }
+  if (
+    providerOperation.binding?.provider_id !== binding.provider_id
+    || providerOperation.binding?.action !== action
+    || providerOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+  ) {
+    fail(`The verification provider for ${action} changed after authorization.`);
+  }
+  const precondition = assertProviderOperationReceiptIntegrity(providerOperation.precondition_receipt);
+  if (
+    precondition.provider.id !== binding.provider_id
+    || precondition.operation.action !== action
+    || precondition.operation.phase !== "precondition"
+  ) {
+    fail(`The saved starting-state proof for ${action} does not match this delivery.`);
+  }
+  const registry = createDefaultDeliveryProviderRegistry();
+  try {
+    const completion = registry.verifyCompletion(binding.provider_id, {
+      id: precondition.operation.id,
+      action,
+      subject: precondition.subject,
+      observed_at: completedAt,
+    }, precondition);
+    assertProviderOperationReceiptIntegrity(completion);
+    assertRecordSchema(completion, "provider-operation-receipt.schema.json", `${action} provider completion`);
+    return {
+      ...providerOperation,
+      completion_receipt: completion,
+    };
+  } catch (error) {
+    if (error instanceof DeliveryProviderError) {
+      fail(`Could not verify the completed result for ${action}. ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function withProviderCompatibilityProjection(action, actionDetails, providerOperation) {
+  const precondition = providerOperation?.precondition_receipt?.proof;
+  const completion = providerOperation?.completion_receipt?.proof;
+  let projected = { ...actionDetails, provider_operation: providerOperation };
+  if (action === "git.push") {
+    projected = {
+      ...projected,
+      base_precondition: {
+        provider: providerOperation.binding.provider_id,
+        remote: precondition.remote,
+        base_ref: precondition.base_ref,
+        observed_sha: precondition.base_sha,
+      },
+      push_precondition: {
+        provider: providerOperation.binding.provider_id,
+        remote: precondition.remote,
+        destination_ref: precondition.destination_ref,
+        observed_sha: precondition.previous_sha,
+      },
+    };
+    if (completion) {
+      projected.remote_verification = {
+        provider: providerOperation.binding.provider_id,
+        remote: completion.remote,
+        destination_ref: completion.destination_ref,
+        observed_sha: completion.observed_sha,
+        verified_at: providerOperation.completion_receipt.observed_at,
+      };
+    }
+  }
+  if (["pull_request.create", "pull_request.merge", "pull_request.update"].includes(action)) {
+    const legacyPrecondition = { provider: providerOperation.binding.provider_id, ...precondition };
+    if (action === "pull_request.merge") projected.merge_precondition = legacyPrecondition;
+    else projected.provider_precondition = legacyPrecondition;
+    if (completion) projected.provider_verification = { provider: providerOperation.binding.provider_id, ...completion };
+  }
+  return projected;
+}
+
+function assertDeliveryProviderAuthorization(context, profile, authorization) {
+  if (!DELIVERY_PROVIDER_ACTIONS.has(authorization.action)) return;
+  const providerOperation = authorization.action_details?.provider_operation;
+  if (!providerOperation) {
+    if (profile.schema_version === "delivery-execution-profile:v1") return;
+    fail(`Delivery action authorization ${authorization.id} has no provider precondition proof.`);
+  }
+  const binding = resolveDeliveryProviderBinding(profile, authorization.action);
+  let precondition;
+  try {
+    precondition = assertProviderOperationReceiptIntegrity(providerOperation.precondition_receipt);
+  } catch (error) {
+    fail(`Delivery action authorization ${authorization.id} has an invalid provider precondition proof: ${error.message}`);
+  }
+  const expectedSubject = deliveryProviderOperationSubject(
+    context,
+    profile,
+    authorization.action,
+    authorization.action_details,
+    authorization.authorized_at,
+  );
+  if (
+    providerOperation.completion_receipt !== null
+    || providerOperation.binding?.action !== authorization.action
+    || providerOperation.binding?.provider_id !== binding.provider_id
+    || providerOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+    || precondition.provider.id !== binding.provider_id
+    || precondition.operation.id !== authorization.id
+    || precondition.operation.action !== authorization.action
+    || precondition.operation.phase !== "precondition"
+    || stableJson(precondition.subject) !== stableJson(expectedSubject)
+  ) {
+    fail(`Delivery action authorization ${authorization.id} provider proof does not match its exact action boundary.`);
+  }
 }
 
 function normalizeSmokeTestCommand(value) {
@@ -11010,7 +11363,9 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     constraints,
   });
   const createdAt = now();
-  const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+  const providerBindings = deliveryProviderBindingsFromOptions(context, kind, options);
+  const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfileV2({
+    schema_version: "delivery-execution-profile:v2",
     id: profileId,
     status: "proposed",
     delivery_id: deliveryId,
@@ -11035,6 +11390,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     phase_levels: {},
     constraints,
     checkpoints: context.config.autonomy_policy?.presets?.[requestedLevel]?.checkpoints,
+    provider_bindings: providerBindings,
     ...target,
     authority_assurance: { mode: "audit_only" },
     approval_ref: null,
@@ -11047,7 +11403,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
       exact_delivery_selection: true,
     },
   }));
-  assertRecordSchema(profile, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  assertRecordSchema(profile, deliveryExecutionProfileSchemaName(profile), `Delivery autonomy profile ${profileId}`);
   const profilePath = deliveryAutonomyPath(context, profileId);
   writeJsonFile(profilePath, profile, { force: false });
   const attribution = buildAttribution(context, options, "autonomy.delivery.propose");
@@ -11082,6 +11438,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     checkpoints: profile.checkpoints,
     forbidden_actions: constraints.forbidden_actions,
     proposal_authority_mode: profile.authority_assurance.mode,
+    provider_bindings: profile.provider_bindings,
     non_reusable: true,
   };
   const projectName = readProjectSafe(context)?.project_name || path.basename(context.root);
@@ -11126,6 +11483,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
         : profile.local_release_target.root_path}`,
       `Requested technical level: ${requestedLevel}`,
       `Highest currently enforceable level: ${guidance.details.effective_level}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       `Allowed actions: ${review.allowed_actions.join(", ")}`,
       `Allowed write paths: ${review.allowed_write_paths.join(", ")}`,
       `Checkpoints: ${review.checkpoints.join(", ") || "global exceptions only"}`,
@@ -11409,7 +11767,10 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
     authorityAction: "autonomy.delivery.approve",
     authoritySubject: approvalSubject,
   });
-  const active = buildDomainRecord(`Cannot activate delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfile({
+  const profileBuilder = proposed.schema_version === "delivery-execution-profile:v2"
+    ? buildDeliveryExecutionProfileV2
+    : buildDeliveryExecutionProfile;
+  const active = buildDomainRecord(`Cannot activate delivery autonomy ${profileId}`, () => profileBuilder({
     ...proposed,
     status: "active",
     authority_assurance: authorityAssurance,
@@ -11417,7 +11778,7 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
     updated_at: now(),
     extensions: { ...proposed.extensions, approved_profile_hash: proposed.profile_hash },
   }));
-  assertRecordSchema(active, "delivery-execution-profile.schema.json", `Delivery autonomy profile ${profileId}`);
+  assertRecordSchema(active, deliveryExecutionProfileSchemaName(active), `Delivery autonomy profile ${profileId}`);
   const { decision } = evaluateDeliveryAutonomy(context, active, {
     id: `AUT-DEC-${uniqueRecordSuffix()}`,
     phase: getOptionString(options, "phase") || undefined,
@@ -11460,6 +11821,7 @@ function approveDeliveryAutonomyLocked(context, options, profileId, profilePath)
       `Requested technical level: ${active.requested_level}`,
       `Effective technical level: ${decision.effective_level}`,
       `Approval evidence: ${active.authority_assurance?.verified ? "trusted signature verified" : "recorded and hash-bound; identity not independently verified"}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       ...(decision.reason_codes.length > 0 ? [`Technical reason codes: ${decision.reason_codes.join(", ")}`] : []),
     ], options),
   ]);
@@ -11692,7 +12054,7 @@ function validateDeliveryCheckpointPolicySource(context, source, expectedRef = n
 }
 
 function persistDeliveryCheckpointPolicySource(context, preparedSource) {
-  fs.mkdirSync(deliveryCheckpointPolicySourcesRoot(context), { recursive: true });
+  ensureDir(deliveryCheckpointPolicySourcesRoot(context));
   const releaseLock = acquireFileLock(`${preparedSource.sourcePath}.lock`);
   try {
     if (fs.existsSync(preparedSource.sourcePath)) {
@@ -12453,6 +12815,7 @@ function assertCurrentDeliveryActionAuthorization(context, profile, decision, ac
   ) {
     fail(`Delivery action authorization ${authorization.id} is stale for the current exact policy boundary.`);
   }
+  assertDeliveryProviderAuthorization(context, profile, authorization);
   const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
   let checkpointRequired = actionPolicy.required;
   const auditWarnings = [];
@@ -12735,25 +13098,33 @@ function evaluateDeliveryAction(context, options) {
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
       fail("Delivery action completion --outcome must be passed or failed.");
     }
+    const actionReceiptId = `AUT-ACT-${uniqueRecordSuffix()}`;
+    const actionReceiptTimestamp = now();
     const preparedPolicySource = completingAction ? null : buildDeliveryCheckpointPolicySource(context);
     let actionDetails = completingAction
       ? null
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
+    if (!completingAction && DELIVERY_PROVIDER_ACTIONS.has(action)) {
+      const providerOperation = observeDeliveryProviderPrecondition(
+        context,
+        profile,
+        action,
+        actionDetails,
+        actionReceiptId,
+        actionReceiptTimestamp,
+      );
+      actionDetails = withProviderCompatibilityProjection(action, actionDetails, providerOperation);
+    }
     if (!completingAction && action === "git.push") {
-      const basePrecondition = observeGitRemoteBasePrecondition(context, profile, actionDetails);
+      const baseSha = actionDetails.provider_operation?.precondition_receipt?.proof?.base_sha;
       const commitCoverage = assertGitCommitReceiptCoverage(context, profile, {
         ...runtimeTarget,
-        base_sha: basePrecondition.observed_sha,
+        base_sha: baseSha,
       });
       actionDetails = {
         ...actionDetails,
-        base_precondition: basePrecondition,
         commit_coverage: commitCoverage,
-        push_precondition: observeGitPushPrecondition(context, actionDetails),
       };
-    }
-    if (!completingAction && action === "pull_request.merge") {
-      actionDetails = { ...actionDetails, merge_precondition: observeGitHubMergePrecondition(profile, actionDetails) };
     }
     if (!completingAction) {
       actionDetails = {
@@ -12886,10 +13257,35 @@ function evaluateDeliveryAction(context, options) {
       if (stableJson(currentDetails) !== stableJson(remoteAuthorizationProjection(action, priorAuthorization.action_details))) {
         fail(`Delivery action ${action} exact operation changed after authorization; request a fresh checkpoint.`);
       }
-      if (reportedOutcome === "passed") {
-        actionDetails = action === "git.push"
-          ? { ...priorAuthorization.action_details, remote_verification: verifyCompletedGitPush(context, priorAuthorization) }
-          : { ...priorAuthorization.action_details, provider_verification: verifyCompletedGitHubMerge(profile, priorAuthorization) };
+    }
+    if (completingAction && DELIVERY_PROVIDER_ACTIONS.has(action) && reportedOutcome === "passed") {
+      const providerOperation = priorAuthorization.action_details?.provider_operation;
+      if (providerOperation?.precondition_receipt) {
+        const completedProviderOperation = verifyDeliveryProviderCompletion(
+          profile,
+          action,
+          providerOperation,
+          actionReceiptTimestamp,
+        );
+        actionDetails = withProviderCompatibilityProjection(
+          action,
+          priorAuthorization.action_details,
+          completedProviderOperation,
+        );
+      } else if (profile.schema_version === "delivery-execution-profile:v1") {
+        if (action === "git.push") {
+          actionDetails = {
+            ...priorAuthorization.action_details,
+            remote_verification: verifyLegacyCompletedGitPush(context, priorAuthorization),
+          };
+        } else if (action === "pull_request.merge") {
+          actionDetails = {
+            ...priorAuthorization.action_details,
+            provider_verification: verifyLegacyCompletedGitHubMerge(profile, priorAuthorization),
+          };
+        }
+      } else {
+        fail(`The authorization for ${action} has no verified starting state.`);
       }
     }
     if (completingAction && evidence.length === 0) {
@@ -12923,9 +13319,9 @@ function evaluateDeliveryAction(context, options) {
         rollback: profile.local_release_target.rollback,
       };
     }
-    const createdAt = now();
+    const createdAt = actionReceiptTimestamp;
     const receiptBase = {
-      id: `AUT-ACT-${uniqueRecordSuffix()}`,
+      id: actionReceiptId,
       kind: "delivery_action_receipt",
       schema_version: "delivery-action-receipt:v1",
       profile_ref: {
@@ -13316,7 +13712,7 @@ function showDeliveryAutonomy(context, options) {
   const activeProfiles = profiles.filter((profile) => profile.lifecycle_status === "started").length;
   const listGuidance = profiles.length === 0
     ? {
-        result: italian ? "Non esistono ancora scelte di lavoro per una pull request o un rilascio locale." : "There are no working choices for a pull request or local release yet.",
+        result: italian ? "Non esistono ancora scelte di lavoro per consegne concrete." : "There are no working choices for concrete deliveries yet.",
         impact: italian ? "Nessuna consegna può ereditare automaticamente un livello di autonomia." : "No delivery can inherit a level of autonomy automatically.",
         required_decision: italian ? "Non devi decidere nulla finché non viene preparata una consegna concreta." : "You do not need to decide anything until a concrete delivery is prepared.",
         protection_boundary: italian ? "Il requisito da solo non autorizza lavoro, merge, rilasci, produzione, segreti o modifiche." : "The requirement alone authorizes no work, merge, release, production, secrets, or changes.",
@@ -13338,8 +13734,8 @@ function showDeliveryAutonomy(context, options) {
             ? (italian ? "Esamina separatamente ogni scelta ancora in attesa prima di iniziare quella consegna." : "Review each pending choice separately before starting that delivery.")
             : (italian ? "In questo momento non serve una nuova decisione per le consegne già concordate." : "No new decision is needed now for deliveries already agreed."),
         protection_boundary: italian
-          ? "Nessuna scelta vale per un’altra pull request o rilascio locale; merge, distribuzione, produzione, segreti e file non concordati restano separati."
-          : "No choice applies to another pull request or local release; merges, deployment, production, secrets, and unagreed files remain separate.",
+          ? "Nessuna scelta vale per un’altra consegna; merge, distribuzione, produzione, segreti e file non concordati restano separati."
+          : "No choice applies to another delivery; merges, deployment, production, secrets, and unagreed files remain separate.",
         next_action: profilesNeedingRepair > 0
           ? (italian ? "Apri i dettagli facoltativi della scelta non verificabile e correggila prima di continuare." : "Open the optional details for the unverifiable choice and correct it before continuing.")
           : profilesNeedingDecision > 0
@@ -13360,6 +13756,7 @@ function showDeliveryAutonomy(context, options) {
         `Requested technical level: ${profiles[0].requested_level}`,
         `Effective technical level: ${profiles[0].human_guidance.details.effective_level}`,
         `Lifecycle: ${profiles[0].lifecycle_status}`,
+        ...autonomyVerificationTechnicalLines(profiles[0].human_guidance, options),
         ...(profiles[0].human_guidance.details.reason_codes.length > 0
           ? [`Technical reason codes: ${profiles[0].human_guidance.details.reason_codes.join(", ")}`]
           : []),
@@ -13395,6 +13792,7 @@ function explainDeliveryAutonomy(context, options) {
       ...humanGuidanceLines(guidance, [
         `Profile: ${profileId}`,
         `Profile status: ${profile.status}`,
+        ...autonomyVerificationTechnicalLines(guidance, options),
       ], options),
     ]);
     return;
@@ -13425,6 +13823,7 @@ function explainDeliveryAutonomy(context, options) {
       `Requested technical level: ${decision.requested_level}`,
       `Effective technical level: ${decision.effective_level}`,
       `Execution status: ${decision.execution_status}`,
+      ...autonomyVerificationTechnicalLines(guidance, options),
       ...(decision.reason_codes.length > 0 ? [`Technical reason codes: ${decision.reason_codes.join(", ")}`] : []),
     ], options),
   ]);
@@ -17848,7 +18247,7 @@ async function completeAssessmentProposalLocked(context, options, id) {
           writeTextFile(target.path, target.original, { force: true });
         } else if (fs.existsSync(target.path)) {
           assertNoSymlinkPathSegments(target.path);
-          fs.rmSync(target.path);
+          removePathGoverned(target.path);
         }
       } catch (rollbackError) {
         rollbackErrors.push(`${toProjectPath(context, target.path)}: ${rollbackError.message}`);
@@ -25085,7 +25484,7 @@ function clearCache(context, options) {
   ensureInitialized(context);
   const cacheRoot = resolveProjectFilePath(context, path.join(SDLC_DIR, "cache"), { mustExist: false });
   assertNoSymlinkPathSegments(cacheRoot);
-  fs.rmSync(cacheRoot, { recursive: true, force: true });
+  removePathGoverned(cacheRoot, { recursive: true, force: true });
   ensureDir(cacheRoot);
   output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
 }
@@ -26341,10 +26740,10 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
       ensureDir(path.dirname(operation.targetPath));
       if (fs.existsSync(operation.targetPath)) {
         const backupPath = `${operation.targetPath}.backup-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-        fs.renameSync(operation.targetPath, backupPath);
+        renamePathGoverned(operation.targetPath, backupPath);
         backups.push({ targetPath: operation.targetPath, backupPath });
       }
-      fs.renameSync(operation.sourcePath, operation.targetPath);
+      renamePathGoverned(operation.sourcePath, operation.targetPath);
       completed.push(operation);
     }
     for (const operation of completed) {
@@ -26353,7 +26752,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
     commit();
     for (const backup of backups) {
       try {
-        fs.rmSync(backup.backupPath, { force: true });
+        removePathGoverned(backup.backupPath, { force: true });
       } catch {
         // The archive is committed; an orphaned backup is safer than rolling it back incompletely.
       }
@@ -26366,7 +26765,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
       try {
         if (fs.existsSync(operation.targetPath) && !fs.existsSync(operation.sourcePath)) {
           ensureDir(path.dirname(operation.sourcePath));
-          fs.renameSync(operation.targetPath, operation.sourcePath);
+          renamePathGoverned(operation.targetPath, operation.sourcePath);
         }
       } catch {
         // Continue restoring the remaining files; the final error reports the failed transaction.
@@ -26375,7 +26774,7 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
     for (const backup of [...backups].reverse()) {
       try {
         if (fs.existsSync(backup.backupPath)) {
-          fs.renameSync(backup.backupPath, backup.targetPath);
+          renamePathGoverned(backup.backupPath, backup.targetPath);
         }
       } catch {
         // Best effort rollback for a filesystem-level failure.
@@ -26907,7 +27306,7 @@ function migrateActiveReleaseScope(context, options) {
       }
     } catch (error) {
       if (archiveWritten && plan?.preparedArchive.filePath && fs.existsSync(plan.preparedArchive.filePath)) {
-        fs.rmSync(plan.preparedArchive.filePath, { force: true });
+        removePathGoverned(plan.preparedArchive.filePath, { force: true });
       }
       if (configWritten) {
         writeJsonFile(plan.configPath, plan.rawConfig, { force: true });
@@ -26993,11 +27392,34 @@ function migrateIdentity(context, options) {
       fail("Identity migration --recover requires both --recovery-nonce and --plan-hash from the verified lock.");
     }
     try {
-      const result = recoverIdentityMigration({
+      const recoveryPreparation = prepareIdentityMigrationRecovery({
         projectRoot: context.root,
         recoveryNonce,
         planHash: recoveryPlanHash,
       });
+      if (recoveryPreparation.status === "no_recovery_needed") {
+        output(options, { status: "no_recovery_needed", recovered: false }, [
+          "No interrupted identity migration requires recovery.",
+        ]);
+        return;
+      }
+      const grant = createBootstrapMutationGrant({
+        root: context.root,
+        canonical_action: "migration.identity",
+        recover: true,
+        nonce: recoveryNonce,
+        expected_nonce: recoveryNonce,
+        plan_hash: recoveryPlanHash,
+        expected_plan_hash: recoveryPlanHash,
+        exact_mutations: recoveryPreparation.exact_mutations,
+      });
+      const result = consumeBootstrapMutationGrant(grant, () => recoverIdentityMigration({
+        projectRoot: context.root,
+        recoveryNonce,
+        planHash: recoveryPlanHash,
+        recoveryPreparation,
+        mutationGateway: executeIdentityMutation,
+      }));
       output(options, result, [
         result.status === "rolled_back"
           ? `Recovered interrupted identity migration ${result.migration_id} by restoring the complete pre-migration tree.`
@@ -27043,6 +27465,17 @@ function migrateIdentity(context, options) {
   }
 
   try {
+    const governancePolicy = context.config?.governance_policy;
+    if (
+      options.apply
+      && governancePolicy?.kind !== "governance_policy"
+      && governancePolicy?.mode === "enforce"
+    ) {
+      fail(
+        "This identity change was not started because its approval records could not be kept safely while the project data is replaced. "
+        + "No files were changed. For now, use a reviewed policy embedded in the project configuration, or run the external policy in audit mode.",
+      );
+    }
     const plan = planIdentityMigration({
       projectRoot: context.root,
       mapping,
@@ -27058,14 +27491,32 @@ function migrateIdentity(context, options) {
     }
     const result = options.apply
       ? applyIdentityMigration(plan, {
-          rebuildDerived: ({ projectRoot, sdlcRoot }) => {
+          mutationGateway: governancePolicy?.kind === "governance_policy"
+            ? executePreparedIdentityMutation
+            : executeIdentityMutation,
+          rebuildDerived: ({
+            projectRoot,
+            sdlcRoot,
+            logicalProjectRoot,
+            execution_descriptor: executionDescriptor,
+          }) => {
             const stagedContext = { ...context, root: projectRoot, sdlcRoot };
             const cache = buildCache(stagedContext);
             const index = buildIndex(stagedContext);
             cache.root = context.root;
             index.root = context.root;
-            writeJsonFile(path.join(sdlcRoot, "cache", CACHE_FILE_NAME), cache, { force: true });
-            writeJsonFile(path.join(sdlcRoot, "indexes", "kb-index.json"), index, { force: true });
+            const cachePath = path.join(sdlcRoot, "cache", CACHE_FILE_NAME);
+            const indexPath = path.join(sdlcRoot, "indexes", "kb-index.json");
+            writeJsonFile(cachePath, cache, {
+              force: true,
+              preparedTempPath: preparedIdentityWritePath(logicalProjectRoot, executionDescriptor, cachePath),
+              preauthorizedMutation: governancePolicy?.kind === "governance_policy",
+            });
+            writeJsonFile(indexPath, index, {
+              force: true,
+              preparedTempPath: preparedIdentityWritePath(logicalProjectRoot, executionDescriptor, indexPath),
+              preauthorizedMutation: governancePolicy?.kind === "governance_policy",
+            });
           },
           validateAfter: ({ projectRoot, sdlcRoot }) => {
             const stagedContext = { ...context, root: projectRoot, sdlcRoot };
@@ -28666,7 +29117,135 @@ function sealPreparedTraceEventLocked(context, tracePath, preparedEvent) {
 }
 
 function traceIntegrityOptions(context, tracePath) {
-  return { boundaryRoot: context.sdlcRoot, tracePath };
+  return {
+    boundaryRoot: context.sdlcRoot,
+    tracePath,
+    dependencies: traceIntegrityGovernanceDependencies(tracePath),
+  };
+}
+
+function traceIntegrityGovernanceDependencies(tracePath) {
+  const canonicalTracePath = fs.existsSync(tracePath)
+    ? fs.realpathSync.native(tracePath)
+    : path.join(fs.realpathSync.native(path.dirname(tracePath)), path.basename(tracePath));
+  const checkpointPath = traceIntegrityCheckpointPath(canonicalTracePath);
+  const lockPath = `${checkpointPath}.lock`;
+  const descriptorMutations = new Map();
+
+  const logicalPath = (candidate) => {
+    const resolved = path.resolve(candidate);
+    const checkpointDirectory = path.dirname(checkpointPath);
+    const name = path.basename(resolved);
+    const temporaryPrefix = `.${path.basename(checkpointPath)}.`;
+    if (
+      path.dirname(resolved) === checkpointDirectory
+      && name.startsWith(temporaryPrefix)
+      && name.endsWith(".tmp")
+    ) {
+      // Same-directory random temp names implement one exact checkpoint write;
+      // they never widen the policy path beyond the canonical checkpoint.
+      return checkpointPath;
+    }
+    return resolved;
+  };
+  const requestForOpen = (filePath, flags) => {
+    const resolved = path.resolve(filePath);
+    const mapped = logicalPath(resolved);
+    if (resolved === lockPath) return { operation: "lock.acquire", path: lockPath };
+    const append = typeof flags === "number" && (flags & fs.constants.O_APPEND) !== 0;
+    if (append) return { operation: "file.append", path: mapped };
+    if (mapped === canonicalTracePath) return { operation: "file.truncate", path: mapped };
+    return { operation: "file.write", path: mapped };
+  };
+  const mutatingOpen = (flags) => {
+    if (typeof flags === "string") return /[+awx]/u.test(flags);
+    return (flags & (
+      fs.constants.O_WRONLY
+      | fs.constants.O_RDWR
+      | fs.constants.O_APPEND
+      | fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_TRUNC
+    )) !== 0;
+  };
+  const guardedDescriptorMutation = (descriptor, callback) => {
+    const request = descriptorMutations.get(descriptor);
+    if (!request) {
+      throw new MutationGovernanceError(
+        "A trace writer tried to use a descriptor without an exact file authorization",
+        "MUTATION_GOVERNANCE_DESCRIPTOR_UNBOUND",
+      );
+    }
+    return withGovernedMutation(request, () => {
+      assertMutationExecutionAuthorized(request);
+      return callback();
+    });
+  };
+
+  return {
+    openSync(filePath, flags, mode) {
+      if (!mutatingOpen(flags)) return fs.openSync(filePath, flags, mode);
+      const request = requestForOpen(filePath, flags);
+      return withGovernedMutation(request, () => {
+        assertMutationExecutionAuthorized(request);
+        const descriptor = fs.openSync(filePath, flags, mode);
+        descriptorMutations.set(descriptor, request);
+        return descriptor;
+      });
+    },
+    closeSync(descriptor) {
+      try {
+        return fs.closeSync(descriptor);
+      } finally {
+        descriptorMutations.delete(descriptor);
+      }
+    },
+    writeSync(descriptor, buffer, offset, length, position) {
+      return guardedDescriptorMutation(
+        descriptor,
+        () => fs.writeSync(descriptor, buffer, offset, length, position),
+      );
+    },
+    appendWriteSync(descriptor, buffer, offset, length, position) {
+      return guardedDescriptorMutation(
+        descriptor,
+        () => fs.writeSync(descriptor, buffer, offset, length, position),
+      );
+    },
+    ftruncateSync(descriptor, length) {
+      return guardedDescriptorMutation(descriptor, () => fs.ftruncateSync(descriptor, length));
+    },
+    mkdirSync(directoryPath, options) {
+      return withGovernedMutation({ operation: "directory.create", path: directoryPath }, () => {
+        assertMutationExecutionAuthorized({ operation: "directory.create", path: directoryPath });
+        return fs.mkdirSync(directoryPath, options);
+      });
+    },
+    chmodSync(filePath, mode) {
+      return withGovernedMutation({ operation: "path.chmod", path: filePath }, () => {
+        assertMutationExecutionAuthorized({ operation: "path.chmod", path: filePath });
+        return fs.chmodSync(filePath, mode);
+      });
+    },
+    renameSync(sourcePath, targetPath) {
+      const source = logicalPath(sourcePath);
+      const target = logicalPath(targetPath);
+      return withGovernedMutation({ operation: "path.rename.source", path: source }, () =>
+        withGovernedMutation({ operation: "path.rename.target", path: target }, () => {
+          assertMutationExecutionAuthorized({ operation: "path.rename.source", path: source });
+          assertMutationExecutionAuthorized({ operation: "path.rename.target", path: target });
+          return fs.renameSync(sourcePath, targetPath);
+        }));
+    },
+    unlinkSync(filePath) {
+      const target = logicalPath(filePath);
+      const operation = path.resolve(filePath) === lockPath ? "lock.remove" : "file.remove";
+      return withGovernedMutation({ operation, path: target }, () => {
+        assertMutationExecutionAuthorized({ operation, path: target });
+        return fs.unlinkSync(filePath);
+      });
+    },
+  };
 }
 
 function workflowTraceSealTestHooks(event) {
@@ -28685,6 +29264,7 @@ function workflowTraceSealTestHooks(event) {
 }
 
 function failTraceIntegrityWrite(error) {
+  if (error instanceof MutationGovernanceError) throw error;
   const code = /^[a-z][a-z0-9_.-]{0,63}$/u.test(String(error?.code || ""))
     ? error.code
     : "trace_integrity_failed";
@@ -30797,7 +31377,108 @@ function validateCompletedGitCommitReceipt(context, report, receipt, authorizati
   }
 }
 
-function validateCompletedRemoteActionReceipt(report, receipt, authorization, label) {
+function validateCompletedProviderActionReceipt(context, report, profile, receipt, authorization, label) {
+  const authorizedOperation = authorization.action_details?.provider_operation;
+  const completedOperation = receipt.action_details?.provider_operation;
+  if (!authorizedOperation && !completedOperation) return false;
+  try {
+    if (!authorizedOperation || !completedOperation) {
+      throw new Error("provider proof is missing from one side of the action boundary");
+    }
+    const precondition = assertProviderOperationReceiptIntegrity(authorizedOperation.precondition_receipt);
+    const completion = assertProviderOperationReceiptIntegrity(completedOperation.completion_receipt);
+    if (authorizedOperation.completion_receipt !== null) {
+      throw new Error("authorization unexpectedly contains a completion proof");
+    }
+    if (
+      stableJson(authorizedOperation.binding) !== stableJson(completedOperation.binding)
+      || completedOperation.precondition_receipt?.receipt_hash !== precondition.receipt_hash
+      || completion.precondition_receipt_ref?.id !== precondition.id
+      || completion.precondition_receipt_ref?.hash !== precondition.receipt_hash
+      || completion.provider.id !== precondition.provider.id
+      || completion.operation.id !== precondition.operation.id
+      || completion.operation.action !== receipt.action
+      || stableJson(completion.subject) !== stableJson(precondition.subject)
+    ) {
+      throw new Error("provider completion is not bound to its exact precondition");
+    }
+    const binding = providerBindingForAction(profile, receipt.action);
+    if (
+      !binding
+      || binding.provider_id !== precondition.provider.id
+      || authorizedOperation.binding?.provider_bindings_hash !== (profile.provider_bindings_hash || null)
+    ) {
+      throw new Error("provider proof does not match the delivery profile binding");
+    }
+    const expectedSubject = deliveryProviderOperationSubject(
+      context,
+      profile,
+      receipt.action,
+      authorization.action_details,
+      authorization.authorized_at,
+    );
+    if (stableJson(precondition.subject) !== stableJson(expectedSubject)) {
+      throw new Error("provider proof subject differs from the authorized operation");
+    }
+    if (receipt.action === "git.push" && completion.proof?.observed_sha !== precondition.subject.source_sha) {
+      throw new Error("Git provider proof does not show the authorized source at the destination ref");
+    }
+    if (receipt.action === "pull_request.merge" && (
+      completion.proof?.state !== "MERGED"
+      || completion.proof?.head_sha !== precondition.subject.source_sha
+      || !completion.proof?.merge_commit_sha
+    )) {
+      throw new Error("pull-request provider proof does not show the exact merged head");
+    }
+    if (receipt.action === "pull_request.create" && (
+      completion.proof?.state !== "OPEN"
+      || completion.proof?.head_sha !== precondition.subject.source_sha
+    )) {
+      throw new Error("pull-request provider proof does not show the exact created PR");
+    }
+    if (receipt.action === "pull_request.update" && (
+      completion.proof?.state !== "OPEN"
+      || stableJson(completion.proof?.expected) !== stableJson(precondition.subject.expected)
+    )) {
+      throw new Error("pull-request provider proof does not show the exact requested update");
+    }
+    if (receipt.action === "release.local" && (
+      completion.proof?.root_path !== precondition.subject.root_path
+      || completion.proof?.root_identity?.device !== precondition.proof?.root_identity?.device
+      || completion.proof?.root_identity?.inode !== precondition.proof?.root_identity?.inode
+    )) {
+      throw new Error("filesystem provider proof does not preserve the authorized root identity");
+    }
+    const stripCompletion = (details) => {
+      const copy = structuredClone(details || {});
+      if (copy.provider_operation) copy.provider_operation.completion_receipt = null;
+      delete copy.remote_verification;
+      delete copy.provider_verification;
+      return copy;
+    };
+    if (
+      stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+      || stableJson(stripCompletion(receipt.action_details)) !== stableJson(stripCompletion(authorization.action_details))
+    ) {
+      throw new Error("provider completion differs from the exact authorization boundary");
+    }
+  } catch (error) {
+    report.errors.push(`${label} has invalid provider verification: ${error.message}`);
+  }
+  return true;
+}
+
+function validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, label) {
+  if (validateCompletedProviderActionReceipt(context, report, profile, receipt, authorization, label)) return;
+  if (!["git.push", "pull_request.merge"].includes(receipt.action)) {
+    if (
+      stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+      || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
+    ) {
+      report.errors.push(`${label} completion differs from its exact authorization boundary`);
+    }
+    return;
+  }
   const verificationField = receipt.action === "git.push" ? "remote_verification" : "provider_verification";
   const { [verificationField]: verification, ...authorizedProjection } = receipt.action_details || {};
   if (
@@ -30987,6 +31668,13 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
     }
+    if (receipt.status === "authorized" && DELIVERY_PROVIDER_ACTIONS.has(receipt.action)) {
+      try {
+        assertDeliveryProviderAuthorization(context, profile, receipt);
+      } catch (error) {
+        report.errors.push(`${actionLabel} provider authorization is invalid: ${error.message}`);
+      }
+    }
     const actionPolicy = receiptHistorical && profile.delivery_kind === "local_release"
       ? null
       : deliveryActionCheckpointRequired(context, profile, expectedEffectiveLevel, receipt.action);
@@ -31105,8 +31793,8 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         report.errors.push(`${actionLabel} completion differs from its authorized effective level`);
       } else if (receipt.action === "git.commit" && receipt.outcome === "passed") {
         validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
-      } else if (["git.push", "pull_request.merge"].includes(receipt.action) && receipt.outcome === "passed") {
-        validateCompletedRemoteActionReceipt(report, receipt, authorization, actionLabel);
+      } else if (DELIVERY_PROVIDER_ACTIONS.has(receipt.action) && receipt.outcome === "passed") {
+        validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, actionLabel);
       } else if (
         stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
         || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
@@ -31311,7 +31999,7 @@ function validateAutonomyRecords(context, report, storyId = null) {
     if (storyId && !(profile.story_refs || []).some((ref) => ref.id === storyId)) continue;
     const label = `delivery autonomy profile ${profile.id || name}`;
     deliveryProfiles.push(profile);
-    appendRecordSchemaIssues(report, profile, "delivery-execution-profile.schema.json", label);
+    appendRecordSchemaIssues(report, profile, deliveryExecutionProfileSchemaName(profile), label);
     const integrity = validateDeliveryExecutionProfileIntegrity(profile);
     for (const error of integrity.errors || []) report.errors.push(`${label}: ${error}`);
     if (profile.status === "active") {
@@ -31931,6 +32619,8 @@ function traceGateSnapshotTestHooks(filePath) {
   if (!targetPath) return {};
   return {
     after_snapshot_verified() {
+      // Deliberate NODE_ENV=test-only adversarial mutation. Production trace
+      // writes use traceIntegrityGovernanceDependencies above.
       const bytes = fs.readFileSync(targetPath);
       if (process.platform === "win32") {
         fs.appendFileSync(targetPath, " ");
@@ -32763,10 +33453,92 @@ function writeJsonFile(filePath, value, options = {}) {
   writeTextFile(filePath, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
+function executeIdentityMutation(request, effect) {
+  return withGovernedMutation(request, () => {
+    assertMutationExecutionAuthorized(request);
+    return effect();
+  });
+}
+
+executeIdentityMutation.revalidate = function revalidateIdentityMutation(request) {
+  assertMutationExecutionAuthorized(request);
+  return true;
+};
+
+function executePreparedIdentityMutation(request, effect) {
+  assertMutationExecutionAuthorized(request);
+  return effect();
+}
+
+executePreparedIdentityMutation.revalidate = function revalidatePreparedIdentityMutation(request) {
+  assertMutationExecutionAuthorized(request);
+  return true;
+};
+
+executePreparedIdentityMutation.prepare = function prepareIdentityMutationBatch(descriptor, effect) {
+  if (!descriptor || !Array.isArray(descriptor.exact_mutations)) {
+    throw new MutationGovernanceError(
+      "Identity migration is missing its reviewed exact mutation descriptor",
+      "MUTATION_BATCH_INVALID",
+    );
+  }
+  return withGovernedMutationBatch(descriptor.exact_mutations, effect);
+};
+
+function preparedIdentityWritePath(projectRoot, descriptor, targetPath) {
+  const projectPath = path.relative(projectRoot, targetPath).split(path.sep).join("/");
+  const prepared = descriptor?.prepared_writes?.find((entry) => entry.target_path === projectPath);
+  if (!prepared) {
+    throw new MutationGovernanceError(
+      `Identity migration tried to write '${projectPath}' outside its reviewed execution descriptor`,
+      "MUTATION_BATCH_MISS",
+      { project_path: projectPath },
+    );
+  }
+  return path.join(projectRoot, ...prepared.temporary_path.split("/"));
+}
+
+function removePathGoverned(filePath, options = {}) {
+  const operation = options.recursive ? "directory.remove" : "file.remove";
+  return withGovernedMutation({ operation, path: filePath }, () => {
+    assertMutationExecutionAuthorized({ operation, path: filePath });
+    fs.rmSync(filePath, options);
+    return true;
+  });
+}
+
+function removeEmptyDirectoryGoverned(directoryPath) {
+  return withGovernedMutation({ operation: "directory.remove", path: directoryPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.remove", path: directoryPath });
+    fs.rmdirSync(directoryPath);
+    return true;
+  });
+}
+
+function renamePathGoverned(sourcePath, targetPath) {
+  return withGovernedMutation({ operation: "path.rename.source", path: sourcePath }, () =>
+    withGovernedMutation({ operation: "path.rename.target", path: targetPath }, () => {
+      assertMutationExecutionAuthorized({ operation: "path.rename.source", path: sourcePath });
+      assertMutationExecutionAuthorized({ operation: "path.rename.target", path: targetPath });
+      fs.renameSync(sourcePath, targetPath);
+      return true;
+    }));
+}
+
 function writeTextFile(filePath, content, options = {}) {
+  if (options.preauthorizedMutation) {
+    assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+    return writeTextFileAuthorized(filePath, content, options);
+  }
+  return withGovernedMutation({ operation: "file.write", path: filePath }, () =>
+    writeTextFileAuthorized(filePath, content, options));
+}
+
+function writeTextFileAuthorized(filePath, content, options = {}) {
+  assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
   assertNoSymlinkPathSegments(filePath);
   const parentPath = path.dirname(filePath);
-  ensureDir(parentPath);
+  ensureDir(parentPath, { preauthorizedMutation: options.preauthorizedMutation });
   const parentIdentity = captureDirectoryIdentity(parentPath);
   if (fs.existsSync(filePath) && !options.force) {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
@@ -32791,10 +33563,17 @@ function writeTextFile(filePath, content, options = {}) {
       parentPath,
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
+    let tempIdentity = null;
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity, options);
+      tempIdentity = writeFileToStableParent(tempPath, content, parentIdentity, {
+        ...options,
+        governanceTargetPath: filePath,
+      });
       assertDirectoryIdentity(parentPath, parentIdentity);
+      assertOwnedWriterTemporary(tempPath, tempIdentity);
       try {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+        assertOwnedWriterTemporary(tempPath, tempIdentity);
         fs.linkSync(tempPath, filePath);
       } catch (error) {
         if (error?.code === "EEXIST") {
@@ -32805,29 +33584,80 @@ function writeTextFile(filePath, content, options = {}) {
       if (options.durable) syncWorkflowDirectory(parentPath);
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
-        fs.rmSync(tempPath, { force: true });
+        removeOwnedWriterTemporary(
+          tempPath,
+          tempIdentity,
+          { operation: "file.write", path: filePath },
+        );
       }
     }
     return true;
   }
   if (options.force) {
-    const tempPath = path.join(
+    const tempPath = options.preparedTempPath ?? path.join(
       parentPath,
       `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
+    if (options.preparedTempPath && path.dirname(path.resolve(tempPath)) !== path.resolve(parentPath)) {
+      fail(`Prepared identity migration temp path must stay beside its target: ${filePath}`);
+    }
+    const executePhysical = (request, callback) => {
+      if (options.preauthorizedMutation) {
+        assertMutationExecutionAuthorized(request);
+        return callback();
+      }
+      return withGovernedMutation(request, () => {
+        assertMutationExecutionAuthorized(request);
+        return callback();
+      });
+    };
+    let tempIdentity = null;
     try {
-      writeFileToStableParent(tempPath, content, parentIdentity);
+      if (options.preparedTempPath) {
+        tempIdentity = executePhysical({ operation: "file.write", path: tempPath }, () =>
+          writeFileToStableParent(tempPath, content, parentIdentity, {
+            governanceTargetPath: tempPath,
+          }));
+      } else {
+        tempIdentity = writeFileToStableParent(tempPath, content, parentIdentity, {
+          governanceTargetPath: filePath,
+        });
+      }
       assertDirectoryIdentity(parentPath, parentIdentity);
-      fs.renameSync(tempPath, filePath);
+      assertOwnedWriterTemporary(tempPath, tempIdentity);
+      if (options.preparedTempPath) {
+        executePhysical({ operation: "path.rename.source", path: tempPath }, () =>
+          executePhysical({ operation: "path.rename.target", path: filePath }, () => {
+            assertOwnedWriterTemporary(tempPath, tempIdentity);
+            return fs.renameSync(tempPath, filePath);
+          }));
+      } else {
+        assertMutationExecutionAuthorized({ operation: "file.write", path: filePath });
+        assertOwnedWriterTemporary(tempPath, tempIdentity);
+        fs.renameSync(tempPath, filePath);
+      }
     } finally {
       if (directoryIdentityMatches(parentPath, parentIdentity)) {
-        fs.rmSync(tempPath, { force: true });
+        if (options.preparedTempPath) {
+          if (writerTemporaryMatches(tempPath, tempIdentity)) {
+            executePhysical({ operation: "file.remove", path: tempPath }, () =>
+              fs.rmSync(tempPath));
+          }
+        } else {
+          removeOwnedWriterTemporary(
+            tempPath,
+            tempIdentity,
+            { operation: "file.write", path: filePath },
+          );
+        }
       }
     }
     return true;
   }
   try {
-    writeFileToStableParent(filePath, content, parentIdentity);
+    writeFileToStableParent(filePath, content, parentIdentity, {
+      governanceTargetPath: filePath,
+    });
   } catch (error) {
     if (error && error.code === "EEXIST") {
       fail(`File already exists: ${filePath}. Use --force to overwrite it.`);
@@ -32926,41 +33756,89 @@ function sameStableFileIdentity(left, right) {
 }
 
 function writeFileToStableParent(filePath, content, parentIdentity, options = {}) {
+  assertMutationExecutionAuthorized({
+    operation: "file.write",
+    path: options.governanceTargetPath ?? filePath,
+  });
   assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
   let descriptor;
   let created = false;
   let complete = false;
+  let createdIdentity = null;
   try {
+    assertMutationExecutionAuthorized({
+      operation: "file.write",
+      path: options.governanceTargetPath ?? filePath,
+    });
     descriptor = fs.openSync(
       filePath,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW_FLAG,
       0o666,
     );
     created = true;
-    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    const opened = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    createdIdentity = { dev: opened.dev, ino: opened.ino };
+    assertMutationExecutionAuthorized({
+      operation: "file.write",
+      path: options.governanceTargetPath ?? filePath,
+    });
     fs.writeFileSync(descriptor, content);
     if (options.durable) fs.fsyncSync(descriptor);
     complete = true;
+    return createdIdentity;
   } finally {
     if (descriptor !== undefined) {
       fs.closeSync(descriptor);
     }
     if (created && !complete && directoryIdentityMatches(path.dirname(filePath), parentIdentity)) {
-      fs.rmSync(filePath, { force: true });
+      removeOwnedWriterTemporary(filePath, createdIdentity, {
+        operation: "file.write",
+        path: options.governanceTargetPath ?? filePath,
+      });
     }
   }
 }
 
-function appendJsonLine(filePath, value) {
-  assertNoSymlinkPathSegments(filePath);
-  ensureDir(path.dirname(filePath));
-  const releaseLock = acquireFileLock(`${filePath}.lock`);
+function writerTemporaryMatches(filePath, expectedIdentity) {
+  if (!expectedIdentity) return false;
   try {
-    assertJsonLineTailComplete(filePath);
-    fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
-  } finally {
-    releaseLock();
+    const entry = fs.lstatSync(filePath);
+    return !entry.isSymbolicLink()
+      && entry.isFile()
+      && entry.dev === expectedIdentity.dev
+      && entry.ino === expectedIdentity.ino;
+  } catch {
+    return false;
   }
+}
+
+function assertOwnedWriterTemporary(filePath, expectedIdentity) {
+  if (!writerTemporaryMatches(filePath, expectedIdentity)) {
+    fail(`Temporary file ownership changed before publication: ${filePath}`);
+  }
+}
+
+function removeOwnedWriterTemporary(filePath, expectedIdentity, authorization) {
+  if (!writerTemporaryMatches(filePath, expectedIdentity)) return false;
+  assertMutationExecutionAuthorized(authorization);
+  fs.rmSync(filePath);
+  return true;
+}
+
+function appendJsonLine(filePath, value) {
+  return withGovernedMutation({ operation: "file.append", path: filePath }, () => {
+    assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
+    assertNoSymlinkPathSegments(filePath);
+    ensureDir(path.dirname(filePath));
+    const releaseLock = acquireFileLock(`${filePath}.lock`);
+    try {
+      assertJsonLineTailComplete(filePath);
+      assertMutationExecutionAuthorized({ operation: "file.append", path: filePath });
+      appendJsonLineNoFollow(filePath, value);
+    } finally {
+      releaseLock();
+    }
+  });
 }
 
 function assertJsonLineTailComplete(filePath) {
@@ -32984,6 +33862,12 @@ function assertJsonLineTailComplete(filePath) {
 }
 
 function acquireFileLock(lockPath) {
+  return withGovernedMutation({ operation: "lock.acquire", path: lockPath }, () =>
+    acquireFileLockAuthorized(lockPath));
+}
+
+function acquireFileLockAuthorized(lockPath) {
+  assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
   assertNoSymlinkPathSegments(lockPath);
   ensureDir(path.dirname(lockPath));
   const nonce = crypto.randomBytes(12).toString("hex");
@@ -32997,6 +33881,7 @@ function acquireFileLock(lockPath) {
   let descriptor;
   while (true) {
     try {
+      assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
       descriptor = fs.openSync(lockPath, "wx");
       break;
     } catch (error) {
@@ -33019,6 +33904,7 @@ function acquireFileLock(lockPath) {
     }
   }
   try {
+    assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
     fs.writeFileSync(descriptor, JSON.stringify(metadata));
     fs.closeSync(descriptor);
   } catch (error) {
@@ -33028,6 +33914,7 @@ function acquireFileLock(lockPath) {
       // Preserve the original metadata-write or close error.
     }
     try {
+      assertMutationExecutionAuthorized({ operation: "lock.acquire", path: lockPath });
       fs.rmSync(lockPath, { force: true });
     } catch {
       // A partially initialized lock remaining on disk is safer than hiding the failure.
@@ -33035,14 +33922,17 @@ function acquireFileLock(lockPath) {
     throw error;
   }
   return () => {
-    try {
-      const current = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, "utf8")) : null;
-      if (current?.nonce === nonce) {
-        fs.rmSync(lockPath, { force: true });
+    withGovernedMutation({ operation: "lock.release", path: lockPath }, () => {
+      try {
+        const current = fs.existsSync(lockPath) ? JSON.parse(fs.readFileSync(lockPath, "utf8")) : null;
+        if (current?.nonce === nonce) {
+          assertMutationExecutionAuthorized({ operation: "lock.release", path: lockPath });
+          fs.rmSync(lockPath, { force: true });
+        }
+      } catch {
+        // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
       }
-    } catch {
-      // Best effort cleanup; a remaining lock is safer than silent concurrent writes.
-    }
+    });
   };
 }
 
@@ -33074,16 +33964,20 @@ function reclaimStaleInternalLock(lockPath) {
     }
   }
   const stalePath = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  try {
-    fs.renameSync(lockPath, stalePath);
-    fs.rmSync(stalePath, { force: true });
-    return true;
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
+  return withGovernedMutation({ operation: "lock.reclaim", path: lockPath }, () => {
+    try {
+      assertMutationExecutionAuthorized({ operation: "lock.reclaim", path: lockPath });
+      fs.renameSync(lockPath, stalePath);
+      assertMutationExecutionAuthorized({ operation: "lock.reclaim", path: lockPath });
+      fs.rmSync(stalePath, { force: true });
       return true;
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        return true;
+      }
+      return false;
     }
-    return false;
-  }
+  });
 }
 
 function processIsAlive(pid) {
@@ -33116,8 +34010,26 @@ function assertNoSymlinkPathSegments(filePath) {
   }
 }
 
-function ensureDir(dirPath) {
-  fs.mkdirSync(dirPath, { recursive: true });
+function ensureDir(dirPath, options = {}) {
+  if (fs.existsSync(dirPath)) {
+    const entry = fs.lstatSync(dirPath);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      fail(`Refusing unstable directory path: ${dirPath}`);
+    }
+    return false;
+  }
+  const parentPath = path.dirname(dirPath);
+  ensureDir(parentPath, options);
+  if (options.preauthorizedMutation) {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
+    fs.mkdirSync(dirPath);
+    return true;
+  }
+  return withGovernedMutation({ operation: "directory.create", path: dirPath }, () => {
+    assertMutationExecutionAuthorized({ operation: "directory.create", path: dirPath });
+    fs.mkdirSync(dirPath);
+    return true;
+  });
 }
 
 function safeReadDir(dirPath) {
@@ -33490,6 +34402,19 @@ function humanGuidanceLines(guidance, detailLines = [], options = {}, summaryLin
     italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
     ...detailLines.map((line) => String(line).trim()).filter(Boolean).map((line) => `- ${line}`),
   ];
+}
+
+function autonomyVerificationTechnicalLines(guidance, options = {}) {
+  if (!guidance?.details?.digital_approver_verification) return [];
+  return humanGuidanceLocale(options) === "it"
+    ? [
+        "Verifica digitale dell'approvatore: non attiva; l'esecuzione effettiva resta checkpointed.",
+        "Per abilitarla: imposta authority_policy.mode=host_verified, configura la chiave pubblica Ed25519 in authority_policy.trusted_host_keys e fornisci l'approvazione esterna firmata con --host-receipt-file.",
+      ]
+    : [
+        "Digital approver verification: not active; effective execution remains checkpointed.",
+        "To enable it: set authority_policy.mode=host_verified, configure the Ed25519 public key in authority_policy.trusted_host_keys, and supply the externally signed approval with --host-receipt-file.",
+      ];
 }
 
 function compactIndexEntry(entry, sourceHash = null) {

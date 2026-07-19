@@ -39,13 +39,25 @@ test("Italian leaf help is understandable without plugin terminology", () => {
 
 test("delivery help exposes required runtime inputs rather than internal aliases", () => {
   const propose = renderHelp(["autonomy", "delivery", "propose"]);
-  const proposeTechnical = propose.split("Technical details (optional):")[1];
+  const [proposePrimary, proposeTechnical] = propose.split("Technical details (optional):");
+  assert.match(proposePrimary, /For this pull request, how independently should I work\?/u);
+  assert.match(proposePrimary, /A local release uses its own separate question/u);
+  assert.doesNotMatch(proposePrimary, /pull request or local release/u);
+  assert.doesNotMatch(proposePrimary, FORBIDDEN_PRIMARY_JARGON);
   for (const flag of ["--id", "--delivery", "--kind", "--story", "--contract", "--requirement", "--level"]) {
     assert.match(proposeTechnical, new RegExp(`${flag}[^\\n]*\\(required\\)`, "u"));
   }
   assert.doesNotMatch(proposeTechnical, /--contract-id/u);
   assert.match(proposeTechnical, /--repository[^\n]*required with --kind pull_request/u);
   assert.match(proposeTechnical, /--target-root[^\n]*required with --kind local_release/u);
+  assert.match(proposeTechnical, /supervised means Guided/u);
+  assert.match(proposeTechnical, /checkpointed means Autonomy with checks/u);
+
+  const italian = renderHelp(["autonomy", "delivery", "propose"], { locale: "it" });
+  const [italianPrimary] = italian.split("Dettagli tecnici (facoltativi):");
+  assert.match(italianPrimary, /Per questa PR, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(italianPrimary, /Un rilascio locale usa una domanda separata/u);
+  assert.doesNotMatch(italianPrimary, /PR o rilascio locale/u);
 
   const action = buildHelpModel(["autonomy", "delivery", "action"]);
   const flags = new Map(action.options.map((entry) => [entry.flag, entry]));

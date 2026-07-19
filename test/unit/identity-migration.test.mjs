@@ -21,6 +21,7 @@ import { computeStableHash, omitKeys } from "../../lib/canonical.mjs";
 import {
   applyIdentityMigration,
   planIdentityMigration,
+  prepareIdentityMigrationRecovery,
   publicIdentityMigrationPlan,
   recoverIdentityMigration,
   validateIdentityMigrationReceipt,
@@ -28,6 +29,302 @@ import {
 
 const SOURCE_EMAIL = "legacy@example.invalid";
 const TARGET_EMAIL = "current@example.test";
+
+test("identity migration routes every physical mutation through the injected gateway", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const mutations = [];
+  const revalidated = [];
+  let preparedDescriptor = null;
+  const mutationGateway = (request, effect) => {
+    mutations.push(request);
+    return effect();
+  };
+  mutationGateway.prepare = (descriptor, effect) => {
+    preparedDescriptor = descriptor;
+    return effect();
+  };
+  mutationGateway.revalidate = (request) => {
+    revalidated.push(request);
+    return true;
+  };
+  const applied = applyIdentityMigration(plan, {
+    mutationGateway,
+    rebuildDerived: ({ sdlcRoot }) => {
+      writeJson(path.join(sdlcRoot, "cache", "kb-cache.json"), { search_text: TARGET_EMAIL });
+      writeJson(path.join(sdlcRoot, "indexes", "kb-index.json"), { search_text: TARGET_EMAIL });
+    },
+  });
+
+  assert.equal(applied.status, "applied");
+  const operations = new Set(mutations.map(({ operation }) => operation));
+  for (const operation of [
+    "directory.copy",
+    "directory.create",
+    "directory.remove",
+    "file.append",
+    "file.remove",
+    "file.truncate",
+    "file.write",
+    "lock.release",
+    "path.chmod",
+    "path.link.source",
+    "path.link.target",
+    "path.rename.source",
+    "path.rename.target",
+  ]) {
+    assert.ok(operations.has(operation), `missing governed identity operation ${operation}`);
+  }
+  assert.ok(mutations.every(({ path: mutationPath }) => path.isAbsolute(mutationPath)));
+  assert.ok(preparedDescriptor, "prepared gateway must receive the reviewed execution descriptor");
+  const canonicalRoot = fs.realpathSync.native(project);
+  const exact = new Set(preparedDescriptor.exact_mutations.map(({ operation, path: mutationPath }) =>
+    `${operation}\0${mutationPath}`));
+  for (const request of mutations) {
+    const projectPath = path.relative(canonicalRoot, request.path).split(path.sep).join("/");
+    assert.ok(exact.has(`${request.operation}\0${projectPath}`), `unprepared physical mutation ${request.operation} ${projectPath}`);
+    if (projectPath.endsWith(".tmp")) {
+      assert.match(projectPath, /\.identity-[a-f0-9]{24}\.tmp$|identity-migration-(?:lock|journal)[.-]/u);
+      assert.doesNotMatch(projectPath, /\.\d+\.[a-f0-9]{12}\.tmp$/u);
+    }
+  }
+  for (const operation of [
+    "path.link.source",
+    "path.link.target",
+    "path.rename.source",
+    "path.rename.target",
+  ]) {
+    assert.ok(revalidated.some((request) => request.operation === operation));
+  }
+});
+
+for (const dualPathOperation of ["link", "rename"]) {
+  test(`identity ${dualPathOperation} revalidates an expired source after deciding its target`, (t) => {
+    const project = fixtureProject(t);
+    const plan = planIdentityMigration({
+      projectRoot: project,
+      mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+    });
+    const prefix = `path.${dualPathOperation}`;
+    const active = [];
+    let clockMinutes = 0;
+    let targetEvaluatedAt = null;
+    let sourceRevalidatedAt = null;
+    let armed = true;
+    const mutationGateway = (request, effect) => {
+      const authorization = {
+        request,
+        validUntilMinutes: request.operation === `${prefix}.source` && armed ? 10 : Number.POSITIVE_INFINITY,
+      };
+      active.push(authorization);
+      if (request.operation === `${prefix}.target` && armed) {
+        clockMinutes = 11;
+        targetEvaluatedAt = clockMinutes;
+      }
+      try {
+        return effect();
+      } finally {
+        active.pop();
+      }
+    };
+    mutationGateway.revalidate = (request) => {
+      const authorization = [...active].reverse().find((candidate) =>
+        candidate.request.operation === request.operation && candidate.request.path === request.path);
+      assert.ok(authorization, `missing active ${request.operation} authorization`);
+      if (request.operation === `${prefix}.source` && armed) {
+        sourceRevalidatedAt = clockMinutes;
+      }
+      if (clockMinutes >= authorization.validUntilMinutes) {
+        throw new Error(`${dualPathOperation} source authorization expired`);
+      }
+      return true;
+    };
+
+    const syscallName = dualPathOperation === "link" ? "linkSync" : "renameSync";
+    const originalSyscall = fs[syscallName];
+    let syscallCount = 0;
+    fs[syscallName] = function countedDualPathSyscall(...args) {
+      syscallCount += 1;
+      return originalSyscall.apply(fs, args);
+    };
+    try {
+      assert.throws(
+        () => applyIdentityMigration(plan, { mutationGateway }),
+        new RegExp(`${dualPathOperation} source authorization expired`, "u"),
+      );
+    } finally {
+      fs[syscallName] = originalSyscall;
+    }
+
+    assert.equal(targetEvaluatedAt, 11);
+    assert.equal(sourceRevalidatedAt, 11);
+    assert.equal(syscallCount, 0, `${dualPathOperation} ran after its source authorization expired`);
+  });
+}
+
+test("identity migration gateway denial happens before the first physical byte", (t) => {
+  const project = fixtureProject(t);
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const denied = [];
+
+  assert.throws(() => applyIdentityMigration(plan, {
+    mutationGateway(request) {
+      denied.push(request);
+      throw new Error("gateway denied before effect");
+    },
+  }), /gateway denied before effect/u);
+  assert.equal(denied[0].operation, "file.write");
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
+test("identity migration rejects a tampered execution descriptor before its first byte", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const tamperedDescriptor = structuredClone(plan.execution_descriptor);
+  tamperedDescriptor.lock_temporary_path = ".tampered-identity-lock.tmp";
+  const tamperedPlan = { ...plan, execution_descriptor: tamperedDescriptor };
+  const mutationGateway = (request, effect) => effect();
+  mutationGateway.prepare = (_descriptor, effect) => effect();
+
+  assert.throws(
+    () => applyIdentityMigration(tamperedPlan, { mutationGateway }),
+    /execution descriptor is missing or changed/u,
+  );
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+  );
+});
+
+test("identity migration never removes a pre-existing deterministic lock temp", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const lockTempPath = path.join(canonicalRoot, ...plan.execution_descriptor.lock_temporary_path.split("/"));
+  fs.writeFileSync(lockTempPath, "pre-existing-owner\n", { flag: "wx", mode: 0o600 });
+
+  assert.throws(() => applyIdentityMigration(plan), /Cannot acquire identity migration lock/u);
+  assert.equal(fs.readFileSync(lockTempPath, "utf8"), "pre-existing-owner\n");
+  assert.equal(fs.existsSync(path.join(canonicalRoot, plan.execution_descriptor.lock_path)), false);
+});
+
+test("identity migration preserves a replaced journal temp and never publishes it", {
+  skip: process.platform === "win32"
+    ? "Windows does not portably allow replacing an open journal file"
+    : false,
+}, (t) => {
+  const project = fixtureProject(t);
+  const before = snapshotTree(path.join(project, ".sdlc"));
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const journalPath = path.join(canonicalRoot, ...plan.execution_descriptor.journal_path.split("/"));
+  const journalTempPath = path.join(
+    canonicalRoot,
+    ...plan.execution_descriptor.journal_temporary_path.split("/"),
+  );
+  let replaced = false;
+  const mutationGateway = (request, effect) => {
+    if (!replaced && request.operation === "path.rename.target" && request.path === journalPath) {
+      fs.rmSync(journalTempPath);
+      fs.writeFileSync(journalTempPath, "replacement-not-owned\n", { flag: "wx", mode: 0o600 });
+      replaced = true;
+    }
+    return effect();
+  };
+  mutationGateway.revalidate = () => true;
+
+  assert.throws(
+    () => applyIdentityMigration(plan, { mutationGateway }),
+    /temporary-file ownership changed/u,
+  );
+  assert.equal(replaced, true);
+  assert.equal(fs.readFileSync(journalTempPath, "utf8"), "replacement-not-owned\n");
+  assert.equal(fs.existsSync(journalPath), false);
+  assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
+});
+
+test("identity migration keeps the journal temp handle open through its rename", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const journalPath = path.join(canonicalRoot, ...plan.execution_descriptor.journal_path.split("/"));
+  const journalTempPath = path.join(
+    canonicalRoot,
+    ...plan.execution_descriptor.journal_temporary_path.split("/"),
+  );
+  const originalOpenSync = fs.openSync;
+  let journalDescriptor = null;
+  let observedOpenRename = false;
+  fs.openSync = function trackedOpenSync(filePath, ...args) {
+    const descriptor = originalOpenSync.call(fs, filePath, ...args);
+    if (path.resolve(filePath) === journalTempPath) journalDescriptor = descriptor;
+    return descriptor;
+  };
+  const mutationGateway = (request, effect) => {
+    if (request.operation === "path.rename.target" && request.path === journalPath) {
+      assert.notEqual(journalDescriptor, null, "journal temp descriptor was not captured");
+      assert.doesNotThrow(() => fs.fstatSync(journalDescriptor));
+      observedOpenRename = true;
+    }
+    return effect();
+  };
+  mutationGateway.revalidate = () => true;
+
+  try {
+    assert.equal(applyIdentityMigration(plan, {
+      mutationGateway,
+      rebuildDerived: ({ sdlcRoot }) => {
+        writeJson(path.join(sdlcRoot, "cache", "kb-cache.json"), { search_text: TARGET_EMAIL });
+        writeJson(path.join(sdlcRoot, "indexes", "kb-index.json"), { search_text: TARGET_EMAIL });
+      },
+    }).status, "applied");
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(observedOpenRename, true);
+});
+
+test("identity execution nonce changes with migrated content, not policy-only plan inputs", (t) => {
+  const project = fixtureProject(t);
+  const first = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const projectPath = path.join(project, ".sdlc", "project.json");
+  const projectRecord = readJson(projectPath);
+  projectRecord.audit.review_marker = "content-changed-after-first-preview";
+  writeJson(projectPath, projectRecord);
+  const second = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  assert.notEqual(first.execution_descriptor.nonce, second.execution_descriptor.nonce);
+});
 
 test("identity migration preserves approval and authorization lineage without retaining source identity", (t) => {
   const project = fixtureProject(t);
@@ -195,6 +492,11 @@ test("identity migration refuses a stale plan without overwriting the newer proj
   assert.throws(() => applyIdentityMigration(plan), /changed after planning/u);
   assert.equal(fs.readFileSync(projectPath, "utf8"), changed);
   assert.equal(fs.existsSync(path.join(project, plan.receipt_path)), false);
+  assert.deepEqual(
+    fs.readdirSync(project).filter((name) => name.startsWith(".sdlc-identity-migration")),
+    [],
+    "stale state must fail before the deterministic lock temp is created",
+  );
 });
 
 test("identity migration fails closed on unsupported matches and pre-existing hash corruption", (t) => {
@@ -1066,12 +1368,51 @@ test("identity migration recovery restores a durable backup after an interrupted
   );
   assert.deepEqual(snapshotTree(liveRoot), interrupted);
 
-  const recovered = recoverIdentityMigration({
+  const preparation = prepareIdentityMigrationRecovery({
     projectRoot: project,
     recoveryNonce: nonce,
     planHash,
   });
+  const lockBeforeDeniedRecovery = fs.readFileSync(path.join(project, ".sdlc-identity-migration.lock"));
+  assert.throws(() => recoverIdentityMigration({
+    projectRoot: project,
+    recoveryNonce: nonce,
+    planHash,
+    recoveryPreparation: preparation,
+    mutationGateway() {
+      throw new Error("recovery mutation denied before effect");
+    },
+  }), /denied before effect/u);
+  assert.deepEqual(snapshotTree(liveRoot), interrupted);
+  assert.deepEqual(
+    fs.readFileSync(path.join(project, ".sdlc-identity-migration.lock")),
+    lockBeforeDeniedRecovery,
+  );
+  assert.equal(findRecoveryClaims(project).length, 0);
+  const exactMutations = new Set(preparation.exact_mutations.map(({ operation, path: mutationPath }) =>
+    `${operation}\u0000${mutationPath}`));
+  const observedMutations = [];
+  const recoveryMutationGateway = (request, effect) => {
+    const exactKey = `${request.operation}\u0000${request.path}`;
+    assert.ok(exactMutations.has(exactKey), `recovery attempted an unprepared mutation: ${exactKey}`);
+    observedMutations.push(exactKey);
+    return effect();
+  };
+  recoveryMutationGateway.revalidate = (request) => {
+    const exactKey = `${request.operation}\u0000${request.path}`;
+    assert.ok(exactMutations.has(exactKey), `recovery revalidated an unprepared mutation: ${exactKey}`);
+    return true;
+  };
+  const recovered = recoverIdentityMigration({
+    projectRoot: project,
+    recoveryNonce: nonce,
+    planHash,
+    recoveryPreparation: preparation,
+    mutationGateway: recoveryMutationGateway,
+  });
   assert.equal(recovered.status, "rolled_back");
+  assert.ok(observedMutations.length > 0);
+  assert.equal(observedMutations.some((item) => item.startsWith("transaction.execute\u0000")), false);
   assert.deepEqual(snapshotTree(liveRoot), before);
   assert.equal(fs.existsSync(path.join(project, ".sdlc-identity-migration.lock")), false);
   assert.equal(fs.existsSync(path.join(project, journalName)), false);

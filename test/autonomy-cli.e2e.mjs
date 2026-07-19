@@ -7,7 +7,10 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { computeDeliveryExecutionProfileHash } from "../lib/autonomy-policy.mjs";
+import {
+  buildDeliveryExecutionProfile,
+  computeDeliveryExecutionProfileHash,
+} from "../lib/autonomy-policy.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -356,6 +359,34 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     contractId: "CONTRACT-PR-1",
     profileId: "AUT-PR-1",
   });
+  const destinationUnknownIntent = taskIntent("ST-PR-1");
+  const destinationUnknown = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+  ]);
+  assert.equal(destinationUnknown.contract_action, "select_delivery_autonomy");
+  assert.equal(destinationUnknown.delivery_kind, null);
+  const destinationUnknownEnglish = splitHumanGuidance(mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+  ]).stdout);
+  assert.match(destinationUnknownEnglish.primary, /First identify this delivery's exact destination/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /For this pull request, how independently should I work/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /For this local release, how independently should I work/u);
+  assert.doesNotMatch(destinationUnknownEnglish.primary, /(?:1\. Guided|2\. Autonomy with checks|3\. Full autonomy)/u);
+  const destinationUnknownHuman = splitHumanGuidance(mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", destinationUnknownIntent,
+    "--locale", "it",
+  ]).stdout, "it");
+  assert.match(destinationUnknownHuman.primary, /Prima indica la destinazione esatta di questa consegna/u);
+  assert.match(destinationUnknownHuman.primary, /ti mostrerò una sola domanda con le tre scelte applicabili/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /Per questa PR, quanto vuoi che lavori in autonomia/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /Per questo rilascio locale, quanto vuoi che lavori in autonomia/u);
+  assert.doesNotMatch(destinationUnknownHuman.primary, /(?:1\. Guidato|2\. Autonomia con controlli|3\. Autonomia completa)/u);
   mustRun([
     "story", "create",
     "--root", project,
@@ -397,17 +428,41 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   mustGit(project, ["remote", "set-url", "origin", "https://github.com/example/unapproved-repository.git"]);
   mustGit(project, ["remote", "set-url", "--add", "origin", expectedRemoteUrl]);
   mustGit(project, ["remote", "set-url", "--push", "--add", "origin", expectedRemoteUrl]);
-  const proposalResponse = mustRunJson(proposalArgs);
+  const levelOptionIndex = proposalArgs.indexOf("--level");
+  mustFail([
+    ...proposalArgs.slice(0, levelOptionIndex),
+    ...proposalArgs.slice(levelOptionIndex + 2),
+  ], /Missing required option --level/u);
+  mustFail([...proposalArgs, "--git-provider", "github-cli"], /cannot verify git\.push/u);
+  const proposalResponse = mustRunJson([
+    ...proposalArgs,
+    "--git-provider", "git-remote",
+    "--pull-request-provider", "github-cli",
+  ]);
   const proposed = proposalResponse.delivery_profile;
   assert.equal(proposed.status, "proposed");
   assert.equal(proposed.delivery_kind, "pull_request");
   assert.equal(proposed.delivery_id, "PR-1");
+  assert.equal(proposed.schema_version, "delivery-execution-profile:v2");
+  assert.deepEqual(proposed.provider_bindings, [
+    { action: "git.push", provider_id: "git-remote" },
+    { action: "pull_request.create", provider_id: "github-cli" },
+    { action: "pull_request.merge", provider_id: "github-cli" },
+    { action: "pull_request.update", provider_id: "github-cli" },
+  ]);
   assert.equal(proposed.requested_level, "bounded-autonomous");
   assert.equal(proposed.use_policy.reusable_across_deliveries, false);
   assert.equal(proposed.pull_request_target.merge_allowed, false);
   assert.match(proposalResponse.human_guidance.impact, /project “Autonomy E2E”/u);
+  assert.match(proposalResponse.human_guidance.impact, /^You chose full autonomy within the agreed limits/u);
+  assert.match(proposalResponse.human_guidance.impact, /cannot digitally verify who gave it/u);
   assert.match(proposalResponse.human_guidance.impact, /destination is “codex\/pr-1” in repository “github\.com\/aantenore\/agentic-sdlc-codex-plugin”, starting from “main”/u);
   assert.match(proposalResponse.human_guidance.impact, /change only “src”/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /For this pull request, how independently should I work\?/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /2\. Autonomy with checks: I proceed independently/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /3\. Full autonomy within these limits: I complete this pull request/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /applies only to this pull request and will not be reused/u);
   assert.match(proposalResponse.human_guidance.required_decision, /before anything is deployed outside the local machine and before the pull request is merged/u);
   assert.match(proposalResponse.human_guidance.required_decision, /no separate calendar deadline.*ends when the pull request is merged, closed, or cancelled/u);
   assert.equal(proposalResponse.human_guidance.details.project_name, "Autonomy E2E");
@@ -437,7 +492,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   const deliveryGuidance = splitHumanGuidance(humanStatus.stdout);
   assert.match(deliveryGuidance.firstLine, /^Outcome: The working choice is active for one pull request/u);
-  assert.match(deliveryGuidance.primary, /What this changes in practice: .*continue between the review moments we agreed/u);
+  assert.match(deliveryGuidance.primary, /What this changes in practice: You chose full autonomy within the agreed limits/u);
+  assert.match(deliveryGuidance.primary, /cannot digitally verify who gave it/u);
   assert.match(deliveryGuidance.primary, /Next step: .*approved limits.*review moment/u);
   assert.match(deliveryGuidance.technical, /Profile: AUT-PR-1/u);
   assert.match(deliveryGuidance.technical, /Requested technical level: bounded-autonomous/u);
@@ -452,7 +508,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   const deliveryGuidanceItalian = splitHumanGuidance(humanExplainItalian.stdout, "it");
   assert.match(deliveryGuidanceItalian.firstLine, /^Risultato: La scelta del modo di lavorare è attiva per una sola pull request/u);
-  assert.match(deliveryGuidanceItalian.primary, /Cosa cambia in pratica: .*proseguire tra i momenti di revisione che abbiamo concordato/u);
+  assert.match(deliveryGuidanceItalian.primary, /Cosa cambia in pratica: Hai scelto autonomia completa entro i limiti concordati/u);
+  assert.match(deliveryGuidanceItalian.primary, /non può verificare digitalmente chi l'ha data/u);
   assert.match(deliveryGuidanceItalian.primary, /Prossimo passo: .*limiti approvati.*momento di revisione/u);
   assert.match(deliveryGuidanceItalian.technical, /Profile: AUT-PR-1/u);
   assert.match(deliveryGuidanceItalian.technical, /bounded-autonomous/u);
@@ -480,6 +537,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(profileMissing.execution_allowed, false);
   assert.equal(profileMissing.contract_action, "select_delivery_autonomy");
+  assert.equal(profileMissing.delivery_kind, "pull_request");
   assert.ok(profileMissing.blocking_reasons.includes("autonomy_selection_required"));
   const profileMissingHuman = mustRun([
     "task", "start",
@@ -487,14 +545,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--intent-json", intent,
   ]);
   const profileMissingGuidance = splitHumanGuidance(profileMissingHuman.stdout);
-  assert.match(profileMissingGuidance.primary, /How independently should I work on this pull request or local release/u);
-  assert.match(profileMissingGuidance.primary, /Ask before every important step/u);
-  assert.match(profileMissingGuidance.primary, /Work independently between review moments, but pause before the sensitive steps we agree/u);
-  assert.match(profileMissingGuidance.primary, /Complete this delivery independently within the displayed limits/u);
-  assert.match(profileMissingGuidance.primary, /choice applies only to this delivery and will not be reused/u);
+  assert.match(profileMissingGuidance.primary, /For this pull request, how independently should I work\?/u);
+  assert.match(profileMissingGuidance.primary, /1\. Guided: I ask for confirmation before important steps/u);
+  assert.match(profileMissingGuidance.primary, /2\. Autonomy with checks: I proceed independently, but stop before the sensitive actions we agree/u);
+  assert.match(profileMissingGuidance.primary, /3\. Full autonomy within these limits: I complete this pull request without routine pauses/u);
+  assert.match(profileMissingGuidance.primary, /This choice applies only to this pull request and will not be reused/u);
+  assert.doesNotMatch(profileMissingGuidance.primary, /pull request or local release/u);
   assert.doesNotMatch(profileMissingGuidance.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
-  assert.match(profileMissingGuidance.technical, /this pull request or local release still needs its own choice/u);
-  assert.match(profileMissingGuidance.technical, /choice is never inherited from an earlier delivery/u);
+  assert.match(profileMissingGuidance.technical, /this pull request still needs its own choice/u);
+  assert.match(profileMissingGuidance.technical, /choice is never inferred from a previous delivery/u);
   const profileMissingItalian = mustRun([
     "task", "start",
     "--root", project,
@@ -505,13 +564,15 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(missingGuidanceItalian.firstLine, /^Risultato: Il lavoro non è ancora iniziato/u);
   assert.match(missingGuidanceItalian.primary, /Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa/u);
   assert.match(missingGuidanceItalian.primary, /Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare/u);
-  assert.match(missingGuidanceItalian.primary, /Quanto vuoi che proceda in autonomia per questa pull request o questo rilascio locale/u);
-  assert.match(missingGuidanceItalian.primary, /Chiedimi conferma prima di ogni passaggio importante/u);
-  assert.match(missingGuidanceItalian.primary, /Procedi da solo tra un momento di revisione e l’altro/u);
-  assert.match(missingGuidanceItalian.primary, /Completa questa consegna da solo entro i limiti mostrati/u);
+  assert.match(missingGuidanceItalian.primary, /Per questa PR, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(missingGuidanceItalian.primary, /1\. Guidato: ti chiedo conferma prima dei passaggi importanti/u);
+  assert.match(missingGuidanceItalian.primary, /2\. Autonomia con controlli: procedo da solo, ma mi fermo prima delle azioni delicate concordate/u);
+  assert.match(missingGuidanceItalian.primary, /3\. Autonomia completa entro questi limiti: completo questa PR senza pause ordinarie/u);
+  assert.match(missingGuidanceItalian.primary, /Questa scelta vale solo per questa PR e non sarà riutilizzata/u);
+  assert.doesNotMatch(missingGuidanceItalian.primary, /PR o rilascio locale/u);
   assert.doesNotMatch(missingGuidanceItalian.primary, /bounded-autonomous|checkpointed|audit_only|ceiling|profile|receipt/u);
-  assert.match(missingGuidanceItalian.technical, /questa pull request .* propria scelta del livello di autonomia/u);
-  assert.match(missingGuidanceItalian.technical, /Quanto vuoi che proceda in autonomia/u);
+  assert.match(missingGuidanceItalian.technical, /questa PR deve ancora avere una scelta propria/u);
+  assert.match(missingGuidanceItalian.technical, /Per questa PR, quanto vuoi che lavori in autonomia/u);
   assert.match(missingGuidanceItalian.technical, /autonomy_selection_required/u);
 
   const automatic = mustRunJson([
@@ -532,6 +593,22 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(receipt.delivery_profile_ref.id, "AUT-PR-1");
   assert.equal(receipt.autonomy_decision_ref.id, automatic.autonomy_decision.id);
   assert.equal(receipt.start_basis, "checkpointed-profile");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/1",
+    "--expected-pr-state", "almost-ready",
+  ], /expected-pr-state.*draft.*ready/iu);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-PR-1",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/1",
+    "--expected-pr-base", "production",
+  ], /cannot retarget the pull request outside the approved base branch/u);
   const startTrace = fs.readFileSync(path.join(project, ".sdlc", "traces", "ST-PR-1.jsonl"), "utf8")
     .trim()
     .split(/\r?\n/u)
@@ -832,6 +909,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.observed_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.base_precondition.base_ref, "refs/heads/main");
   assert.equal(pushAuthorization.action_receipt.action_details.push_precondition.observed_sha, beforeCommit);
+  assert.equal(
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "git-remote",
+  );
+  assert.equal(
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.operation.phase,
+    "precondition",
+  );
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.schema_version, "git-commit-coverage:v1");
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.base_sha, beforeCommit);
   assert.equal(pushAuthorization.action_receipt.action_details.commit_coverage.head_sha, afterCommit);
@@ -893,6 +978,14 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.equal(pushCompletion.status, "completed");
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.observed_sha, afterCommit);
   assert.equal(pushCompletion.action_receipt.action_details.remote_verification.destination_ref, "refs/heads/codex/pr-1");
+  assert.equal(
+    pushCompletion.action_receipt.action_details.provider_operation.completion_receipt.operation.phase,
+    "completion",
+  );
+  assert.equal(
+    pushCompletion.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
 
   const closeResult = mustRun([
     "autonomy", "delivery", "close",
@@ -1014,7 +1107,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     "--root", project,
   ]).stdout);
   assert.match(multiDeliveryGuidance.firstLine, /^Outcome: I found 2 separate working choices for concrete deliveries/u);
-  assert.match(multiDeliveryGuidance.primary, /No choice applies to another pull request or local release/u);
+  assert.match(multiDeliveryGuidance.primary, /No choice applies to another delivery/u);
   assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-1/u);
   assert.match(multiDeliveryGuidance.technical, /Profile: AUT-PR-2/u);
 
@@ -1170,6 +1263,131 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     forgedGateError.error.message,
     /Delivery lifecycle receipt .*close\.json validation failed: .*approval\.status: must equal "approved"/u,
   );
+});
+
+test("an in-flight v1 push authorization completes through its legacy verifier", () => {
+  const project = tmpProject("legacy-v1-push-completion");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LEGACY-PUSH",
+    contractId: "CONTRACT-LEGACY-PUSH",
+    profileId: "AUT-LEGACY-PUSH",
+  });
+  const proposed = mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--delivery", "PR-LEGACY-PUSH",
+    "--kind", "pull_request",
+    "--story", "ST-LEGACY-PUSH",
+    "--contract", "CONTRACT-LEGACY-PUSH",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "bounded-autonomous",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+  ]).delivery_profile;
+  const profilePath = path.join(
+    project,
+    ".sdlc",
+    "autonomy",
+    "deliveries",
+    "AUT-LEGACY-PUSH.json",
+  );
+  const legacyProposed = buildDeliveryExecutionProfile(proposed);
+  assert.equal(legacyProposed.schema_version, "delivery-execution-profile:v1");
+  fs.writeFileSync(profilePath, `${JSON.stringify(legacyProposed, null, 2)}\n`, "utf8");
+
+  const activated = mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--phase", "implementation",
+    ...humanApproval("Approve the historical v1 delivery fixture"),
+  ]).delivery_profile;
+  assert.equal(activated.schema_version, "delivery-execution-profile:v1");
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LEGACY-PUSH"),
+    "--delivery-profile", "AUT-LEGACY-PUSH",
+  ]);
+  assert.equal(started.execution_allowed, true);
+
+  const sourcePath = path.join(project, "src", "legacy-change.txt");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "legacy in-flight push\n", "utf8");
+  mustGit(project, ["add", "--", "src/legacy-change.txt"]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.commit",
+    "--scope-path", "src/legacy-change.txt",
+  ]);
+  const beforeCommit = mustGit(project, ["rev-parse", "HEAD"]);
+  mustGit(project, ["commit", "-m", "test: legacy v1 in-flight push"]);
+  const afterCommit = mustGit(project, ["rev-parse", "HEAD"]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.commit",
+    "--outcome", "passed",
+    "--evidence", "src/legacy-change.txt",
+  ]);
+
+  const authorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.push",
+    "--remote", "origin",
+    "--confirm-action",
+    ...humanApproval("Approve the historical v1 push checkpoint"),
+  ], { env: fakeGitRemoteEnv(project, beforeCommit) });
+  assert.equal(authorization.action_receipt.profile_ref.hash, activated.profile_hash);
+  assert.equal(
+    authorization.action_receipt.action_details.provider_operation.binding.source,
+    "legacy-v1",
+  );
+
+  const legacyAuthorization = structuredClone(authorization.action_receipt);
+  delete legacyAuthorization.action_details.provider_operation;
+  const approvalSubject = {
+    profile_id: legacyAuthorization.profile_ref.id,
+    profile_hash: legacyAuthorization.profile_ref.hash,
+    delivery_id: legacyAuthorization.delivery.id,
+    action: legacyAuthorization.action,
+    runtime_target: legacyAuthorization.runtime_target,
+    action_details: legacyAuthorization.action_details,
+  };
+  if (legacyAuthorization.approval) {
+    legacyAuthorization.approval.approved_content_hash = crypto.createHash("sha256")
+      .update(stableJson(approvalSubject))
+      .digest("hex");
+  }
+  legacyAuthorization.receipt_hash = lifecycleReceiptHash(legacyAuthorization);
+  fs.writeFileSync(
+    path.join(project, authorization.action_receipt_path),
+    `${JSON.stringify(legacyAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+
+  const completion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LEGACY-PUSH",
+    "--action", "git.push",
+    "--outcome", "passed",
+    "--evidence", "src/legacy-change.txt",
+  ], { env: fakeGitRemoteEnv(project, afterCommit) });
+  assert.equal(completion.status, "completed");
+  assert.equal(completion.action_receipt.authorization_receipt_ref.hash, legacyAuthorization.receipt_hash);
+  assert.equal(completion.action_receipt.action_details.provider_operation, undefined);
+  assert.equal(completion.action_receipt.action_details.remote_verification.provider, "git-remote");
+  assert.equal(completion.action_receipt.action_details.remote_verification.observed_sha, afterCommit);
 });
 
 test("git.push rejects commits created outside the exact delivery action chain", () => {
@@ -1382,6 +1600,10 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
     ...humanApproval("Approve this exact open PR merge checkpoint"),
   ], { env: fakeGitHubEnv(project, openState) });
   assert.equal(authorization.status, "authorized");
+  assert.equal(
+    authorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "github-cli",
+  );
   const mergedAt = new Date(Date.parse(authorization.action_receipt.authorized_at) + 1_000).toISOString();
   const mergeSha = "f".repeat(40);
 
@@ -1399,6 +1621,10 @@ test("pull-request merge requires an exact open pre-state and later GitHub merge
   assert.equal(completion.lifecycle_status, "terminal");
   assert.equal(completion.action_receipt.action_details.provider_verification.state, "MERGED");
   assert.equal(completion.action_receipt.action_details.provider_verification.merge_commit_sha, mergeSha);
+  assert.equal(
+    completion.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    authorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
   const close = JSON.parse(fs.readFileSync(path.join(project, completion.close_receipt_path), "utf8"));
   assert.equal(close.terminal_status, "merged");
   assert.equal(close.terminal_action_receipt_ref.id, completion.action_receipt.id);
@@ -1453,20 +1679,42 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     "--write-path", outsideRoot,
   ], /must be a strict child of root_path/u);
 
-  const proposed = mustRunJson([
+  const proposalResponse = mustRunJson([
     ...baseArgs,
     "--write-path", releaseOutput,
-  ]).delivery_profile;
+  ]);
+  const proposed = proposalResponse.delivery_profile;
   assert.equal(proposed.delivery_kind, "local_release");
   assert.equal(proposed.local_release_target.environment, "local");
   assert.equal(proposed.local_release_target.root_path, releaseRoot);
   assert.deepEqual(proposed.local_release_target.allowed_write_paths, [releaseOutput]);
   assert.deepEqual(proposed.local_release_target.smoke_tests, ['["node","--version"]']);
+  assert.deepEqual(proposed.provider_bindings, [
+    { action: "release.local", provider_id: "local-filesystem" },
+  ]);
   assert.equal(proposed.local_release_target.rollback.required, true);
   assert.match(proposed.local_release_target.rollback.procedure, /previous local build/u);
   assert.equal(proposed.local_release_target.external_access_allowed, false);
   assert.equal(proposed.local_release_target.production_access_allowed, false);
   assert.equal(proposed.local_release_target.destructive_actions_allowed, false);
+  assert.match(proposalResponse.human_guidance.required_decision, /Per questo rilascio locale|For this local release/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /Full autonomy within these limits: I complete this local release/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /applies only to this local release and will not be reused/u);
+  assert.doesNotMatch(proposalResponse.human_guidance.required_decision, /pull request or local release/u);
+
+  const missingLocalSelection = mustRun([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LOCAL-1"),
+    "--locale", "it",
+  ]);
+  const missingLocalGuidance = splitHumanGuidance(missingLocalSelection.stdout, "it");
+  assert.match(missingLocalGuidance.primary, /Per questo rilascio locale, quanto vuoi che lavori in autonomia\?/u);
+  assert.match(missingLocalGuidance.primary, /1\. Guidato: ti chiedo conferma prima dei passaggi importanti/u);
+  assert.match(missingLocalGuidance.primary, /2\. Autonomia con controlli: procedo da solo/u);
+  assert.match(missingLocalGuidance.primary, /3\. Autonomia completa entro questi limiti: completo questo rilascio locale senza pause ordinarie/u);
+  assert.match(missingLocalGuidance.primary, /Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata/u);
+  assert.doesNotMatch(missingLocalGuidance.primary, /Per questa PR|PR o rilascio locale/u);
 
   const activated = mustRunJson([
     "autonomy", "delivery", "approve",
@@ -1531,6 +1779,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(releaseAuthorization.checkpoint_required, true);
   assert.equal(releaseAuthorization.action_receipt.approval.status, "approved");
   assert.equal(releaseAuthorization.action_receipt.action_details.target_root, releaseRoot);
+  assert.equal(
+    releaseAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.provider.id,
+    "local-filesystem",
+  );
   assert.deepEqual(releaseAuthorization.action_receipt.action_details.allowed_write_paths, [releaseOutput]);
   const localCheckpointPolicy = releaseAuthorization.action_receipt.action_details.checkpoint_policy;
   assert.equal(localCheckpointPolicy.local_boundary_source.schema_version, "delivery-local-boundary-source:v1");
@@ -1881,6 +2133,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     /remains valid for this exact action; updated approval rules apply to later actions/iu.test(warning)));
   assert.match(completed.close_receipt_path, /autonomy\/executions\/AUT-LOCAL-1\/close\.json$/u);
   assert.equal(completed.action_receipt.authorization_receipt_ref.id, releaseAuthorization.action_receipt.id);
+  assert.equal(
+    completed.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
+    releaseAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
+  );
   assert.equal(completed.action_receipt.local_release_verification.outcome, "passed");
   assert.deepEqual(completed.action_receipt.local_release_verification.smoke_tests, ['["node","--version"]']);
   assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts.length, 1);

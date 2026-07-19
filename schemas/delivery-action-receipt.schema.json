@@ -67,7 +67,12 @@
         }
       ]
     },
-    "action_details": { "type": "object" },
+    "action_details": {
+      "type": "object",
+      "properties": {
+        "provider_operation": { "$ref": "#/$defs/provider_operation_binding" }
+      }
+    },
     "authorization_receipt_ref": {
       "oneOf": [
         { "type": "null" },
@@ -240,6 +245,36 @@
         "id": { "type": "string", "minLength": 1 },
         "path": { "type": "string", "minLength": 1 },
         "hash": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "provider_operation_binding": {
+      "type": "object",
+      "required": ["binding", "precondition_receipt", "completion_receipt"],
+      "properties": {
+        "binding": {
+          "type": "object",
+          "required": ["action", "provider_id", "source", "provider_bindings_hash"],
+          "properties": {
+            "action": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+            "provider_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+            "source": { "enum": ["explicit-v2", "legacy-v1"] },
+            "provider_bindings_hash": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/sha256" }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "precondition_receipt": { "$ref": "provider-operation-receipt.schema.json" },
+        "completion_receipt": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "provider-operation-receipt.schema.json" }
+          ]
+        }
       },
       "additionalProperties": false
     }

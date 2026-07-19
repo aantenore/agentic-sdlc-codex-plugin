@@ -601,7 +601,7 @@ Examples:
 
 `requirement-execution-profile:v1` binds one immutable requirement revision and stores its maximum level, optional phase levels, material scope hash, tools, capabilities, environments, write paths, forbidden actions, checkpoints, exception actions, budget reference, validity, and authority assurance. It is a ceiling, not an executable authorization.
 
-`delivery-execution-profile:v1` stores the explicit selection for exactly one delivery and exactly one story/approved-contract pair. When several changes need to ship together, first model an agreed aggregation story/contract instead of treating a profile as an unrelated multi-story bundle:
+`delivery-execution-profile:v2` stores the explicit selection for exactly one delivery and exactly one story/approved-contract pair. It also binds each externally verified delivery action to one registered observer and includes an independent provider-binding hash. Historical v1 records are never rewritten; their original bytes and profile hashes remain valid, while a compatibility mapping is derived only in memory. When several changes need to ship together, first model an agreed aggregation story/contract instead of treating a profile as an unrelated multi-story bundle:
 
 - `pull_request` binds repository, base branch, head branch, canonical actions, explicit write paths, one story/contract hash pair, and whether merge is allowed;
 - `local_release` binds the local root, actions, write paths, smoke tests, and required rollback while denying external, production, and destructive access.
