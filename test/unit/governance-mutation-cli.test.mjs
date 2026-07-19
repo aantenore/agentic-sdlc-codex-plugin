@@ -13,6 +13,7 @@ import { DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT } from "../../lib/governance/mutat
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
+const CLI_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
 
 function verifiedCliActor() {
   const credential = typeof process.getuid === "function"
@@ -38,7 +39,7 @@ function run(project, args) {
     cwd: project,
     env,
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: CLI_TIMEOUT_MS,
   });
 }
 

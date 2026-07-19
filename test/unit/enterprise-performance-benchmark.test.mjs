@@ -1321,7 +1321,10 @@ test("parent treats an Observatory IPC error message as immediately terminal", {
         scale: SMALL_SCALE,
         warmIterations: 2,
         observatoryWorkerScriptPath: fakeWorker,
-        observatoryWorkerTimeoutMs: 1_000,
+        // Process startup on a saturated hosted Windows runner can exceed one
+        // second. The event timestamp assertion below still proves that the
+        // IPC error, rather than this outer deadline, owns the result.
+        observatoryWorkerTimeoutMs: 10_000,
       }),
       /Observatory server worker failed: deterministic IPC failure/u,
     );
