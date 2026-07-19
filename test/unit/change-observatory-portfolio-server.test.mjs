@@ -147,6 +147,47 @@ test("validates portfolio concurrency before binding and disposes cached runtime
   assert.equal(disposed, 3);
 });
 
+test("shutdown bounds portfolio disposal while a summary lease is still active", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  let releaseSummary;
+  const summaryGate = new Promise((resolve) => {
+    releaseSummary = resolve;
+  });
+  let summaryStarted = false;
+  let disposed = 0;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.root,
+    portfolioManifest: "portfolio.json",
+    shutdownGraceMs: 25,
+    createProjectRuntime({ projectId }) {
+      const runtime = disposableProjectRuntime(projectId, () => {
+        disposed += 1;
+      });
+      if (projectId !== "alpha") return runtime;
+      return {
+        ...runtime,
+        async getPortfolioSummary() {
+          summaryStarted = true;
+          await summaryGate;
+          return runtime.getPortfolioSummary();
+        },
+      };
+    },
+  });
+
+  const pendingRequest = request(running, "/api/v1/portfolio")
+    .then((response) => ({ response, error: null }), (error) => ({ response: null, error }));
+  await waitFor(() => summaryStarted);
+  await assertCompletesWithin(running.close(), 500, "active portfolio shutdown");
+  const outcome = await assertCompletesWithin(pendingRequest, 500, "active portfolio client teardown");
+  assert.equal(outcome.response, null);
+  assert.ok(outcome.error instanceof Error);
+  assert.equal(running.server.listening, false);
+
+  releaseSummary();
+  await waitFor(() => disposed === 3);
+});
+
 test("enforces auth, Host, read-only methods, and exact portfolio queries", async (t) => {
   const fixture = await createPortfolioFixture(t);
   const running = await startObservatoryServer({
@@ -287,6 +328,24 @@ function request(running, requestPath, {
     outgoing.on("error", reject);
     outgoing.end();
   });
+}
+
+function assertCompletesWithin(promise, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs} ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("Timed out waiting for the portfolio operation");
 }
 
 function collectStringFields(value, field) {
