@@ -56,6 +56,33 @@ test("hierarchical help works outside a project and keeps technical literals sec
   assert.equal(fs.existsSync(path.join(cwd, ".sdlc")), false);
 });
 
+test("direct focused help exposes the exact inputs for the core work sequence", () => {
+  const cwd = temporaryDirectory("core-work-help");
+  const expectations = [
+    { command: ["story", "create"], required: ["--id", "--title"], present: ["--acceptance"] },
+    { command: ["story", "claim"], required: ["--id", "--agent"], present: ["--branch"] },
+    { command: ["output", "resolve"], required: ["--story", "--type"], present: [] },
+    { command: ["contract", "approve"], required: ["--id", "--actor-type"], present: ["--approval-source", "--approval-evidence"] },
+    { command: ["task", "start"], required: [], present: ["--intent-json", "--intent-file", "--contract-id", "--confirm-start"] },
+  ];
+
+  for (const expectation of expectations) {
+    const payload = JSON.parse(mustRun([...expectation.command, "--help", "--json"], { cwd }).stdout);
+    const options = new Map(payload.options.map((entry) => [entry.flag, entry]));
+    for (const flag of expectation.required) {
+      assert.equal(options.get(flag)?.required, true, `${expectation.command.join(" ")} should require ${flag}`);
+    }
+    for (const flag of expectation.present) {
+      assert.equal(options.has(flag), true, `${expectation.command.join(" ")} should expose ${flag}`);
+    }
+  }
+
+  const italian = mustRun(["task", "start", "--help", "--locale", "it"], { cwd });
+  assertPrimaryHasNoTechnicalJargon(italian.stdout, "it");
+  assert.match(italian.stdout.split("Dettagli tecnici (facoltativi):")[1], /--intent-json/u);
+  assert.equal(fs.existsSync(path.join(cwd, ".sdlc")), false);
+});
+
 test("requirement and contract help describe commands that run with the documented inputs", () => {
   const cwd = temporaryDirectory("agreement-help");
   mustRun(["init", "--project-name", "Agreement help", "--root", cwd]);

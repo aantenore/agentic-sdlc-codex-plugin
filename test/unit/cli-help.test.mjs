@@ -106,6 +106,26 @@ test("requirement and contract help include safe runnable examples and exact run
   assert.doesNotMatch(italianFlags.get("--delivery-profile").required_when, /implementation|approved|enforcement/u);
 });
 
+test("core work commands keep human guidance plain and runtime flags in optional details", () => {
+  const expectations = [
+    { path: ["story", "create"], flags: ["--title", "--acceptance"] },
+    { path: ["story", "claim"], flags: ["--agent", "--branch"] },
+    { path: ["output", "resolve"], flags: ["--story", "--type"] },
+    { path: ["contract", "approve"], flags: ["--actor-type", "--approval-source", "--approval-evidence"] },
+    { path: ["task", "start"], flags: ["--intent-json", "--intent-file", "--contract-id", "--confirm-start"] },
+  ];
+
+  for (const expectation of expectations) {
+    const output = renderHelp(expectation.path, { locale: "it" });
+    const [primary, technical] = output.split("Dettagli tecnici (facoltativi):");
+    assert.doesNotMatch(primary, FORBIDDEN_PRIMARY_JARGON, expectation.path.join(" "));
+    assert.doesNotMatch(primary, /(?:agentic-sdlc|--[a-z])/iu, expectation.path.join(" "));
+    for (const flag of expectation.flags) {
+      assert.match(technical, new RegExp(flag, "u"), `${expectation.path.join(" ")} should expose ${flag}`);
+    }
+  }
+});
+
 test("hierarchical help shows only the selected group's immediate children", () => {
   const model = buildHelpModel(["autonomy", "delivery"], { locale: "en" });
   assert.equal(Object.isFrozen(model), true);

@@ -161,6 +161,53 @@ test("requirement and contract help expose the runtime-required and conditional 
   }
 });
 
+test("focused lifecycle help mirrors the runtime inputs needed to create and start work", () => {
+  const describe = (command) => new Map(listOptions(command, { includeGlobal: false }).map((entry) => [entry.flag, entry]));
+
+  const storyCreate = describe("story create");
+  assert.equal(storyCreate.get("--id")?.required, true);
+  assert.equal(storyCreate.get("--title")?.required, true);
+  assert.equal(storyCreate.get("--acceptance")?.repeatable, true);
+
+  const storyClaim = describe("story claim");
+  assert.equal(storyClaim.get("--id")?.required, true);
+  assert.equal(storyClaim.get("--agent")?.required, true);
+  assert.equal(storyClaim.has("--branch"), true);
+
+  const outputResolve = describe("output resolve");
+  assert.equal(outputResolve.get("--story")?.required, true);
+  assert.equal(outputResolve.get("--type")?.required, true);
+
+  const contractApprove = describe("contract approve");
+  assert.equal(contractApprove.get("--id")?.required, true);
+  assert.equal(contractApprove.get("--actor-type")?.required, true);
+  assert.match(contractApprove.get("--approval-source")?.required_when.en, /not supplied by CI/u);
+  for (const flag of ["--actor-name", "--actor-email", "--summary", "--approval-evidence", "--authorization", "--host-receipt-file"]) {
+    assert.equal(contractApprove.has(flag), true, `missing contract approval flag: ${flag}`);
+  }
+  assert.equal(contractApprove.get("--summary")?.required_one_of.en, "--summary or --approval-evidence");
+
+  const taskStart = describe("task start");
+  for (const flag of [
+    "--intent-json",
+    "--intent-file",
+    "--text",
+    "--story",
+    "--phase",
+    "--contract-id",
+    "--delivery-profile",
+    "--confirm-start",
+    "--actor-type",
+    "--authorization",
+    "--revise-contract",
+  ]) {
+    assert.equal(taskStart.has(flag), true, `missing task-start flag: ${flag}`);
+  }
+  assert.equal(taskStart.has("--contract"), false);
+  assert.equal(taskStart.get("--intent-json")?.required_one_of.en, "--intent-json or --intent-file");
+  assert.equal(taskStart.get("--intent-file")?.required_one_of.it, "--intent-json oppure --intent-file");
+});
+
 test("capability selectors use --profile while delivery commands use --delivery-profile", () => {
   for (const command of ["capability profile status", "capability recommend", "capability status"]) {
     const flags = new Set(listOptions(command, { includeGlobal: false }).map((entry) => entry.flag));
