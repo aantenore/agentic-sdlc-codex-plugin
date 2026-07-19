@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refresh the trusted enterprise platform snapshot after the final Windows path, loaded-runner, and process-marker reliability fixes.
+Refresh the trusted enterprise platform snapshot after making delivery proof verification clone-portable and enforcing its static check.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
@@ -25,7 +25,7 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 ## Key Files
 - .github/workflows/ci.yml (59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3)
 - .github/workflows/release.yml (5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4)
-- package.json (dfbba33ede59142d45ca5015c00fbc6c7955c9d664aa6306521c7ffad79bdcf8)
+- package.json (9748d4093e3bf22501afb287726d8dded82ca23bc12fa133a8e463da88d02224)
 - README.md (2247e26a63178e02f99621e9f8b55db3cf03286d6e18b5d229730e756d8de58f)
 
 ## Imported Documents

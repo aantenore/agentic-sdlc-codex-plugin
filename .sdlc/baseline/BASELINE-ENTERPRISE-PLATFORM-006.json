@@ -4,13 +4,13 @@
   "sdlc_version": "0.11.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Refresh the trusted enterprise platform snapshot after the final Windows path, loaded-runner, and process-marker reliability fixes.",
+  "summary": "Refresh the trusted enterprise platform snapshot after making delivery proof verification clone-portable and enforcing its static check.",
   "repository_snapshot": {
     "root_name": "worktree",
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
+      "head_sha": "279fa25b1fa418e2629d79fd31b3b597418b6ad5",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -52,8 +52,8 @@
       },
       {
         "path": "package.json",
-        "sha256": "dfbba33ede59142d45ca5015c00fbc6c7955c9d664aa6306521c7ffad79bdcf8",
-        "size_bytes": 3850
+        "sha256": "9748d4093e3bf22501afb287726d8dded82ca23bc12fa133a8e463da88d02224",
+        "size_bytes": 3914
       },
       {
         "path": "README.md",
@@ -63,7 +63,7 @@
     ],
     "package_scripts": {
       "benchmark:enterprise": "node scripts/benchmark-enterprise-performance.mjs --enforce",
-      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/provider-subject-compatibility.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
       "test": "node --test && npm run benchmark:enterprise"
@@ -664,7 +664,7 @@
     ],
     "runtime_and_validation_scripts": {
       "benchmark:enterprise": "node scripts/benchmark-enterprise-performance.mjs --enforce",
-      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
+      "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/provider-subject-compatibility.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
       "test": "node --test && npm run benchmark:enterprise"
@@ -762,6 +762,7 @@
     "lib/delivery/default-providers.mjs",
     "lib/delivery/provider-compatibility.mjs",
     "lib/delivery/provider-registry.mjs",
+    "lib/delivery/provider-subject-compatibility.mjs",
     "lib/delivery/providers/git-remote.mjs",
     "lib/delivery/providers/github-cli.mjs",
     "lib/delivery/providers/local-filesystem.mjs",
@@ -856,6 +857,7 @@
     "test/unit/obs-redaction.test.mjs",
     "test/unit/obs-support-bundle.test.mjs",
     "test/unit/observability-config.test.mjs",
+    "test/unit/provider-subject-compatibility.test.mjs",
     "test/unit/pull-request-lineage.test.mjs",
     "test/unit/requirement-lifecycle.test.mjs",
     "test/unit/rtk-optimization-adapter.test.mjs",
@@ -876,7 +878,7 @@
     ".github/workflows/ci.yml": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
     ".github/workflows/release.yml": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
     "README.md": "2247e26a63178e02f99621e9f8b55db3cf03286d6e18b5d229730e756d8de58f",
-    "bin/agentic-sdlc.mjs": "93ded3c28a894f53b638b8751fb92920245da2f84690cdf0981f0a2a5dc67eb8",
+    "bin/agentic-sdlc.mjs": "dff4e7379a73f4773300e2618d2e51708e23b49946f9a74025ba277e8890b217",
     "docs/agent-interactions.md": "9e072f578a9acc51a0007bc64207bf005b9d91c9ad7cfda568323432ff012311",
     "docs/architecture.md": "34dbe96e8e9606e0c9f73873fc55ff78f369fe327fc05a113cd9454f057b35ac",
     "docs/change-observatory.md": "683af3ee43fea25656d3c3f105be9734d6761ccba4d22d15fe41d60c6b736b20",
@@ -925,7 +927,8 @@
     "lib/delivery/default-providers.mjs": "ff0d9735f561f6ca5ca738592c5e17bebc471daee65f9ff95990763eb9f33a17",
     "lib/delivery/provider-compatibility.mjs": "59d7f172ac088746d3fe1707d489d9b173b9e5109779e770ac4dcf7a71349ae6",
     "lib/delivery/provider-registry.mjs": "219d89c70f938ef22ae44c852cb1b222e361f97e728ae8b9e00c59b6d8f2489a",
-    "lib/delivery/providers/git-remote.mjs": "77c98a8e613032590493c887d0d3366681ba5b4cfa2c40affe01257609b1f2f3",
+    "lib/delivery/provider-subject-compatibility.mjs": "4952a53e647cd15cffd782e894e12af801d1c4d12e803c975819f62b023094db",
+    "lib/delivery/providers/git-remote.mjs": "86abbe3dd61a96816800ec370692be1c0ae93a98843e0297daf6b5e767d8e0e8",
     "lib/delivery/providers/github-cli.mjs": "8b3e5ab78ec064426a80a1d3c4876edab52b256d2fb47f06c6fe7bc91bba4803",
     "lib/delivery/providers/local-filesystem.mjs": "6c50541e2af180939d56d196bd5ec1737ae14dae22285e410e4768351ce40fa2",
     "lib/delivery/pull-request-lineage.mjs": "ac743d62838f0c6d698353de44510c5c103dcd98f728cb592b0510f25670fad5",
@@ -950,8 +953,8 @@
     "lib/verification-levels.mjs": "19e84c12b5cf0244db17518edcdaceec23063215f76296626c6e4e6311712c24",
     "lib/workflow-engine.mjs": "e905e566ec59d394aa4ba4f9ecd02c8fda863452223b82c0e7f3f6a15f7a2ce6",
     "lib/workflow-presets.mjs": "519dbb28b4e5c5503ecbe920b983c0c4920af6837ee8d4263f7ed0bea6d10cb3",
-    "package.json": "dfbba33ede59142d45ca5015c00fbc6c7955c9d664aa6306521c7ffad79bdcf8",
-    "test/autonomy-cli.e2e.mjs": "a233b187a078f721dde634269da2cbbdfca8527b0e9d72f9df7d18187eeed38a",
+    "package.json": "9748d4093e3bf22501afb287726d8dded82ca23bc12fa133a8e463da88d02224",
+    "test/autonomy-cli.e2e.mjs": "55d2c10f1c9893265cc5eca8ff3879fbb7faeb72d07c84ef6ee4ac72a6c7d189",
     "test/cli-self-service.e2e.mjs": "979a2347befa8797b276e16bc73836ecd528f3c0436223ea30be4a6307bd79cb",
     "test/cli.e2e.mjs": "babf43d719d0206ee7aea7bf21f3291f227005a6a29a6623d27696c1cee493a6",
     "test/fixtures/change-observatory-wrapper.mjs": "2a86a4642dea39c2a91d0161743da605ebcfceb656942e44b43f5b26d4a13b44",
@@ -1003,7 +1006,7 @@
     "test/unit/codeburn-metering-adapter.test.mjs": "b091e91d98ffc4f922993b9f6488062e5eea14504c9c95a467fff071c6c2fd9b",
     "test/unit/context-optimization.test.mjs": "c002f6c85c9dfcb092d25554a37085090d46df73f5062258c9e1d317c8938ace",
     "test/unit/delivery-profile-v2.test.mjs": "ac7579ca4a1e9f926e41ea9376297065b24904e36e347597bac96ff4a0b45889",
-    "test/unit/delivery-provider-registry.test.mjs": "8a66d8b0a67e522b4b54ad9e48d91d059c4c700af93ed21988d5b8df3517b59c",
+    "test/unit/delivery-provider-registry.test.mjs": "72c2c18796d890521199cd565e45eda7d7fe12cb1f0423bfd42d41eaf7235cd9",
     "test/unit/effective-config.test.mjs": "344e221770f3a243751a144d3a0341de199ebb784a805b68606cb28f81c60d08",
     "test/unit/enterprise-foundation-fixture.test.mjs": "8306ffd859216f21ef2c22570ed00de4802d35512243e72b9e4004d885e30ca1",
     "test/unit/enterprise-performance-benchmark.test.mjs": "76f7dbc0f9a1aa8f29beb10e56de00d771015d5d5c7580b5db5ab6757b2202ac",
@@ -1019,6 +1022,7 @@
     "test/unit/obs-redaction.test.mjs": "7f7e79fca714d56a1fc29bc60aa22f78a3be74796bd430dae602ea4c93ca18fb",
     "test/unit/obs-support-bundle.test.mjs": "75c606ac73fc0ea818e8f6a04f5999863205f64615300591f11c141be4c09c31",
     "test/unit/observability-config.test.mjs": "d5184e1e8f4f844afcc76493cbafbda9787c26b56b6dc92c2c548b6ab67d304f",
+    "test/unit/provider-subject-compatibility.test.mjs": "a51959d8c5bb8e12b56576e02e2143085b8912647d89b23cce96a547108d75ae",
     "test/unit/pull-request-lineage.test.mjs": "ebadcd7e78f9255d2f1588654ae04e41583e8e2c031d575cc2ae517403841214",
     "test/unit/requirement-lifecycle.test.mjs": "b77c1a5a0edc73785550422bce6015bdaaed08b97a89c2d951fc081c8ca64f40",
     "test/unit/rtk-optimization-adapter.test.mjs": "8d6ae93ac4f9aa0fdabc36c6d245d08f5a304e94afe547a6c672dae3ae1a3b30",
@@ -1037,10 +1041,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260719024005-033f02",
+      "id": "APR-20260719030226-1978e0",
       "baseline_id": "BASELINE-ENTERPRISE-PLATFORM-006",
       "status": "approved",
-      "summary": "Antonio authorized the autonomous completion of this delivery; approve this exact refreshed project snapshot after all final reliability fixes.",
+      "summary": "Antonio authorized autonomous completion; approve this exact clone-portable final project snapshot.",
       "scope": {
         "principle": "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
         "subject_id": "BASELINE-ENTERPRISE-PLATFORM-006",
@@ -1057,7 +1061,7 @@
       "authorization_action": null,
       "explicit_user_confirmation": true,
       "provisional": false,
-      "approved_content_hash": "226e433418ef75b2736c5ae38ca8a144babfb879057732915a79ddfebc3ed786",
+      "approved_content_hash": "60a453491258404d1556ec8aa49afa640900a3e4e4bc866b64149fbba32df7d9",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "antonioantenore",
@@ -1069,7 +1073,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PORTFOLIO",
-        "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
+        "head_sha": "279fa25b1fa418e2629d79fd31b3b597418b6ad5",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -1086,11 +1090,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-19T02:40:05.764Z"
+      "created_at": "2026-07-19T03:02:26.597Z"
     }
   ],
-  "created_at": "2026-07-19T02:39:59.937Z",
-  "updated_at": "2026-07-19T02:40:05.764Z",
+  "created_at": "2026-07-19T03:02:26.308Z",
+  "updated_at": "2026-07-19T03:02:26.597Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -1102,7 +1106,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "a2c600571cc3818a82e88125f2ac4ea80abc6f46",
+      "head_sha": "279fa25b1fa418e2629d79fd31b3b597418b6ad5",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",

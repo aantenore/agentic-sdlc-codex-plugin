@@ -11,13 +11,13 @@
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "new_writes": {
-    "count": 112,
+    "count": 120,
     "first_sequence": 1,
-    "last_sequence": 112,
-    "last_event_hash": "cd92f44f0e2490ed3287dfead1accbd52a68dcfd49198870010b49988af16127",
-    "rolling_hash": "6960e21a6d8520e12378b7c86566123b3dc5683def7b7bcbee10f1a4f503c1ae"
+    "last_sequence": 120,
+    "last_event_hash": "ceb651aa8b539d8108f6011dcc7abd68b82c82fc4f997c575d950c37fe679500",
+    "rolling_hash": "1ffcd39d4128781fa039e761e4d7d2c8e0393dcd4934f51e2392f1f446b7cc69"
   },
-  "committed_offset": 244697,
-  "updated_at": "2026-07-19T02:35:09.174Z",
-  "checkpoint_hash": "ff5a737c446df89cb68c45721ea2f35b8818e4acfd760fb3562a3477b866225d"
+  "committed_offset": 261467,
+  "updated_at": "2026-07-19T03:02:16.329Z",
+  "checkpoint_hash": "8ca8e8d9bd7f4fc4e958385af8d16e9eca735757cd98b6309effe61470fd11f7"
 }
