@@ -4,13 +4,13 @@
   "sdlc_version": "0.11.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Refresh the trusted enterprise platform snapshot after the final trace-evidence deduplication fix and complete portfolio verification.",
+  "summary": "Refresh the trusted enterprise platform snapshot after the portfolio governance lineage and exact PR creation boundary fixes.",
   "repository_snapshot": {
     "root_name": "worktree",
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "801c3914811d23b8902afb4d2c8c1c898b6a0ebf",
+      "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -765,6 +765,7 @@
     "lib/delivery/providers/git-remote.mjs",
     "lib/delivery/providers/github-cli.mjs",
     "lib/delivery/providers/local-filesystem.mjs",
+    "lib/delivery/pull-request-lineage.mjs",
     "lib/effective-config.mjs",
     "lib/execution-budget.mjs",
     "lib/governance/command-subject.mjs",
@@ -855,6 +856,7 @@
     "test/unit/obs-redaction.test.mjs",
     "test/unit/obs-support-bundle.test.mjs",
     "test/unit/observability-config.test.mjs",
+    "test/unit/pull-request-lineage.test.mjs",
     "test/unit/requirement-lifecycle.test.mjs",
     "test/unit/rtk-optimization-adapter.test.mjs",
     "test/unit/trace-evidence-manifest.test.mjs",
@@ -874,7 +876,7 @@
     ".github/workflows/ci.yml": "59da0395f1ea2f2444ff5916381d947b2f0825847d77b9e91cbe09f9e951f9d3",
     ".github/workflows/release.yml": "5cf40e57e2ff4ac2f6a36c9c4578e66a0224d8b62acd21ce506b4c7a1837cfb4",
     "README.md": "2247e26a63178e02f99621e9f8b55db3cf03286d6e18b5d229730e756d8de58f",
-    "bin/agentic-sdlc.mjs": "3822b2673ba3307c3a8e7dc9e8e96cec29de8d48703ed7d7464f0dff2018dc1d",
+    "bin/agentic-sdlc.mjs": "93ded3c28a894f53b638b8751fb92920245da2f84690cdf0981f0a2a5dc67eb8",
     "docs/agent-interactions.md": "9e072f578a9acc51a0007bc64207bf005b9d91c9ad7cfda568323432ff012311",
     "docs/architecture.md": "34dbe96e8e9606e0c9f73873fc55ff78f369fe327fc05a113cd9454f057b35ac",
     "docs/change-observatory.md": "683af3ee43fea25656d3c3f105be9734d6761ccba4d22d15fe41d60c6b736b20",
@@ -926,6 +928,7 @@
     "lib/delivery/providers/git-remote.mjs": "77c98a8e613032590493c887d0d3366681ba5b4cfa2c40affe01257609b1f2f3",
     "lib/delivery/providers/github-cli.mjs": "8b3e5ab78ec064426a80a1d3c4876edab52b256d2fb47f06c6fe7bc91bba4803",
     "lib/delivery/providers/local-filesystem.mjs": "6c50541e2af180939d56d196bd5ec1737ae14dae22285e410e4768351ce40fa2",
+    "lib/delivery/pull-request-lineage.mjs": "ac743d62838f0c6d698353de44510c5c103dcd98f728cb592b0510f25670fad5",
     "lib/effective-config.mjs": "34b97845bb94d07e8d973a6fc078b5dc775784aaedf8e320bdf0ba948d2432f3",
     "lib/execution-budget.mjs": "79b9e0a2546d7f4763854733d47da08d97cc7a097b0993a35ec1858b6411e658",
     "lib/governance/command-subject.mjs": "df5595c4cbdd5e160ff498f3bf25db1c665e4bd975b409197591e8860ad4fcfc",
@@ -948,7 +951,7 @@
     "lib/workflow-engine.mjs": "e905e566ec59d394aa4ba4f9ecd02c8fda863452223b82c0e7f3f6a15f7a2ce6",
     "lib/workflow-presets.mjs": "519dbb28b4e5c5503ecbe920b983c0c4920af6837ee8d4263f7ed0bea6d10cb3",
     "package.json": "dfbba33ede59142d45ca5015c00fbc6c7955c9d664aa6306521c7ffad79bdcf8",
-    "test/autonomy-cli.e2e.mjs": "3c4069cfb9951b041520d4b7db1812d016ad7421f480caf5b155a23961670999",
+    "test/autonomy-cli.e2e.mjs": "a233b187a078f721dde634269da2cbbdfca8527b0e9d72f9df7d18187eeed38a",
     "test/cli-self-service.e2e.mjs": "979a2347befa8797b276e16bc73836ecd528f3c0436223ea30be4a6307bd79cb",
     "test/cli.e2e.mjs": "babf43d719d0206ee7aea7bf21f3291f227005a6a29a6623d27696c1cee493a6",
     "test/fixtures/change-observatory-wrapper.mjs": "2a86a4642dea39c2a91d0161743da605ebcfceb656942e44b43f5b26d4a13b44",
@@ -1016,6 +1019,7 @@
     "test/unit/obs-redaction.test.mjs": "7f7e79fca714d56a1fc29bc60aa22f78a3be74796bd430dae602ea4c93ca18fb",
     "test/unit/obs-support-bundle.test.mjs": "75c606ac73fc0ea818e8f6a04f5999863205f64615300591f11c141be4c09c31",
     "test/unit/observability-config.test.mjs": "d5184e1e8f4f844afcc76493cbafbda9787c26b56b6dc92c2c548b6ab67d304f",
+    "test/unit/pull-request-lineage.test.mjs": "ebadcd7e78f9255d2f1588654ae04e41583e8e2c031d575cc2ae517403841214",
     "test/unit/requirement-lifecycle.test.mjs": "b77c1a5a0edc73785550422bce6015bdaaed08b97a89c2d951fc081c8ca64f40",
     "test/unit/rtk-optimization-adapter.test.mjs": "8d6ae93ac4f9aa0fdabc36c6d245d08f5a304e94afe547a6c672dae3ae1a3b30",
     "test/unit/trace-evidence-manifest.test.mjs": "4a049bed56b22415ee22658e56bff6c7c9b0e94a663d3067d3b2450bc2c3cf45",
@@ -1033,10 +1037,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260719014025-84e944",
+      "id": "APR-20260719015321-b7903e",
       "baseline_id": "BASELINE-ENTERPRISE-PLATFORM-006",
       "status": "approved",
-      "summary": "Antonio explicitly authorized autonomous approval of this final exact project snapshot within the portfolio delivery.",
+      "summary": "Antonio authorized all in-scope refreshes and approvals needed to complete this implementation autonomously; approve this exact refreshed project snapshot.",
       "scope": {
         "principle": "A human approval applies only to the specific artifact or decision shown to the user before the approval.",
         "subject_id": "BASELINE-ENTERPRISE-PLATFORM-006",
@@ -1053,7 +1057,7 @@
       "authorization_action": null,
       "explicit_user_confirmation": true,
       "provisional": false,
-      "approved_content_hash": "64351c49ccab99030da57b02cc538ea5a8f6ac0867a8539356ed0255b4e9121d",
+      "approved_content_hash": "eccc2e7d37a0e3ff12e09ba2c449e6b06a5726725705e6b670de197450de858d",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "antonioantenore",
@@ -1065,7 +1069,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-ENT-PORTFOLIO",
-        "head_sha": "801c3914811d23b8902afb4d2c8c1c898b6a0ebf",
+        "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -1082,11 +1086,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.11.0"
       },
-      "created_at": "2026-07-19T01:40:25.233Z"
+      "created_at": "2026-07-19T01:53:21.142Z"
     }
   ],
-  "created_at": "2026-07-19T01:40:21.444Z",
-  "updated_at": "2026-07-19T01:40:25.233Z",
+  "created_at": "2026-07-19T01:53:16.644Z",
+  "updated_at": "2026-07-19T01:53:21.142Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -1098,7 +1102,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-PORTFOLIO",
-      "head_sha": "801c3914811d23b8902afb4d2c8c1c898b6a0ebf",
+      "head_sha": "6acce0d1d5dfb45e49a0eac83cf7c5f547a7684f",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
