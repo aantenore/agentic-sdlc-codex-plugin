@@ -61,6 +61,52 @@ function jobBlocks(source) {
 }
 
 
+function actionReferences(source) {
+  return [...source.matchAll(/^\s+-?\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
+}
+
+
+function ciContractErrors(source) {
+  const errors = [];
+  const jobs = jobBlocks(source);
+  const correctness = jobs.get("test") ?? "";
+
+  if ([...jobs.keys()].join(",") !== "test") errors.push("CI job boundary");
+  if (!/timeout-minutes: 35/u.test(correctness)) errors.push("CI job timeout");
+  if (/continue-on-error:/u.test(correctness)) errors.push("CI fail-open policy");
+  if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(correctness)
+    || !/node: \[18\.18\.0, 20, 24\]/u.test(correctness)) {
+    errors.push("CI correctness matrix");
+  }
+  if ((correctness.match(/^\s+if:/gmu) ?? []).length !== 1
+    || (correctness.match(/npm run benchmark:enterprise/gu) ?? []).length !== 1
+    || !/- name: Enforce enterprise performance on the required reference runtime\n\s+if: matrix\.os == 'ubuntu-latest' && matrix\.node == 24\n\s+run: npm run benchmark:enterprise/u.test(correctness)) {
+    errors.push("CI required reference performance gate");
+  }
+
+  const actions = actionReferences(source);
+  const checkout = `actions/checkout@${ACTION_PINS.get("actions/checkout")}`;
+  const setupNode = `actions/setup-node@${ACTION_PINS.get("actions/setup-node")}`;
+  const setupPython = `actions/setup-python@${ACTION_PINS.get("actions/setup-python")}`;
+  if (actions.length !== 3
+    || actions.filter((action) => action === checkout).length !== 1
+    || actions.filter((action) => action === setupNode).length !== 1
+    || actions.filter((action) => action === setupPython).length !== 1
+    || actions.some((action) => {
+      const separator = action.lastIndexOf("@");
+      return separator < 1
+        || ACTION_PINS.get(action.slice(0, separator)) !== action.slice(separator + 1);
+    })) {
+    errors.push("CI immutable action pins");
+  }
+  if ((source.match(/persist-credentials: false/gu) ?? []).length !== 1
+    || (source.match(/package-manager-cache: false/gu) ?? []).length !== 1) {
+    errors.push("CI checkout and cache policy");
+  }
+  return errors;
+}
+
+
 function releaseContractErrors(source) {
   const errors = [];
   const jobs = jobBlocks(source);
@@ -72,6 +118,7 @@ function releaseContractErrors(source) {
   if (jobNames.join(",") !== "verify,package,publish") errors.push("job order");
   if (!/^permissions: \{\}$/mu.test(source)) errors.push("default permissions");
   if (!/^  cancel-in-progress: false$/mu.test(source)) errors.push("concurrency cancellation");
+  if (/continue-on-error:/u.test(source)) errors.push("release fail-open policy");
   if (/workflow_dispatch|pull_request|schedule:/u.test(source)) errors.push("tag-only trigger");
   if (!/^    tags:\n      - "v\*"$/mu.test(source)) errors.push("release tag trigger");
   if (!/timeout-minutes: 35/u.test(verify)
@@ -102,6 +149,10 @@ function releaseContractErrors(source) {
 
   if (!/node: \[18\.18\.0, 20, 24\]/u.test(verify)) errors.push("node policy matrix");
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(verify)) errors.push("platform matrix");
+  if ((verify.match(/npm run benchmark:enterprise/gu) ?? []).length !== 1
+    || !/- name: Enforce enterprise performance on the reference runtime\n\s+if: matrix\.os == 'ubuntu-latest' && matrix\.node == 24\n\s+run: npm run benchmark:enterprise/u.test(verify)) {
+    errors.push("release reference performance gate");
+  }
   const pythonAction = `actions/setup-python@${ACTION_PINS.get("actions/setup-python")}`;
   if (actions.filter((action) => action === pythonAction).length !== 2
     || (source.match(/python-version: "3\.13\.14"/gu) ?? []).length !== 2
@@ -231,7 +282,8 @@ test("workflow source normalization accepts Windows checkouts", () => {
 });
 
 
-test("CI pins and passes an exact Python interpreter to the cross-platform suite", () => {
+test("CI pins actions and separates the compatibility matrix from the performance gate", () => {
+  assert.deepEqual(ciContractErrors(ciWorkflow), []);
   assert.match(
     ciWorkflow,
     /- id: python\n\s+uses: actions\/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1\n\s+with:\n\s+python-version: "3\.13\.14"\n\s+update-environment: false/u,
@@ -243,12 +295,37 @@ test("CI pins and passes an exact Python interpreter to the cross-platform suite
 });
 
 
+test("CI guards reject fail-open performance configuration", () => {
+  const fixtures = [
+    ciWorkflow.replace(
+      "        run: npm run benchmark:enterprise\n",
+      "        run: npm run benchmark:enterprise\n        continue-on-error: true\n",
+    ),
+    ciWorkflow.replace("  test:\n", "  test:\n    continue-on-error: true\n"),
+  ];
+  for (const source of fixtures) {
+    assert.ok(ciContractErrors(source).includes("CI fail-open policy"));
+  }
+});
+
+
+test("CI guards reject a skipped required job", () => {
+  const source = ciWorkflow.replace("  test:\n", "  test:\n    if: false\n");
+  assert.ok(ciContractErrors(source).includes("CI required reference performance gate"));
+});
+
+
 test("all third-party actions use the approved immutable commit pins", () => {
-  const actionRefs = [...workflow.matchAll(/^\s+-?\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
+  const actionRefs = actionReferences(workflow);
   for (const [name, sha] of ACTION_PINS) {
     assert.ok(actionRefs.includes(`${name}@${sha}`), `${name} must use its approved SHA`);
   }
-  assert.equal(actionRefs.some((ref) => /@(main|master|v?\d+(?:\.\d+)*)$/u.test(ref)), false);
+  for (const source of [ciWorkflow, workflow]) {
+    assert.equal(
+      actionReferences(source).some((ref) => /@(main|master|v?\d+(?:\.\d+)*)$/u.test(ref)),
+      false,
+    );
+  }
 });
 
 
@@ -268,6 +345,22 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       name: "cancellable release",
       source: workflow.replace("cancel-in-progress: false", "cancel-in-progress: true"),
       expected: "concurrency cancellation",
+    },
+    {
+      name: "performance gate moved away from the reference runtime",
+      source: workflow.replace(
+        "if: matrix.os == 'ubuntu-latest' && matrix.node == 24",
+        "if: matrix.os == 'windows-latest' && matrix.node == 18.18.0",
+      ),
+      expected: "release reference performance gate",
+    },
+    {
+      name: "fail-open performance gate",
+      source: workflow.replace(
+        "        run: npm run benchmark:enterprise\n",
+        "        run: npm run benchmark:enterprise\n        continue-on-error: true\n",
+      ),
+      expected: "release fail-open policy",
     },
     {
       name: "package without draft",

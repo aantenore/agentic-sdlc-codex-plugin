@@ -50,6 +50,9 @@ jobs:
           set -euo pipefail
           npm run check
           npm test
+      - name: Enforce enterprise performance on the reference runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: npm run benchmark:enterprise
       - name: Pack and verify the policy-controlled artifact
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}

@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -17,10 +18,13 @@ jobs:
         node: [18.18.0, 20, 24]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: ${{ matrix.node }}
+          package-manager-cache: false
       - id: python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
@@ -30,5 +34,8 @@ jobs:
       - run: npm test
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
+      - name: Enforce enterprise performance on the required reference runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: npm run benchmark:enterprise
       - run: npm run doctor
       - run: npm pack --dry-run

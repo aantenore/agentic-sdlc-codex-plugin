@@ -197,15 +197,16 @@ test("canonical query sampling uses a numeric median and an inclusive 1.20x samp
   );
 });
 
-test("package configuration preserves the enforcing enterprise benchmark command", () => {
+test("package configuration separates correctness from the enforcing enterprise benchmark", () => {
   const packageDefinition = JSON.parse(fs.readFileSync(PACKAGE_PATH, "utf8"));
   assert.equal(
     packageDefinition.scripts?.["benchmark:enterprise"],
     "node scripts/benchmark-enterprise-performance.mjs --enforce",
   );
-  assert.match(
-    packageDefinition.scripts?.test || "",
-    /(?:^|&&\s*)npm run benchmark:enterprise(?:\s|$)/u,
+  assert.equal(packageDefinition.scripts?.test, "node --test");
+  assert.equal(
+    packageDefinition.scripts?.["test:enterprise"],
+    "npm test && npm run benchmark:enterprise",
   );
 });
 
