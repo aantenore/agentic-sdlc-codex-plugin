@@ -1204,7 +1204,9 @@ test("worker timeout kills descendants that keep inherited output handles open",
   timeout: 10_000,
 }, async () => {
   const workerTimeoutMs = 2_000;
-  const descendantMarkerTimeoutMs = 1_500;
+  // This observation includes fixture construction and process scheduling,
+  // while the worker timeout starts only after the worker has been spawned.
+  const descendantMarkerTimeoutMs = 5_000;
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "enterprise-worker-tree-timeout-"));
   const fakeWorker = path.join(temporary, "worker-with-descendant.mjs");
   const descendantMarker = path.join(temporary, "descendant-pid.txt");
