@@ -261,6 +261,50 @@ test("identity migration preserves a replaced journal temp and never publishes i
   assert.deepEqual(snapshotTree(path.join(project, ".sdlc")), before);
 });
 
+test("identity migration keeps the journal temp handle open through its rename", (t) => {
+  const project = fixtureProject(t);
+  const plan = planIdentityMigration({
+    projectRoot: project,
+    mapping: { source: { email: SOURCE_EMAIL }, target: { email: TARGET_EMAIL } },
+  });
+  const canonicalRoot = fs.realpathSync.native(project);
+  const journalPath = path.join(canonicalRoot, ...plan.execution_descriptor.journal_path.split("/"));
+  const journalTempPath = path.join(
+    canonicalRoot,
+    ...plan.execution_descriptor.journal_temporary_path.split("/"),
+  );
+  const originalOpenSync = fs.openSync;
+  let journalDescriptor = null;
+  let observedOpenRename = false;
+  fs.openSync = function trackedOpenSync(filePath, ...args) {
+    const descriptor = originalOpenSync.call(fs, filePath, ...args);
+    if (path.resolve(filePath) === journalTempPath) journalDescriptor = descriptor;
+    return descriptor;
+  };
+  const mutationGateway = (request, effect) => {
+    if (request.operation === "path.rename.target" && request.path === journalPath) {
+      assert.notEqual(journalDescriptor, null, "journal temp descriptor was not captured");
+      assert.doesNotThrow(() => fs.fstatSync(journalDescriptor));
+      observedOpenRename = true;
+    }
+    return effect();
+  };
+  mutationGateway.revalidate = () => true;
+
+  try {
+    assert.equal(applyIdentityMigration(plan, {
+      mutationGateway,
+      rebuildDerived: ({ sdlcRoot }) => {
+        writeJson(path.join(sdlcRoot, "cache", "kb-cache.json"), { search_text: TARGET_EMAIL });
+        writeJson(path.join(sdlcRoot, "indexes", "kb-index.json"), { search_text: TARGET_EMAIL });
+      },
+    }).status, "applied");
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(observedOpenRename, true);
+});
+
 test("identity execution nonce changes with migrated content, not policy-only plan inputs", (t) => {
   const project = fixtureProject(t);
   const first = planIdentityMigration({
