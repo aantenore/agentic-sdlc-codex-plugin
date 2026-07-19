@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Trusted Agentic SDLC 0.12.0 release snapshot after Linux Python-link and Windows npm-package portability fixes, with policy-bound package verification, reversible Installer V2, retry-safe publication and exact merge verification.
+Refresh the approved Agentic SDLC 0.12.0 project snapshot after the bounded installer timeout and robust Windows canonical-query sampling fixes; the 4,000 ms query budget remains unchanged.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
