@@ -94,6 +94,10 @@ function releaseContractErrors(source) {
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(verify)) errors.push("platform matrix");
   if (!/scripts\/verify-release-package\.mjs/u.test(verify)
     || !/scripts\/verify-release-package\.mjs/u.test(packageJob)) errors.push("policy verifier");
+  if (!/verification\.value\?\.smoke\?\.installer_v2_plan !== "passed"/u.test(packageJob)
+    || !/verification\.value\?\.smoke\?\.installer_v2_zero_write !== true/u.test(packageJob)) {
+    errors.push("installer v2 seal gate");
+  }
   if ((verify.match(/npm pack /gu) ?? []).length !== 1
     || (packageJob.match(/npm pack /gu) ?? []).length !== 1
     || /npm pack /u.test(publish)) errors.push("single-build handoff");
@@ -270,6 +274,11 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       source: workflow.replace("timeout --signal=TERM --kill-after=15s 60s", "gh-timeout-removed"),
       expected: "publish gate",
     },
+    {
+      name: "release seal without installer v2 plan proof",
+      source: workflow.replace('            || verification.value?.smoke?.installer_v2_plan !== "passed"\n', ""),
+      expected: "installer v2 seal gate",
+    },
   ];
   for (const fixture of fixtures) {
     assert.ok(
@@ -315,7 +324,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
       specVersion: "1.6",
       components: [{ name: "agentic-sdlc-codex-plugin" }],
     })}\n`);
-    writeFileSync(verificationPath, `${JSON.stringify({
+    const validVerification = {
       status: "passed",
       package: { name: "agentic-sdlc-codex-plugin", version: "1.2.3", tag: "v1.2.3" },
       artifact: { sha256: sha256(archivePath) },
@@ -325,8 +334,11 @@ test("the exact inline seal and publish validators accept a valid fixture and re
         doctor: "passed",
         installer_plan: "passed",
         installer_zero_write: true,
+        installer_v2_plan: "passed",
+        installer_v2_zero_write: true,
       },
-    })}\n`);
+    };
+    writeFileSync(verificationPath, `${JSON.stringify(validVerification)}\n`);
 
     const commonEnv = {
       ARCHIVE_NAME: archiveName,
@@ -342,10 +354,23 @@ test("the exact inline seal and publish validators accept a valid fixture and re
       SBOM_PATH: sbomPath,
       VERIFICATION_PATH: verificationPath,
     };
-    const seal = runInlineModule(inlineNodeModule("Verify both SBOMs and seal the release manifest"), {
-      cwd: temporary,
-      env: commonEnv,
-    });
+    const sealManifest = () => runInlineModule(
+      inlineNodeModule("Verify both SBOMs and seal the release manifest"),
+      { cwd: temporary, env: commonEnv },
+    );
+    for (const [field, value] of [
+      ["installer_v2_plan", "not_run"],
+      ["installer_v2_zero_write", false],
+    ]) {
+      const weakened = JSON.parse(JSON.stringify(validVerification));
+      weakened.smoke[field] = value;
+      writeFileSync(verificationPath, `${JSON.stringify(weakened)}\n`);
+      const rejectedSeal = sealManifest();
+      assert.notEqual(rejectedSeal.status, 0, field);
+      assert.match(rejectedSeal.stderr, /did not pass every smoke gate/u, field);
+    }
+    writeFileSync(verificationPath, `${JSON.stringify(validVerification)}\n`);
+    const seal = sealManifest();
     assert.equal(seal.status, 0, seal.stderr);
     writeFileSync(
       `${archivePath}.sha256`,

@@ -24,21 +24,30 @@ Install from the `aantenore` source repository. Keep this checkout separate from
 ```bash
 git clone https://github.com/aantenore/agentic-sdlc-codex-plugin.git
 cd agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py check
-python3 scripts/install-personal-marketplace.py plan --json
-python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
+python3 scripts/install-personal-marketplace-v2.py check
+python3 scripts/install-personal-marketplace-v2.py plan --json
+python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
+python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 ```
 
-If RTK 0.43 or newer is already installed and you want its guidance available to
-Codex globally, opt in while staging:
+Installer V2 is the canonical local installation path. `apply` retains the
+byte-exact previous plugin and marketplace state; after validation, use
+`confirm` to keep the update or the returned `restore` command to roll it back.
+
+Installer V2 intentionally leaves global settings unchanged. If RTK 0.43 or
+newer is already installed and you need the legacy one-step bootstrap for its
+global Codex guidance, first confirm or restore any V2 transaction, then use
+the V1 compatibility path explicitly:
 
 ```bash
 python3 scripts/install-personal-marketplace.py plan --with-rtk --json
 python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 ```
 
+This compatibility path is separate from V2's retained-backup transaction.
 `--with-rtk` configures the current user's global Codex instructions. It does
 not install or upgrade the RTK binary, and omitting the flag leaves global
 instructions unchanged. `--rtk-executable` selects a binary only for that
@@ -403,19 +412,31 @@ Use a source checkout that is separate from the generated personal-plugin direct
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py check
-python3 scripts/install-personal-marketplace.py plan --json
-python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
+python3 scripts/install-personal-marketplace-v2.py check
+python3 scripts/install-personal-marketplace-v2.py plan --json
+python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
+python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 ```
 
-Pass `--with-rtk` only when you intentionally want the installer to refresh the
-current user's global Codex instructions for an already installed RTK binary.
+Installer V2 is canonical. Use its returned `restore` command instead of
+`confirm` if validation or plugin registration fails. The V1 `--with-rtk`
+compatibility path remains available only when you intentionally want to
+refresh global Codex instructions for an already installed RTK binary.
 
 On systems where Python 3 is exposed as `python` or `py -3`, use that launcher for the same script. Start a new Codex task after installation so the app reloads plugin skills and agent cards.
 
-`check` and `plan` are read-only. `apply` accepts only the exact current plan hash, rechecks it under a lock, stages and byte-verifies the package, then updates `~/plugins/agentic-sdlc-codex-plugin` and the matching entry in `~/.agents/plugins/marketplace.json` as one rollback boundary. It refuses unsafe destinations instead of traversing or replacing a symlink, Windows junction/reparse point, Git checkout, source checkout, or unmanaged directory. Running the script without a mode is the same as `plan`; it never installs implicitly.
+`check` and `plan` are read-only. `apply` accepts only the exact current plan
+hash, rechecks it under a lock, stages and byte-verifies the package, then
+updates `~/plugins/agentic-sdlc-codex-plugin` and the matching entry in
+`~/.agents/plugins/marketplace.json` while retaining byte-exact recovery data.
+`validate` proves that state is still unchanged; `confirm` removes the retained
+copy, while `restore` puts it back. The installer refuses unsafe destinations
+instead of traversing or replacing a symlink, Windows junction/reparse point,
+Git checkout, source checkout, or unmanaged directory. Running the script
+without a mode is the same as `plan`; it never installs implicitly.
 
 ## Update
 
@@ -423,13 +444,17 @@ Update the source checkout, rerun the staging installer, and add the plugin agai
 
 ```bash
 cd /path/to/agentic-sdlc-codex-plugin
-python3 scripts/install-personal-marketplace.py plan --json
-python3 scripts/install-personal-marketplace.py apply --plan-hash <plan_hash-from-plan>
+python3 scripts/install-personal-marketplace-v2.py plan --json
+python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
+python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 ```
 
-If global RTK guidance was previously enabled, retain the opt-in during update:
+If global RTK guidance must also be refreshed, first confirm or restore the V2
+transaction, then use the explicit V1 compatibility path as a separate
+global-settings operation:
 
 ```bash
 python3 scripts/install-personal-marketplace.py plan --with-rtk --json

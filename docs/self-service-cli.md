@@ -100,30 +100,34 @@ prerequisite for understanding the decision.
 The local installer uses a reviewable transaction:
 
 ```bash
-python3 scripts/install-personal-marketplace.py check --locale it
-python3 scripts/install-personal-marketplace.py plan --locale it --json
-python3 scripts/install-personal-marketplace.py apply --locale it --plan-hash <plan_hash-from-plan>
+python3 scripts/install-personal-marketplace-v2.py check --locale it
+python3 scripts/install-personal-marketplace-v2.py plan --locale it --json
+python3 scripts/install-personal-marketplace-v2.py apply --locale it --plan-hash <plan_hash-from-plan> --json
+python3 scripts/install-personal-marketplace-v2.py validate --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/install-personal-marketplace-v2.py confirm --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 ```
 
-`check` and `plan` never write. With no command, the installer also creates a
-plan only. `apply` accepts one exact plan hash, recalculates it under a lock,
-stages and byte-verifies the package, and restores the prior plugin plus
-marketplace bytes if the transaction fails. A later run detects an interrupted
-transaction and either restores or finalizes only when the recorded byte
-digests prove the exact state; unexpected data stops recovery without being
-overwritten. Use `--home /absolute/path` to inspect or manage another explicit
-destination.
+V2 is the canonical local installer. `check` and `plan` never write. With no
+command, it also creates a plan only. `apply` accepts one exact plan hash,
+recalculates it under a lock, stages and byte-verifies the package, and retains
+the prior plugin plus marketplace bytes. `validate` proves the installed state
+still matches the receipt; then `confirm` keeps it or the returned `restore`
+command restores the byte-exact previous state. Unexpected data stops recovery
+without being overwritten. Use `--home /absolute/path` to inspect or manage
+another explicit destination.
 
-RTK remains a separate, explicit global change:
+V2 never changes global settings. RTK remains a separate, explicit V1
+compatibility operation and must run only after the V2 transaction has been
+confirmed or restored:
 
 ```bash
 python3 scripts/install-personal-marketplace.py plan --with-rtk --json
 python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
 ```
 
-The installer verifies an existing RTK binary; it does not download or upgrade
-one. Apply executes a private copy whose bytes match the reviewed plan. This
-step changes the current user's global Codex instructions for every project;
-it is intentionally separate from the local plugin transaction and is not
-covered by local rollback. See [Portable install](portable-install.md) for
-supported environments, trust boundaries, removal, and recovery.
+The compatibility installer verifies an existing RTK binary; it does not
+download or upgrade one. Apply executes a private copy whose bytes match the
+reviewed plan. This step changes the current user's global Codex instructions
+for every project; it is intentionally outside V2's retained-backup boundary.
+See [Portable install](portable-install.md) for supported environments, trust
+boundaries, removal, and recovery.

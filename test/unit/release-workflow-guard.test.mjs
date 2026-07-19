@@ -17,6 +17,7 @@ import {
   expectedReleaseAssetNames,
   parseReleaseTag,
   ReleaseWorkflowGuardError,
+  validateReleaseBundleDirectory,
   validateMatchingReleaseBundles,
   validateReleaseMetadata,
 } from "../../lib/release/workflow-guard.mjs";
@@ -68,6 +69,8 @@ function createBundle(root) {
       doctor: "passed",
       installer_plan: "passed",
       installer_zero_write: true,
+      installer_v2_plan: "passed",
+      installer_v2_zero_write: true,
     },
   })}\n`);
   const assets = new Map([
@@ -213,6 +216,38 @@ test("accepts an exact workflow-owned draft or already-published bundle", (t) =>
     (error) => error instanceof ReleaseWorkflowGuardError
       && error.code === "REMOTE_RELEASE_MISMATCH",
   );
+});
+
+
+test("requires both installer v2 read-only gates in the sealed verification", (t) => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), "release-workflow-v2-gates-"));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+
+  for (const [field, value] of [
+    ["installer_v2_plan", "not_run"],
+    ["installer_v2_zero_write", false],
+  ]) {
+    const root = path.join(temporary, field);
+    createBundle(root);
+    const verificationPath = path.join(root, "release-verification.json");
+    const verification = JSON.parse(readFileSync(verificationPath, "utf8"));
+    verification.smoke[field] = value;
+    writeJson(verificationPath, verification);
+
+    const verificationBytes = readFileSync(verificationPath);
+    const manifestPath = path.join(root, "release-manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.verification.bytes = verificationBytes.length;
+    manifest.verification.sha256 = sha256(verificationBytes);
+    writeJson(manifestPath, manifest);
+
+    assert.throws(
+      () => validateReleaseBundleDirectory(root, IDENTITY),
+      (error) => error instanceof ReleaseWorkflowGuardError
+        && error.code === "INVALID_RELEASE_VERIFICATION",
+      field,
+    );
+  }
 });
 
 

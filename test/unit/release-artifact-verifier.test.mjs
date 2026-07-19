@@ -60,6 +60,14 @@ function replaceEntry(entries, archivePath, replacement) {
 }
 
 
+test("declares installer v2 as canonical while packaging both installer protocols", () => {
+  const policy = JSON.parse(readFileSync(policyPath, "utf8"));
+  assert.equal(policy.package.installer, "scripts/install-personal-marketplace-v2.py");
+  assert.ok(policy.package.required_files.includes("scripts/install-personal-marketplace.py"));
+  assert.ok(policy.package.required_files.includes("scripts/install-personal-marketplace-v2.py"));
+});
+
+
 test("produces a deterministic content snapshot without freezing package file count", () => {
   const baseEntries = validReleaseFixtureEntries({ version: packageVersion });
   let first;

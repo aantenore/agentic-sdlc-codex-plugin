@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Two-phase, reversible local installer for the Agentic SDLC plugin.
 
-The existing installer remains the stable v1 entry point. This companion
-protocol keeps the byte-exact previous installation until an independently
-validated update is explicitly confirmed or restored.
+This is the canonical local installer. It keeps the byte-exact previous
+installation until an independently validated update is explicitly confirmed
+or restored, while reusing the v1 implementation for bounded staging helpers.
 """
 
 from __future__ import annotations

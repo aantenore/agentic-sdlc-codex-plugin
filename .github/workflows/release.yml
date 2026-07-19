@@ -278,7 +278,9 @@ jobs:
             || verification.value?.smoke?.cli_help !== "passed"
             || verification.value?.smoke?.doctor !== "passed"
             || verification.value?.smoke?.installer_plan !== "passed"
-            || verification.value?.smoke?.installer_zero_write !== true) {
+            || verification.value?.smoke?.installer_zero_write !== true
+            || verification.value?.smoke?.installer_v2_plan !== "passed"
+            || verification.value?.smoke?.installer_v2_zero_write !== true) {
             throw new Error("policy-driven release verification did not pass every smoke gate");
           }
 
