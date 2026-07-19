@@ -141,6 +141,7 @@ import {
 import {
   providerBindingForAction,
 } from "../lib/delivery/provider-compatibility.mjs";
+import { buildPullRequestCommitLineage } from "../lib/delivery/pull-request-lineage.mjs";
 import {
   DeliveryProviderError,
   assertProviderOperationReceiptIntegrity,
@@ -12358,18 +12359,21 @@ function compareDeliveryAuthorizationOrder(left, right) {
     || String(left.id).localeCompare(String(right.id));
 }
 
-function pullRequestCommitLineage(profile) {
-  return {
-    schema_version: "pull-request-commit-lineage:v1",
-    delivery_kind: profile.delivery_kind,
+function pullRequestCommitLineage(context, profile) {
+  return buildPullRequestCommitLineage(profile, {
     repository: normalizeGitRepositoryIdentity(profile.pull_request_target?.repository),
-    base_branch: profile.pull_request_target?.base_branch || null,
-    head_branch: profile.pull_request_target?.head_branch || null,
-    story_ids: [...new Set((profile.story_refs || []).map((item) => item.id).filter(Boolean))].sort(),
-    requirement_profile_ids: [...new Set(
-      (profile.requirement_profile_refs || []).map((item) => item.id).filter(Boolean),
-    )].sort(),
-  };
+    resolveRequirementLogicalId: (ref) => {
+      const requirementProfile = readRequirementAutonomyProfile(context, ref.id);
+      if (requirementProfile.profile_hash !== ref.hash) {
+        fail(`Delivery profile ${profile.id} has a stale requirement profile reference ${ref.id}.`);
+      }
+      const requirement = requirementByAutonomyProfileId(context, requirementProfile.id);
+      if (!requirement) {
+        fail(`Delivery profile ${profile.id} references a requirement profile without its immutable requirement.`);
+      }
+      return requirement.logical_id || requirement.id;
+    },
+  });
 }
 
 function deliveryActionReceiptRef(context, receipt) {
@@ -12413,7 +12417,10 @@ function validateCommitMediationCandidate(
 ) {
   const errors = [];
   const label = `Commit ${commitSha}`;
-  if (stableJson(pullRequestCommitLineage(candidateProfile)) !== stableJson(pullRequestCommitLineage(currentProfile))) {
+  if (
+    stableJson(pullRequestCommitLineage(context, candidateProfile))
+    !== stableJson(pullRequestCommitLineage(context, currentProfile))
+  ) {
     return { compatible: false, errors: [] };
   }
   if (candidateProfile.status !== "active") {
@@ -12649,7 +12656,7 @@ function buildGitCommitCoverageProof(context, profile, runtimeTarget) {
     schema_version: "git-commit-coverage:v1",
     base_sha: baseSha,
     head_sha: headSha,
-    lineage_hash: hashApprovalSubject(pullRequestCommitLineage(profile)),
+    lineage_hash: hashApprovalSubject(pullRequestCommitLineage(context, profile)),
     entries,
   };
   return {
@@ -12673,7 +12680,7 @@ function validateGitCommitCoverageProof(context, profile, runtimeTarget, proof) 
     || coverageHash !== hashApprovalSubject(proofBase)
     || proof.base_sha !== runtimeTarget?.base_sha
     || proof.head_sha !== runtimeTarget?.head_sha
-    || proof.lineage_hash !== hashApprovalSubject(pullRequestCommitLineage(profile))
+    || proof.lineage_hash !== hashApprovalSubject(pullRequestCommitLineage(context, profile))
     || !Array.isArray(proof.entries)
   ) {
     return ["Git commit coverage proof is stale or invalid."];
