@@ -150,6 +150,7 @@ import {
   DEFAULT_DELIVERY_PROVIDER_SELECTION,
   createDefaultDeliveryProviderRegistry,
 } from "../lib/delivery/default-providers.mjs";
+import { deliveryProviderOperationSubjectsMatch } from "../lib/delivery/provider-subject-compatibility.mjs";
 import {
   IdentityMigrationError,
   applyIdentityMigration,
@@ -10803,7 +10804,6 @@ function resolveDeliveryProviderBinding(profile, action) {
 function deliveryProviderOperationSubject(context, profile, action, actionDetails, authorizedAt) {
   if (action === "git.push") {
     return {
-      cwd: context.root,
       repository: profile.pull_request_target.repository,
       remote: actionDetails.push.remote,
       destination_ref: actionDetails.push.destination_ref,
@@ -10843,7 +10843,7 @@ function observeDeliveryProviderPrecondition(context, profile, action, actionDet
       action,
       subject,
       observed_at: authorizedAt,
-    });
+    }, { cwd: context.root });
     assertProviderOperationReceiptIntegrity(receipt);
     assertRecordSchema(receipt, "provider-operation-receipt.schema.json", `${action} provider precondition`);
     return {
@@ -10864,7 +10864,7 @@ function observeDeliveryProviderPrecondition(context, profile, action, actionDet
   }
 }
 
-function verifyDeliveryProviderCompletion(profile, action, providerOperation, completedAt) {
+function verifyDeliveryProviderCompletion(context, profile, action, providerOperation, completedAt) {
   const binding = resolveDeliveryProviderBinding(profile, action);
   if (!binding || !providerOperation?.precondition_receipt) {
     fail(`The authorization for ${action} has no verified starting state.`);
@@ -10891,7 +10891,7 @@ function verifyDeliveryProviderCompletion(profile, action, providerOperation, co
       action,
       subject: precondition.subject,
       observed_at: completedAt,
-    }, precondition);
+    }, precondition, { cwd: context.root });
     assertProviderOperationReceiptIntegrity(completion);
     assertRecordSchema(completion, "provider-operation-receipt.schema.json", `${action} provider completion`);
     return {
@@ -10975,7 +10975,7 @@ function assertDeliveryProviderAuthorization(context, profile, authorization) {
     || precondition.operation.id !== authorization.id
     || precondition.operation.action !== authorization.action
     || precondition.operation.phase !== "precondition"
-    || stableJson(precondition.subject) !== stableJson(expectedSubject)
+    || !deliveryProviderOperationSubjectsMatch(authorization.action, precondition.subject, expectedSubject)
   ) {
     fail(`Delivery action authorization ${authorization.id} provider proof does not match its exact action boundary.`);
   }
@@ -13332,6 +13332,7 @@ function evaluateDeliveryAction(context, options) {
       const providerOperation = priorAuthorization.action_details?.provider_operation;
       if (providerOperation?.precondition_receipt) {
         const completedProviderOperation = verifyDeliveryProviderCompletion(
+          context,
           profile,
           action,
           providerOperation,
@@ -31487,7 +31488,7 @@ function validateCompletedProviderActionReceipt(context, report, profile, receip
       authorization.action_details,
       authorization.authorized_at,
     );
-    if (stableJson(precondition.subject) !== stableJson(expectedSubject)) {
+    if (!deliveryProviderOperationSubjectsMatch(receipt.action, precondition.subject, expectedSubject)) {
       throw new Error("provider proof subject differs from the authorized operation");
     }
     if (receipt.action === "git.push" && completion.proof?.observed_sha !== precondition.subject.source_sha) {

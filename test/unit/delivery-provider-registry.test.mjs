@@ -84,6 +84,8 @@ test("registry exposes only observer/verifier capabilities and rejects execution
 test("git-remote emits hash-bound, idempotent push observations without executing Git mutations", () => {
   const calls = [];
   let remoteState = "before";
+  const sourceCwd = path.join(os.tmpdir(), "provider-source-checkout");
+  const relocatedCwd = path.join(os.tmpdir(), "provider-relocated-checkout");
   const runner = (executable, args, options) => {
     calls.push({ executable, args, options });
     assert.equal(executable, "git");
@@ -96,7 +98,6 @@ test("git-remote emits hash-bound, idempotent push observations without executin
   };
   const registry = createProviderRegistry([createGitRemoteProvider({ commandRunner: runner })]);
   const subject = {
-    cwd: process.cwd(),
     repository: "example.test/acme/travelops",
     remote: "origin",
     destination_ref: "refs/heads/provider-spi",
@@ -104,17 +105,18 @@ test("git-remote emits hash-bound, idempotent push observations without executin
     source_sha: SHA.head,
   };
   const before = operation("PUSH-001", "git.push", subject);
-  const precondition = registry.observePrecondition("git-remote", before);
-  const retry = registry.observePrecondition("git-remote", before);
+  const precondition = registry.observePrecondition("git-remote", before, { cwd: sourceCwd });
+  const retry = registry.observePrecondition("git-remote", before, { cwd: sourceCwd });
 
   assert.deepEqual(retry, precondition);
+  assert.equal(Object.hasOwn(precondition.subject, "cwd"), false);
   assert.equal(precondition.proof.previous_sha, SHA.before);
   assert.equal(precondition.proof.base_sha, SHA.base);
   assert.equal(precondition.precondition_receipt_ref, null);
   assert.equal(validateProviderOperationReceiptIntegrity(precondition).valid, true);
   assertAgainstSchema(precondition, "provider-operation-receipt");
   assert.deepEqual(calls[0].args, [
-    "-C", process.cwd(), "ls-remote", "--heads", "origin",
+    "-C", sourceCwd, "ls-remote", "--heads", "origin",
     "refs/heads/provider-spi", "refs/heads/main",
   ]);
 
@@ -123,6 +125,7 @@ test("git-remote emits hash-bound, idempotent push observations without executin
     "git-remote",
     operation("PUSH-001", "git.push", subject, TIME.completed),
     precondition,
+    { cwd: relocatedCwd },
   );
   assert.equal(completion.proof.observed_sha, SHA.head);
   assert.deepEqual(completion.precondition_receipt_ref, {
@@ -131,7 +134,50 @@ test("git-remote emits hash-bound, idempotent push observations without executin
   });
   assert.equal(validateProviderOperationReceiptIntegrity(completion).valid, true);
   assertAgainstSchema(completion, "provider-operation-receipt");
+  assert.equal(calls.at(-1).options.cwd, relocatedCwd);
+  assert.deepEqual(calls.at(-1).args.slice(0, 2), ["-C", relocatedCwd]);
   assert.equal(calls.every((call) => call.args.includes("push") === false), true);
+});
+
+test("git-remote can complete a legacy cwd-bound receipt from a relocated checkout", () => {
+  const calls = [];
+  let remoteState = "before";
+  const sourceCwd = path.join(os.tmpdir(), "legacy-provider-source");
+  const relocatedCwd = path.join(os.tmpdir(), "legacy-provider-relocated");
+  const registry = createProviderRegistry([createGitRemoteProvider({
+    commandRunner: (_executable, args, options) => {
+      calls.push({ args, options });
+      return remoteState === "before"
+        ? `${SHA.before}\trefs/heads/provider-spi\n${SHA.base}\trefs/heads/main\n`
+        : `${SHA.head}\trefs/heads/provider-spi\n`;
+    },
+  })]);
+  const legacySubject = {
+    cwd: sourceCwd,
+    repository: "example.test/acme/travelops",
+    remote: "origin",
+    destination_ref: "refs/heads/provider-spi",
+    base_ref: "refs/heads/main",
+    source_sha: SHA.head,
+  };
+  const precondition = registry.observePrecondition(
+    "git-remote",
+    operation("PUSH-LEGACY-CWD", "git.push", legacySubject),
+  );
+  assert.equal(precondition.subject.cwd, sourceCwd);
+  assert.equal(calls[0].options.cwd, sourceCwd);
+
+  remoteState = "after";
+  const completion = registry.verifyCompletion(
+    "git-remote",
+    operation("PUSH-LEGACY-CWD", "git.push", legacySubject, TIME.completed),
+    precondition,
+    { cwd: relocatedCwd },
+  );
+  assert.equal(completion.proof.observed_sha, SHA.head);
+  assert.equal(completion.subject.cwd, sourceCwd);
+  assert.equal(calls.at(-1).options.cwd, relocatedCwd);
+  assert.deepEqual(calls.at(-1).args.slice(0, 2), ["-C", relocatedCwd]);
 });
 
 test("receipt tampering and wrong precondition bindings fail closed", () => {

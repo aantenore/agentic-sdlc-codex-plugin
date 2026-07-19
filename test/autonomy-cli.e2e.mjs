@@ -995,6 +995,35 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     pushCompletion.action_receipt.action_details.provider_operation.completion_receipt.precondition_receipt_ref.hash,
     pushAuthorization.action_receipt.action_details.provider_operation.precondition_receipt.receipt_hash,
   );
+  assert.equal(
+    Object.hasOwn(
+      pushCompletion.action_receipt.action_details.provider_operation.precondition_receipt.subject,
+      "cwd",
+    ),
+    false,
+  );
+
+  const relocatedParent = tmpProject("relocated-provider-receipts");
+  const relocatedProject = path.join(relocatedParent, "copy");
+  fs.cpSync(project, relocatedProject, { recursive: true });
+  const relocatedGate = run([
+    "gate", "check",
+    "--root", relocatedProject,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(relocatedGate.error, undefined, relocatedGate.error?.message);
+  assert.equal(relocatedGate.signal, null, `relocated gate check terminated by ${relocatedGate.signal}`);
+  assert.ok([0, 1].includes(relocatedGate.status), relocatedGate.stderr || relocatedGate.stdout);
+  const relocatedGateReport = JSON.parse(relocatedGate.stdout);
+  assert.deepEqual(
+    relocatedGateReport.errors.filter((error) =>
+      /provider proof subject differs from the authorized operation/iu.test(error)),
+    [],
+    relocatedGate.stdout,
+  );
 
   const closeResult = mustRun([
     "autonomy", "delivery", "close",
