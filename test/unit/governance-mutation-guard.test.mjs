@@ -460,7 +460,11 @@ test("audit pointer persists bounded immutable deny and error events but no allo
     assert.match(name, /^event-[a-f0-9]{64}\.json$/u);
     const eventPath = path.join(auditRoot, name);
     assert.equal(fs.lstatSync(eventPath).isSymbolicLink(), false);
-    assert.equal(fs.statSync(eventPath).mode & 0o777, 0o600);
+    // Node applies creation modes on POSIX. Windows reports synthesized mode
+    // bits and protects files through ACLs, so 0600 is not observable there.
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(eventPath).mode & 0o777, 0o600);
+    }
     assert.ok(fs.statSync(eventPath).size <= MAX_GOVERNANCE_AUDIT_EVENT_BYTES);
     return JSON.parse(fs.readFileSync(eventPath, "utf8"));
   });
