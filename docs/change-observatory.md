@@ -79,7 +79,7 @@ projection and never builds a project's full Observatory model. It reads only
 the canonical project, requirement, story/workflow, risk, budget, dependency,
 release, and gate-report locations needed for the cards. Per project it reads
 at most 256 files, 64 KiB per file, and 2 MiB in total, and retains at most
-eight preview items per aggregate. The versioned
+1,024 parsed summary records and eight preview items per aggregate. The versioned
 `change-observatory:portfolio-aggregates:v1` projection reports active
 workflows, blockers, risks, budgets, dependencies, and releases. Blockers,
 failed releases, exceeded budgets, malformed summary evidence, and unresolved

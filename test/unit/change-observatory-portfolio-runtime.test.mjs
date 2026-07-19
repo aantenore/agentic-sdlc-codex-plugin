@@ -287,6 +287,32 @@ test("the real project runtime keeps the full normalizer lazy", async (t) => {
   assert.equal(fullBuilds, 1);
 });
 
+test("LRU recreation never accepts a changed project privacy configuration", async (t) => {
+  const fixture = await createLargePortfolioFixture(t, 2);
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    concurrency: 1,
+    maxCachedProjects: 1,
+  });
+  t.after(() => runtime.dispose());
+
+  await runtime.getSummaryRepresentation();
+  assert.equal(runtime.cacheSnapshot().pinnedConfigurations, 2);
+  const alphaRoot = path.join(fixture.root, "projects", "project-00", ".sdlc");
+  await fs.mkdir(alphaRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(alphaRoot, "config.json"),
+    '{"observability":{"enabled":true}}\n',
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => runtime.getProjectDetailRepresentation("project-00"),
+    (error) => error.code === "observability_configuration_changed" && error.statusCode === 503,
+  );
+});
+
 async function createPortfolioFixture(t) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-portfolio-runtime-"));
   const root = await fs.realpath(temporary);

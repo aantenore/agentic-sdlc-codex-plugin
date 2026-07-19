@@ -27,6 +27,10 @@ test("reads only bounded summary records and derives versioned delivery aggregat
     status: "active",
     phase: "implementation",
   });
+  await writeJson(root, ".sdlc/stories/ST-1/outputs/report.json", {
+    id: "OUTPUT-NOT-A-WORKFLOW",
+    status: "active",
+  });
   await writeJson(root, ".sdlc/risks/RISK-1.json", {
     id: "RISK-1",
     type: "risk",
@@ -114,6 +118,25 @@ test("terminal story evidence wins over earlier active records", async (t) => {
   const summary = await buildProjectPortfolioSummary(root);
 
   assert.equal(summary.aggregates.activeWorkflows.count, 0);
+});
+
+test("respects a lower configured parsed-record bound", async (t) => {
+  const root = await fixture(t, "record-bound");
+  await writeJson(root, ".sdlc/project.json", { project_id: "record-bound" });
+  for (let index = 0; index < 10; index += 1) {
+    await writeJson(root, `.sdlc/requirements/REQ-${index}.json`, {
+      id: `REQ-${index}`,
+      status: "approved",
+    });
+  }
+
+  const summary = await buildProjectPortfolioSummary(root, {
+    limits: { maxRecords: 3 },
+  });
+
+  assert.equal(summary.scan.truncated, true);
+  assert.equal(summary.counts.asked, 2);
+  assert.equal(summary.health, "review");
 });
 
 async function fixture(t, name) {
