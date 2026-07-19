@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refresh the approved Agentic SDLC 0.12.0 project snapshot after the bounded installer timeout and robust Windows canonical-query sampling fixes; the 4,000 ms query budget remains unchanged.
+Refresh the approved Agentic SDLC 0.12.0 project snapshot after binding the unchanged enterprise benchmark to the already required Ubuntu Node 24 check and adding fail-open regression guards; supported operating systems, Node versions, and performance thresholds remain unchanged.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
@@ -23,9 +23,9 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 - automation: npm-scripts (package.json)
 
 ## Key Files
-- .github/workflows/ci.yml (96225d558f0e34de093a4e3b1af1a7b8826aa514d6d07b7cbdf2bfa708d9ee6e)
-- .github/workflows/release.yml (381650a73f3552fa108b8ad75c6466281470d0aafaa6dd818472865b29209406)
-- package.json (2a59b63443c123e8e4a91f1914fc985885c2710fc51d5384ae0c6550d58ab27d)
+- .github/workflows/ci.yml (6d07ecd049dd1646bbde89cd4c4269563e523a49b766b83a7125cb0cf6c62b91)
+- .github/workflows/release.yml (5d1753f52033714124ab0af9edded4181b7a5600a64027ed962452cb254c841a)
+- package.json (14bc24e6e82c5e38a86348a801c524c834c9dd716c86b54290b0232cf7e1b09b)
 - README.md (0d45b8d6d8a09029e6fb230cf26e3a03284d5e558380b410bd7ce1548c8424c8)
 
 ## Imported Documents

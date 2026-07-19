@@ -4,13 +4,13 @@
   "sdlc_version": "0.12.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Refresh the approved Agentic SDLC 0.12.0 project snapshot after the bounded installer timeout and robust Windows canonical-query sampling fixes; the 4,000 ms query budget remains unchanged.",
+  "summary": "Refresh the approved Agentic SDLC 0.12.0 project snapshot after binding the unchanged enterprise benchmark to the already required Ubuntu Node 24 check and adding fail-open regression guards; supported operating systems, Node versions, and performance thresholds remain unchanged.",
   "repository_snapshot": {
-    "root_name": "worktree",
+    "root_name": "agentic-sdlc-ci-hotfix.CMve7N",
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-ENT-RELEASE",
-      "head_sha": "eb6710028ebf98337021c6e8e9593cd21fd07b95",
+      "branch": "codex/ST-ENT-CI-PERF",
+      "head_sha": "cc9cb5ceb4a04a181ae34865285ee9cedb7baac2",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -35,25 +35,26 @@
           "check",
           "doctor",
           "smoke",
-          "test"
+          "test",
+          "test:enterprise"
         ]
       }
     ],
     "key_files": [
       {
         "path": ".github/workflows/ci.yml",
-        "sha256": "96225d558f0e34de093a4e3b1af1a7b8826aa514d6d07b7cbdf2bfa708d9ee6e",
-        "size_bytes": 775
+        "sha256": "6d07ecd049dd1646bbde89cd4c4269563e523a49b766b83a7125cb0cf6c62b91",
+        "size_bytes": 1148
       },
       {
         "path": ".github/workflows/release.yml",
-        "sha256": "381650a73f3552fa108b8ad75c6466281470d0aafaa6dd818472865b29209406",
-        "size_bytes": 31417
+        "sha256": "5d1753f52033714124ab0af9edded4181b7a5600a64027ed962452cb254c841a",
+        "size_bytes": 31591
       },
       {
         "path": "package.json",
-        "sha256": "2a59b63443c123e8e4a91f1914fc985885c2710fc51d5384ae0c6550d58ab27d",
-        "size_bytes": 4120
+        "sha256": "14bc24e6e82c5e38a86348a801c524c834c9dd716c86b54290b0232cf7e1b09b",
+        "size_bytes": 4155
       },
       {
         "path": "README.md",
@@ -66,7 +67,8 @@
       "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check scripts/verify-release-package.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/release/artifact-verifier.mjs && node --check lib/release/tar-reader.mjs && node --check lib/release/workflow-guard.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/provider-subject-compatibility.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
-      "test": "node --test && npm run benchmark:enterprise"
+      "test": "node --test",
+      "test:enterprise": "npm test && npm run benchmark:enterprise"
     },
     "package_summary": {
       "name": "agentic-sdlc-codex-plugin",
@@ -86,13 +88,13 @@
     "ci_files": [
       {
         "path": ".github/workflows/ci.yml",
-        "sha256": "96225d558f0e34de093a4e3b1af1a7b8826aa514d6d07b7cbdf2bfa708d9ee6e",
-        "size_bytes": 775
+        "sha256": "6d07ecd049dd1646bbde89cd4c4269563e523a49b766b83a7125cb0cf6c62b91",
+        "size_bytes": 1148
       },
       {
         "path": ".github/workflows/release.yml",
-        "sha256": "381650a73f3552fa108b8ad75c6466281470d0aafaa6dd818472865b29209406",
-        "size_bytes": 31417
+        "sha256": "5d1753f52033714124ab0af9edded4181b7a5600a64027ed962452cb254c841a",
+        "size_bytes": 31591
       }
     ]
   },
@@ -667,7 +669,8 @@
       "check": "node --check bin/agentic-sdlc.mjs && node --check scripts/generate-plugin-assets.mjs && node --check scripts/benchmark-enterprise-performance.mjs && node --check scripts/verify-release-package.mjs && node --check lib/autonomy-policy.mjs && node --check lib/requirement-lifecycle.mjs && node --check lib/context-optimization.mjs && node --check lib/identity-migration.mjs && node --check lib/rtk-optimization-adapter.mjs && node --check lib/canonical-query-session.mjs && node --check lib/human-guidance.mjs && node --check lib/release/artifact-verifier.mjs && node --check lib/release/tar-reader.mjs && node --check lib/release/workflow-guard.mjs && node --check lib/delivery/default-providers.mjs && node --check lib/delivery/provider-compatibility.mjs && node --check lib/delivery/provider-registry.mjs && node --check lib/delivery/provider-subject-compatibility.mjs && node --check lib/delivery/providers/git-remote.mjs && node --check lib/delivery/providers/github-cli.mjs && node --check lib/delivery/providers/local-filesystem.mjs && node --check lib/cli/command-catalog.mjs && node --check lib/cli/completion.mjs && node --check lib/cli/dispatch.mjs && node --check lib/cli/help.mjs && node --check lib/cli/presets.mjs && node --check lib/governance/command-subject.mjs && node --check lib/governance/policy-engine.mjs && node --check lib/governance/mutation-guard.mjs && node --check lib/change-observatory/bounded-file-reader.mjs && node --check lib/change-observatory/cli.mjs && node --check lib/change-observatory/configuration.mjs && node --check lib/change-observatory/constants.mjs && node --check lib/change-observatory/index.mjs && node --check lib/change-observatory/intentabi-adapter.mjs && node --check lib/change-observatory/model-cache.mjs && node --check lib/change-observatory/normalizer.mjs && node --check lib/change-observatory/operations.mjs && node --check lib/change-observatory/path-safety.mjs && node --check lib/change-observatory/portfolio-collector.mjs && node --check lib/change-observatory/portfolio-manifest.mjs && node --check lib/change-observatory/portfolio-project-summary.mjs && node --check lib/change-observatory/portfolio-runtime.mjs && node --check lib/change-observatory/project-runtime.mjs && node --check lib/change-observatory/record-index.mjs && node --check lib/change-observatory/runtime.mjs && node --check lib/change-observatory/server.mjs && node --check lib/change-observatory/source-reader.mjs && node --check lib/change-observatory/summary-ranking.mjs && node --check lib/observability/context.mjs && node --check lib/observability/index.mjs && node --check lib/observability/metrics.mjs && node --check lib/observability/redaction.mjs && node --check lib/observability/support-bundle.mjs && node --check lib/trace-integrity.mjs && node --check lib/trace-narrative.mjs && node --check ui/change-observatory/api.js && node --check ui/change-observatory/app.js && node --check ui/change-observatory/components.js && node --check ui/change-observatory/i18n.js && node --check ui/change-observatory/model.js && node --check ui/change-observatory/portfolio.js && node --check ui/change-observatory/portfolio-components.js",
       "doctor": "node bin/agentic-sdlc.mjs doctor",
       "smoke": "node bin/agentic-sdlc.mjs --help",
-      "test": "node --test && npm run benchmark:enterprise"
+      "test": "node --test",
+      "test:enterprise": "npm test && npm run benchmark:enterprise"
     },
     "stack_summary": [
       "node:package-json",
@@ -682,7 +685,8 @@
     "test_surface": [
       "check",
       "smoke",
-      "test"
+      "test",
+      "test:enterprise"
     ],
     "imported_document_count": 12,
     "confidence": 0.7,
@@ -884,8 +888,8 @@
     "test/unit/workflow-schema.test.mjs"
   ],
   "source_hashes": {
-    ".github/workflows/ci.yml": "96225d558f0e34de093a4e3b1af1a7b8826aa514d6d07b7cbdf2bfa708d9ee6e",
-    ".github/workflows/release.yml": "381650a73f3552fa108b8ad75c6466281470d0aafaa6dd818472865b29209406",
+    ".github/workflows/ci.yml": "6d07ecd049dd1646bbde89cd4c4269563e523a49b766b83a7125cb0cf6c62b91",
+    ".github/workflows/release.yml": "5d1753f52033714124ab0af9edded4181b7a5600a64027ed962452cb254c841a",
     "README.md": "0d45b8d6d8a09029e6fb230cf26e3a03284d5e558380b410bd7ce1548c8424c8",
     "bin/agentic-sdlc.mjs": "c848af49204cfe986fd03bbc3493ea3686836ff22d8c59d8094536eb19be2e9a",
     "docs/agent-interactions.md": "9e072f578a9acc51a0007bc64207bf005b9d91c9ad7cfda568323432ff012311",
@@ -965,7 +969,7 @@
     "lib/verification-levels.mjs": "19e84c12b5cf0244db17518edcdaceec23063215f76296626c6e4e6311712c24",
     "lib/workflow-engine.mjs": "e905e566ec59d394aa4ba4f9ecd02c8fda863452223b82c0e7f3f6a15f7a2ce6",
     "lib/workflow-presets.mjs": "519dbb28b4e5c5503ecbe920b983c0c4920af6837ee8d4263f7ed0bea6d10cb3",
-    "package.json": "2a59b63443c123e8e4a91f1914fc985885c2710fc51d5384ae0c6550d58ab27d",
+    "package.json": "14bc24e6e82c5e38a86348a801c524c834c9dd716c86b54290b0232cf7e1b09b",
     "test/autonomy-cli.e2e.mjs": "288f8c5708fb90c3c226f81f80f8321c26741393d8f99e2d622ba0b797437411",
     "test/cli-self-service.e2e.mjs": "d8341c816ee159c66fe216a7b2195bf0e6a6e7bc3e1bfa09cc617574a83e60ab",
     "test/cli.e2e.mjs": "53cb3c90cb44b5593f8abd4ace1acc46010bab2ac9e83113ea0b3223c6e50f81",
@@ -1023,7 +1027,7 @@
     "test/unit/delivery-provider-registry.test.mjs": "f4d615886758a197474feaf232db5b12a657f08d1f51d3439a95e79345449f4b",
     "test/unit/effective-config.test.mjs": "344e221770f3a243751a144d3a0341de199ebb784a805b68606cb28f81c60d08",
     "test/unit/enterprise-foundation-fixture.test.mjs": "8306ffd859216f21ef2c22570ed00de4802d35512243e72b9e4004d885e30ca1",
-    "test/unit/enterprise-performance-benchmark.test.mjs": "569b684b1c531827f334a162611c954f9ea4277f43d5f4710ea77165db5b29ab",
+    "test/unit/enterprise-performance-benchmark.test.mjs": "d3241da2443987805bb63d992ca8b1fefea1602c57450041d56cd6ec27dd8212",
     "test/unit/execution-budget.test.mjs": "b59e2b57e88036f8cf3493ecb596ef695a2463643dca488548d7119122c2fdcf",
     "test/unit/governance-mutation-cli.test.mjs": "80a5789cc6469728606ffd380113d6dd3422603998137e57260cc63462a391af",
     "test/unit/governance-mutation-guard.test.mjs": "2b7ed896843c5e5e631136a4e3dccfe7e239da7cfe740c0f6e7590c35a7cbfd5",
@@ -1041,7 +1045,7 @@
     "test/unit/release-artifact-verifier.test.mjs": "0406271e10ed93f2137d0b42e8763a427e3816d43de76725df455da7f8744aa6",
     "test/unit/release-tar-reader.test.mjs": "e7e9a4984fe40c8ec5328fb5b53686f4d7eedbdf67ecb17f449a94585dd180ed",
     "test/unit/release-workflow-guard.test.mjs": "728683e076e31490c01d25a1343f38b490c7c24cf28b813a81ffa1f74fb85262",
-    "test/unit/release-workflow.test.mjs": "befa987668148d3e47a4332dc699036864dab273b68610183e2a41f3d23a516c",
+    "test/unit/release-workflow.test.mjs": "545aa6e07fc771e431b0543a01fb56e4e5ace5dd13987adb7c30f99d35ab42f0",
     "test/unit/requirement-lifecycle.test.mjs": "b77c1a5a0edc73785550422bce6015bdaaed08b97a89c2d951fc081c8ca64f40",
     "test/unit/rtk-optimization-adapter.test.mjs": "8d6ae93ac4f9aa0fdabc36c6d245d08f5a304e94afe547a6c672dae3ae1a3b30",
     "test/unit/trace-evidence-manifest.test.mjs": "4a049bed56b22415ee22658e56bff6c7c9b0e94a663d3067d3b2450bc2c3cf45",
@@ -1059,10 +1063,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260719053213-400085",
+      "id": "APR-20260719061453-473963",
       "baseline_id": "BASELINE-ENTERPRISE-PLATFORM-006",
       "status": "approved",
-      "summary": "Approved under Antonio's explicit one-use delegation: this exact snapshot matches the current 0.12.0 release sources, including bounded installer execution and robust Windows query sampling, and authorizes no later snapshot or delivery action.",
+      "summary": "Delegated one-use approval of the final frozen-source project context for the fail-closed CI hotfix; support, thresholds and repository settings remain unchanged.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "BASELINE-ENTERPRISE-PLATFORM-006",
@@ -1073,8 +1077,8 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-ENT-RELEASE-BASELINE-REFRESH-002",
-        "approval_level": "Approve only the exact refreshed Agentic SDLC 0.12.0 project snapshot at release head eb67100 after the bounded installer timeout and robust Windows query-sampling fixes; no later baseline, code change, merge, installation, publication, external access, production access, secret access or destructive action is covered.",
+        "authorization_ref": "AUTH-ENT-CI-PERF-BASELINE-R2",
+        "approval_level": "Approve only the final refreshed project snapshot for the exact fail-closed CI hotfix after product files were frozen; no scope, threshold, support, repository-setting, deployment, release, secret, destructive, or unrelated change.",
         "allowed_actions": [
           "baseline.approve"
         ],
@@ -1082,24 +1086,24 @@
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-ENT-RELEASE-BASELINE-REFRESH-002",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-RELEASE-BASELINE-REFRESH-002/AUSE-AUTH-ENT-RELEASE-BASELINE-REFRESH-002-20260719053213917-811459.json",
+      "authorization_ref": "AUTH-ENT-CI-PERF-BASELINE-R2",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-ENT-CI-PERF-BASELINE-R2/AUSE-AUTH-ENT-CI-PERF-BASELINE-R2-20260719061453680-70a7fa.json",
       "authorization_action": "baseline.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "22c3af24e0fbbe7883d6a0ce61ed9b810260e9aedc0a50e07641a5cae490baf4",
+      "approved_content_hash": "0f9628f4cdd23fdd6ab9dfed1f9c0adf9a7c58461cae14fbed0cf916b5f550c1",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
-        "id": "codex",
+        "id": "Codex",
         "type": "agent",
         "name": "Codex",
         "email": null,
-        "source": "default"
+        "source": "cli"
       },
       "git": {
         "is_git_repo": true,
-        "branch": "codex/ST-ENT-RELEASE",
-        "head_sha": "eb6710028ebf98337021c6e8e9593cd21fd07b95",
+        "branch": "codex/ST-ENT-CI-PERF",
+        "head_sha": "cc9cb5ceb4a04a181ae34865285ee9cedb7baac2",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -1116,11 +1120,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.12.0"
       },
-      "created_at": "2026-07-19T05:32:13.919Z"
+      "created_at": "2026-07-19T06:14:53.682Z"
     }
   ],
-  "created_at": "2026-07-19T05:32:00.030Z",
-  "updated_at": "2026-07-19T05:32:13.919Z",
+  "created_at": "2026-07-19T06:14:43.603Z",
+  "updated_at": "2026-07-19T06:14:53.682Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -1131,8 +1135,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-ENT-RELEASE",
-      "head_sha": "eb6710028ebf98337021c6e8e9593cd21fd07b95",
+      "branch": "codex/ST-ENT-CI-PERF",
+      "head_sha": "cc9cb5ceb4a04a181ae34865285ee9cedb7baac2",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -1150,11 +1154,11 @@
       "version": "0.12.0"
     },
     "approved_by": {
-      "id": "codex",
+      "id": "Codex",
       "type": "agent",
       "name": "Codex",
       "email": null,
-      "source": "default"
+      "source": "cli"
     }
   }
 }
