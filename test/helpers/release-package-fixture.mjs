@@ -121,6 +121,7 @@ export function validReleaseFixtureEntries({ version = "0.11.0", extra = [] } = 
     { path: "package/config/release-artifact-policy.json", data: "{}\n" },
     { path: "package/schemas/release-artifact-policy.schema.json", data: "{}\n" },
     { path: "package/scripts/install-personal-marketplace.py", data: "# fixture\n" },
+    { path: "package/scripts/install-personal-marketplace-v2.py", data: "# fixture\n" },
     { path: "package/scripts/verify-release-package.mjs", data: "// fixture\n" },
     { path: "package/skills/agentic-sdlc/SKILL.md", data: "# Fixture\n" },
     ...extra,

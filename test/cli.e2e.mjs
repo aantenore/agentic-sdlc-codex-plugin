@@ -7153,6 +7153,68 @@ test("personal marketplace installer stages only allowlisted plugin files", asyn
   assert.equal(fs.readFileSync(path.join(destination, "unmanaged.txt"), "utf8"), "do not delete\n");
 });
 
+test("personal marketplace installer v2 keeps an exact recovery point until confirmation", () => {
+  const home = tmpProject("personal-installer-v2-home");
+  const python = process.env.PYTHON || "python3";
+  const installer = path.join(repoRoot, "scripts", "install-personal-marketplace-v2.py");
+  const invoke = (args) => spawnSync(python, [installer, ...args, "--home", home], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home },
+    timeout: 30_000,
+  });
+
+  const planned = invoke(["plan", "--json"]);
+  assert.equal(planned.status, 0, `${planned.stdout}\n${planned.stderr}`);
+  const preview = JSON.parse(planned.stdout);
+  assert.equal(preview.schema, "agentic-sdlc.local-installer.v2");
+  assert.equal(preview.data.state, "ready_to_apply");
+  assert.match(preview.data.plan_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(fs.existsSync(path.join(home, "plugins")), false, "v2 plan must not create plugin files");
+  assert.equal(fs.existsSync(path.join(home, ".agents")), false, "v2 plan must not create transaction files");
+
+  const applied = invoke(["apply", "--json", "--plan-hash", preview.data.plan_hash]);
+  assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
+  const pending = JSON.parse(applied.stdout);
+  assert.equal(pending.data.state, "validation_pending");
+  assert.match(pending.data.transaction_id, /^[a-f0-9]{24}$/u);
+  assert.match(pending.technical_details.receipt_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(
+    fs.existsSync(path.join(
+      home,
+      "plugins",
+      "agentic-sdlc-codex-plugin",
+      "scripts",
+      "install-personal-marketplace-v2.py",
+    )),
+    true,
+  );
+
+  const bound = [
+    "--transaction-id", pending.data.transaction_id,
+    "--receipt-hash", pending.technical_details.receipt_hash,
+  ];
+  const validated = invoke(["validate", "--json", ...bound]);
+  assert.equal(validated.status, 0, `${validated.stdout}\n${validated.stderr}`);
+  assert.equal(JSON.parse(validated.stdout).data.state, "validation_pending");
+
+  const confirmed = invoke(["confirm", "--json", ...bound]);
+  assert.equal(confirmed.status, 0, `${confirmed.stdout}\n${confirmed.stderr}`);
+  const confirmation = JSON.parse(confirmed.stdout);
+  assert.equal(confirmation.data.state, "confirmed");
+  assert.notEqual(confirmation.technical_details.receipt_hash, pending.technical_details.receipt_hash);
+
+  const retried = invoke(["confirm", "--json", ...bound]);
+  assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
+  assert.equal(
+    JSON.parse(retried.stdout).technical_details.receipt_hash,
+    confirmation.technical_details.receipt_hash,
+  );
+  const refusedRestore = invoke(["restore", "--json", ...bound]);
+  assert.notEqual(refusedRestore.status, 0);
+  assert.match(refusedRestore.stdout, /already confirmed/u);
+});
+
 test("personal marketplace installer can validate and configure RTK globally", () => {
   const home = tmpProject("personal-installer-rtk-home");
   const codexHome = path.join(home, ".codex-test");

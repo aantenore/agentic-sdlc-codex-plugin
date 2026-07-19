@@ -26,6 +26,14 @@ assert SPEC is not None and SPEC.loader is not None
 INSTALLER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INSTALLER)
 
+INSTALLER_V2_PATH = REPO_ROOT / "scripts" / "install-personal-marketplace-v2.py"
+V2_SPEC = importlib.util.spec_from_file_location(
+    "personal_marketplace_installer_v2", INSTALLER_V2_PATH
+)
+assert V2_SPEC is not None and V2_SPEC.loader is not None
+INSTALLER_V2 = importlib.util.module_from_spec(V2_SPEC)
+V2_SPEC.loader.exec_module(INSTALLER_V2)
+
 
 PRIMARY_INTERNAL_JARGON = re.compile(
     r"\b(?:bounded[-_ ]autonomous|checkpoint(?:ed)?|audit[-_ ]only|receipt(?:s)?|"
@@ -89,6 +97,16 @@ class InstallerTransactionTests(unittest.TestCase):
             plan["plan_hash"],
             False,
             None,
+        )
+
+    def v2_plan(self):
+        return INSTALLER_V2._build_install_plan(self.repo, self.home)
+
+    def v2_apply(self, plan):
+        return INSTALLER_V2._apply_install_plan(
+            self.repo,
+            self.home,
+            plan["plan_hash"],
         )
 
     def test_plan_is_deterministic_and_strictly_read_only(self) -> None:
@@ -693,6 +711,451 @@ class InstallerTransactionTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(len(stdout.getvalue().splitlines()), 1)
         self.assertFalse(json.loads(stdout.getvalue())["ok"])
+
+    def test_v2_apply_waits_for_validation_and_confirm_is_idempotent(self) -> None:
+        legacy = self.plan()
+        plan = self.v2_plan()
+
+        self.assertNotEqual(plan["plan_hash"], legacy["plan_hash"])
+        self.assertEqual(plan["protocol"], "v2")
+        self.assertTrue(plan["validation_required"])
+        self.assertFalse(self.home.exists())
+
+        applied, pending = self.v2_apply(plan)
+        self.assertEqual(applied["plan_hash"], plan["plan_hash"])
+        self.assertEqual(pending["phase"], "validation_pending")
+        self.assertRegex(pending["receipt_hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            INSTALLER_V2._validate_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )["phase"],
+            "validation_pending",
+        )
+
+        _, retried = self.v2_apply(plan)
+        self.assertEqual(retried["transaction_id"], pending["transaction_id"])
+        self.assertEqual(retried["receipt_hash"], pending["receipt_hash"])
+
+        confirmed = INSTALLER_V2._confirm_install(
+            self.home,
+            pending["transaction_id"],
+            pending["receipt_hash"],
+        )
+        self.assertEqual(confirmed["phase"], "confirmed")
+        self.assertFalse(
+            INSTALLER_V2._marketplace_backup_path(self.home).exists()
+        )
+        self.assertEqual(
+            INSTALLER_V2._confirm_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )["receipt_hash"],
+            confirmed["receipt_hash"],
+        )
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "already confirmed"):
+            INSTALLER_V2._restore_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )
+
+    def test_v2_concurrent_apply_converges_on_one_pending_transaction(self) -> None:
+        plan = self.v2_plan()
+        barrier = threading.Barrier(2)
+        outcomes = []
+        failures = []
+
+        def worker():
+            barrier.wait()
+            try:
+                _, receipt = self.v2_apply(plan)
+                outcomes.append(
+                    (receipt["transaction_id"], receipt["receipt_hash"], receipt["phase"])
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(outcomes[0][2], "validation_pending")
+
+    def test_v2_restore_is_byte_exact_and_allows_a_new_reviewed_attempt(self) -> None:
+        self.apply(self.plan())
+        destination = self.home / "plugins" / INSTALLER.PLUGIN_NAME
+        marketplace = self.home / ".agents" / "plugins" / "marketplace.json"
+        original_tree = INSTALLER._snapshot_tree(destination)
+        original_marketplace = (
+            b'{\n  "name": "personal",\n  "plugins": [],\n'
+            b'  "custom": "preserve byte-for-byte"\n}\n'
+        )
+        marketplace.write_bytes(original_marketplace)
+        (self.repo / "lib" / "core.mjs").write_text(
+            'export const version = "two";\n', encoding="utf-8"
+        )
+        plan = self.v2_plan()
+        _, pending = self.v2_apply(plan)
+
+        self.assertNotEqual(INSTALLER._snapshot_tree(destination), original_tree)
+        self.assertTrue(Path(pending["plugin_backup"]).is_dir())
+        restored = INSTALLER_V2._restore_install(
+            self.home,
+            pending["transaction_id"],
+            pending["receipt_hash"],
+        )
+        self.assertEqual(restored["phase"], "restored")
+        self.assertEqual(INSTALLER._snapshot_tree(destination), original_tree)
+        self.assertEqual(marketplace.read_bytes(), original_marketplace)
+        self.assertEqual(
+            INSTALLER_V2._restore_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )["receipt_hash"],
+            restored["receipt_hash"],
+        )
+
+        next_plan = self.v2_plan()
+        self.assertNotEqual(next_plan["plan_hash"], plan["plan_hash"])
+        self.assertEqual(
+            next_plan["prior_transaction"]["receipt_hash"],
+            restored["receipt_hash"],
+        )
+        _, next_pending = self.v2_apply(next_plan)
+        self.assertNotEqual(next_pending["transaction_id"], pending["transaction_id"])
+
+    def test_v2_drift_and_linked_state_fail_closed(self) -> None:
+        plan = self.v2_plan()
+        _, pending = self.v2_apply(plan)
+        installed = (
+            self.home
+            / "plugins"
+            / INSTALLER.PLUGIN_NAME
+            / "lib"
+            / "core.mjs"
+        )
+        installed.write_text("changed after apply\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "changed after apply"):
+            INSTALLER_V2._validate_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "changed after apply"):
+            INSTALLER_V2._restore_install(
+                self.home,
+                pending["transaction_id"],
+                pending["receipt_hash"],
+            )
+        self.assertEqual(installed.read_text(encoding="utf-8"), "changed after apply\n")
+        self.assertEqual(
+            INSTALLER_V2._read_receipt(self.home)["phase"],
+            "validation_pending",
+        )
+
+        if os.name != "nt":
+            linked_home = self.root / "v2-linked-home"
+            linked_root = self.root / "external-v2-state"
+            linked_root.mkdir()
+            (linked_root / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+            state_parent = linked_home / ".agents" / "plugins"
+            state_parent.mkdir(parents=True)
+            state_parent.joinpath(f".{INSTALLER.PLUGIN_NAME}.install-v2").symlink_to(
+                linked_root, target_is_directory=True
+            )
+            with self.assertRaisesRegex(INSTALLER_V2.InstallError, "linked"):
+                INSTALLER_V2._build_install_plan(self.repo, linked_home)
+            self.assertEqual(
+                (linked_root / "sentinel.txt").read_text(encoding="utf-8"),
+                "keep\n",
+            )
+
+    def test_v2_rejects_unbounded_or_nonmatching_receipt_inputs(self) -> None:
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "24 hexadecimal"):
+            INSTALLER_V2._parse_arguments(
+                [
+                    "confirm",
+                    "--transaction-id",
+                    "a" * 25,
+                    "--receipt-hash",
+                    "b" * 64,
+                ]
+            )
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "64 hexadecimal"):
+            INSTALLER_V2._parse_arguments(
+                [
+                    "restore",
+                    "--transaction-id",
+                    "a" * 24,
+                    "--receipt-hash",
+                    "b" * 65,
+                ]
+            )
+
+        deep_home = self.root / "deep-marketplace-home"
+        deep_marketplace = deep_home / ".agents" / "plugins" / "marketplace.json"
+        deep_marketplace.parent.mkdir(parents=True)
+        deep_marketplace.write_text("[" * 65 + "0" + "]" * 65, encoding="utf-8")
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "nesting depth"):
+            INSTALLER_V2._build_install_plan(self.repo, deep_home)
+
+        orphan_home = self.root / "orphaned-v2-home"
+        orphan = (
+            orphan_home
+            / "plugins"
+            / f".{INSTALLER.PLUGIN_NAME}.validation-{'a' * 24}"
+        )
+        orphan.mkdir(parents=True)
+        (orphan / "sentinel.txt").write_text("preserve\n", encoding="utf-8")
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "Unmatched v2 recovery"):
+            INSTALLER_V2._build_install_plan(self.repo, orphan_home)
+        self.assertEqual((orphan / "sentinel.txt").read_text(), "preserve\n")
+
+        plan = self.v2_plan()
+        _, pending = self.v2_apply(plan)
+        receipt_path = INSTALLER_V2._receipt_path(self.home)
+        receipt_path.write_bytes(b"{" + b" " * INSTALLER_V2.MAX_RECEIPT_BYTES + b"}")
+        with self.assertRaisesRegex(INSTALLER_V2.InstallError, "exceeds"):
+            INSTALLER_V2._read_receipt(self.home)
+
+    def test_v2_rejects_receipt_path_alias_without_touching_external_tree(self) -> None:
+        if os.name == "nt":
+            self.skipTest("symlink/parent traversal semantics are POSIX-specific")
+
+        self.apply(self.plan())
+        (self.repo / "lib" / "core.mjs").write_text(
+            'export const version = "two";\n', encoding="utf-8"
+        )
+        _, pending = self.v2_apply(self.v2_plan())
+        backup = INSTALLER_V2._plugin_backup_path(
+            self.home, pending["transaction_id"]
+        )
+
+        external_parent = self.root / "external-backup-parent"
+        link_target = external_parent / "link-target"
+        link_target.mkdir(parents=True)
+        external_backup = external_parent / backup.name
+        shutil.copytree(backup, external_backup)
+        external_sentinel = external_backup / "README.md"
+        sentinel_bytes = external_sentinel.read_bytes()
+
+        alias = self.home / "plugins" / "external-alias"
+        alias.symlink_to(link_target, target_is_directory=True)
+        aliased_backup = alias / ".." / backup.name
+        self.assertEqual(
+            os.path.normpath(str(aliased_backup)),
+            os.path.normpath(str(backup)),
+        )
+
+        tampered = json.loads(json.dumps(pending))
+        tampered["plugin_backup"] = str(aliased_backup)
+        tampered["receipt_hash"] = INSTALLER_V2._canonical_receipt_hash(tampered)
+        INSTALLER_V2._receipt_path(self.home).write_bytes(
+            INSTALLER_V2.V1._json_bytes(tampered)
+        )
+
+        with self.assertRaisesRegex(
+            INSTALLER_V2.InstallError, "unsafe plugin backup path"
+        ):
+            INSTALLER_V2._confirm_install(
+                self.home,
+                pending["transaction_id"],
+                tampered["receipt_hash"],
+            )
+        self.assertEqual(external_sentinel.read_bytes(), sentinel_bytes)
+        self.assertTrue(external_backup.is_dir())
+        self.assertTrue(backup.is_dir())
+
+    def test_v2_preflight_bounds_empty_directories_before_snapshot(self) -> None:
+        managed_tree = self.root / "many-empty-directories"
+        managed_tree.mkdir()
+        for index in range(4):
+            (managed_tree / f"empty-{index}").mkdir()
+        with mock.patch.object(INSTALLER_V2, "MAX_MANAGED_ENTRIES", 3):
+            with self.assertRaisesRegex(
+                INSTALLER_V2.InstallError, "resource limits"
+            ):
+                INSTALLER_V2._preflight_tree_bounds(managed_tree, "Managed test tree")
+
+        source_many = self.repo / "lib" / "many-empty-directories"
+        source_many.mkdir()
+        for index in range(4):
+            (source_many / f"empty-{index}").mkdir()
+        with mock.patch.object(INSTALLER_V2, "MAX_MANAGED_ENTRIES", 8):
+            with self.assertRaisesRegex(
+                INSTALLER_V2.InstallError, "resource limits"
+            ):
+                INSTALLER_V2._preflight_source_bounds(
+                    self.repo, INSTALLER_V2._destination_path(self.home)
+                )
+
+    def test_v2_interrupted_apply_retries_the_same_reviewed_update(self) -> None:
+        crash_repo = self.root / "v2-crash-source"
+        shutil.copytree(self.repo, crash_repo)
+        (crash_repo / "scripts").mkdir()
+        shutil.copy2(
+            INSTALLER_PATH,
+            crash_repo / "scripts" / "install-personal-marketplace.py",
+        )
+        shutil.copy2(
+            INSTALLER_V2_PATH,
+            crash_repo / "scripts" / "install-personal-marketplace-v2.py",
+        )
+        crash_home = self.root / "v2-crash-home"
+        copied = crash_repo / "scripts" / "install-personal-marketplace-v2.py"
+
+        def invoke(arguments, crash_phase=None):
+            environment = dict(os.environ)
+            environment["HOME"] = str(crash_home)
+            if crash_phase is not None:
+                environment[
+                    "_AGENTIC_SDLC_INSTALLER_V2_TEST_CRASH_PHASE"
+                ] = crash_phase
+            return subprocess.run(
+                [sys.executable, str(copied), *arguments, "--home", str(crash_home)],
+                cwd=str(crash_repo),
+                env=environment,
+                capture_output=True,
+                encoding="utf-8",
+                timeout=20,
+                check=False,
+            )
+
+        preview = invoke(["plan", "--json"])
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        plan_hash = json.loads(preview.stdout)["data"]["plan_hash"]
+        crashed = invoke(
+            ["apply", "--json", "--plan-hash", plan_hash],
+            crash_phase="plugin_replaced",
+        )
+        self.assertEqual(crashed.returncode, 87)
+
+        retried = invoke(["apply", "--json", "--plan-hash", plan_hash])
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        envelope = json.loads(retried.stdout)
+        self.assertEqual(envelope["data"]["state"], "validation_pending")
+        self.assertTrue(
+            (
+                crash_home
+                / "plugins"
+                / INSTALLER.PLUGIN_NAME
+                / "lib"
+                / "core.mjs"
+            ).is_file()
+        )
+
+    def test_v2_confirm_and_restore_resume_after_partial_terminal_work(self) -> None:
+        self.apply(self.plan())
+        destination = self.home / "plugins" / INSTALLER.PLUGIN_NAME
+        marketplace = self.home / ".agents" / "plugins" / "marketplace.json"
+        original_tree = INSTALLER._snapshot_tree(destination)
+        original_marketplace = marketplace.read_bytes()
+        (self.repo / "lib" / "core.mjs").write_text(
+            'export const version = "two";\n', encoding="utf-8"
+        )
+        first_plan = self.v2_plan()
+        _, first_pending = self.v2_apply(first_plan)
+
+        original_write_receipt = INSTALLER_V2._write_receipt
+        failed_confirmation = False
+
+        def fail_first_terminal_receipt(home, receipt):
+            nonlocal failed_confirmation
+            if receipt["phase"] == "confirmed" and not failed_confirmation:
+                failed_confirmation = True
+                raise OSError("injected terminal receipt interruption")
+            return original_write_receipt(home, receipt)
+
+        with mock.patch.object(
+            INSTALLER_V2,
+            "_write_receipt",
+            side_effect=fail_first_terminal_receipt,
+        ):
+            with self.assertRaisesRegex(OSError, "terminal receipt interruption"):
+                INSTALLER_V2._confirm_install(
+                    self.home,
+                    first_pending["transaction_id"],
+                    first_pending["receipt_hash"],
+                )
+        self.assertEqual(
+            INSTALLER_V2._read_receipt(self.home)["phase"],
+            "confirm_started",
+        )
+        confirmed = INSTALLER_V2._confirm_install(
+            self.home,
+            first_pending["transaction_id"],
+            first_pending["receipt_hash"],
+        )
+        self.assertEqual(confirmed["phase"], "confirmed")
+        confirmed_tree = INSTALLER._snapshot_tree(destination)
+        self.assertNotEqual(confirmed_tree, original_tree)
+
+        (self.repo / "lib" / "core.mjs").write_text(
+            'export const version = "three";\n', encoding="utf-8"
+        )
+        second_plan = self.v2_plan()
+        _, second_pending = self.v2_apply(second_plan)
+        original_remove_verified_tree = INSTALLER_V2._remove_verified_tree
+        interrupted_restore = False
+
+        def interrupt_restore_cleanup(path, expected, label):
+            nonlocal interrupted_restore
+            if label == "restore work tree" and not interrupted_restore:
+                interrupted_restore = True
+                (path / "lib" / "core.mjs").unlink()
+                raise OSError("injected restore interruption")
+            return original_remove_verified_tree(path, expected, label)
+
+        with mock.patch.object(
+            INSTALLER_V2,
+            "_remove_verified_tree",
+            side_effect=interrupt_restore_cleanup,
+        ):
+            with self.assertRaisesRegex(OSError, "restore interruption"):
+                INSTALLER_V2._restore_install(
+                    self.home,
+                    second_pending["transaction_id"],
+                    second_pending["receipt_hash"],
+                )
+        self.assertEqual(marketplace.read_bytes(), original_marketplace)
+        self.assertEqual(
+            INSTALLER_V2._read_receipt(self.home)["phase"],
+            "restore_started",
+        )
+        restored = INSTALLER_V2._restore_install(
+            self.home,
+            second_pending["transaction_id"],
+            second_pending["receipt_hash"],
+        )
+        self.assertEqual(restored["phase"], "restored")
+        self.assertEqual(INSTALLER._snapshot_tree(destination), confirmed_tree)
+        self.assertEqual(marketplace.read_bytes(), original_marketplace)
+
+    def test_v2_primary_messages_remain_plain_in_both_languages(self) -> None:
+        for locale in ("en", "it"):
+            for command, state in (
+                ("check", "update_available"),
+                ("plan", "ready_to_apply"),
+                ("apply", "validation_pending"),
+                ("validate", "validation_pending"),
+                ("confirm", "confirmed"),
+                ("restore", "restored"),
+            ):
+                message = INSTALLER_V2._human_message(command, locale, state)
+                self.assertEqual(set(message), HUMAN_FIELDS)
+                primary = "\n".join(message.values())
+                self.assertNotRegex(primary, PRIMARY_INTERNAL_JARGON)
+                self.assertNotRegex(primary, PRIMARY_COMMAND_TEXT)
 
 
 if __name__ == "__main__":

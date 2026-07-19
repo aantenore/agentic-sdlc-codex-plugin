@@ -105,6 +105,8 @@ test("verifies a real npm pack through offline install and installed-package smo
     assert.equal(report.smoke.doctor, "passed");
     assert.equal(report.smoke.installer_plan, "passed");
     assert.equal(report.smoke.installer_zero_write, true);
+    assert.equal(report.smoke.installer_v2_plan, "passed");
+    assert.equal(report.smoke.installer_v2_zero_write, true);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
