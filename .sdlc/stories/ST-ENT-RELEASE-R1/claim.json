@@ -3,8 +3,8 @@
   "agent": "Codex",
   "branch": "codex/ST-ENT-RELEASE",
   "status": "active",
-  "claimed_at": "2026-07-19T03:26:39.430Z",
-  "expires_at": "2026-07-20T03:26:39.430Z",
+  "claimed_at": "2026-07-19T03:50:11.383Z",
+  "expires_at": "2026-07-20T03:50:11.383Z",
   "notes": null,
   "audit": {
     "claimed_by": {
@@ -17,7 +17,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-ENT-RELEASE",
-      "head_sha": "3ad39d8c6c5386c2588830fa95fa7fed4fa49c7e",
+      "head_sha": "f8ce6e6a27e385557728a09c8f04624227c88312",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -32,7 +32,7 @@
       "thread_id": "019f6f22-ba84-7631-bdaf-b074e51dba5d",
       "session_id": null,
       "tool": "agentic-sdlc-cli",
-      "version": "0.11.0"
+      "version": "0.12.0"
     }
   }
 }
