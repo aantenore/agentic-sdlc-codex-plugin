@@ -156,9 +156,12 @@ function portfolioSummary(overrides = {}) {
     schemaVersion: "change-observatory:portfolio:v1",
     generatedAt: "2026-07-19T12:00:00.000Z",
     status: "degraded",
+    health: "needs_attention",
     projectCount: 2,
     availableProjectCount: 1,
     unavailableProjectCount: 1,
+    needsAttentionProjectCount: 0,
+    reviewProjectCount: 0,
     projects: [
       {
         id: "alpha",

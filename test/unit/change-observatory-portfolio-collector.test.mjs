@@ -71,8 +71,8 @@ test("keeps summaries compact and strips every source-bearing field", async () =
     rawHref: "/api/v1/source?path=.sdlc%2Fprivate.json",
     sourceRefs: [{ path: ".sdlc/private.json" }],
   }];
-  oversized.summary.asked[0].sourceRefs = [{ path: ".sdlc/requirements/private.json" }];
-  oversized.summary.asked[0].rawHref = "/api/v1/source?path=.sdlc%2Frequirements%2Fprivate.json";
+  oversized.previews[0].sourceRefs = [{ path: ".sdlc/requirements/private.json" }];
+  oversized.previews[0].rawHref = "/api/v1/source?path=.sdlc%2Frequirements%2Fprivate.json";
 
   const summary = await collectPortfolioSummary([{ id: "alpha" }], {
     loadProject: () => oversized,
@@ -85,6 +85,39 @@ test("keeps summaries compact and strips every source-bearing field", async () =
   assert.doesNotMatch(serialized, /\.sdlc|private\.json/u);
 });
 
+test("publishes versioned bounded delivery aggregates and derives degraded health", async () => {
+  const healthy = model("healthy");
+  const blocked = model("blocked", { health: "needs_attention" });
+  blocked.aggregates.blockers = {
+    count: 12,
+    items: Array.from({ length: 12 }, (_, index) => ({
+      id: `BLOCK-${index}`,
+      status: "blocked",
+      path: `/private/${index}`,
+    })),
+    truncated: false,
+  };
+
+  const summary = await collectPortfolioSummary([
+    { id: "healthy" },
+    { id: "blocked" },
+  ], {
+    loadProject(project) {
+      return project.id === "healthy" ? healthy : blocked;
+    },
+  });
+
+  assert.equal(summary.status, "degraded");
+  assert.equal(summary.health, "needs_attention");
+  assert.equal(summary.needsAttentionProjectCount, 1);
+  assert.equal(summary.aggregates.schemaVersion, "change-observatory:portfolio-aggregates:v1");
+  assert.equal(summary.aggregates.blockers.count, 12);
+  assert.equal(summary.aggregates.blockers.affectedProjects, 1);
+  assert.equal(summary.projects[1].aggregates.blockers.items.length, 8);
+  assert.equal(summary.projects[1].aggregates.blockers.truncated, true);
+  assert.doesNotMatch(JSON.stringify(summary), /\/private\//u);
+});
+
 test("rejects attempts to raise collection concurrency above four", async () => {
   await assert.rejects(
     () => collectPortfolioSummary([{ id: "alpha" }], {
@@ -95,8 +128,9 @@ test("rejects attempts to raise collection concurrency above four", async () => 
   );
 });
 
-function model(id, { previewCount = 1 } = {}) {
+function model(id, { previewCount = 1, health = "ready" } = {}) {
   const items = Array.from({ length: previewCount }, (_, index) => ({
+    kind: "asked",
     id: `${id}-${index}`,
     type: "requirement",
     title: `Title ${index}`,
@@ -106,16 +140,32 @@ function model(id, { previewCount = 1 } = {}) {
     timestamp: "2026-07-19T09:00:00.000Z",
     provenance: "recorded",
   }));
+  const emptyBucket = () => ({ count: 0, items: [], truncated: false });
   return {
-    schemaVersion: "change-observatory:view:v1",
+    schemaVersion: "change-observatory:portfolio-project-summary:v1",
     project: { id, name: `Project ${id}`, branch: "main" },
-    summary: { asked: items, changed: items, decided: items },
-    iterations: [],
-    contracts: [],
-    decisions: [],
-    changes: [],
-    verification: [],
-    diagnostics: [],
+    health,
+    counts: {
+      asked: items.length,
+      changed: 0,
+      decided: 0,
+      iterations: 0,
+      contracts: 0,
+      decisions: 0,
+      changes: 0,
+      verification: 0,
+      diagnostics: 0,
+    },
+    previews: items,
+    aggregates: {
+      schemaVersion: "change-observatory:portfolio-aggregates:v1",
+      activeWorkflows: emptyBucket(),
+      blockers: emptyBucket(),
+      risks: emptyBucket(),
+      budgets: emptyBucket(),
+      dependencies: emptyBucket(),
+      releases: emptyBucket(),
+    },
   };
 }
 

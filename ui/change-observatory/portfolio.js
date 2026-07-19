@@ -59,11 +59,28 @@ export function normalizePortfolioSummary(payload) {
 
   const availableProjectCount = projects.filter((project) => project.status === "available").length;
   const unavailableProjectCount = projects.length - availableProjectCount;
+  const needsAttentionProjectCount = projects.filter(
+    (project) => project.status === "available" && project.health === "needs_attention",
+  ).length;
+  const reviewProjectCount = projects.filter(
+    (project) => project.status === "available" && project.health === "review",
+  ).length;
+  const expectedStatus = unavailableProjectCount > 0 || needsAttentionProjectCount > 0
+    ? "degraded"
+    : "ready";
+  const expectedHealth = unavailableProjectCount > 0 || needsAttentionProjectCount > 0
+    ? "needs_attention"
+    : reviewProjectCount > 0
+      ? "review"
+      : "ready";
   if (
     payload.projectCount !== projects.length
     || payload.availableProjectCount !== availableProjectCount
     || payload.unavailableProjectCount !== unavailableProjectCount
-    || payload.status !== (unavailableProjectCount === 0 ? "ready" : "degraded")
+    || payload.needsAttentionProjectCount !== needsAttentionProjectCount
+    || payload.reviewProjectCount !== reviewProjectCount
+    || payload.status !== expectedStatus
+    || payload.health !== expectedHealth
   ) {
     throw new TypeError("The portfolio summary counts do not match its project list.");
   }
@@ -72,9 +89,12 @@ export function normalizePortfolioSummary(payload) {
     schemaVersion: PORTFOLIO_VIEW_SCHEMA,
     generatedAt: normalizeTimestamp(payload.generatedAt),
     status: payload.status,
+    health: payload.health,
     projectCount: projects.length,
     availableProjectCount,
     unavailableProjectCount,
+    needsAttentionProjectCount,
+    reviewProjectCount,
     projects: Object.freeze(projects),
   });
 }

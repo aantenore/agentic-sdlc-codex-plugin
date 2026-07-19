@@ -204,6 +204,89 @@ test("forwards reviewed global privacy and operational policy to every project r
   assert.ok(received.every((options) => options.operationalPolicy === operationalPolicy));
 });
 
+test("summary and readiness never build full detail and the 64-project LRU stays bounded", async (t) => {
+  const fixture = await createLargePortfolioFixture(t, 64);
+  const events = [];
+  let fullBuilds = 0;
+  let liveRuntimes = 0;
+  let maximumLiveRuntimes = 0;
+  let disposedRuntimes = 0;
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    maxCachedProjects: 8,
+    onCacheEvent(event) {
+      events.push(event.type);
+    },
+    createProjectRuntime({ projectId }) {
+      liveRuntimes += 1;
+      maximumLiveRuntimes = Math.max(maximumLiveRuntimes, liveRuntimes);
+      // This retained allocation makes an unbounded runtime cache visible to
+      // the behavioral live-runtime counter without relying on RSS/GC timing.
+      let retained = Buffer.alloc(256 * 1024, 0x61);
+      let disposed = false;
+      return fakeProjectRuntime(projectId, {
+        async getRepresentation() {
+          fullBuilds += 1;
+          return {
+            body: Buffer.from('{"schemaVersion":"change-observatory:view:v1"}\n'),
+            etag: '"sha256-unexpected"',
+          };
+        },
+        async dispose() {
+          if (disposed) return;
+          disposed = true;
+          retained = null;
+          liveRuntimes -= 1;
+          disposedRuntimes += 1;
+        },
+      });
+    },
+  });
+
+  const readyRepresentation = await runtime.assertReady();
+  const summary = JSON.parse(readyRepresentation.body);
+  const cache = runtime.cacheSnapshot();
+
+  assert.equal(summary.projectCount, 64);
+  assert.equal(fullBuilds, 0);
+  assert.equal(cache.limit, 8);
+  assert.equal(cache.size, 8);
+  assert.equal(cache.evictions, 56);
+  assert.ok(maximumLiveRuntimes <= 12, `maximum live runtimes was ${maximumLiveRuntimes}`);
+  assert.ok(events.includes("portfolio_miss"));
+  assert.ok(events.includes("portfolio_evict"));
+  assert.ok(events.includes("portfolio_dispose"));
+
+  await runtime.dispose();
+  assert.equal(liveRuntimes, 0);
+  assert.equal(disposedRuntimes, 64);
+  assert.equal(runtime.cacheSnapshot().size, 0);
+});
+
+test("the real project runtime keeps the full normalizer lazy", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  let fullBuilds = 0;
+  const runtime = await createPortfolioRuntime({
+    portfolioRoot: fixture.root,
+    manifestPath: "portfolio.json",
+    buildViewModel() {
+      fullBuilds += 1;
+      throw new Error("FULL-DETAIL-BUILDER-CANARY");
+    },
+  });
+  t.after(() => runtime.dispose());
+
+  const summary = JSON.parse((await runtime.getSummaryRepresentation()).body);
+  assert.equal(summary.projectCount, 3);
+  assert.equal(fullBuilds, 0);
+  await assert.rejects(
+    () => runtime.getProjectDetailRepresentation("alpha"),
+    /FULL-DETAIL-BUILDER-CANARY/u,
+  );
+  assert.equal(fullBuilds, 1);
+});
+
 async function createPortfolioFixture(t) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-portfolio-runtime-"));
   const root = await fs.realpath(temporary);
@@ -294,16 +377,71 @@ function fakeProjectRuntime(projectId, overrides = {}) {
   return {
     redactionPolicy: Object.freeze({}),
     async getRepresentation() {
+      if (overrides.getRepresentation) return overrides.getRepresentation();
       return {
         body: Buffer.from(`${JSON.stringify(model)}\n`, "utf8"),
         etag: '"sha256-fake"',
       };
     },
+    async getPortfolioSummary() {
+      if (overrides.getPortfolioSummary) return overrides.getPortfolioSummary();
+      return compactProjectSummary(projectId);
+    },
     async readSource(relativePath) {
       if (overrides.readSource) return overrides.readSource(relativePath);
       return { schemaVersion: "change-observatory:source:v1", data: { projectId } };
     },
+    async dispose() {
+      await overrides.dispose?.();
+    },
   };
+}
+
+function compactProjectSummary(projectId) {
+  const emptyBucket = () => ({ count: 0, items: [], truncated: false });
+  return {
+    schemaVersion: "change-observatory:portfolio-project-summary:v1",
+    project: { id: projectId, name: `${projectId} project`, branch: "main" },
+    health: "ready",
+    counts: {
+      asked: 0,
+      changed: 0,
+      decided: 0,
+      iterations: 0,
+      contracts: 0,
+      decisions: 0,
+      changes: 0,
+      verification: 0,
+      diagnostics: 0,
+    },
+    previews: [],
+    aggregates: {
+      schemaVersion: "change-observatory:portfolio-aggregates:v1",
+      activeWorkflows: emptyBucket(),
+      blockers: emptyBucket(),
+      risks: emptyBucket(),
+      budgets: emptyBucket(),
+      dependencies: emptyBucket(),
+      releases: emptyBucket(),
+    },
+  };
+}
+
+async function createLargePortfolioFixture(t, count) {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-portfolio-large-"));
+  const root = await fs.realpath(temporary);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const projects = [];
+  for (let index = 0; index < count; index += 1) {
+    const id = `project-${String(index).padStart(2, "0")}`;
+    await fs.mkdir(path.join(root, "projects", id), { recursive: true });
+    projects.push({ id, path: `projects/${id}` });
+  }
+  await fs.writeFile(path.join(root, "portfolio.json"), `${JSON.stringify({
+    schema_version: "portfolio-manifest:v1",
+    projects,
+  })}\n`, "utf8");
+  return { root };
 }
 
 function escapeRegExp(value) {

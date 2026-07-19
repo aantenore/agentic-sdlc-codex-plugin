@@ -107,11 +107,44 @@ test("serves authenticated portfolio summary, detail, and isolated source repres
   assert.ok(requestMetric.series.some(
     (series) => series.labels.route === "portfolio" && series.value >= 1,
   ));
+  const cacheMetric = metrics.json.snapshot.metrics.find(
+    (metric) => metric.name === "observatory_model_cache_events_total",
+  );
+  assert.ok(cacheMetric.series.some(
+    (series) => series.labels.event === "portfolio_miss" && series.value >= 1,
+  ));
   const support = await request(running, "/api/v1/support-bundle");
   assert.equal(
     support.json.sections.versions.modelSchema,
     "change-observatory:portfolio:v1",
   );
+});
+
+test("validates portfolio concurrency before binding and disposes cached runtimes on close", async (t) => {
+  const fixture = await createPortfolioFixture(t);
+  await assert.rejects(
+    () => startObservatoryServer({
+      projectRoot: fixture.root,
+      portfolioManifest: "portfolio.json",
+      portfolioConcurrency: 5,
+    }),
+    /between 1 and 4/u,
+  );
+
+  let disposed = 0;
+  const running = await startObservatoryServer({
+    projectRoot: fixture.root,
+    portfolioManifest: "portfolio.json",
+    createProjectRuntime({ projectId }) {
+      return disposableProjectRuntime(projectId, () => {
+        disposed += 1;
+      });
+    },
+  });
+  const ready = await request(running, "/api/v1/ready");
+  assert.equal(ready.statusCode, 200);
+  await running.close();
+  assert.equal(disposed, 3);
 });
 
 test("enforces auth, Host, read-only methods, and exact portfolio queries", async (t) => {
@@ -272,4 +305,54 @@ function collectStringFields(value, field) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function disposableProjectRuntime(projectId, onDispose) {
+  const emptyBucket = () => ({ count: 0, items: [], truncated: false });
+  let disposed = false;
+  return {
+    redactionPolicy: Object.freeze({}),
+    async getPortfolioSummary() {
+      return {
+        schemaVersion: "change-observatory:portfolio-project-summary:v1",
+        project: { id: projectId, name: projectId, branch: "main" },
+        health: "ready",
+        counts: {
+          asked: 0,
+          changed: 0,
+          decided: 0,
+          iterations: 0,
+          contracts: 0,
+          decisions: 0,
+          changes: 0,
+          verification: 0,
+          diagnostics: 0,
+        },
+        previews: [],
+        aggregates: {
+          schemaVersion: "change-observatory:portfolio-aggregates:v1",
+          activeWorkflows: emptyBucket(),
+          blockers: emptyBucket(),
+          risks: emptyBucket(),
+          budgets: emptyBucket(),
+          dependencies: emptyBucket(),
+          releases: emptyBucket(),
+        },
+      };
+    },
+    async getRepresentation() {
+      return {
+        body: Buffer.from('{"schemaVersion":"change-observatory:view:v1"}\n'),
+        etag: '"sha256-test"',
+      };
+    },
+    async readSource() {
+      return { schemaVersion: "change-observatory:source:v1", data: {} };
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      onDispose();
+    },
+  };
 }
