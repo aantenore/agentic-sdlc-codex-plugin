@@ -536,7 +536,11 @@ test("audit store lock contention is bounded and fail-open without reclaiming un
     outcome.reason_codes?.includes("mutation.audit_sink_unavailable")).length, 1);
 });
 
-test("audit lock cleanup preserves a replacement and the primary persistence error", (t) => {
+test("audit lock cleanup preserves a replacement and the primary persistence error", {
+  skip: process.platform === "win32"
+    ? "Windows does not portably allow replacing an open lock file"
+    : false,
+}, (t) => {
   const root = fixture(t, "audit-lock-release-tamper");
   const governanceRoot = path.join(root, ".sdlc", "governance");
   const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));

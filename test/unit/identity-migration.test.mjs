@@ -227,7 +227,11 @@ test("identity migration never removes a pre-existing deterministic lock temp", 
   assert.equal(fs.existsSync(path.join(canonicalRoot, plan.execution_descriptor.lock_path)), false);
 });
 
-test("identity migration preserves a replaced journal temp and never publishes it", (t) => {
+test("identity migration preserves a replaced journal temp and never publishes it", {
+  skip: process.platform === "win32"
+    ? "Windows does not portably allow replacing an open journal file"
+    : false,
+}, (t) => {
   const project = fixtureProject(t);
   const before = snapshotTree(path.join(project, ".sdlc"));
   const plan = planIdentityMigration({
