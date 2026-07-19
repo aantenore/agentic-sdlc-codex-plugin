@@ -76,7 +76,7 @@ test("runtime registry dispatches help, presets, completion, and Observatory boo
   assert.match(missingError.error.message, /--portfolio-manifest/u);
 });
 
-test("portfolio status emits compact path-free JSON and exits without a server token", () => {
+test("portfolio status accepts physical Windows path aliases and emits compact path-free JSON", () => {
   const root = fs.realpathSync(temporaryProject("portfolio-status"));
   for (const id of ["alpha", "beta"]) {
     const projectRoot = path.join(root, "projects", id, ".sdlc");
