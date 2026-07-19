@@ -73,6 +73,7 @@ test("operations expose closed-cardinality request, cache, and readiness metrics
   operations.recordCacheEvent({ type: "request" });
   operations.recordCacheEvent({ type: "build_start" });
   operations.recordCacheEvent({ type: "build_success" });
+  operations.recordCacheEvent({ type: "portfolio_dispose_deferred" });
   operations.recordCacheEvent({ type: "customer-controlled-event" });
   operations.recordRequest({ requestState: model, route: "model", statusCode: 304 });
 
@@ -102,6 +103,9 @@ test("operations expose closed-cardinality request, cache, and readiness metrics
   }), 1);
   assert.equal(metricValue(metrics, "observatory_model_cache_events_total", {
     event: "build_success",
+  }), 1);
+  assert.equal(metricValue(metrics, "observatory_model_cache_events_total", {
+    event: "portfolio_dispose_deferred",
   }), 1);
   assert.equal(metricValue(metrics, "observatory_readiness_checks_total", {
     outcome: "ready",
