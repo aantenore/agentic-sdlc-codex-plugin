@@ -172,7 +172,7 @@ jobs:
             --no-package-lock \
             --cache "$cache_root" \
             --prefix "$install_root" \
-            "$ARCHIVE_PATH"
+            "file:$ARCHIVE_PATH"
           sbom_source="$install_root/node_modules/agentic-sdlc-codex-plugin"
           test -d "$sbom_source"
           test ! -L "$sbom_source"

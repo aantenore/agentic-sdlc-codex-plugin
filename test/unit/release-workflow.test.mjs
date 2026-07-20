@@ -164,6 +164,9 @@ function releaseContractErrors(source) {
   }
   if (!/scripts\/verify-release-package\.mjs/u.test(verify)
     || !/scripts\/verify-release-package\.mjs/u.test(packageJob)) errors.push("policy verifier");
+  if (!/npm install[\s\S]*"file:\$ARCHIVE_PATH"/u.test(packageJob)) {
+    errors.push("SBOM local archive spec");
+  }
   if (!/verification\.value\?\.smoke\?\.installer_v2_plan !== "passed"/u.test(packageJob)
     || !/verification\.value\?\.smoke\?\.installer_v2_zero_write !== true/u.test(packageJob)) {
     errors.push("installer v2 seal gate");
@@ -384,6 +387,11 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
         "https://raw.githubusercontent.com/anchore/syft/main/install.sh",
       ),
       expected: "SBOM gates",
+    },
+    {
+      name: "archive path parsed as a Git shorthand",
+      source: workflow.replace('"file:$ARCHIVE_PATH"', '"$ARCHIVE_PATH"'),
+      expected: "SBOM local archive spec",
     },
     {
       name: "implicit setup-node cache",
