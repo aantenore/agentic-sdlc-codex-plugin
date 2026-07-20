@@ -2,17 +2,19 @@
 
 ## In plain English
 
-Agentic SDLC helps people understand and trust work performed by a coding agent. It turns a request into an agreed scope, records the important decisions and contracts, verifies the delivered files, and preserves enough evidence for someone else to reconstruct what happened later.
+**The problem:** when a coding agent works on a software project, it can be hard to tell what it understood, what it was allowed to change, why it made each decision, or whether the result really works.
 
-**Example:** a product owner asks Codex to assess an existing service and produce an architecture report. The plugin records what was requested, what Codex inferred, the approved boundaries, the report it created, and the checks it ran. The bundled Change Observatory then presents that history as a readable timeline for both technical and non-technical reviewers.
+**What Agentic SDLC changes:** it turns that work into a reviewable journey. The goal and boundaries are agreed before execution, important decisions and evidence stay with the project, delivered files are checked, and a local visual app explains the history. A product owner can understand the outcome without reading code, while an engineer can still inspect the underlying evidence.
 
-| Feature | What it means for a team |
+**Example:** a product owner asks Codex to assess an existing service and produce an architecture report. The plugin records the request, Codex's understanding, the approved boundaries, the report, and the checks that were actually run. Change Observatory then presents that history as a readable local timeline.
+
+| Feature | Practical benefit |
 | --- | --- |
-| Guided project understanding | Stakeholders can correct facts and assumptions before they shape the work. |
-| Explicit scope and contracts | The agent's freedom stays inside a visible, agreed boundary. |
-| Verified deliverables | A completed task includes the real output and evidence of the checks performed on it. |
-| Change Observatory | Reviewers can see what was asked, decided, changed, and verified without reading raw internal records. |
-| Repository-local lineage | Project history travels with the code instead of living only in a transient chat. |
+| Project understanding before work | People can correct facts and assumptions before they influence the result. |
+| Visible work boundary | The goal, files, tools, limits, and exclusions are clear before execution. |
+| Evidence-backed completion | The delivered file is linked to the checks actually run, not just an agent's claim that it is done. |
+| Change Observatory | A local visual timeline shows what was asked, decided, changed, and verified. |
+| Project memory that travels with the code | Another person or agent can resume later without relying on a disappearing chat. |
 
 ## Technical summary
 
