@@ -174,6 +174,11 @@ function releaseContractErrors(source) {
   if ((verify.match(/npm pack /gu) ?? []).length !== 1
     || (packageJob.match(/npm pack /gu) ?? []).length !== 1
     || /npm pack /u.test(publish)) errors.push("single-build handoff");
+  if (!/pack_report="\$RUNNER_TEMP\/npm-pack\.json"/u.test(packageJob)
+    || !/test ! -e "\$pack_report"/u.test(packageJob)
+    || !/> "\$pack_report"/u.test(packageJob)
+    || !/' "\$pack_report"\)"/u.test(packageJob)
+    || /release\/npm-pack\.json/u.test(packageJob)) errors.push("isolated pack report");
   if (!packageJob.includes(`syft/releases/download/v${SYFT_PINS.version}/`)
     || !packageJob.includes(SYFT_PINS.amd64)
     || !packageJob.includes(SYFT_PINS.arm64)
@@ -394,6 +399,14 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       expected: "SBOM local archive spec",
     },
     {
+      name: "npm pack report stored inside the sealed bundle",
+      source: workflow.replace(
+        'pack_report="$RUNNER_TEMP/npm-pack.json"',
+        'pack_report="release/npm-pack.json"',
+      ),
+      expected: "isolated pack report",
+    },
+    {
       name: "implicit setup-node cache",
       source: workflow.replace("          package-manager-cache: false\n", ""),
       expected: "setup-node cache policy",
@@ -540,7 +553,7 @@ test("the exact inline seal and publish validators accept a valid fixture and re
     assert.match(changedArchive.stderr, /asset does not match its sealed record/u);
     writeFileSync(archivePath, Buffer.from("immutable release archive fixture\n"));
 
-    const unexpectedPath = path.join(releaseRoot, "unexpected.txt");
+    const unexpectedPath = path.join(releaseRoot, "npm-pack.json");
     writeFileSync(unexpectedPath, "unexpected\n");
     const unexpectedEntry = validate();
     assert.notEqual(unexpectedEntry.status, 0);

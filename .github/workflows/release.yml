@@ -137,13 +137,15 @@ jobs:
           event_commit="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
           test "$tag_commit" = "$event_commit"
           mkdir release
-          npm pack --json --ignore-scripts --pack-destination release > release/npm-pack.json
+          pack_report="$RUNNER_TEMP/npm-pack.json"
+          test ! -e "$pack_report"
+          npm pack --json --ignore-scripts --pack-destination release > "$pack_report"
           archive_name="$(node --input-type=module -e '
             import fs from "node:fs";
             const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
             if (!Array.isArray(report) || report.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._+-]*\.tgz$/u.test(report[0]?.filename ?? "")) process.exit(1);
             process.stdout.write(report[0].filename);
-          ' release/npm-pack.json)"
+          ' "$pack_report")"
           archive="release/$archive_name"
           test -f "$archive"
           node scripts/verify-release-package.mjs \
