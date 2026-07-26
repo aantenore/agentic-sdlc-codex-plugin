@@ -50,6 +50,9 @@ excluded.
   publication, and deployment differ.
 - New black-box tests reproduce a novice journey without internal IDs in the
   conversation layer and prove the deterministic lifecycle handoff.
+- Action evidence that changes in a later commit is now verified against the
+  exact Git revision bound to its receipt. The gate keeps the historical proof
+  and reports the later change instead of incorrectly treating it as tampering.
 
 ## Why was it decided?
 
@@ -78,6 +81,8 @@ the published JSON help shape remain unchanged.
 - Full `npm test`: 986/986 passed. An earlier full run had one subprocess
   `ETIMEDOUT`; that exact test passed alone in 1.65 seconds before the clean full
   rerun passed.
+- Delivery-autonomy end-to-end regression: 10/10 passed, including verification
+  of a changed working-tree file against the exact receipt-bound Git revision.
 - `npm run doctor`: all available checks passed.
 - `npm pack --dry-run --json`: passed; 213 package entries.
 - Real package verification: archive structure, allowlist, metadata consistency,
@@ -87,7 +92,8 @@ the published JSON help shape remain unchanged.
   basic-auth, JWT, URL-userinfo, private-key, or credential-value pattern was
   found. Generic high-entropy candidates were classified as canonical hashes,
   record IDs, paths, or prose rather than credentials.
-- Strict story gate: passed after this approved evidence was linked. The
+- Strict story gate: passed after this approved evidence was linked. A later
+  documentation commit is verified from its exact earlier Git revision; the
   remaining findings are non-blocking historical or pre-change warnings.
 - Remote CI and post-merge `main` verification are completed during the governed
   publication steps and reported with the final delivery.
