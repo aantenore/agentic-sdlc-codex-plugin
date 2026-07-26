@@ -32,28 +32,28 @@ Internal names may appear under **Technical details (optional)**. They are audit
 
 For implementation work, Codex follows one visible order:
 
-1. **Preview and normalize**  
+1. **Preview and normalize**
    Codex restates the outcome, project, destination, evidence boundary, and missing facts. This is read-only planning. The task has not started.
 
-2. **Agree the requirement**  
+2. **Agree the requirement**
    You review the desired outcome, observable success criteria, non-goals, constraints, integrations, and the most independence this requirement may permit.
 
-3. **Decompose only when needed**  
+3. **Decompose only when needed**
    A small bounded change can remain one story. Larger work receives a proposed breakdown and dependencies before they become part of the plan.
 
-4. **Agree the output and work brief**  
+4. **Agree the output and work brief**
    Codex shows the concrete files, tools, tests, branches or local target, verification, protected actions, and rollback where relevant. “Work brief” is the plain-language view of the formal contract.
 
-5. **Choose autonomy for this one delivery**  
+5. **Choose autonomy for this one delivery**
    Every new pull request, existing pull request, or local release gets a fresh choice. A choice from an earlier delivery is never reused.
 
-6. **Start once**  
+6. **Start once**
    Only after the preceding content is approved does Codex make the task-start decision. An explicit start confirmation, when required, completes that same start; it is not a second planning phase.
 
-7. **Implement and test**  
+7. **Implement and test**
    Codex changes only the displayed paths, runs the agreed checks, records evidence, and validates the result.
 
-8. **Finish at the named destination**  
+8. **Finish at the named destination**
    Codex creates or updates the one approved PR, or completes the local-only release and its smoke test. Merge, remote deployment, and production remain separate unless they were explicitly included and approved.
 
 If a material requirement, branch, path, tool, budget, environment, or destination changes, Codex shows the changed boundary before continuing.
