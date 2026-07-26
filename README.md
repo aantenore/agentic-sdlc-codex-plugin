@@ -22,10 +22,13 @@ Agentic SDLC 0.12.0 gives Codex a guided way to understand an existing software 
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
+You talk to Codex in normal language. Codex turns that request into structured input; the deterministic CLI checks the agreed requirement, work brief, permissions, and evidence. A new user does not need to run the low-level lifecycle commands manually.
+
 ## Documentation Map
 
+- [Getting Started](docs/getting-started.md) — choose an assessment, a new pull request, an existing pull request, or a local-only result and see exactly what you will approve.
 - [Documentation home](docs/README.md) — choose the right guide without knowing the internal record names.
-- [How It Works](docs/how-it-works.md) — the complete two-checkpoint journey, state transitions, authorization, verification, and recovery.
+- [How It Works](docs/how-it-works.md) — advanced detail about checkpoints, state transitions, authorization, verification, and recovery.
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
 - [Configuration Safety](docs/configuration-safety.md) — why project behavior is pinned, how to preview an upgrade, and how to recover from drift without hidden policy changes.
 - [Token Efficiency](docs/token-efficiency.md) — compact derived JSON, the RTK command gateway, lifecycle observations, and budget-safe savings telemetry.
@@ -74,21 +77,49 @@ the project configures and explicitly trusts a custom provider command. See
 [Portable Installation](docs/portable-install.md) for the user-global scope,
 runtime trust boundary, and update behavior.
 
-Open the project you want to assess in a **new Codex task**, then ask naturally:
+### Start a new Codex task
 
-```text
-Contextualize this project and prepare an initial technical assessment.
-```
+Open the target project in a **new Codex task** and choose the request that matches the outcome you want:
 
-The dedicated `Project Assessment` skill is visible in Codex and is also selected implicitly from equivalent requests. Normal use is conversational: the low-level CLI commands are available for automation and recovery, but the user does not need to orchestrate them manually.
+| Goal | Starter request |
+| --- | --- |
+| Understand the project and receive an assessment | `Contextualize this project and prepare an initial technical assessment.` |
+| Agree a new requirement and deliver it as a new PR | `Turn this new requirement into an agreed work brief, implement it, verify it, and open a new pull request.` |
+| Continue one PR that already exists | `Continue this existing pull request, verify the requested changes, and update the PR without creating a new one.` |
+| Build and verify only on this machine | `Build and verify this result only on my local machine. Do not push, open a pull request, deploy, or use production.` |
+| Read the recorded project history visually | `Open the Change Observatory and explain this project's recorded delivery lineage.` |
 
-To inspect an existing `.sdlc` history visually, ask in the same natural style:
+Add the actual requirement, PR URL, desired local destination, exclusions, or acceptance criteria after the starter. Codex preserves information you already supplied and asks only for material gaps.
 
-```text
-Open the Change Observatory and explain this project's recorded delivery lineage.
-```
+For implementation work, the order is deliberately linear:
 
-The installed `Change Observatory` skill resolves the plugin-local launcher directly, so a Codex plugin installation does not depend on a global shell command.
+1. preview and normalize the request without starting work;
+2. agree the requirement and success criteria;
+3. decompose it only when needed;
+4. agree the output and plain-language work brief;
+5. make a fresh autonomy choice for this one PR or local release;
+6. start the task once, then implement and test;
+7. create or update the named PR, or verify the local-only release.
+
+Before showing the autonomy choices, Codex explains whether the most independent option can really be used. If this installation cannot digitally verify who approved the delivery, option 3 is reduced to **autonomy with checkpoints**; this is disclosed before you choose.
+
+### Know where work happens
+
+| Boundary | What it means |
+| --- | --- |
+| Codex conversation | Codex understands the request, explains the plan, and asks for decisions. |
+| Deterministic CLI | The CLI validates structured state, permissions, limits, and evidence; it does not interpret the conversation. |
+| Local execution and data | Project reads, approved local writes, tests, `.sdlc/` records, and a local release stay on the named machine and paths. |
+| Repository publication | Push and PR create/update use the network and only the displayed repository and branches. |
+| Deployment and production | A PR or local release never implies a remote deployment, production access, or secret use. Those need a separate exact decision. |
+
+A **new PR** must show the repository, base branch, new head branch, allowed files, tests, push, and PR creation. An **existing PR** must show the exact PR and its current repository, base, head, and SHA; the workflow updates that PR and does not create another one. A **local-only result** excludes push, PR actions, remote deployment, and production and includes a smoke test plus rollback.
+
+If the workflow pauses, ask Codex: `Why is Agentic SDLC blocked? Explain the next safe action without changing anything.` The read-only `agentic-sdlc status` command gives the same one-next-step orientation for operators. See [Getting Started](docs/getting-started.md#when-the-workflow-pauses) for recovery.
+
+The dedicated `Project Assessment` and `Change Observatory` skills are visible in Codex and can also be selected implicitly from equivalent requests. The Observatory skill resolves the plugin-local launcher directly, so a Codex plugin installation does not depend on a global shell command.
+
+If you are new to the plugin, continue with [Getting Started](docs/getting-started.md). The sections below are reference material for operators and maintainers.
 
 ## Self-service CLI
 

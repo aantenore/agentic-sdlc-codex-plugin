@@ -4,8 +4,9 @@ This page is the documentation map. Start with the goal that matches what you wa
 
 ## Start here
 
+- [Getting started](getting-started.md) — choose a natural-language starter, understand what you will approve, and distinguish a new PR, an existing PR, and a local-only result.
 - [Project overview](../README.md) — what the plugin does, installation, the normal two-checkpoint experience, and maintainer commands.
-- [How it works](how-it-works.md) — the end-to-end lifecycle from project context and `requirement:v2` agreement through per-delivery autonomy, execution, verification, and release evidence.
+- [How it works](how-it-works.md) — the advanced lifecycle from project context and requirement agreement through per-delivery autonomy, execution, verification, and release evidence.
 - [Limits and metering](limits-and-metering.md) — how requirement ceilings and explicit pull-request or local-release choices constrain actions, files, capabilities, time, steps, tokens, calls, cost, and custom metrics.
 - [Change Observatory](change-observatory.md) — open and interpret the bundled visual request/change/decision lineage.
 - [Token efficiency](token-efficiency.md) — reduce derived JSON and shell-output context without changing canonical evidence.
@@ -17,6 +18,10 @@ This page is the documentation map. Start with the goal that matches what you wa
 
 | I want to... | Read this | What it answers |
 |---|---|---|
+| Start without learning internal record names | [Getting started](getting-started.md) | What to ask Codex, the novice journey, and the decisions you will see |
+| Deliver a new requirement as a new pull request | [Getting started — New pull request](getting-started.md#new-requirement-and-new-pull-request) | Requirement, work brief, branch boundary, autonomy, implementation, verification, and PR creation |
+| Continue a pull request that already exists | [Getting started — Existing pull request](getting-started.md#continue-an-existing-pull-request) | How the exact PR is identified and updated without creating another one |
+| Produce a result only on this machine | [Getting started — Local-only result](getting-started.md#local-only-result-or-release) | Which local writes and checks are allowed and which network/production actions remain excluded |
 | Understand the normal user journey | [How it works](how-it-works.md) | What happens at each checkpoint and which records are created |
 | Run or explain an assessment | [Assessment interactions](agent-interactions.md) | What Codex asks, what the user must answer, and concrete examples |
 | Choose autonomy for a requirement, pull request, or local release | [Limits and metering](limits-and-metering.md) | Requirement ceiling, per-delivery selection, local rollback, exception boundaries, and resource limits |
@@ -34,11 +39,18 @@ This page is the documentation map. Start with the goal that matches what you wa
 
 ## Recommended reading paths
 
+### New to the plugin
+
+1. [Getting started](getting-started.md)
+2. [How it works](how-it-works.md), only when you need the protocol details
+3. [Self-service CLI](self-service-cli.md), only when operating or recovering from the command line
+
 ### User approving work
 
-1. [How it works](how-it-works.md)
-2. [Assessment interactions](agent-interactions.md)
-3. [Limits and metering](limits-and-metering.md)
+1. [Getting started](getting-started.md)
+2. [How it works](how-it-works.md)
+3. [Assessment interactions](agent-interactions.md)
+4. [Limits and metering](limits-and-metering.md)
 
 ### Operator configuring controls
 

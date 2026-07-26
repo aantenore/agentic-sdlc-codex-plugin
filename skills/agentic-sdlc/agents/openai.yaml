@@ -1,9 +1,9 @@
 interface:
   display_name: "Agentic SDLC"
-  short_description: "Contract-driven SDLC with shared KB"
+  short_description: "Agree requirements and deliver verified PRs or local results"
   brand_color: "#0EA5E9"
   icon_small: "./assets/icon-small.png"
   icon_large: "./assets/icon-large.png"
-  default_prompt: "Use $agentic-sdlc to initialize and govern this project with contract-driven SDLC."
+  default_prompt: "Turn this new requirement into an agreed work brief, implement it, verify it, and open a new pull request."
 policy:
   allow_implicit_invocation: true
