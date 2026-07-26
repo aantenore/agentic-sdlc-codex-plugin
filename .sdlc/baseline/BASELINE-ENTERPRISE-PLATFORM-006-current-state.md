@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refresh the approved Agentic SDLC 0.12.0 project snapshot after binding the unchanged enterprise benchmark to the already required Ubuntu Node 24 check and adding fail-open regression guards; supported operating systems, Node versions, and performance thresholds remain unchanged.
+Current Agentic SDLC 0.12.0 project snapshot before the novice requirement-to-delivery journey changes; covers the plugin manifest, conversational guidance, deterministic CLI, help catalog, documentation, and regression tests without changing the approved enterprise scope.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.
@@ -12,7 +12,7 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 ## Architecture And Component Signals
 - Source root: lib
 - Source root: bin
-- README.md: Agentic SDLC Codex Plugin > Documentation Map > Quick Start > Self-service CLI > Change Observatory > How It Works > What The Two Checkpoints Mean > Autonomy Is Negotiated Per Requirement And Selected Per Delivery > CodeBurn Versus Exact Metering > RTK Context Optimization > Canonical Output Formats > Generation And Layered Verification Receipts
+- README.md: Agentic SDLC Codex Plugin > In plain English > Technical summary > Documentation Map > Quick Start > Self-service CLI > Change Observatory > How It Works > What The Two Checkpoints Mean > Autonomy Is Negotiated Per Requirement And Selected Per Delivery > CodeBurn Versus Exact Metering > RTK Context Optimization
 - docs/architecture.md: Architecture > Core Design Choices > Local Observability And Integrity Boundary > Command-Scoped Canonical Queries > Existing Project Baseline > Assessment Control Plane > Configurable Workflow Plane > Autonomy Control Plane > Intent Routing Layer > Contract Model > Approval Governance > Capability Discovery Layer
 - docs/agent-interactions.md: Assessment Interactions > Activation > Exactly Two Normal Checkpoints > Contract For Every Question > Checkpoint 1 — Project Context > Required question > Prepare The Immutable Proposal > Checkpoint 2 — Combined Proposal And Complete Tranche > Budget in the same checkpoint > Required question > Internal Command Choreography > Requirement And Story Lineage
 - docs/codeburn-metering.md: CodeBurn advisory metering adapter > What each input means > Shell-free command configuration > Start snapshot > Current snapshot and delta > Persisted evidence > Limitations and enforcement boundary > Library API
@@ -24,12 +24,12 @@ Codex plugin for contract-driven delivery, verified assessments, and visual proj
 
 ## Key Files
 - .github/workflows/ci.yml (6d07ecd049dd1646bbde89cd4c4269563e523a49b766b83a7125cb0cf6c62b91)
-- .github/workflows/release.yml (5d1753f52033714124ab0af9edded4181b7a5600a64027ed962452cb254c841a)
+- .github/workflows/release.yml (d7364d820d631871e4b41bb4aa8826861a92986bdaa63e20fe7b6314561e3d4c)
 - package.json (14bc24e6e82c5e38a86348a801c524c834c9dd716c86b54290b0232cf7e1b09b)
-- README.md (0d45b8d6d8a09029e6fb230cf26e3a03284d5e558380b410bd7ce1548c8424c8)
+- README.md (a07ecbe6071e3d3177080dd3e3884898644944bba1f9e1e52b549c19daa305ee)
 
 ## Imported Documents
-- README.md: Agentic SDLC Codex Plugin; sections Agentic SDLC Codex Plugin > Documentation Map > Quick Start > Self-service CLI > Change Observatory > How It Works > What The Two Checkpoints Mean > Autonomy Is Negotiated Per Requirement And Selected Per Delivery > CodeBurn Versus Exact Metering > RTK Context Optimization > Canonical Output Formats > Generation And Layered Verification Receipts; evidence 0d45b8d6d8a09029e6fb230cf26e3a03284d5e558380b410bd7ce1548c8424c8
+- README.md: Agentic SDLC Codex Plugin; sections Agentic SDLC Codex Plugin > In plain English > Technical summary > Documentation Map > Quick Start > Self-service CLI > Change Observatory > How It Works > What The Two Checkpoints Mean > Autonomy Is Negotiated Per Requirement And Selected Per Delivery > CodeBurn Versus Exact Metering > RTK Context Optimization; evidence a07ecbe6071e3d3177080dd3e3884898644944bba1f9e1e52b549c19daa305ee
 - docs/architecture.md: Architecture; sections Architecture > Core Design Choices > Local Observability And Integrity Boundary > Command-Scoped Canonical Queries > Existing Project Baseline > Assessment Control Plane > Configurable Workflow Plane > Autonomy Control Plane > Intent Routing Layer > Contract Model > Approval Governance > Capability Discovery Layer; evidence 460fa1f28a61bd51567c4325c406ae10f6b5866e2e04e97911673822c11484bf
 - docs/product-assessment.md: Product Assessment: Guided Project Assessment Journey; sections Product Assessment: Guided Project Assessment Journey > Executive Verdict > Before The Change > Target After The Complete Change Set > Assessment Scope > Product Strengths Before The Change > Pre-Change Product Gaps > Target Product Behavior > Checkpoint 1: Project Context > Checkpoint 2: Combined Work Proposal > Execution And Delivery > Format Product Contract; evidence 0afac961db4dbc23a98b5c826e83959d6d2c1906192744be4fa5c57026318b99
 - docs/agent-interactions.md: Assessment Interactions; sections Assessment Interactions > Activation > Exactly Two Normal Checkpoints > Contract For Every Question > Checkpoint 1 — Project Context > Required question > Prepare The Immutable Proposal > Checkpoint 2 — Combined Proposal And Complete Tranche > Budget in the same checkpoint > Required question > Internal Command Choreography > Requirement And Story Lineage; evidence 9e072f578a9acc51a0007bc64207bf005b9d91c9ad7cfda568323432ff012311

@@ -15,6 +15,41 @@ For a request to contextualize an existing project and produce a technical, func
 
 Never store project contracts or project KB state inside the plugin installation. Treat the plugin as reusable method code only. Treat `<target-project>/.sdlc/` as the project source of truth. Treat `<target-project>/.sdlc/cache/` and `<target-project>/.sdlc/indexes/` as derived local optimization artifacts, never as canonical evidence.
 
+## Novice Front Door
+
+Users do not need to know the CLI command tree or the names of internal records. Recognize outcome-oriented requests such as:
+
+- “Turn this new requirement into an agreed work brief, implement it, verify it, and open a new pull request.”
+- “Continue this existing pull request, verify the requested changes, and update the PR without creating a new one.”
+- “Build and verify this result only on my local machine. Do not push, open a pull request, deploy, or use production.”
+
+Translate those requests into the governed workflow internally. In the primary conversation say “requirement”, “success criteria”, “work brief”, “working mode”, “new pull request”, “existing pull request”, or “local result”. Put route intent, record IDs, hashes, receipts, policy labels, and CLI commands under optional technical details.
+
+Keep these boundaries distinct:
+
+- **Codex conversation**: Codex understands the request, inspects evidence, explains choices, and prepares structured input.
+- **Deterministic CLI**: the CLI validates the agreed records and performs deterministic state transitions; it does not interpret the user's prose.
+- **Local execution and data**: project reads, approved local writes, tests, `.sdlc/` evidence, and local releases stay on the named machine and paths.
+- **Repository publication**: Git push and pull-request create or update are network operations for one named repository and branches.
+- **Deployment or production**: never follows from a pull request or local release; it needs a separate exact decision and target.
+
+### Required Delivery Order
+
+For generic implementation and release work, follow this order:
+
+1. **Preview and normalize the request** — identify the intended outcome, target project, delivery destination, evidence boundary, and missing information. This is read-only planning. Do not call `task start`.
+2. **Agree the requirement** — show the outcome, success criteria, non-goals, constraints, integrations, and maximum working independence in ordinary language; obtain the required approval.
+3. **Decompose only when needed** — propose stories and dependencies for work that cannot safely remain one bounded story; obtain approval before treating the breakdown as canonical.
+4. **Agree the output and work brief** — resolve the real output, tools, files, tests, contract, branches or local target, verification, and protected actions. Create and approve the contextualized contract only after this content is complete.
+5. **Choose autonomy for this delivery** — for every pull request or local release, ask again; never carry the choice over from earlier work. Before presenting the choices, explain whether option 3 can actually be effective; when this installation cannot digitally verify the approver, say that option 3 will be reduced to “Autonomy with checkpoints”.
+6. **Start once** — after the requirement, optional decomposition, work brief/contract, and current delivery choice are approved, make one logical `task start` decision. Never use an early speculative start as routing or discovery.
+7. **Implement and test** — claim the story, change only approved paths, run the agreed checks, record evidence, and validate the strict gate.
+8. **Finish at the named destination** — create/update and verify the one pull request, or complete and verify the local release. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
+
+For a **new pull request**, the displayed boundary must include the repository, base and new head branch, `pull_request.create`, allowed writes, tests, push, and whether later PR updates are included. For an **existing pull request**, resolve and show the exact PR, repository, base, head, current SHA, and allowed update actions; do not create another PR. For a **local-only result**, exclude Git push, pull-request actions, remote deployment, and production access, and require the exact local target, smoke test, and rollback.
+
+The dedicated assessment journey remains the exception described above: it packages its requirement, contract draft, budget, and any already named delivery choice into checkpoint 2, then applies and starts that unchanged proposal without exposing extra normal decisions.
+
 ## Workflow
 
 1. Identify the target project root. Default to the current workspace root unless the user names another project.
@@ -36,16 +71,7 @@ Never store project contracts or project KB state inside the plugin installation
 
    Treat `.sdlc/baseline/<id>.json` as proposed until the user explicitly confirms what is canonical. When asking for that confirmation, summarize the baseline contents in chat: inferred project summary, documents read, detected stack, important files, assumptions, and open questions. Do not tell the user to inspect `.sdlc/baseline/<id>.json` or `<id>-current-state.md` manually as the main approval path; links are supporting evidence only.
 
-3. When the user invokes Agentic SDLC for project context, discovery, analysis, design, implementation, validation, release, or other generic phase work, normalize the request into canonical route intent JSON and run `task start` before doing the work. For an assessment, follow the dedicated skill instead: approve the baseline, prepare and approve the immutable combined proposal, apply it idempotently, then run the proposal-bound task start. Do not treat natural-language requests such as "initial technical assessment" as permission to analyze directly. Do not keyword-match inside the CLI. Proceed only when the relevant start decision is `ready_to_execute`. That decision must include an approved requirement ceiling and, for implementation or release delivery, an explicit profile for the current pull request or local release. If it needs input or revision, explain the practical boundary before asking. If approval depends on files, summarize their meaningful content directly in chat.
-
-   ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs task start \
-     --root <target-project> \
-     --intent-json '<canonical-route-intent-json>' \
-     --json
-   ```
-
-   Use `--confirm-start` only after the user explicitly confirms the concrete task start or grants a persistent authorization that includes `task.start.confirm`. An agent or system confirmation must cite that grant with `--authorization <id>`. This is operational authorization, not formal SDLC approval.
+3. When the user invokes Agentic SDLC for project context, discovery, analysis, design, implementation, validation, release, or other generic phase work, normalize the request into canonical route intent JSON as a read-only preview. Do not call `task start` yet. Explain the intended outcome, delivery destination, known boundaries, and missing decisions in ordinary language. Do not keyword-match inside the CLI. For an assessment, follow the dedicated skill instead: approve the baseline, prepare and approve the immutable combined proposal, apply it idempotently, then make its one proposal-bound start decision. Do not treat natural-language requests such as "initial technical assessment" as permission to analyze directly.
 
 4. Select the SDLC phase: `discovery`, `analysis`, `design`, `implementation`, `validation`, or `release`.
 5. Agree the requirement before treating decomposition as canonical. New requirements use `requirement:v2` and move through `propose`, `approve`, `revise`, and `supersede`; `requirement create` is only a compatibility alias for a proposal and must not create approved authority. Capture outcome, acceptance criteria, non-goals, constraints, NFRs, integrations, source hashes, revision lineage, and the linked requirement execution profile. That profile sets an autonomy ceiling and is not an executable grant. A material change creates a new revision and invalidates downstream profiles bound to the prior hash.
@@ -163,7 +189,7 @@ Never store project contracts or project KB state inside the plugin installation
      --requirement REQ-001
    ```
 
-13. Before every delivery, ask for and obtain one fresh working-mode choice. Never inherit, infer, or reuse the choice from an earlier delivery, even when it implements the same approved requirement. First show only the concrete destination, files that may change, actions that remain protected, expiry, and material risks in normal product language. Do not lead with internal levels, policy modes, record IDs, hashes, or approval-evidence terminology. A delivery execution profile remains deliberately exact and non-reusable: one story, its one approved contract, and one concrete delivery. If several stories must ship together, agree an aggregation story and contract first.
+13. Before every delivery, ask for and obtain one fresh working-mode choice. Never inherit, infer, or reuse the choice from an earlier delivery, even when it implements the same approved requirement. First show only the concrete destination, files that may change, actions that remain protected, expiry, and material risks in normal product language. Before listing the choices, state whether the most independent option can actually be effective in this installation; if approver identity cannot be digitally verified, explain that selecting option 3 will produce the effective “Autonomy with checkpoints” mode. Do not lead with internal levels, policy modes, record IDs, hashes, or approval-evidence terminology. A delivery execution profile remains deliberately exact and non-reusable: one story, its one approved contract, and one concrete delivery. If several stories must ship together, agree an aggregation story and contract first.
 
    For a pull request, ask in the user's language. In Italian, use this copy:
 
@@ -187,7 +213,7 @@ Never store project contracts or project KB state inside the plugin installation
 
    Map the explicit answer internally only after the plain-language choice: `Guidato` → `supervised`, `Autonomia con controlli` → `checkpointed`, and `Autonomia completa entro questi limiti` → `bounded-autonomous`. The `--level` value is mandatory for every proposal and must come from this delivery's current answer; past choices may inform a recommendation but never supply the value. Keep the complete JSON record for machine processing and place its IDs, codes, hashes, exact actions, and policy calculations only after `Technical details (optional):` or `Dettagli tecnici (facoltativi):`.
 
-   For a pull request:
+   For a new pull request:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery propose \
@@ -207,9 +233,12 @@ Never store project contracts or project KB state inside the plugin installation
      --allow-action test.run \
      --allow-action git.commit \
      --allow-action git.push \
+     --allow-action pull_request.create \
      --allow-action pull_request.update \
      --json
    ```
+
+   For an existing pull request, resolve and display its exact repository, base, head, current SHA, and PR URL. Omit `pull_request.create`, keep only the approved update actions, and reject a profile that points to a different PR or changed material boundary.
 
    For a local release:
 
@@ -248,13 +277,13 @@ Never store project contracts or project KB state inside the plugin installation
      --id AUT-PR-184
    ```
 
-   When the user chooses the most independent option but this installation cannot digitally verify the approver, use this primary explanation in Italian:
+   Before the user chooses, when this installation cannot digitally verify the approver, use this primary explanation in Italian:
 
-   > Hai scelto autonomia completa entro i limiti concordati. In questa installazione posso però usare soltanto autonomia con controlli, perché il sistema registra l'approvazione ma non può verificare digitalmente chi l'ha data.
+   > Questa installazione registra l'approvazione ma non può verificare digitalmente chi l'ha data. Se scegli l'opzione 3, il livello effettivo sarà quindi “Autonomia con controlli”: potrò procedere tra i momenti di revisione concordati, ma non in autonomia completa.
 
    Only after the optional technical-details divider, explain that `audit_only` narrows requested `bounded-autonomous` to effective `checkpointed`. Explain the practical effect and how to enable verification: a trusted external host or CI issues an Ed25519-signed receipt for the exact delivery-profile approval subject; configure `authority_policy.mode: host_verified` and the matching public key in `authority_policy.trusted_host_keys`, then pass it with `autonomy delivery approve --host-receipt-file <path.json>`. The CLI validates external authority and never mints trusted authority for itself.
 
-   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Then evaluate task start with that profile. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. Otherwise the command returns the exact confirmation checkpoint; follow step 3 and rerun with `--confirm-start` or a matching authorization. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
+   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Only now make the workflow's one logical task-start decision with that profile. Do not use `task start` for preview, routing, requirement discovery, or contract preparation. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. If the CLI requires `--confirm-start`, the explicit confirmation completes this same logical start decision; it does not reopen planning or create a second delivery start. Use `--confirm-start` only after the user confirms this concrete start or with an authorization containing `task.start.confirm`; an agent or system confirmation must cite that grant with `--authorization <id>`. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs task start \

@@ -1049,6 +1049,31 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     validationAfterPolicyChange.stdout,
   );
 
+  fs.writeFileSync(sourcePath, "a later working-tree revision\n", "utf8");
+  const validationAfterEvidenceChange = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.ok([0, 1].includes(validationAfterEvidenceChange.status), validationAfterEvidenceChange.stderr);
+  const validationAfterEvidenceChangeReport = JSON.parse(validationAfterEvidenceChange.stdout);
+  assert.equal(
+    validationAfterEvidenceChangeReport.errors.some((error) =>
+      error.includes(`${commitCompletion.action_receipt.id} evidence changed after recording`)),
+    false,
+    validationAfterEvidenceChange.stdout,
+  );
+  assert.ok(
+    validationAfterEvidenceChangeReport.warnings.some((warning) =>
+      warning.includes(commitCompletion.action_receipt.id)
+      && warning.includes("verified from its exact Git revision")),
+    validationAfterEvidenceChange.stdout,
+  );
+  fs.writeFileSync(sourcePath, "exact authorized change\n", "utf8");
+
   mustFail([
     "autonomy", "delivery", "action",
     "--root", project,

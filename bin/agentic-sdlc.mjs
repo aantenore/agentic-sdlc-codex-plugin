@@ -5646,6 +5646,28 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
+  if (routeDecision.route === "intake_requirement") {
+    result.status = "needs_user_input";
+    result.contract_action = "agree_requirement";
+    pushAllUnique(result.blocking_reasons, ["requirement_agreement_required"]);
+    return dedupeTaskStartDecision(result);
+  }
+
+  if (routeDecision.route === "decompose_stories") {
+    result.status = "needs_user_input";
+    result.execution_allowed = false;
+    result.contract_action = routeDecision.blocking_reasons.length > 0
+      ? "approve_requirement"
+      : "record_decomposition";
+    if (routeDecision.blocking_reasons.length === 0) {
+      pushAllUnique(result.blocking_reasons, ["decomposition_precedes_task_start"]);
+      pushAllUnique(result.questions, [
+        "Review and record the proposed stories and dependencies first. Task execution starts only after the output, work brief, and delivery-specific autonomy choice are agreed.",
+      ]);
+    }
+    return dedupeTaskStartDecision(result);
+  }
+
   if (isAssessmentRouteIntent(context, routeDecision)) {
     const activeBaselines = selectActiveBaselines(context, storyId);
     if (activeBaselines.length === 0) {
@@ -5673,7 +5695,7 @@ function buildTaskStartDecision(context, options) {
       pushAllUnique(result.questions, [
         `Checkpoint 1 of 2 — Review the current-state summary for ${unreadyBaselines.map((baseline) => baseline.id).join(", ")}. What I need: approve it or name the exact correction. Why: every scope and budget choice at checkpoint 2 is derived from this context. Example answer: “The stack and source list are correct; also include docs/architecture.md, and do not treat examples/ as production code.” Effect: approval makes this snapshot the immutable context reference for the proposal.`,
       ]);
-      result.approval_requests = collectApprovalRequests(context, { storyId });
+      result.approval_requests = collectTaskStartApprovalRequests(context, result);
       return dedupeTaskStartDecision(result);
     }
     const proposalId = getOptionString(options, "proposal");
@@ -5752,7 +5774,7 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.blocking_reasons, ["contract_negotiation_required"]);
     pushAllUnique(result.questions, [contractNegotiationQuestion(phase, storyId)]);
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, explicitContractId));
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5768,7 +5790,7 @@ function buildTaskStartDecision(context, options) {
     result.contract_action = "approve_or_refresh_project_context";
     pushAllUnique(result.blocking_reasons, ["baseline_not_ready"]);
     pushAllUnique(result.questions, ["Refresh or approve the active project context before phase work starts."]);
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5795,7 +5817,7 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.blocking_reasons, ["missing_contract"]);
     pushAllUnique(result.questions, [contractNegotiationQuestion(phase, storyId)]);
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, explicitContractId));
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5821,7 +5843,7 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.blocking_reasons, ["contract_revision_requested"]);
     pushAllUnique(result.questions, [`What should change in contract ${contractState.contract.id} before this task starts?`]);
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5842,7 +5864,7 @@ function buildTaskStartDecision(context, options) {
     result.contract_action = "clarify_contract";
     pushAllUnique(result.blocking_reasons, ["contract_incomplete"]);
     pushAllUnique(result.questions, gaps.map((gap) => gap.question));
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5853,7 +5875,7 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.blocking_reasons, ["contract_dependencies_stale"]);
     pushAllUnique(result.questions, freshnessGaps.map((gap) => gap.question));
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5867,7 +5889,7 @@ function buildTaskStartDecision(context, options) {
     pushAllUnique(result.next_commands, [
       `agentic-sdlc approval requests${storyId ? ` --story ${storyId}` : ""}`,
     ]);
-    result.approval_requests = collectApprovalRequests(context, { storyId });
+    result.approval_requests = collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
 
@@ -5876,6 +5898,15 @@ function buildTaskStartDecision(context, options) {
   }
 
   return finalizeTaskStartExecution(context, result, routeDecision, options);
+}
+
+function collectTaskStartApprovalRequests(context, decision) {
+  return collectApprovalRequests(context, {
+    storyId: decision.story_id || null,
+    phase: decision.phase || null,
+    contractId: decision.contract_id || null,
+    activeOnly: true,
+  });
 }
 
 function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
@@ -6020,7 +6051,7 @@ function finalizeTaskStartExecution(context, result, routeDecision, options) {
     result.contract_action = "resolve_route_blockers";
     result.approval_requests = result.approval_requests.length
       ? result.approval_requests
-      : collectApprovalRequests(context, { storyId: result.story_id || null });
+      : collectTaskStartApprovalRequests(context, result);
     return dedupeTaskStartDecision(result);
   }
   const effectiveAutonomy = result.autonomy_decision?.effective_level || result.autonomy?.effective_level || "supervised";
@@ -6106,9 +6137,7 @@ function inferTaskPhase(routeDecision, options = {}) {
 
 function taskRouteRequiresContract(route) {
   return [
-    "intake_requirement",
     "classify_artifact",
-    "decompose_stories",
     "discover_capabilities",
     "technical_decision",
     "claim_and_implement",
@@ -6359,6 +6388,18 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
       return italian
         ? '“Usa README.md, package.json e src/ come prove di progetto; ignora i file generati.”'
         : '“Use README.md, package.json and src/ as project evidence; ignore generated files.”';
+    case "agree_requirement":
+      return italian
+        ? '“Voglio ridurre a meno di due minuti la creazione di un itinerario; è completo quando l’utente può salvarlo e riaprirlo; non deve acquistare nulla; lavora in autonomia con checkpoint prima di accessi esterni.”'
+        : '“I need itinerary creation to take under two minutes; it is complete when a user can save and reopen it; it must not purchase anything; work independently with a checkpoint before external access.”';
+    case "approve_requirement":
+      return italian
+        ? '“Usa il requisito REQ-001 approvato; se non è corrente o manca il limite di autonomia, fermati e fammelo correggere prima della scomposizione.”'
+        : '“Use approved requirement REQ-001; if it is not current or lacks its autonomy ceiling, stop and let me correct it before decomposition.”';
+    case "record_decomposition":
+      return italian
+        ? '“La scomposizione proposta è corretta: registra le storie e le dipendenze, poi mostrami output, incarico e scelta di autonomia prima dell’unico avvio.”'
+        : '“The proposed breakdown is correct: record the stories and dependencies, then show the output, work brief, and autonomy choice before the single task start.”';
     case "create_or_revise_contract":
     case "create_contract":
     case "clarify_contract":
@@ -6394,6 +6435,18 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
 function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
   const italian = locale === "it";
   switch (decision.contract_action) {
+    case "agree_requirement":
+      return italian
+        ? "Quale risultato osservabile vuoi ottenere, come verifichiamo che sia completo, cosa deve restare escluso e qual è la massima autonomia consentita?"
+        : "What observable outcome do you need, how will we know it is complete, what must remain excluded, and what is the maximum independence allowed?";
+    case "approve_requirement":
+      return italian
+        ? "Quale requisito approvato e corrente devo scomporre in storie?"
+        : "Which current, approved requirement should I decompose into stories?";
+    case "record_decomposition":
+      return italian
+        ? "La scomposizione proposta rappresenta correttamente il requisito e le dipendenze?"
+        : "Does the proposed story breakdown accurately represent the requirement and its dependencies?";
     case "select_delivery_autonomy":
       if (!decision.delivery_kind) {
         return italian
@@ -6447,6 +6500,18 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
       return italian
         ? "Il progetto non è ancora preparato: prima devo creare o confermare il contesto iniziale."
         : "This project has not been prepared yet, so I need to create or confirm its starting context first.";
+    case "agree_requirement":
+      return italian
+        ? "Prima di creare storie o incarichi dobbiamo concordare il risultato, le prove di completamento, le esclusioni e il limite massimo di autonomia."
+        : "Before creating stories or work briefs, we need to agree the outcome, completion evidence, exclusions, and maximum autonomy boundary.";
+    case "approve_requirement":
+      return italian
+        ? "La scomposizione può partire soltanto da un requisito approvato, corrente e collegato al proprio limite di autonomia."
+        : "Decomposition can start only from a current approved requirement linked to its autonomy boundary.";
+    case "record_decomposition":
+      return italian
+        ? "La scomposizione è ancora pianificazione: prima dell’unico avvio devo registrare storie e dipendenze, poi concordare output, incarico e autonomia della consegna."
+        : "Decomposition is still planning: before the single task start, I must record stories and dependencies, then agree the output, work brief, and delivery autonomy.";
     case "create_or_revise_contract":
     case "create_contract":
       return italian
@@ -6520,10 +6585,16 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
       contract_needs_approval: "L’incarico esiste ma non è ancora stato approvato per l’esecuzione.",
       contract_negotiation_required: "Prima di produrre lavoro definitivo serve un incarico concordato.",
       contract_not_approved: "L’incarico esiste, ma devi ancora confermarlo o chiedere modifiche.",
+      decomposition_precedes_task_start: "La scomposizione viene concordata e registrata prima dell’avvio; non è ancora autorizzazione a eseguire il lavoro.",
       kb_not_initialized: "Il contesto iniziale del progetto non è ancora stato preparato.",
       missing_context: "Mancano informazioni importanti e serve la tua risposta prima di continuare.",
       missing_contract: "Per questo passo non esiste ancora un incarico concordato.",
+      requirement_agreement_required: "Prima di scomporre o pianificare il lavoro dobbiamo concordare risultato, criteri osservabili, esclusioni e limite massimo di autonomia.",
+      requirement_not_approved: "Il requisito indicato non è ancora approvato e corrente, quindi non può guidare la scomposizione.",
+      requirement_not_found: "Il requisito indicato non esiste ancora.",
+      requirement_reference_required: "Devo sapere quale requisito approvato deve guidare la scomposizione.",
       route_requires_confirmation: "L’azione richiesta è chiara, ma prima di avviarla serve la tua conferma.",
+      story_requirement_mismatch: "L’attività indicata non è collegata al requisito approvato che dovrebbe guidarla.",
       story_contract_missing: "L’attività non ha ancora un incarico concordato.",
       story_not_found: "L’attività indicata non esiste ancora.",
       story_reference_required: "Devo sapere a quale attività appartiene questo lavoro.",
@@ -6551,6 +6622,7 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
     contract_needs_approval: "The work brief exists, but it has not been approved for execution.",
     contract_negotiation_required: "I need an agreed work brief before producing durable work.",
     contract_not_approved: "The work brief exists, but you still need to confirm it or ask for changes.",
+    decomposition_precedes_task_start: "The breakdown is agreed and recorded before task execution; it is not permission to start the work.",
     contract_phase_mismatch: "The selected work brief is for a different kind of work, so it needs to be revised or replaced.",
     contract_revision_requested: "You asked to revise the work brief before starting.",
     "delivery.authority.audit_only_caps_autonomy": "The choice was saved, but this installation cannot yet verify automatically who approved it. For safety, I will work independently only between the agreed review moments and ask again before sensitive steps.",
@@ -6566,7 +6638,12 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
     needs_normalization: "The request is still raw natural language and needs to be normalized before the workflow can route it.",
     output_already_linked: "An output already exists for this story and type; I need to know whether to reuse it, update it, or create a separate one.",
     phase_skip_requires_confirmation: "Skipping a phase is a deliberate choice and needs explicit confirmation.",
+    requirement_agreement_required: "Before planning or decomposing work, we need to agree the outcome, observable acceptance criteria, exclusions, and maximum autonomy boundary.",
+    requirement_not_approved: "The referenced requirement is not current and approved yet, so it cannot drive decomposition.",
+    requirement_not_found: "The referenced requirement does not exist yet.",
+    requirement_reference_required: "I need to know which approved requirement should drive this decomposition.",
     route_requires_confirmation: "The requested action is clear, but starting it still needs your go-ahead.",
+    story_requirement_mismatch: "The referenced story is not linked to the approved requirement that should govern it.",
     story_contract_missing: "The story does not yet have an agreed work brief.",
     story_not_found: "The referenced story does not exist yet.",
     story_reference_required: "I need to know which story this work belongs to.",
@@ -7112,22 +7189,111 @@ function decideOnboardExistingProjectRoute(context, decision, policy, actionConf
 
 function decideIntakeRequirementRoute(decision, policy, actionConfig, confidenceOutcome) {
   decision.route = "intake_requirement";
-  decision.next_commands.push("agentic-sdlc contract create --phase discovery --context-summary <summary>");
+  const requirementId = routeEntityId(decision.intent, policy, "requirement") || "<requirement-id>";
+  pushAllUnique(decision.blocking_reasons, ["requirement_agreement_required"]);
+  pushAllUnique(decision.questions, [
+    "Describe the outcome you need, at least one observable acceptance criterion, explicit non-goals or things the solution must not do, and the maximum independence allowed: supervised, checkpointed, or bounded-autonomous.",
+  ]);
+  decision.next_commands.push(
+    `agentic-sdlc requirement propose --id ${requirementId} --title "<short title>" --summary "<required outcome>" --acceptance "<observable acceptance criterion>" --non-goal "<explicit exclusion>" --autonomy-ceiling <supervised|checkpointed|bounded-autonomous>`,
+  );
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
 
 function decideDecomposeStoriesRoute(context, decision, policy, actionConfig, confidenceOutcome) {
   decision.route = "decompose_stories";
+  const requirementId = routeEntityId(decision.intent, policy, "requirement");
   const storyId = routeStoryId(decision.intent, policy);
+  if (!requirementId) {
+    addRouteCheck(decision, "approved_requirement_reference", "failed", "No requirement reference was provided");
+    pushAllUnique(decision.blocking_reasons, ["requirement_reference_required"]);
+    pushAllUnique(decision.questions, [
+      "Which approved requirement should be decomposed? Reference its requirement id so every resulting story stays linked to the agreed outcome, acceptance criteria, exclusions, and autonomy ceiling.",
+    ]);
+    decision.next_commands.push(canonicalIntentCommand());
+    return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+  }
+
+  const requirement = readRequirement(context, requirementId, { missingOk: true });
+  addRouteCheck(
+    decision,
+    "requirement_exists",
+    requirement ? "passed" : "failed",
+    requirement ? requirementId : `${requirementId} not found`,
+  );
+  if (!requirement) {
+    pushAllUnique(decision.blocking_reasons, ["requirement_not_found"]);
+    pushAllUnique(decision.questions, [
+      `Requirement ${requirementId} does not exist yet. Agree its outcome, acceptance criteria, non-goals, and autonomy ceiling before decomposing it.`,
+    ]);
+    decision.next_commands.push(
+      `agentic-sdlc requirement propose --id ${requirementId} --title "<short title>" --summary "<required outcome>" --acceptance "<observable acceptance criterion>" --non-goal "<explicit exclusion>" --autonomy-ceiling <supervised|checkpointed|bounded-autonomous>`,
+    );
+    return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+  }
+
+  let requirementReady = false;
+  let readinessDetails = `${requirementId}:${requirement.status || "unknown"}`;
+  try {
+    if (requirement.schema_version !== "requirement:v2") {
+      fail(`Requirement ${requirementId} must use requirement:v2 before decomposition.`);
+    }
+    assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirementId}`);
+    requirementReady = true;
+    readinessDetails = `${requirementId}:approved and current`;
+  } catch (error) {
+    if (!(error instanceof UserError)) throw error;
+    readinessDetails = error.message;
+  }
+  addRouteCheck(decision, "approved_requirement_ready", requirementReady ? "passed" : "failed", readinessDetails);
+  if (!requirementReady) {
+    pushAllUnique(decision.blocking_reasons, ["requirement_not_approved"]);
+    pushAllUnique(decision.questions, [
+      `Requirement ${requirementId} must be a current, approved requirement:v2 with an active autonomy profile before stories can be derived from it.`,
+    ]);
+    decision.next_commands.push(`agentic-sdlc requirement status --id ${requirementId}`);
+    if (requirement.status === "proposed") {
+      decision.next_commands.push(
+        `agentic-sdlc requirement approve --id ${requirementId} --actor-type human --approval-source explicit-user --summary "<approve this exact requirement and autonomy ceiling>"`,
+      );
+    }
+    return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+  }
+
   if (storyId) {
     const story = readStory(context, storyId);
-    addRouteCheck(decision, "story_exists", story ? "passed" : "failed", story ? storyId : `${storyId} not found`);
+    addRouteCheck(decision, "story_exists", story ? "passed" : "warning", story ? storyId : `${storyId} not found`);
     if (story) {
-      decision.next_commands.push(`agentic-sdlc story create --id <new-story-id> --title <title> --acceptance <criterion>`);
-      return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+      const linkedRequirementIds = new Set([
+        ...(story.links?.requirements || []),
+        ...(story.requirement_refs || []).map((ref) => ref?.id).filter(Boolean),
+      ]);
+      const linked = linkedRequirementIds.has(requirementId);
+      addRouteCheck(
+        decision,
+        "story_requirement_link",
+        linked ? "passed" : "failed",
+        linked ? `${storyId} -> ${requirementId}` : `${storyId} is not linked to ${requirementId}`,
+      );
+      if (!linked) {
+        pushAllUnique(decision.blocking_reasons, ["story_requirement_mismatch"]);
+        pushAllUnique(decision.questions, [
+          `Story ${storyId} already exists but is not linked to approved requirement ${requirementId}. Revise the story relationship before treating it as part of this decomposition.`,
+        ]);
+        return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
+      }
     }
   }
-  decision.next_commands.push("agentic-sdlc story create --id <story-id> --title <title> --acceptance <criterion>");
+
+  const targetStoryId = storyId || "<story-id>";
+  if (!storyId || !readStory(context, storyId)) {
+    decision.next_commands.push(
+      `agentic-sdlc story create --id ${targetStoryId} --title "<story outcome>" --requirement ${requirementId} --acceptance "<story-level observable criterion>"`,
+    );
+  }
+  decision.next_commands.push(
+    `agentic-sdlc breakdown propose --id BD-${requirementId} --requirement ${requirementId} --item story:${targetStoryId}`,
+  );
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
 
@@ -8946,6 +9112,10 @@ function proposeBaseline(context, options) {
       assistant_message: assistantMessage,
       ...assistantMessagePresentationFields(),
       approval_request: baselineApprovalRequest,
+      next_commands: [
+        `agentic-sdlc baseline status --id ${result.baseline.id}`,
+        `agentic-sdlc baseline approve --id ${result.baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
+      ],
     },
     [
       `Proposed baseline ${result.baseline.id}`,
@@ -9170,22 +9340,54 @@ function showBaselineStatus(context, options) {
       stale_sources: staleSources,
       open_questions: Array.isArray(baseline.open_questions) ? baseline.open_questions.length : 0,
       approved,
-      next_action: sourceFresh
-        ? null
-        : `Refresh the project snapshot before starting new work from ${baseline.id}.`,
+      next_action: !sourceFresh || (baseline.status === "approved" && !approvalFresh)
+        ? `Refresh the project snapshot before starting new work from ${baseline.id}.`
+        : approved
+          ? "Describe the next required outcome, success checks, exclusions, and autonomy ceiling."
+          : "Review and approve the proposed project context, or state the exact correction.",
+      next_action_details: !sourceFresh || (baseline.status === "approved" && !approvalFresh)
+        ? {
+            kind: "refresh_project_context",
+            label: "Refresh the saved project context from current evidence.",
+            command: `agentic-sdlc baseline propose --id ${baseline.id} --source <current-path> --summary "<updated observable context>" --force`,
+          }
+        : approved
+          ? {
+              kind: "describe_requirement",
+              label: "Describe the next required outcome, success checks, exclusions, and autonomy ceiling.",
+              command: null,
+            }
+          : {
+              kind: "approve_project_context",
+              label: "Review and approve the proposed project context, or state the exact correction.",
+              command: `agentic-sdlc baseline approve --id ${baseline.id} --actor-type human --approval-source explicit-user --summary "<what the user confirmed>"`,
+            },
     };
   });
+  const nextAction = status[0]?.next_action_details || {
+    kind: "propose_project_context",
+    label: "Create a current project context proposal before planning work.",
+    command: "agentic-sdlc baseline propose --id BASELINE-INITIAL --summary \"<observable current project context>\"",
+  };
   output(
     options,
-    { baselines: status },
+    { baselines: status, next_action: nextAction },
     status.length
-      ? status.flatMap((item) => item.stale
+      ? status.flatMap((item) => item.stale || item.effective_status === "needs_refresh"
         ? [
             `${item.id}: the saved project snapshot no longer matches the current files.`,
-            `Next: refresh the snapshot before using it to start new work. Technical status: ${item.effective_status}.`,
+            `Next: ${item.next_action} Technical status: ${item.effective_status}.`,
           ]
-        : [`${item.id}: ready to use; open questions ${item.open_questions}.`])
-      : ["No baselines found."],
+        : item.approved
+          ? [
+              `${item.id}: approved project context is ready to use; open questions ${item.open_questions}.`,
+              `Next: ${item.next_action}`,
+            ]
+          : [
+              `${item.id}: proposed project context is waiting for review; open questions ${item.open_questions}.`,
+              `Next: ${item.next_action}`,
+            ])
+      : ["No project context proposals found.", `Next: ${nextAction.label}`],
   );
 }
 
@@ -19429,19 +19631,114 @@ function safePrimaryGuidanceText(value, request = {}) {
 }
 
 function collectApprovalRequests(context, options = {}) {
-  const storyId = options.storyId || null;
-  const baselineRequests = collectBaselineApprovalRequests(context, storyId);
+  const scope = normalizeApprovalCollectionScope(options);
+  const baselineRequests = collectBaselineApprovalRequests(context, scope.storyId);
   if (baselineRequests.length > 0) {
     return baselineRequests;
   }
-  return [
-    ...collectCapabilityProfileApprovalRequests(context, storyId),
-    ...collectCapabilityRecommendationApprovalRequests(context, storyId),
-    ...collectOutputTemplateApprovalRequests(context, storyId),
-    ...collectContractClarificationRequests(context, storyId),
-    ...collectContractApprovalRequests(context, storyId),
-    ...collectOutputLinkActionRequests(context, storyId),
+  const requests = [
+    ...collectCapabilityProfileApprovalRequests(context, scope.storyId),
+    ...collectCapabilityRecommendationApprovalRequests(context, scope.storyId),
+    ...collectOutputTemplateApprovalRequests(context, scope.storyId),
+    ...collectContractClarificationRequests(context, scope),
+    ...collectContractApprovalRequests(context, scope),
+    ...collectOutputLinkActionRequests(context, scope),
   ];
+  return scope.activeOnly
+    ? filterApprovalRequestsForActiveScope(context, requests, scope)
+    : requests;
+}
+
+function normalizeApprovalCollectionScope(options = {}) {
+  return {
+    storyId: options.storyId ? normalizeId(options.storyId) : null,
+    phase: options.phase ? normalizeRoutePhase(options.phase) : null,
+    contractId: options.contractId ? normalizeId(options.contractId) : null,
+    activeOnly: options.activeOnly === true,
+  };
+}
+
+function activeContractForApprovalScope(context, scope) {
+  if (scope.contractId) {
+    return readContractById(context, scope.contractId, { missingOk: true });
+  }
+  if (scope.storyId) {
+    const story = readStory(context, scope.storyId);
+    if (story?.contract_id) {
+      return readContractById(context, story.contract_id, { missingOk: true });
+    }
+    const candidates = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
+      .filter((contract) => contract.story_id === scope.storyId)
+      .filter((contract) => !scope.phase || contract.phase === scope.phase);
+    return candidates.length > 0 ? newestContract(candidates) : null;
+  }
+  return null;
+}
+
+function filterApprovalRequestsForActiveScope(context, requests, scope) {
+  const activeContract = activeContractForApprovalScope(context, scope);
+  const templateIds = new Set((activeContract?.output_contract_refs || []).map((ref) => ref.template_id).filter(Boolean));
+  const recommendationIds = new Set(
+    (activeContract?.capability_recommendation_refs || []).map((ref) => ref.id).filter(Boolean),
+  );
+  const recommendationProfileIds = new Set(
+    (activeContract?.capability_recommendation_refs || []).map((ref) => ref.profile_id).filter(Boolean),
+  );
+  return requests.filter((request) => {
+    if (request.type?.startsWith("baseline_")) {
+      return true;
+    }
+    if (
+      request.type === "contract_approval"
+      || request.type === "contract_clarification"
+      || request.type === "output_link_required"
+    ) {
+      return true;
+    }
+    if (request.type === "output_template_approval") {
+      return templateIds.has(request.subject_id);
+    }
+    if (request.type?.startsWith("capability_recommendation_")) {
+      if (recommendationIds.has(request.subject_id)) {
+        return true;
+      }
+      const recommendation = readCapabilityRecommendations(context)
+        .find((candidate) => candidate.id === request.subject_id);
+      if (!recommendation) return false;
+      const profile = readCapabilityProfiles(context)
+        .find((candidate) => candidate.id === recommendation.profile_id);
+      return approvalSubjectMatchesActiveScope(profile?.subject, scope);
+    }
+    if (request.type?.startsWith("capability_profile_")) {
+      if (recommendationProfileIds.has(request.subject_id)) {
+        return true;
+      }
+      const profile = readCapabilityProfiles(context)
+        .find((candidate) => candidate.id === request.subject_id);
+      return approvalSubjectMatchesActiveScope(profile?.subject, scope);
+    }
+    return (
+      Boolean(scope.storyId && request.story_id === scope.storyId)
+      || Boolean(scope.phase && request.phase === scope.phase)
+      || Boolean(scope.contractId && request.subject_id === scope.contractId)
+    );
+  });
+}
+
+function approvalSubjectMatchesActiveScope(subject, scope) {
+  if (!subject || typeof subject !== "object") {
+    return false;
+  }
+  if (scope.storyId && subject.story_id !== scope.storyId) {
+    return false;
+  }
+  if (scope.phase && subject.phase && subject.phase !== scope.phase) {
+    return false;
+  }
+  return Boolean(
+    (scope.storyId && subject.story_id === scope.storyId)
+    || (scope.phase && subject.phase === scope.phase),
+  );
 }
 
 function renderApprovalRequestsAssistantMessage(requests) {
@@ -20049,9 +20346,9 @@ function buildOutputTemplateApprovalRequest(context, template) {
   };
 }
 
-function collectContractApprovalRequests(context, storyId = null) {
+function collectContractApprovalRequests(context, scope = {}) {
   return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
-    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, storyId))
+    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, scope))
     .filter((contract) => collectContractReadinessGaps(context, contract).length === 0)
     .filter((contract) => collectContractDependencyFreshnessGaps(context, contract).length === 0)
     .filter((contract) => contract.human_gate === true && (contract.status !== "approved" || !hasFreshApprovedContractApproval(contract)))
@@ -20084,9 +20381,9 @@ function collectContractApprovalRequests(context, storyId = null) {
     }));
 }
 
-function collectContractClarificationRequests(context, storyId = null) {
+function collectContractClarificationRequests(context, scope = {}) {
   return collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))
-    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, storyId))
+    .filter((contract) => contractMatchesStoryApprovalScope(context, contract, scope))
     .map((contract) => ({
       contract,
       gaps: [
@@ -20126,13 +20423,13 @@ function collectContractClarificationRequests(context, storyId = null) {
     }));
 }
 
-function collectOutputLinkActionRequests(context, storyId = null) {
+function collectOutputLinkActionRequests(context, scope = {}) {
   const registry = readOutputRegistry(context, { missingOk: true });
   const links = registry?.links || [];
   const requests = [];
   for (const contract of collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"))) {
     if (
-      !contractMatchesStoryApprovalScope(context, contract, storyId) ||
+      !contractMatchesStoryApprovalScope(context, contract, scope) ||
       !contractIsActiveStoryContract(context, contract)
     ) {
       continue;
@@ -20193,15 +20490,62 @@ function collectOutputLinkActionRequests(context, storyId = null) {
   return requests;
 }
 
-function contractMatchesStoryApprovalScope(context, contract, storyId = null) {
-  if (!storyId) {
-    return !contract.story_id || contractIsActiveStoryContract(context, contract);
+function contractMatchesStoryApprovalScope(context, contract, rawScope = {}) {
+  const scope = typeof rawScope === "string"
+    ? normalizeApprovalCollectionScope({ storyId: rawScope })
+    : normalizeApprovalCollectionScope(rawScope);
+  if (scope.contractId) {
+    return contract.id === scope.contractId;
   }
-  if (contract.story_id !== storyId) {
+  if (scope.storyId) {
+    if (scope.phase && contract.phase !== scope.phase) {
+      return false;
+    }
+    const story = readStory(context, scope.storyId);
+    if (story?.contract_id) {
+      return contract.id === story.contract_id;
+    }
+    return contract.story_id === scope.storyId;
+  }
+  if (scope.phase) {
+    return contract.phase === scope.phase && !contract.story_id;
+  }
+  if (isIntactBootstrapPhaseContract(context, contract)) {
     return false;
   }
-  const story = readStory(context, storyId);
-  return !story?.contract_id || contract.id === story.contract_id;
+  if (contract.story_id && !contractIsActiveStoryContract(context, contract)) {
+    return false;
+  }
+  return true;
+}
+
+function isIntactBootstrapPhaseContract(context, contract) {
+  const phase = String(contract?.phase || "");
+  if (
+    !phase
+    || !context.config.phase_order.includes(phase)
+    || contract.id !== `contract-${phase}-v1`
+    || contract.story_id
+  ) {
+    return false;
+  }
+  const contextualization = contract.contextualization || {};
+  return (
+    contract.status === "draft"
+    && (!Array.isArray(contract.approvals) || contract.approvals.length === 0)
+    && (!Array.isArray(contract.output_contract_refs) || contract.output_contract_refs.length === 0)
+    && (!Array.isArray(contract.capability_bindings) || contract.capability_bindings.length === 0)
+    && (!Array.isArray(contract.capability_recommendation_refs) || contract.capability_recommendation_refs.length === 0)
+    && (!Array.isArray(contract.requirement_refs) || contract.requirement_refs.length === 0)
+    && (!Array.isArray(contract.requirement_execution_profile_refs) || contract.requirement_execution_profile_refs.length === 0)
+    && !contract.delivery_execution_profile_id
+    && !String(contextualization.summary || "").trim()
+    && (!Array.isArray(contextualization.context_sources) || contextualization.context_sources.length === 0)
+    && (!Array.isArray(contextualization.questions) || contextualization.questions.length === 0)
+    && (!Array.isArray(contextualization.constraints) || contextualization.constraints.length === 0)
+    && (!Array.isArray(contextualization.assumptions) || contextualization.assumptions.length === 0)
+    && Number(contextualization.open_questions || 0) === 0
+  );
 }
 
 function contractIsActiveStoryContract(context, contract) {
@@ -30138,7 +30482,9 @@ function showStatus(context, options) {
   const counts = {};
   for (const directory of context.config.kb_directories) {
     const dirPath = path.join(context.sdlcRoot, directory);
-    counts[directory] = countCanonicalRecords(directory, dirPath);
+    counts[directory] = directory === "contracts"
+      ? collectJsonFiles(context, dirPath).filter((contract) => !isIntactBootstrapPhaseContract(context, contract)).length
+      : countCanonicalRecords(directory, dirPath);
   }
   const project = readProjectJson(context, path.join(context.sdlcRoot, "project.json"));
   const orchestration = buildOrchestrationSnapshot(context);
@@ -30157,7 +30503,7 @@ function showStatus(context, options) {
     stale_claims: orchestration.summary.stale,
     completed_work: orchestration.summary.terminal,
   };
-  const nextAction = buildStatusNextAction(summary, orchestration);
+  const nextAction = buildStatusNextAction(context, summary, orchestration, counts, project);
   const italian = humanGuidanceLocale(options) === "it";
   const guidance = statusHumanGuidance(nextAction, summary, { italian });
   const payload = {
@@ -30186,11 +30532,12 @@ function showStatus(context, options) {
   );
 }
 
-function buildStatusNextAction(summary, orchestration) {
+function buildStatusNextAction(context, summary, orchestration, counts, project) {
   if (summary.pending_decisions > 0) {
     return {
       kind: "review_decision",
       reason: "pending_human_decision",
+      label: "Review the pending project decision.",
       command: "agentic-sdlc approval requests",
       protected: true,
     };
@@ -30200,6 +30547,7 @@ function buildStatusNextAction(summary, orchestration) {
     return {
       kind: "resolve_blocker",
       reason: "blocked_story",
+      label: "Resolve the first blocked story.",
       command: story ? `agentic-sdlc story deps --id ${story.id}` : "agentic-sdlc orchestrate status",
       protected: false,
       story_id: story?.id || null,
@@ -30210,6 +30558,7 @@ function buildStatusNextAction(summary, orchestration) {
     return {
       kind: "repair_claim",
       reason: "stale_claim",
+      label: "Repair the stale work reservation.",
       command: story ? `agentic-sdlc story release --id ${story.id}` : "agentic-sdlc orchestrate status",
       protected: true,
       story_id: story?.id || null,
@@ -30220,6 +30569,7 @@ function buildStatusNextAction(summary, orchestration) {
     return {
       kind: "start_available_work",
       reason: "available_story",
+      label: "Start the first available story within its active scope.",
       command: story ? `agentic-sdlc task start --story ${story.id}` : "agentic-sdlc orchestrate plan",
       protected: true,
       story_id: story?.id || null,
@@ -30230,14 +30580,40 @@ function buildStatusNextAction(summary, orchestration) {
     return {
       kind: "continue_active_work",
       reason: "active_story",
+      label: "Continue and verify the active story.",
       command: story ? `agentic-sdlc gate check --story ${story.id}` : "agentic-sdlc orchestrate status",
       protected: false,
       story_id: story?.id || null,
     };
   }
+  const baselines = readBaselines(context);
+  if (baselines.length === 0) {
+    const hasExistingEvidence =
+      discoverExistingProjectDocuments(context).length > 0
+      || detectProjectStack(context).length > 0;
+    if (hasExistingEvidence) {
+      return {
+        kind: "onboard_project",
+        reason: "project_context_not_onboarded",
+        label: "Onboard the existing project context, then review what was inferred.",
+        command: `agentic-sdlc onboard existing-project --root ${JSON.stringify(context.root)} --project-name ${JSON.stringify(project.project_name)}`,
+        protected: true,
+      };
+    }
+  }
+  if ((counts.requirements || 0) === 0) {
+    return {
+      kind: "agree_requirement",
+      reason: "requirement_not_described",
+      label: "Describe the required outcome, observable success, exclusions, and maximum independence.",
+      command: null,
+      protected: true,
+    };
+  }
   return {
     kind: "none",
     reason: "no_operational_work",
+    label: "No operational work is waiting.",
     command: null,
     protected: false,
   };
@@ -30277,6 +30653,18 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Non devi prendere una nuova decisione per questo controllo.",
           next: "Continua l’attività aperta e verifica il prossimo risultato.",
         },
+        onboard_project: {
+          result: "Il progetto esiste, ma il suo contesto non è ancora stato confermato.",
+          impact: "Posso leggere le prove locali e proporre un riepilogo senza inventare requisiti.",
+          decision: "Dopo la proposta, conferma cosa è corretto o indica la correzione esatta.",
+          next: "Prepara il contesto iniziale del progetto esistente.",
+        },
+        agree_requirement: {
+          result: "Il progetto è pronto a ricevere il primo risultato richiesto.",
+          impact: "Nessuna storia o attività viene inventata prima di aver concordato il bisogno.",
+          decision: "Descrivi risultato osservabile, criteri di completamento, esclusioni e massima autonomia.",
+          next: "Concorda il primo requisito prima della scomposizione.",
+        },
         none: {
           result: "Non ci sono attività operative in attesa.",
           impact: "Il progetto non richiede un’azione immediata.",
@@ -30314,6 +30702,18 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           impact: "The priority is to complete and verify the open activity before starting another one.",
           decision: "You do not need to make a new decision for this check.",
           next: "Continue the open activity and verify its next result.",
+        },
+        onboard_project: {
+          result: "The project exists, but its current context has not been confirmed yet.",
+          impact: "I can inspect local evidence and propose a summary without inventing requirements.",
+          decision: "After the proposal, confirm what is accurate or state the exact correction.",
+          next: "Prepare the initial context for this existing project.",
+        },
+        agree_requirement: {
+          result: "The project is ready for its first requested outcome.",
+          impact: "No story or task is invented before the need is agreed.",
+          decision: "Describe the observable outcome, completion checks, exclusions, and maximum independence.",
+          next: "Agree the first requirement before decomposition.",
         },
         none: {
           result: "There is no operational work waiting.",
@@ -31762,6 +32162,56 @@ function validateCompletedRemoteActionReceipt(context, report, profile, receipt,
   }
 }
 
+function deliveryActionEvidenceRevision(receipt) {
+  const candidates = [
+    receipt.action_details?.commit?.after_sha,
+    receipt.action_details?.push?.source_sha,
+    receipt.action_details?.merge?.source_sha,
+    receipt.runtime_target?.head_sha,
+  ];
+  return candidates.find((candidate) => /^[a-f0-9]{40,64}$/u.test(candidate || "")) || null;
+}
+
+function hashDeliveryActionEvidenceAtRevision(context, receipt, evidencePath) {
+  const revision = deliveryActionEvidenceRevision(receipt);
+  if (!revision) return null;
+  const projectPath = toProjectPath(context, evidencePath);
+  if (
+    !projectPath
+    || path.isAbsolute(projectPath)
+    || projectPath === ".."
+    || projectPath.startsWith("../")
+    || projectPath.includes("\0")
+  ) {
+    return null;
+  }
+  try {
+    const blob = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "cat-file", "blob", `${revision}:${projectPath}`],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return hashBuffer(blob);
+  } catch {
+    return null;
+  }
+}
+
+function validateDeliveryActionEvidence(context, report, receipt, actionLabel, evidence, changedMessage) {
+  try {
+    const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+    if (hashFile(evidencePath) === evidence.sha256) return;
+    if (hashDeliveryActionEvidenceAtRevision(context, receipt, evidencePath) === evidence.sha256) {
+      const warning = `${actionLabel} evidence is verified from its exact Git revision because the current file changed later: ${evidence.path}`;
+      if (!report.warnings.includes(warning)) report.warnings.push(warning);
+      return;
+    }
+    report.errors.push(`${actionLabel} ${changedMessage}: ${evidence.path}`);
+  } catch (error) {
+    report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
+  }
+}
+
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
@@ -31994,14 +32444,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       }
     }
     for (const evidence of receipt.evidence || []) {
-      try {
-        const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
-        if (hashFile(evidencePath) !== evidence.sha256) {
-          report.errors.push(`${actionLabel} evidence changed after recording: ${evidence.path}`);
-        }
-      } catch (error) {
-        report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
-      }
+      validateDeliveryActionEvidence(
+        context,
+        report,
+        receipt,
+        actionLabel,
+        evidence,
+        "evidence changed after recording",
+      );
     }
     if (receipt.status === "completed") {
       if (!Array.isArray(receipt.evidence) || receipt.evidence.length === 0) {
@@ -32042,14 +32492,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         }
       }
       for (const evidence of receipt.local_release_verification?.evidence || []) {
-        try {
-          const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
-          if (hashFile(evidencePath) !== evidence.sha256) {
-            report.errors.push(`${actionLabel} evidence changed after completion: ${evidence.path}`);
-          }
-        } catch (error) {
-          report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
-        }
+        validateDeliveryActionEvidence(
+          context,
+          report,
+          receipt,
+          actionLabel,
+          evidence,
+          "evidence changed after completion",
+        );
       }
     }
     report.checked.push(actionLabel);
