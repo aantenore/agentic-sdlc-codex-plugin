@@ -32162,6 +32162,56 @@ function validateCompletedRemoteActionReceipt(context, report, profile, receipt,
   }
 }
 
+function deliveryActionEvidenceRevision(receipt) {
+  const candidates = [
+    receipt.action_details?.commit?.after_sha,
+    receipt.action_details?.push?.source_sha,
+    receipt.action_details?.merge?.source_sha,
+    receipt.runtime_target?.head_sha,
+  ];
+  return candidates.find((candidate) => /^[a-f0-9]{40,64}$/u.test(candidate || "")) || null;
+}
+
+function hashDeliveryActionEvidenceAtRevision(context, receipt, evidencePath) {
+  const revision = deliveryActionEvidenceRevision(receipt);
+  if (!revision) return null;
+  const projectPath = toProjectPath(context, evidencePath);
+  if (
+    !projectPath
+    || path.isAbsolute(projectPath)
+    || projectPath === ".."
+    || projectPath.startsWith("../")
+    || projectPath.includes("\0")
+  ) {
+    return null;
+  }
+  try {
+    const blob = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "cat-file", "blob", `${revision}:${projectPath}`],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return hashBuffer(blob);
+  } catch {
+    return null;
+  }
+}
+
+function validateDeliveryActionEvidence(context, report, receipt, actionLabel, evidence, changedMessage) {
+  try {
+    const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+    if (hashFile(evidencePath) === evidence.sha256) return;
+    if (hashDeliveryActionEvidenceAtRevision(context, receipt, evidencePath) === evidence.sha256) {
+      const warning = `${actionLabel} evidence is verified from its exact Git revision because the current file changed later: ${evidence.path}`;
+      if (!report.warnings.includes(warning)) report.warnings.push(warning);
+      return;
+    }
+    report.errors.push(`${actionLabel} ${changedMessage}: ${evidence.path}`);
+  } catch (error) {
+    report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
+  }
+}
+
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
@@ -32394,14 +32444,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
       }
     }
     for (const evidence of receipt.evidence || []) {
-      try {
-        const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
-        if (hashFile(evidencePath) !== evidence.sha256) {
-          report.errors.push(`${actionLabel} evidence changed after recording: ${evidence.path}`);
-        }
-      } catch (error) {
-        report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
-      }
+      validateDeliveryActionEvidence(
+        context,
+        report,
+        receipt,
+        actionLabel,
+        evidence,
+        "evidence changed after recording",
+      );
     }
     if (receipt.status === "completed") {
       if (!Array.isArray(receipt.evidence) || receipt.evidence.length === 0) {
@@ -32442,14 +32492,14 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         }
       }
       for (const evidence of receipt.local_release_verification?.evidence || []) {
-        try {
-          const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
-          if (hashFile(evidencePath) !== evidence.sha256) {
-            report.errors.push(`${actionLabel} evidence changed after completion: ${evidence.path}`);
-          }
-        } catch (error) {
-          report.errors.push(`${actionLabel} evidence is unavailable: ${error.message}`);
-        }
+        validateDeliveryActionEvidence(
+          context,
+          report,
+          receipt,
+          actionLabel,
+          evidence,
+          "evidence changed after completion",
+        );
       }
     }
     report.checked.push(actionLabel);
