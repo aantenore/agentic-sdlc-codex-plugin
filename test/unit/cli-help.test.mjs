@@ -14,10 +14,19 @@ test("root help explains practical behavior before technical details", () => {
   assert.match(primary, /What you need to decide:/u);
   assert.match(primary, /What remains protected:/u);
   assert.match(primary, /Next step:/u);
+  assert.match(primary, /Talk naturally to Codex about the outcome you want\./u);
+  assert.match(primary, /This CLI is for structured recovery and automation/u);
+  assert.match(primary, /requirement -> story -> work brief\/output -> autonomy for this delivery -> one task start -> implement\/test -> delivery/u);
   assert.doesNotMatch(primary, FORBIDDEN_PRIMARY_JARGON);
   assert.doesNotMatch(primary, /(?:agentic-sdlc|--[a-z])/iu);
   assert.match(technical, /Usage:/u);
   assert.match(technical, /\n  status\s+Show the current outcome/u);
+
+  const italian = renderHelp([], { locale: "it" });
+  const [italianPrimary] = italian.split("Dettagli tecnici (facoltativi):");
+  assert.match(italianPrimary, /Parla naturalmente con Codex del risultato che vuoi ottenere\./u);
+  assert.match(italianPrimary, /Questa CLI serve per recupero strutturato e automazione/u);
+  assert.match(italianPrimary, /requisito -> story -> accordo di lavoro\/output -> autonomia per questa consegna -> un solo avvio attività -> implementazione\/test -> consegna/u);
 });
 
 test("Italian leaf help is understandable without plugin terminology", () => {
@@ -124,6 +133,72 @@ test("core work commands keep human guidance plain and runtime flags in optional
       assert.match(technical, new RegExp(flag, "u"), `${expectation.path.join(" ")} should expose ${flag}`);
     }
   }
+});
+
+test("recovery and automation help mirrors mandatory and conditional runtime inputs", () => {
+  const describe = (command) => new Map(buildHelpModel(command.split(" ")).options.map((entry) => [entry.flag, entry]));
+  const expectedFlags = {
+    init: ["--project-name", "--project-id", "--force"],
+    "onboard existing-project": ["--project-name", "--project-id", "--id", "--document", "--source", "--question", "--assumption", "--summary", "--confirmed-source", "--force"],
+    "baseline propose": ["--id", "--document", "--source", "--question", "--assumption", "--summary", "--confirmed-source", "--force"],
+    "output template propose": ["--type", "--id", "--from", "--body", "--preset", "--summary", "--format", "--delivery", "--extension", "--media-type", "--generator", "--force"],
+    "capability profile propose": ["--id", "--story", "--requirement", "--phase", "--scope", "--context-file", "--constraint", "--confidence", "--profile-json", "--profile-file", "--force"],
+    "capability recommend": ["--id", "--profile", "--recommendation-json", "--recommendation-file", "--available-capabilities-json", "--available-capabilities-file", "--force"],
+    "task start": ["--intent-json", "--intent-file", "--text", "--story", "--phase", "--contract-id", "--delivery-profile", "--confirm-start", "--actor-type", "--authorization", "--revise-contract"],
+  };
+
+  for (const [command, flags] of Object.entries(expectedFlags)) {
+    const options = describe(command);
+    for (const flag of flags) assert.equal(options.has(flag), true, `${command} should expose ${flag}`);
+    const model = buildHelpModel(command.split(" "));
+    assert.equal(model.examples.length > 0, true, `${command} should include a copyable example`);
+    assert.doesNotMatch(model.examples[0], /<[^>]+>/u, `${command} example should not contain placeholders`);
+  }
+
+  assert.equal(describe("output template propose").get("--type").required, true);
+  assert.equal(describe("capability profile propose").get("--id").required, true);
+  assert.equal(describe("capability recommend").get("--profile").required, true);
+  assert.equal(describe("task start").get("--intent-json").required_one_of, "--intent-json or --intent-file");
+  assert.match(describe("task start").get("--delivery-profile").required_when, /implementation, validation, or release/u);
+});
+
+test("approval, authorization, routing, and contract help expose governed runtime choices", () => {
+  const describe = (command) => new Map(buildHelpModel(command.split(" ")).options.map((entry) => [entry.flag, entry]));
+  const approvals = ["baseline approve", "output template approve", "capability profile approve", "capability approve", "contract approve"];
+
+  for (const command of approvals) {
+    const options = describe(command);
+    assert.equal(options.get("--id")?.required, true, command);
+    assert.equal(options.get("--actor-type")?.required, true, command);
+    assert.match(options.get("--approval-source")?.required_when, /not supplied by CI/u, command);
+    assert.equal(options.get("--summary")?.required_one_of, "--summary or --approval-evidence", command);
+    assert.match(options.get("--authorization")?.required_when, /automation/u, command);
+    assert.equal(buildHelpModel(command.split(" ")).examples.length > 0, true, command);
+  }
+
+  const authorization = describe("authorization grant");
+  for (const flag of ["--id", "--scope", "--summary", "--actor-type", "--approval-source"]) {
+    assert.equal(authorization.get(flag)?.required, true, flag);
+  }
+  assert.equal(authorization.get("--allow-action")?.required_one_of, "--allow-action or --allow-use");
+  assert.equal(authorization.get("--allow-use")?.required_one_of, "--allow-action or --allow-use");
+  for (const flag of ["--allow-subject", "--allow-artifact-type", "--allow-boundary", "--expires-at", "--proposal", "--proposal-hash", "--max-uses", "--authority-assurance", "--approval-evidence", "--force"]) {
+    assert.equal(authorization.has(flag), true, flag);
+  }
+
+  const route = describe("route decide");
+  assert.equal(route.get("--intent-json")?.required_one_of, "--intent-json or --intent-file");
+  assert.equal(route.get("--intent-file")?.required_one_of, "--intent-json or --intent-file");
+  assert.match(buildHelpModel(["route", "decide"]).human.result, /project routing configuration/u);
+  assert.match(buildHelpModel(["route", "decide"]).examples[0], /"requested_action":"implement_story"/u);
+
+  const contract = describe("contract create");
+  assert.equal(contract.get("--phase")?.value, "discovery|analysis|design|implementation|validation|release");
+  assert.equal(contract.get("--reasoning")?.value, "inherit|minimal|low|medium|high");
+  assert.equal(contract.has("--force"), true);
+  assert.equal(describe("contract approve").get("--status")?.value, "approved|changes_requested|rejected");
+  assert.equal(describe("output template propose").get("--format")?.value, "markdown|docx|xlsx|pdf|pptx|html|json|csv|custom");
+  assert.equal(describe("authorization grant").get("--authority-assurance")?.value, "audit_only|host_verified");
 });
 
 test("hierarchical help shows only the selected group's immediate children", () => {
