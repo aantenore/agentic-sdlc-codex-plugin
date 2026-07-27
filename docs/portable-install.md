@@ -36,7 +36,7 @@ The npm `files` allowlist defines the package surface. Project-specific `.sdlc/`
 ## Prerequisites
 
 - Codex with the `codex plugin` command group.
-- Node.js 18.18 or newer for `bin/agentic-sdlc.mjs`.
+- Node.js 22 or newer for `bin/agentic-sdlc.mjs`.
 - Python 3.8 or newer for the repository staging installer.
 - A source checkout outside the generated `~/plugins/agentic-sdlc-codex-plugin` destination.
 - Optional: RTK 0.43 or newer on `PATH` for the gateway's default automatic runtime route. The first candidate is canonicalized and must resolve outside the project root; project-local or configured custom providers require the explicit per-invocation trust switch described below.

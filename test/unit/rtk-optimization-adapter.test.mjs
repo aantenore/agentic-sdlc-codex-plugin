@@ -124,7 +124,7 @@ test("telemetry collection uses a shell-free configured command and preserves so
 });
 
 test("automatic routing optimizes safe vectors, preserves machine output natively, and rejects other commands", () => {
-  assert.deepEqual(routeRtkCommand(["npm", "test"]), {
+  assert.deepEqual(routeRtkCommand(["npm", "test"], { platform: "linux" }), {
     mode: "rtk",
     profile: "test",
     command: ["npm", "test"],
@@ -230,10 +230,18 @@ test("an explicitly requested unsafe test profile is rejected instead of invokin
 });
 
 test("Windows command shims normalize to the same safe RTK routes", () => {
+  const inferredNpm = routeRtkCommand(["npm", "test"], { platform: "win32" });
+  assert.deepEqual(inferredNpm.execution_command, ["npm.cmd", "test"]);
+  assert.deepEqual(inferredNpm.rtk_arguments, ["test", "npm.cmd", "test"]);
+
   const npm = routeRtkCommand(["npm.cmd", "test"]);
   assert.equal(npm.mode, "rtk");
   assert.equal(npm.profile, "test");
   assert.deepEqual(npm.rtk_arguments, ["test", "npm.cmd", "test"]);
+
+  const linuxNpm = routeRtkCommand(["npm", "test"], { platform: "linux" });
+  assert.deepEqual(linuxNpm.execution_command, ["npm", "test"]);
+  assert.deepEqual(linuxNpm.rtk_arguments, ["test", "npm", "test"]);
 
   const git = routeRtkCommand(["git.exe", "status", "--short"]);
   assert.equal(git.mode, "rtk");

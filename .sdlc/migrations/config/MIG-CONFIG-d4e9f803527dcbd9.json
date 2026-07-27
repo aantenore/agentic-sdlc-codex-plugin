@@ -1,0 +1,286 @@
+{
+  "applied_at": "2026-07-27T18:23:38.814Z",
+  "audit": {
+    "action": "config.migrate",
+    "actor": {
+      "email": null,
+      "id": "codex",
+      "name": "Codex",
+      "source": "default",
+      "type": "agent"
+    },
+    "git": {
+      "branch": "valerio_fixes",
+      "head_sha": "87ddf9d2d1261804f0b92960ae91311ed97d90cd",
+      "is_dirty": true,
+      "is_git_repo": true,
+      "remotes": [
+        "origin"
+      ],
+      "user": {
+        "email": null,
+        "name": null
+      }
+    },
+    "recorded_at": "2026-07-27T18:23:39.145Z",
+    "run": {
+      "run_id": null,
+      "session_id": null,
+      "thread_id": "019f916e-6af5-7901-8b3d-d7169c942196",
+      "tool": "agentic-sdlc-cli",
+      "version": "0.12.0"
+    }
+  },
+  "changes": [
+    {
+      "after": {
+        "allowed_levels": [
+          "supervised",
+          "checkpointed",
+          "bounded-autonomous"
+        ],
+        "bounded_autonomous_requires_host_verified": true,
+        "decision_schema": "schemas/autonomy-decision.schema.json",
+        "default_requirement_ceiling": "supervised",
+        "delivery_kinds": [
+          "pull_request",
+          "local_release"
+        ],
+        "delivery_profile_schema": "schemas/delivery-execution-profile.schema.json",
+        "delivery_profile_schema_v2": "schemas/delivery-execution-profile-v2.schema.json",
+        "delivery_providers": {
+          "git_push": "git-remote",
+          "local_release": "local-filesystem",
+          "pull_request": "github-cli"
+        },
+        "enabled": true,
+        "exception_triggers": [
+          "requirement-change",
+          "scope-expansion",
+          "new-write-path",
+          "new-tool-or-capability",
+          "environment-change",
+          "budget-extension",
+          "secret-access",
+          "external-access",
+          "production-access",
+          "global-install",
+          "destructive-action",
+          "irreversible-migration",
+          "security-privacy-compliance-decision",
+          "gate-bypass",
+          "protected-branch-merge",
+          "remote-deploy",
+          "external-publication"
+        ],
+        "fail_closed_on_unknown": true,
+        "legacy_default": "supervised",
+        "local_release": {
+          "machine_global_changes_require_checkpoint": true,
+          "require_rollback": true,
+          "require_smoke_test": true,
+          "require_target_root": true,
+          "writes_outside_workspace_require_checkpoint": true
+        },
+        "mode": "enforce_new_only",
+        "presets": {
+          "bounded-autonomous": {
+            "automatic_phases": [
+              "analysis",
+              "design",
+              "implementation",
+              "validation",
+              "release"
+            ],
+            "checkpoints": [
+              "pull_request.merge",
+              "deploy.remote"
+            ]
+          },
+          "checkpointed": {
+            "automatic_phases": [
+              "analysis",
+              "design",
+              "implementation",
+              "validation"
+            ],
+            "checkpoints": [
+              "release.local",
+              "pull_request.merge",
+              "deploy.remote"
+            ]
+          },
+          "supervised": {
+            "automatic_phases": [],
+            "checkpoints": [
+              "contract.approve",
+              "task.start.confirm",
+              "story.claim",
+              "story.complete-step",
+              "output.link",
+              "sync.commit",
+              "sync.push",
+              "sync.pr",
+              "release.local",
+              "pull_request.merge",
+              "deploy.remote"
+            ]
+          }
+        },
+        "principle": "Autonomy is negotiated per requirement as a ceiling and selected again for every pull request or local release. A downstream delivery, contract, capability, environment, or budget may narrow that level but never widen it.",
+        "pull_request": {
+          "never_reuse_for_another_delivery": true,
+          "require_base_branch": true,
+          "require_head_branch": true,
+          "require_repository": true
+        },
+        "require_explicit_delivery_selection": true,
+        "requirement_profile_schema": "schemas/requirement-execution-profile.schema.json",
+        "storage_root": "autonomy"
+      },
+      "operation": "add",
+      "path": "/autonomy_policy"
+    },
+    {
+      "after": {
+        "excluded_directories": [
+          ".git",
+          ".next",
+          ".sdlc",
+          ".turbo",
+          "build",
+          "coverage",
+          "dist",
+          "node_modules",
+          "vendor"
+        ],
+        "max_discovered_files": 5000,
+        "max_file_bytes": 5242880,
+        "source_extensions": [
+          ".cjs",
+          ".css",
+          ".go",
+          ".html",
+          ".java",
+          ".js",
+          ".jsx",
+          ".json",
+          ".jsonl",
+          ".kt",
+          ".md",
+          ".mjs",
+          ".py",
+          ".rs",
+          ".scss",
+          ".sh",
+          ".swift",
+          ".toml",
+          ".ts",
+          ".tsx",
+          ".txt",
+          ".xml",
+          ".yaml",
+          ".yml"
+        ]
+      },
+      "operation": "add",
+      "path": "/baseline_policy"
+    },
+    {
+      "after": {
+        "budget_trigger_statuses": [
+          "warning",
+          "soft_limit",
+          "completion_reserve"
+        ],
+        "enabled": true,
+        "fallback": "native",
+        "mode": "automatic",
+        "observation_schema": "schemas/context-optimization-observation.schema.json",
+        "provider": {
+          "command": {
+            "arguments": [],
+            "executable": "rtk"
+          },
+          "id": "rtk",
+          "minimum_version": "0.43.0"
+        },
+        "storage_root": "context-optimization",
+        "telemetry": {
+          "auto_capture": [
+            "apply",
+            "checkpoint",
+            "complete"
+          ],
+          "enabled": true,
+          "include_in_budget_status": true
+        }
+      },
+      "operation": "add",
+      "path": "/context_optimization_policy"
+    },
+    {
+      "after": {
+        "correlation": {
+          "enabled": true,
+          "format": "corr-uuid"
+        },
+        "enabled": true,
+        "external_sinks": "disabled",
+        "metrics": {
+          "cardinality": "closed",
+          "enabled": true,
+          "external_sinks": "disabled"
+        },
+        "readiness": {
+          "liveness_is_shallow": true,
+          "warm_before_ready": true
+        },
+        "redaction": {
+          "identifier_allow_patterns": [],
+          "mode": "before_persistence_and_presentation",
+          "pii_patterns": [],
+          "secret_patterns": []
+        },
+        "slo": {
+          "availability_target": 0.99,
+          "minimum_samples": 20,
+          "mode": "advisory",
+          "readiness_target": 0.99
+        },
+        "support_bundle": {
+          "authenticity_claimed": false,
+          "enabled": true,
+          "integrity": "sha256_of_redacted_canonical_content",
+          "max_recent_requests": 50
+        }
+      },
+      "operation": "add",
+      "path": "/observability"
+    }
+  ],
+  "config_path": ".sdlc/config.json",
+  "defaults_profile": {
+    "id": "sdlc-config:v1@plugin-0.12.0",
+    "sha256": "e248f4e1ebfaf5402a762bcdebcdefd399ade7e83921a62494e5eb271f0afda9"
+  },
+  "effective_config_hash": "eb9895f97ecc0a904252a15341446c2d208e43fd6659da4858ff1bee620a5b72",
+  "hash_algorithm": "sha256:stable-json:v1",
+  "id": "MIG-CONFIG-d4e9f803527dcbd9",
+  "inherited_paths": [
+    "/autonomy_policy",
+    "/baseline_policy",
+    "/context_optimization_policy",
+    "/observability"
+  ],
+  "kind": "config_migration_receipt",
+  "lock_hash": "eccc5afe2b7511b3e90f6980eab9c5f4cac01a883e7be897fc584d5d94af7f26",
+  "lock_path": ".sdlc/config.lock.json",
+  "mode": "materialize_legacy_defaults",
+  "plan_hash": "d4e9f803527dcbd9b2635be810a22cad24ed3015b688a354b9ae443331329a23",
+  "receipt_hash": "0cfb0ff3c543e4daeca4e23c870c87ca5de75adeff019b2f47eb5876ec2faf1c",
+  "schema_version": "config-migration-receipt:v1",
+  "source_config_hash": "1c7c6814e652a6e928636bdae34d2492d04f64481aa492434571b528c0c41c22",
+  "status": "applied",
+  "target_config_hash": "eb9895f97ecc0a904252a15341446c2d208e43fd6659da4858ff1bee620a5b72"
+}

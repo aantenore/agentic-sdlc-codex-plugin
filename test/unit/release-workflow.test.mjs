@@ -75,7 +75,7 @@ function ciContractErrors(source) {
   if (!/timeout-minutes: 35/u.test(correctness)) errors.push("CI job timeout");
   if (/continue-on-error:/u.test(correctness)) errors.push("CI fail-open policy");
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(correctness)
-    || !/node: \[18\.18\.0, 20, 24\]/u.test(correctness)) {
+    || !/node: \[22, 24\]/u.test(correctness)) {
     errors.push("CI correctness matrix");
   }
   if ((correctness.match(/^\s+if:/gmu) ?? []).length !== 1
@@ -147,7 +147,7 @@ function releaseContractErrors(source) {
     if (!actions.some((action) => action.startsWith(`${name}@`))) errors.push(`missing action: ${name}`);
   }
 
-  if (!/node: \[18\.18\.0, 20, 24\]/u.test(verify)) errors.push("node policy matrix");
+  if (!/node: \[22, 24\]/u.test(verify)) errors.push("node policy matrix");
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(verify)) errors.push("platform matrix");
   if ((verify.match(/npm run benchmark:enterprise/gu) ?? []).length !== 1
     || !/- name: Enforce enterprise performance on the reference runtime\n\s+if: matrix\.os == 'ubuntu-latest' && matrix\.node == 24\n\s+run: npm run benchmark:enterprise/u.test(verify)) {
@@ -358,7 +358,7 @@ test("release workflow guards detect unsafe maintenance regressions", () => {
       name: "performance gate moved away from the reference runtime",
       source: workflow.replace(
         "if: matrix.os == 'ubuntu-latest' && matrix.node == 24",
-        "if: matrix.os == 'windows-latest' && matrix.node == 18.18.0",
+        "if: matrix.os == 'windows-latest' && matrix.node == 22",
       ),
       expected: "release reference performance gate",
     },

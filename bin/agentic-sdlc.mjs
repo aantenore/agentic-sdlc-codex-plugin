@@ -164,6 +164,10 @@ import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mj
 import { computeStableHash } from "../lib/canonical.mjs";
 import { openCanonicalQuerySession } from "../lib/canonical-query-session.mjs";
 import {
+  ProjectPathSafetyError,
+  assertNoSymlinkSegmentsWithinBoundary,
+} from "../lib/project-path-safety.mjs";
+import {
   buildConfigMigrationApplyData,
   buildEffectiveConfigLock,
   prepareConfigMigration,
@@ -192,6 +196,7 @@ import {
   appendJsonLineNoFollow,
   assertMutationExecutionAuthorized,
   consumeBootstrapMutationGrant,
+  currentMutationGovernance,
   createBootstrapMutationGrant,
   createProjectMutationGovernance,
   runWithMutationGovernance,
@@ -4393,14 +4398,14 @@ function resolveCliErrorRedactionPolicy(options) {
       if (error?.code !== "ENOENT") return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
       // Missing is optional only when no parent segment is a symlink. A
       // symlinked knowledge-base path could hide a configured privacy policy.
-      assertNoSymlinkPathSegments(configPath);
+      assertNoSymlinkPathSegments(configPath, root);
       return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, false);
     }
     if (!entry.isFile() || entry.isSymbolicLink()) {
       return cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, true);
     }
     resolveProjectFilePath({ root }, configPath, { mustExist: true, fileOnly: true });
-    assertNoSymlinkPathSegments(configPath);
+    assertNoSymlinkPathSegments(configPath, root);
     const config = readProjectJsonBounded(
       { root },
       configPath,
@@ -4581,11 +4586,11 @@ function buildContext(options) {
   const configLockPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_LOCK_FILE_NAME);
   if (fs.existsSync(projectConfigPath)) {
     resolveProjectFilePath({ root }, projectConfigPath, { mustExist: true, fileOnly: true });
-    assertNoSymlinkPathSegments(projectConfigPath);
+    assertNoSymlinkPathSegments(projectConfigPath, root);
   }
   if (fs.existsSync(configLockPath)) {
     resolveProjectFilePath({ root }, configLockPath, { mustExist: true, fileOnly: true });
-    assertNoSymlinkPathSegments(configLockPath);
+    assertNoSymlinkPathSegments(configLockPath, root);
   }
   const templateDefaultsProfile = {
     id: `${templateConfig.config_schema_version}@plugin-${VERSION}`,
@@ -6220,7 +6225,7 @@ function readContractById(context, contractId, options = {}) {
     return null;
   }
   resolveProjectFilePath(context, toProjectPath(context, contractPath), { mustExist: true, fileOnly: true });
-  assertNoSymlinkPathSegments(contractPath);
+  assertNoSymlinkPathSegments(contractPath, context.root);
   const contract = readProjectJson(context, contractPath);
   contract.__path = contractPath;
   contract.__relative_path = toProjectPath(context, contractPath);
@@ -8161,6 +8166,7 @@ function initBootstrapMutations(context) {
     path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME),
     path.join(context.sdlcRoot, "project.json"),
     path.join(context.sdlcRoot, "README.md"),
+    path.join(context.sdlcRoot, ".gitattributes"),
     path.join(context.sdlcRoot, ".gitignore"),
     path.join(context.sdlcRoot, "output-contracts", "registry.json"),
     path.join(context.sdlcRoot, "dependencies", "graph.json"),
@@ -8178,8 +8184,8 @@ async function runDoctor(context, options) {
   const checks = [];
   const add = (id, status, details) => checks.push({ id, status, details });
   const nodeVersion = process.versions.node;
-  const [major, minor] = nodeVersion.split(".").map(Number);
-  add("node-runtime", major > 18 || (major === 18 && minor >= 18) ? "passed" : "failed", `Node ${nodeVersion}; requires >=18.18`);
+  const [major] = nodeVersion.split(".").map(Number);
+  add("node-runtime", major >= 22 ? "passed" : "failed", `Node ${nodeVersion}; requires >=22`);
 
   const packagePath = path.join(PLUGIN_ROOT, "package.json");
   const manifestPath = path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json");
@@ -9010,6 +9016,25 @@ function initializeProject(context, options) {
   writeTextFile(path.join(context.sdlcRoot, ".gitignore"), ["cache/**/*", "indexes/*.json", "reports/*.tmp", ""].join("\n"), {
     force,
   });
+  writeTextFile(
+    path.join(context.sdlcRoot, ".gitattributes"),
+    [
+      "*.json text eol=lf",
+      "*.jsonl text eol=lf",
+      "*.md text eol=lf",
+      "*.txt text eol=lf",
+      "*.docx binary",
+      "*.gif binary",
+      "*.jpeg binary",
+      "*.jpg binary",
+      "*.pdf binary",
+      "*.png binary",
+      "*.pptx binary",
+      "*.xlsx binary",
+      "",
+    ].join("\n"),
+    { force },
+  );
 
   initializeOutputContracts(context, {
     force,
@@ -11397,7 +11422,7 @@ function validateLocalReleaseFilesystemBoundary(target) {
   if (!target?.root_path || !fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) {
     fail(`Local release target root must be an existing directory: ${target?.root_path || "missing"}.`);
   }
-  assertNoSymlinkPathSegments(rootPath);
+  assertNoSymlinkPathSegments(rootPath, rootPath);
   if (fs.lstatSync(rootPath).isSymbolicLink()) {
     fail(`Local release target root cannot be a symlink: ${rootPath}.`);
   }
@@ -11408,7 +11433,7 @@ function validateLocalReleaseFilesystemBoundary(target) {
     if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
       fail(`Local release write path must be a strict child of root_path ${rootPath}: ${writePath}.`);
     }
-    assertNoSymlinkPathSegments(writePath);
+    assertNoSymlinkPathSegments(writePath, rootPath);
     if (pathEntryExistsNoFollow(writePath) && fs.lstatSync(writePath).isSymbolicLink()) {
       fail(`Local release write path cannot be a symlink: ${writePath}.`);
     }
@@ -17481,7 +17506,7 @@ function validateReleaseManifestIntegrity(context, manifest) {
     let filePath;
     try {
       filePath = resolveProjectFilePath(context, reference.path, { mustExist: true, fileOnly: true });
-      assertNoSymlinkPathSegments(filePath);
+      assertNoSymlinkPathSegments(filePath, context.root);
     } catch (error) {
       errors.push(`${label}: ${error.message}`);
       return null;
@@ -17858,7 +17883,7 @@ function validateReleaseManifestIntegrity(context, manifest) {
     let artifactPath;
     try {
       artifactPath = resolveProjectFilePath(context, artifact.path, { mustExist: true, fileOnly: true });
-      assertNoSymlinkPathSegments(artifactPath);
+      assertNoSymlinkPathSegments(artifactPath, context.root);
       if (hashFile(artifactPath) !== artifact.sha256) {
         errors.push(`artifact ${artifact.id} hash is stale for ${artifact.path}`);
       }
@@ -18078,7 +18103,7 @@ function readReleaseManifest(context, value) {
     fail(`Release manifest must be stored under ${toProjectPath(context, configuredRoot)}.`);
   }
   resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
-  assertNoSymlinkPathSegments(filePath);
+  assertNoSymlinkPathSegments(filePath, context.root);
   const manifest = readProjectJson(context, filePath);
   if (!manifest?.id || path.resolve(filePath) !== path.resolve(releaseManifestPath(context, manifest.id))) {
     fail(`Release manifest ${manifest?.id || "unknown"} is not stored at its canonical id-bound path.`);
@@ -26030,7 +26055,7 @@ function showCacheStatus(context, options) {
 function clearCache(context, options) {
   ensureInitialized(context);
   const cacheRoot = resolveProjectFilePath(context, path.join(SDLC_DIR, "cache"), { mustExist: false });
-  assertNoSymlinkPathSegments(cacheRoot);
+  assertNoSymlinkPathSegments(cacheRoot, context.root);
   removePathGoverned(cacheRoot, { recursive: true, force: true });
   ensureDir(cacheRoot);
   output(options, { status: "cleared", cache_root: cacheRoot }, [`Cleared local SDLC cache at ${cacheRoot}`]);
@@ -27267,8 +27292,8 @@ function applyArchiveCandidates(context, candidates, options = {}, commit = () =
     for (const candidate of candidates) {
       const sourcePath = resolveProjectFilePath(context, candidate.source_path, { mustExist: true, fileOnly: true });
       const targetPath = resolveProjectFilePath(context, candidate.target_path, { mustExist: false });
-      assertNoSymlinkPathSegments(sourcePath);
-      assertNoSymlinkPathSegments(targetPath);
+      assertNoSymlinkPathSegments(sourcePath, context.root);
+      assertNoSymlinkPathSegments(targetPath, context.root);
       if (hashFile(sourcePath) !== candidate.sha256) {
         fail(`Archive source changed after planning: ${candidate.source_path}`);
       }
@@ -27501,7 +27526,7 @@ function collectHistoricalReleaseArtifacts(context, activeManifest, activeManife
   );
   const activePaths = new Set(activeEntries.map((entry) => {
     const evidencePath = resolveProjectFilePath(context, entry.path, { mustExist: true, fileOnly: true });
-    assertNoSymlinkPathSegments(evidencePath);
+    assertNoSymlinkPathSegments(evidencePath, context.root);
     return fs.realpathSync.native(evidencePath);
   }));
   const candidates = new Map();
@@ -27542,7 +27567,7 @@ function collectHistoricalReleaseArtifacts(context, activeManifest, activeManife
     try {
       for (const entry of historicalEntries) {
         const evidencePath = resolveProjectFilePath(context, entry.path, { mustExist: true, fileOnly: true });
-        assertNoSymlinkPathSegments(evidencePath);
+        assertNoSymlinkPathSegments(evidencePath, context.root);
         const canonicalKey = fs.realpathSync.native(evidencePath);
         if (activePaths.has(canonicalKey) || candidates.has(canonicalKey)) {
           continue;
@@ -29893,7 +29918,7 @@ function loadTraceEvidencePolicySource(context, ref, options = {}) {
     fail("Trace evidence policy source reference is malformed.");
   }
   const filePath = resolveProjectFilePath(context, ref.path, { mustExist: true, fileOnly: true });
-  assertNoSymlinkPathSegments(filePath);
+  assertNoSymlinkPathSegments(filePath, context.root);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   const bytes = readFileFromStableParent(filePath, parentIdentity, {
     maxBytes: 256 * 1024,
@@ -32955,7 +32980,7 @@ function validateContractContextSources(context, report, contract, label) {
     let resolved;
     try {
       resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-      assertNoSymlinkPathSegments(resolved);
+      assertNoSymlinkPathSegments(resolved, context.root);
     } catch (error) {
       report.errors.push(`${label} context source ${sourcePath} is invalid: ${error.message}`);
       continue;
@@ -34043,7 +34068,7 @@ function ensureInitialized(context) {
     fail(`No ${SDLC_DIR}/project.json found. Run 'agentic-sdlc init' first.`);
   }
   resolveProjectFilePath(context, path.join(SDLC_DIR, "project.json"), { mustExist: true, fileOnly: true });
-  assertNoSymlinkPathSegments(projectPath);
+  assertNoSymlinkPathSegments(projectPath, context.root);
 }
 
 function renderTemplateFile(context, templateName, destination, variables, options = {}) {
@@ -34083,7 +34108,7 @@ function readProjectJson(context, filePath) {
 function readProjectJsonBounded(context, filePath, maxBytes) {
   try {
     resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
-    assertNoSymlinkPathSegments(filePath);
+    assertNoSymlinkPathSegments(filePath, context.root);
     const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
     const realRoot = fs.realpathSync.native(context.root);
     if (!isInsidePath(realRoot, parentIdentity.realpath)) {
@@ -34101,7 +34126,7 @@ function readProjectJsonBounded(context, filePath, maxBytes) {
 
 function readProjectText(context, filePath) {
   resolveProjectFilePath(context, filePath, { mustExist: true, fileOnly: true });
-  assertNoSymlinkPathSegments(filePath);
+  assertNoSymlinkPathSegments(filePath, context.root);
   const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
   const realRoot = fs.realpathSync.native(context.root);
   if (!isInsidePath(realRoot, parentIdentity.realpath)) {
@@ -34668,20 +34693,16 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-function assertNoSymlinkPathSegments(filePath) {
+function assertNoSymlinkPathSegments(filePath, boundaryRoot = currentMutationGovernance()?.root) {
   const resolved = path.resolve(filePath);
-  const root = path.parse(resolved).root;
-  const parts = path.relative(root, resolved).split(path.sep).filter(Boolean);
-  let current = root;
-  for (let index = 0; index < parts.length; index += 1) {
-    const part = parts[index];
-    current = path.join(current, part);
-    if (index === 0) {
-      continue;
+  const boundary = boundaryRoot ? path.resolve(boundaryRoot) : path.parse(resolved).root;
+  try {
+    assertNoSymlinkSegmentsWithinBoundary(boundary, resolved);
+  } catch (error) {
+    if (error instanceof ProjectPathSafetyError) {
+      fail(error.message);
     }
-    if (pathEntryExistsNoFollow(current) && fs.lstatSync(current).isSymbolicLink()) {
-      fail(`Refusing to follow symlink while writing: ${current}`);
-    }
+    throw error;
   }
 }
 

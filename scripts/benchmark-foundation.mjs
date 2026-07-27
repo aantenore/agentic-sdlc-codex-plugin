@@ -515,7 +515,7 @@ function roundMilliseconds(value) {
 function assertSupportedNodeRuntime() {
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (major < 18 || (major === 18 && minor < 18)) {
-    throw new Error(`Node.js 18.18 or newer is required; found ${process.versions.node}`);
+    throw new Error(`Node.js 22 or newer is required; found ${process.versions.node}`);
   }
 }
 
