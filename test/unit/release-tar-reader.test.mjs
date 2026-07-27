@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { readTarGzipArchive } from "../../lib/release/tar-reader.mjs";
 import { buildTarGzip } from "../helpers/release-package-fixture.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 
 const DEFAULT_LIMITS = {
@@ -185,7 +186,8 @@ test("enforces compressed, header, single-file, total, PAX, and decompressed lim
 });
 
 
-test("rejects corrupt headers, incomplete terminators, and archive symlinks", () => {
+test("rejects corrupt headers, incomplete terminators, and archive symlinks", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   withArchive([{ path: "package/a", data: "x", corruptChecksum: true }], (archive) => {
     expectCode("HEADER_CHECKSUM_MISMATCH", () => readTarGzipArchive(archive, DEFAULT_LIMITS));
   });

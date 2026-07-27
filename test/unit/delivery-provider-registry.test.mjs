@@ -24,6 +24,7 @@ import {
 } from "../../lib/delivery/providers/github-cli.mjs";
 import { createLocalFilesystemProvider } from "../../lib/delivery/providers/local-filesystem.mjs";
 import { assertAgainstSchema, validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 const SHA = Object.freeze({
   base: "a".repeat(40),
@@ -469,6 +470,7 @@ test("local-filesystem pins the root identity, permits bounded changes, and neve
 });
 
 test("local-filesystem fails closed on traversal and symlink escape", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-boundary-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-outside-"));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));

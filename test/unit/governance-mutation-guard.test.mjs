@@ -31,6 +31,7 @@ import {
   createGovernanceRevocation,
   evaluateGovernancePolicy,
 } from "../../lib/governance/policy-engine.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 const ACTOR = Object.freeze({ type: "agent", id: "writer-1" });
 const NOW = "2026-07-18T12:00:00.000Z";
@@ -210,7 +211,8 @@ test("missing, unknown, and asynchronous decisions fail closed", () => {
   );
 });
 
-test("path normalization rejects traversal, globs, root writes, and symlinks", () => {
+test("path normalization rejects traversal, globs, root writes, and symlinks", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = fixture(test, "paths");
   const outside = fixture(test, "outside");
   fs.mkdirSync(path.join(root, "safe"));
@@ -726,6 +728,7 @@ test("concurrent audit writers cannot race past the hard event-count bound", asy
 });
 
 test("receipt persistence refuses a configured directory renamed behind an exact symlink", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = fixture(t, "receipt-parent-race");
   const governanceRoot = path.join(root, ".sdlc", "governance");
   const decisionsPath = path.join(governanceRoot, "decisions");
@@ -795,6 +798,7 @@ test("receipt persistence refuses a configured directory renamed behind an exact
 });
 
 test("audit event sink race is fail-open and never writes bytes through a swapped symlink", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = fixture(t, "audit-event-race");
   const governanceRoot = path.join(root, ".sdlc", "governance");
   const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
@@ -918,7 +922,8 @@ test("enforce rejects a self-asserted actor without verified host or CI identity
   assert.match(governance.configuration_error, /identity verified by the host or CI/u);
 });
 
-test("project configuration is optional and pointer/inline policies are bounded and no-follow", () => {
+test("project configuration is optional and pointer/inline policies are bounded and no-follow", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const root = fixture(test, "config");
   fs.mkdirSync(path.join(root, ".sdlc", "governance"), { recursive: true });
   const disabled = createProjectMutationGovernance({ root });
@@ -971,7 +976,8 @@ test("project configuration is optional and pointer/inline policies are bounded 
   assert.match(unsafe.configuration_error, /symbolic link/u);
 });
 
-test("secure JSONL append uses a no-follow append descriptor and complete records", () => {
+test("secure JSONL append uses a no-follow append descriptor and complete records", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const root = fixture(test, "append");
   const target = path.join(root, "events.jsonl");
   for (let index = 0; index < 100; index += 1) appendJsonLineNoFollow(target, { index });

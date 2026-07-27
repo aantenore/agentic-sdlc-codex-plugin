@@ -9,6 +9,7 @@ import {
   resolveObservatoryConfigurationSnapshot,
 } from "../../lib/change-observatory/configuration.mjs";
 import { redactText } from "../../lib/observability/redaction.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 test("uses safe operational defaults when a project has no observability configuration", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "observatory-config-default-"));
@@ -68,6 +69,7 @@ test("loads bounded project redaction and SLO options without accepting secret v
 });
 
 test("rejects a symlinked project config instead of silently ignoring its configured PII policy", async (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "observatory-config-symlink-"));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), "observatory-config-outside-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

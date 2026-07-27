@@ -160,7 +160,7 @@ export class ObservatoryApi {
     const text = rawBody.text;
     const bounded =
       rawBody.truncated || text.length > MAX_RAW_CHARACTERS
-        ? `${text.slice(0, MAX_RAW_CHARACTERS)}\n\n[Raw preview truncated at the ${MAX_RAW_BODY_BYTES.toLocaleString()}-byte safety limit]`
+        ? `${text.slice(0, MAX_RAW_CHARACTERS)}\n\n[Raw preview truncated at the ${MAX_RAW_BODY_BYTES.toLocaleString("en-US")}-byte safety limit]`
         : text;
 
     if (response.headers.get("content-type")?.includes("application/json")) {

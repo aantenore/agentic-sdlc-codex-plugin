@@ -221,7 +221,7 @@ test("a privacy change during a model build prevents the mixed-policy response",
 });
 
 test("invalid or symlinked configuration introduced after startup fails closed", async (t) => {
-  if (process.platform === "win32") t.skip("Symlink lifecycle coverage requires Unix semantics");
+  if (process.platform === "win32") return t.skip("Symlink lifecycle coverage requires Unix semantics");
   const fixture = await createServerFixture(t);
   const running = await startObservatoryServer({
     projectRoot: fixture.projectRoot,
@@ -551,7 +551,7 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
 });
 
 test("rejects a symlinked knowledge base and a swapped project root", async (t) => {
-  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix symlink semantics");
+  if (process.platform === "win32") return t.skip("Directory swap coverage requires Unix symlink semantics");
 
   const symlinkFixture = await createServerFixture(t);
   const hiddenKnowledgeBase = path.join(symlinkFixture.projectRoot, "hidden-sdlc");
@@ -698,7 +698,7 @@ test("allows an explicit server collection limit to override the safe default", 
 });
 
 test("does not serve a warm model after the knowledge-base boundary becomes a symlink", async (t) => {
-  if (process.platform === "win32") t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
+  if (process.platform === "win32") return t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
 
   const fixture = await createServerFixture(t);
   const running = await startObservatoryServer({

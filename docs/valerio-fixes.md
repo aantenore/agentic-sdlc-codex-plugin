@@ -104,3 +104,29 @@ hash, and evidence-drift error. The historical `ST-ENT-RELEASE-R1` gate still
 reports 15 pre-existing delivery action receipts that cannot prove their
 original Git commit boundary. Those immutable receipts were not rewritten or
 re-created, because doing so would fabricate historical delivery evidence.
+
+### Deterministic preview limits
+
+- The Change Observatory raw-preview truncation message now formats its byte
+  limit with the explicit `en-US` locale.
+- Host locale settings can no longer change the stable English API/UI message
+  from `2,000,000` to values such as `2.000.000`.
+
+### Portable symbolic-link coverage
+
+- Added one Windows capability probe for file and directory symbolic links.
+- Security tests skip only when Windows reports a known unsupported-operation
+  error (`EACCES`, `ENOSYS`, `ENOTSUP`, or `EPERM`).
+- Unexpected symbolic-link errors still fail the tests.
+- Tests that intentionally require Unix rename or link semantics now return
+  immediately after being marked skipped.
+
+Linux and macOS CI continue to run the complete symbolic-link security
+coverage on Node.js 22 and 24.
+
+### Deterministic governance test identity
+
+- Governance CLI tests preload a test-only `os.userInfo()` fixture on Windows.
+- The expected policy actor and the CLI subprocess now use the same fixed test
+  identity without depending on the host account API.
+- Production identity discovery and enforcement behavior are unchanged.

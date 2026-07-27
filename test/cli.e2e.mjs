@@ -10,6 +10,7 @@ import { computeStableHash } from "../lib/canonical.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
+import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -3852,7 +3853,8 @@ test("cache tampering is not used as source of truth for output resolve", () => 
   mustFail(["output", "resolve", "--root", project, "--story", "ST-001", "--type", "functional-analysis"], /cache output resolution differs/i);
 });
 
-test("unsafe config directories and symlink context escapes are blocked", () => {
+test("unsafe config directories and symlink context escapes are blocked", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const project = tmpProject("safe-paths");
   const templateDir = tmpProject("bad-template");
   fs.cpSync(path.join(repoRoot, "templates"), templateDir, { recursive: true });
