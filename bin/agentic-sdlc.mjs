@@ -26794,9 +26794,15 @@ function buildDefaultCapabilityRecommendations(profile, availableCapabilities) {
     {
       type: "skill",
       name: "agentic-sdlc",
-      availability: availableSkills.has("agentic-sdlc") ? "available" : "unknown",
+      // This default is produced by the running Agentic SDLC plugin itself.
+      // The optional inventory is needed only to attest additional host
+      // capabilities; absence of that inventory must not make the plugin's own
+      // intrinsic governance capability unusable after approval.
+      availability: "available",
       purpose: "Govern the work through contracts, gates, traces, and shared project KB.",
-      rationale: "Every SDLC step should be traceable and reusable across Codex chats.",
+      rationale: availableSkills.has("agentic-sdlc")
+        ? "The reviewed inventory and the running plugin both confirm this capability."
+        : "The running plugin provides this intrinsic governance capability.",
       install_required: false,
     },
   ];

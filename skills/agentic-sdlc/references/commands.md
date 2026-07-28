@@ -444,6 +444,14 @@ node bin/agentic-sdlc.mjs capability status --root <project> --story ST-001 --js
 
 Use profile records to capture project/story context, detected stack, constraints, integrations, evidence, source paths, and source hashes. Use recommendation records to capture skills, MCPs, tools, connectors, plugins, models, concrete bindings, decision matrices, open questions, and execution-policy suggestions.
 
+The available-capabilities inventory is optional. Without it, the default
+recommendation may use only capabilities proven by the running plugin or
+detected local project surface: the Agentic SDLC governance capability itself
+and, for a detected Node.js project, the local test runner. Supply an inventory
+when recommending additional host skills, tools, connectors, plugins, MCPs, or
+models. A default recommendation must not mark the running plugin itself as
+unknown and then fail only after delivery approval.
+
 If a recommendation requires installing a missing skill/plugin/connector or using a new external/write/production target, approval is separate:
 
 ```bash

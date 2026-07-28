@@ -4647,6 +4647,76 @@ test("default capability recommendations use the reviewed available inventory", 
   assert.equal(byKey.has("tool:unused-tool"), false);
 });
 
+test("default capability recommendations remain usable without an optional inventory", () => {
+  const project = tmpProject("capability-no-inventory");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+  story(project, "ST-001");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--phase",
+    "implementation",
+    "--context-file",
+    "package.json",
+  ]);
+  mustRun([
+    "capability",
+    "profile",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    ...humanApproval("Approved local evidence and boundaries"),
+  ]);
+
+  const proposed = JSON.parse(mustRun([
+    "capability",
+    "recommend",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-ST-001",
+    "--profile",
+    "CAP-PROFILE-ST-001",
+    "--json",
+  ]).stdout);
+  const intrinsic = proposed.recommendation.recommendations.find((item) =>
+    item.type === "skill" && item.name === "agentic-sdlc");
+
+  assert.equal(intrinsic?.availability, "available");
+  assert.equal(intrinsic?.install_required, false);
+  assert.doesNotMatch(proposed.assistant_message, /agentic-sdlc \(unknown/);
+  assert.ok(proposed.approval_request.review_items.some((item) =>
+    /skill:agentic-sdlc \(available; no install\)/.test(item)));
+
+  mustRun([
+    "capability",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-ST-001",
+    ...humanApproval("Approved intrinsic governance and detected local test runner"),
+  ]);
+  const approved = readJson(
+    path.join(project, ".sdlc", "capability-discovery", "recommendations", "CAP-REC-ST-001.json"),
+  );
+  assert.equal(approved.status, "approved");
+  assert.equal(
+    approved.recommendations.every((item) => item.availability === "available"),
+    true,
+  );
+});
+
 test("story approval requests do not leak capability records from another story", () => {
   const project = tmpProject("capability-approval-scope");
   initProject(project);
