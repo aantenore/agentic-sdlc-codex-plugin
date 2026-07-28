@@ -725,6 +725,27 @@ class InstallerTransactionTests(unittest.TestCase):
         self.assertEqual(applied["plan_hash"], plan["plan_hash"])
         self.assertEqual(pending["phase"], "validation_pending")
         self.assertRegex(pending["receipt_hash"], r"^[0-9a-f]{64}$")
+        destination = self.home / "plugins" / INSTALLER.PLUGIN_NAME
+        provenance = json.loads(
+            (
+                destination
+                / INSTALLER_V2.BUILD_PROVENANCE_RELATIVE_PATH
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            provenance["build_fingerprint"],
+            plan["build_identity"]["build_fingerprint"],
+        )
+        self.assertEqual(
+            provenance["package_version"],
+            plan["build_identity"]["package_version"],
+        )
+        self.assertEqual(provenance["source_git_commit"], None)
+        self.assertEqual(provenance["source_git_dirty"], None)
+        self.assertEqual(
+            INSTALLER._file_entries(INSTALLER._snapshot_tree(destination)),
+            plan["_source_entries"],
+        )
         self.assertEqual(
             INSTALLER_V2._validate_install(
                 self.home,

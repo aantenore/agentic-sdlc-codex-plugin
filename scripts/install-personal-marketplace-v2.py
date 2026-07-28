@@ -9,6 +9,7 @@ or restored, while reusing the v1 implementation for bounded staging helpers.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -52,6 +53,9 @@ MAX_MANAGED_FILE_BYTES = 16 * 1024 * 1024
 MAX_MANAGED_PATH_BYTES = 1024
 MAX_HOME_PATH_BYTES = 4096
 MAX_JSON_DEPTH = 64
+BUILD_PROVENANCE_RELATIVE_PATH = ".codex-plugin/build-provenance.json"
+BUILD_PROVENANCE_SCHEMA = "agentic-sdlc-build-provenance:v1"
+BUILD_FINGERPRINT_FORMAT = "agentic-sdlc-distribution:v1"
 
 
 def _load_v1_installer():
@@ -405,6 +409,198 @@ def _preflight_source_bounds(repo_root: Path, destination: Path) -> None:
 def _preflight_managed_inputs(repo_root: Path, home: Path) -> None:
     _preflight_source_bounds(repo_root, _destination_path(home))
     _preflight_tree_bounds(_destination_path(home), "The existing local copy")
+
+
+def _source_git_identity(repo_root: Path) -> tuple[str | None, bool | None]:
+    command = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-C",
+        str(repo_root),
+    ]
+
+    def run(arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                [*command, *arguments],
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    checkout = run(["rev-parse", "--show-toplevel"])
+    if checkout is None or checkout.returncode != 0:
+        return None, None
+    try:
+        if Path(checkout.stdout.strip()).resolve() != repo_root.resolve():
+            return None, None
+    except OSError:
+        return None, None
+
+    head = run(["rev-parse", "--verify", "HEAD"])
+    commit = head.stdout.strip().lower() if head and head.returncode == 0 else ""
+    if re.fullmatch(r"[0-9a-f]{40,64}", commit) is None:
+        commit = ""
+    status = run(["status", "--porcelain=v1", "--untracked-files=normal"])
+    dirty = None if status is None or status.returncode != 0 else bool(status.stdout.strip())
+    return commit or None, dirty
+
+
+def _source_package_version(repo_root: Path) -> str:
+    package_path = repo_root / "package.json"
+    payload = _read_bounded_bytes(
+        package_path,
+        MAX_MANAGED_FILE_BYTES,
+        "source package metadata",
+    )
+    try:
+        package = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise InstallError(f"The source package metadata is invalid: {exc}") from exc
+    version = package.get("version") if isinstance(package, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        raise InstallError("The source package metadata does not define a version")
+    return version
+
+
+def _distribution_fingerprint(
+    repo_root: Path, source_entries: list[dict[str, object]]
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"{BUILD_FINGERPRINT_FORMAT}\0".encode("utf-8"))
+    for entry in sorted(source_entries, key=lambda item: str(item["path"])):
+        relative_name = str(entry["path"])
+        if relative_name == BUILD_PROVENANCE_RELATIVE_PATH:
+            continue
+        relative_parts = Path(relative_name).parts
+        source = repo_root.joinpath(*relative_parts)
+        payload = _read_bounded_bytes(
+            source,
+            MAX_MANAGED_FILE_BYTES,
+            f"distributed source file {relative_name}",
+        )
+        if (
+            len(payload) != int(entry["size"])
+            or V1._sha256_bytes(payload) != str(entry["sha256"])
+        ):
+            raise InstallError(
+                f"Distributed source file changed while build identity was prepared: {relative_name}"
+            )
+        relative_bytes = relative_name.encode("utf-8")
+        digest.update(f"file\0{len(relative_bytes)}\0".encode("utf-8"))
+        digest.update(relative_bytes)
+        digest.update(f"\0{len(payload)}\0".encode("utf-8"))
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _source_entries_with_provenance(
+    repo_root: Path,
+    source_entries: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], bytes, dict[str, object]]:
+    distributed_entries = [
+        entry
+        for entry in source_entries
+        if str(entry["path"]) != BUILD_PROVENANCE_RELATIVE_PATH
+    ]
+    fingerprint = _distribution_fingerprint(repo_root, distributed_entries)
+    commit, dirty = _source_git_identity(repo_root)
+    package_version = _source_package_version(repo_root)
+    provenance = {
+        "schema_version": BUILD_PROVENANCE_SCHEMA,
+        "package_version": package_version,
+        "build_fingerprint": fingerprint,
+        "source_git_commit": commit,
+        "source_git_dirty": dirty,
+        "generated_by": "official-installer-v2",
+    }
+    payload = V1._json_bytes(provenance)
+    provenance_entry = {
+        "path": BUILD_PROVENANCE_RELATIVE_PATH,
+        "type": "file",
+        "size": len(payload),
+        "sha256": V1._sha256_bytes(payload),
+    }
+    augmented = sorted(
+        [*distributed_entries, provenance_entry],
+        key=lambda entry: str(entry["path"]),
+    )
+    public_identity = {
+        "package_version": package_version,
+        "build_fingerprint": fingerprint,
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "provenance_file": BUILD_PROVENANCE_RELATIVE_PATH,
+    }
+    return augmented, payload, public_identity
+
+
+def _attach_source_provenance(
+    repo_root: Path, base: dict[str, object]
+) -> dict[str, object]:
+    source_entries, provenance_payload, identity = _source_entries_with_provenance(
+        repo_root,
+        list(base["_source_entries"]),
+    )
+    destination_files = V1._file_entries(base["_destination_snapshot"])
+    plugin_change = source_entries != destination_files
+    marketplace_change = base["_marketplace_before"] != base["_marketplace_after"]
+    if not bool(base["_destination_snapshot"]["exists"]):
+        operation = "install"
+    elif plugin_change or marketplace_change:
+        operation = "update"
+    else:
+        operation = "noop"
+    changes = [
+        change
+        for change in list(base["changes"])
+        if change != "managed_plugin_copy"
+    ]
+    if plugin_change:
+        changes.insert(0, "managed_plugin_copy")
+    base.update(
+        {
+            "operation": operation,
+            "changes": changes,
+            "source": {
+                "file_count": len(source_entries),
+                "byte_count": sum(int(entry["size"]) for entry in source_entries),
+                "manifest_sha256": V1._canonical_digest(source_entries),
+            },
+            "build_identity": identity,
+            "_source_entries": source_entries,
+            "_build_provenance_bytes": provenance_payload,
+        }
+    )
+    plan_core = {
+        key: value
+        for key, value in base.items()
+        if not key.startswith("_") and key != "plan_hash"
+    }
+    base["plan_hash"] = V1._canonical_digest(plan_core)
+    return base
+
+
+def _write_staged_build_provenance(
+    staging_root: Path, plan: dict[str, object]
+) -> None:
+    provenance_path = staging_root.joinpath(
+        *BUILD_PROVENANCE_RELATIVE_PATH.split("/")
+    )
+    if V1._lexists(provenance_path) and V1._is_link_like(provenance_path):
+        raise InstallError("Refusing linked staged build provenance")
+    V1._write_bytes_atomically(
+        provenance_path,
+        bytes(plan["_build_provenance_bytes"]),
+    )
 
 
 def _assert_no_orphaned_v2_worktrees(home: Path) -> None:
@@ -1028,7 +1224,10 @@ def _build_install_plan(
     _preflight_managed_inputs(repo_root, home)
     marketplace = _marketplace_path(home)
     before_marketplace = _bounded_marketplace_bytes(marketplace)
-    base = V1._build_install_plan(repo_root, home, with_rtk=False, rtk_executable=None)
+    base = _attach_source_provenance(
+        repo_root,
+        V1._build_install_plan(repo_root, home, with_rtk=False, rtk_executable=None),
+    )
     if base["_marketplace_before"] != before_marketplace:
         raise InstallError("The marketplace file changed while the preview was prepared")
     _validate_plan_bounds(base, home)
@@ -1077,7 +1276,10 @@ def _rebuild_install_plan_from_receipt(
     _preflight_managed_inputs(repo_root, home)
     marketplace = _marketplace_path(home)
     before_marketplace = _bounded_marketplace_bytes(marketplace)
-    base = V1._build_install_plan(repo_root, home, with_rtk=False, rtk_executable=None)
+    base = _attach_source_provenance(
+        repo_root,
+        V1._build_install_plan(repo_root, home, with_rtk=False, rtk_executable=None),
+    )
     if base["_marketplace_before"] != before_marketplace:
         raise InstallError("The marketplace changed while recovery rebuilt the preview")
     _validate_plan_bounds(base, home)
@@ -1402,15 +1604,23 @@ def _apply_install_plan(
                 _destination_path(home),
                 locked_plan["_allowlist"],
             )
+            _write_staged_build_provenance(staging_root, locked_plan)
             V1._verify_tree_files(
                 staging_root, locked_plan["_source_entries"], "Staged v2 plugin"
             )
-            current_source = V1._collect_allowlisted_source_files(
+            current_source, current_provenance, current_identity = _source_entries_with_provenance(
                 repo_root,
-                _destination_path(home),
-                locked_plan["_allowlist"],
+                V1._collect_allowlisted_source_files(
+                    repo_root,
+                    _destination_path(home),
+                    locked_plan["_allowlist"],
+                ),
             )
-            if current_source != locked_plan["_source_entries"]:
+            if (
+                current_source != locked_plan["_source_entries"]
+                or current_provenance != locked_plan["_build_provenance_bytes"]
+                or current_identity != locked_plan["build_identity"]
+            ):
                 raise InstallError("The source package changed during staging")
             pending = _apply_transaction(locked_plan, home, staging_root, guard)
             staging_root = None

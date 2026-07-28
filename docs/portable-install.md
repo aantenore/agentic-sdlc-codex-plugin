@@ -126,7 +126,9 @@ Each result contains at least:
 ```json
 {
   "package_version": "0.13.1",
-  "build_fingerprint": "<sha256-of-distributed-paths-and-bytes>"
+  "build_fingerprint": "<sha256-of-distributed-paths-and-bytes>",
+  "git_commit": "<source-commit>",
+  "git_dirty": false
 }
 ```
 
@@ -136,20 +138,25 @@ Interpret the fields as follows:
 | --- | --- | --- |
 | `package_version` | The declared semantic release | Confirm compatibility, but do not use it alone to claim two builds are identical |
 | `build_fingerprint` | A deterministic SHA-256 over every distributed relative path and its exact bytes | Require the source and installed values to match when verifying that this exact checkout was installed |
-| `git_commit` | The checkout `HEAD` that supplied the command | When present, record it as source provenance; an unpacked or staged install may omit it |
-| `git_dirty` | Whether that exact Git checkout has tracked or untracked changes | `false` binds the fingerprint to the displayed commit's clean tree; `true` means the commit alone does not describe the build |
+| `git_commit` | The checkout `HEAD` that supplied the command, preserved by the official V2 installer | Require the source and officially installed values to match |
+| `git_dirty` | Whether the source checkout had tracked or untracked changes when the install plan was created | Require `false` for a release build so the displayed commit fully describes the source |
+| `provenance` | `official-installer-v2` when identity came from installer-managed metadata | Require this marker when validating an installed copy outside Git |
 
 The fingerprint excludes Git metadata, dependencies, runtime `.sdlc/` state,
-coverage, and other non-distributed directories. It therefore remains stable
-when the same package bytes are copied to another path, but changes when any
-distributed source, schema, template, skill, UI asset, or document changes.
+coverage, other non-distributed directories, and the installer-generated
+`.codex-plugin/build-provenance.json` file. Excluding only that metadata file
+avoids a self-referential digest: its contents bind the source commit, dirty
+state, package version, and fingerprint to the copied distribution. The
+fingerprint remains stable when the same package bytes are copied to another
+path, but changes when any distributed source, schema, template, skill, UI
+asset, or document changes.
 
-It is normal for the installed result to omit `git_commit` and `git_dirty`
-because generated plugin staging is not a Git checkout. In that case the
-matching fingerprint is the exact build check. If the versions match but the
-fingerprints do not, do not treat the installed cache as verified: rerun the
-reviewed V2 staging transaction, add the plugin again, open a new task, and
-repeat both commands.
+An arbitrary unpacked copy can still omit Git fields when it has neither a Git
+checkout nor official installer provenance. The canonical V2 installation must
+not omit them. Invalid, stale, or mismatched provenance fails closed. If any of
+version, commit, dirty state, provenance marker, or fingerprint differs, do not
+treat the installed cache as verified: restore or rerun the reviewed V2
+transaction, add the plugin again, open a new task, and repeat both commands.
 
 ### What The Installer Changes
 

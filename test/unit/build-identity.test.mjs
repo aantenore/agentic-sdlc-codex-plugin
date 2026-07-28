@@ -79,6 +79,40 @@ test("build identity works outside Git and omits Git-only fields", (context) => 
   assert.match(identity.build_fingerprint, /^[0-9a-f]{64}$/u);
 });
 
+test("official installer provenance preserves exact source identity outside Git", (context) => {
+  const root = fixture(context, "installed-provenance");
+  const buildFingerprint = computeBuildFingerprint(root);
+  const commit = crypto.randomBytes(20).toString("hex");
+  write(root, ".codex-plugin/build-provenance.json", `${JSON.stringify({
+    schema_version: "agentic-sdlc-build-provenance:v1",
+    package_version: "1.2.3",
+    build_fingerprint: buildFingerprint,
+    source_git_commit: commit,
+    source_git_dirty: false,
+    generated_by: "official-installer-v2",
+  }, null, 2)}\n`);
+
+  assert.equal(computeBuildFingerprint(root), buildFingerprint);
+  assert.deepEqual(inspectBuildIdentity(root, {
+    commandRunner: () => ({ status: 128, stdout: "", stderr: "not a repository" }),
+  }), {
+    package_version: "1.2.3",
+    build_fingerprint: buildFingerprint,
+    git_commit: commit,
+    git_dirty: false,
+    provenance: "official-installer-v2",
+  });
+
+  fs.writeFileSync(path.join(root, "lib", "feature.mjs"), "export const feature = 9;\n");
+  assert.throws(
+    () => inspectBuildIdentity(root, {
+      commandRunner: () => ({ status: 128, stdout: "", stderr: "not a repository" }),
+    }),
+    (error) => error instanceof BuildIdentityError
+      && error.code === "BUILD_PROVENANCE_FINGERPRINT_MISMATCH",
+  );
+});
+
 test("Git identity reports commit and dirty state only for the exact checkout root", (context) => {
   const root = fixture(context, "git");
   const commit = crypto.randomBytes(20).toString("hex");
