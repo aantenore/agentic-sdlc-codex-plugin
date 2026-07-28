@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -45,6 +45,42 @@ function run(args, options = {}) {
     env,
     timeout: options.timeout || 60_000,
     maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+function runAsync(args, options = {}) {
+  const env = { ...process.env };
+  for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) {
+    delete env[key];
+  }
+  Object.assign(env, options.env || {});
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bin, ...args], {
+      cwd: options.cwd || repoRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${args.join(" ")} exceeded its test timeout`));
+    }, options.timeout || 60_000);
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timeout);
+      resolve({
+        status,
+        signal,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
   });
 }
 
@@ -222,6 +258,32 @@ function lifecycleReceiptHash(record) {
   const canonical = structuredClone(record);
   delete canonical.receipt_hash;
   delete canonical.hash_algorithm;
+  return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
+}
+
+function legacyAuthorizationContentHash(record) {
+  const canonical = structuredClone(record);
+  for (const field of [
+    "approved_content_hash",
+    "hash_algorithm",
+    "status",
+    "updated_at",
+    "revoked_at",
+    "revocation_reason",
+    "consumed_at",
+    "closed_at",
+    "closed_reason",
+    "use_count",
+    "__path",
+    "__relative_path",
+    "approvals",
+    "audit",
+    "created_at",
+    "approved_at",
+    "approved_by",
+  ]) {
+    delete canonical[field];
+  }
   return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
 }
 
@@ -745,7 +807,7 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(proposalResponse.human_guidance.impact, /project “Autonomy E2E”/u);
   assert.match(proposalResponse.human_guidance.impact, /^You chose full autonomy within the agreed limits/u);
   assert.match(proposalResponse.human_guidance.impact, /cannot digitally verify who gave it/u);
-  assert.match(proposalResponse.human_guidance.impact, /destination is “codex\/pr-1” in repository “github\.com\/aantenore\/agentic-sdlc-codex-plugin”, starting from “main”/u);
+  assert.match(proposalResponse.human_guidance.impact, /destination is the selected pull-request branch/u);
   assert.match(proposalResponse.human_guidance.impact, /change only “src”/u);
   assert.match(proposalResponse.human_guidance.required_decision, /For this pull request, how independently should I work\?/u);
   assert.match(proposalResponse.human_guidance.required_decision, /1\. Guided: I ask for confirmation before important steps/u);
@@ -756,6 +818,12 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(proposalResponse.human_guidance.required_decision, /before the pull request is merged/u);
   assert.match(proposalResponse.human_guidance.required_decision, /no separate calendar deadline.*ends when the pull request is merged, closed, or cancelled/u);
   assert.equal(proposalResponse.human_guidance.details.project_name, "Autonomy E2E");
+  assert.equal(
+    proposalResponse.human_guidance.details.repository,
+    "github.com/aantenore/agentic-sdlc-codex-plugin",
+  );
+  assert.equal(proposalResponse.human_guidance.details.base_branch, "main");
+  assert.equal(proposalResponse.human_guidance.details.head_branch, "codex/pr-1");
   assert.deepEqual(proposalResponse.human_guidance.details.allowed_write_paths, ["src"]);
   assert.deepEqual(proposalResponse.human_guidance.details.review_moments, ["pull_request.merge"]);
   assert.equal(proposalResponse.human_guidance.details.expires_at, null);
@@ -880,6 +948,8 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(automatic.autonomy_decision_path, /autonomy\/decisions\/AUT-DEC-.*\.json$/u);
   assert.match(automatic.task_start_receipt, /task-start\.json$/u);
   const receipt = JSON.parse(fs.readFileSync(path.join(project, automatic.task_start_receipt), "utf8"));
+  assert.equal(receipt.schema_version, "profile-task-start-receipt:v1");
+  assert.equal(Object.hasOwn(receipt, "workflow_instance_ref"), false);
   assert.equal(receipt.delivery_profile_ref.id, "AUT-PR-1");
   assert.equal(receipt.autonomy_decision_ref.id, automatic.autonomy_decision.id);
   assert.equal(receipt.start_basis, "checkpointed-profile");
@@ -1198,14 +1268,23 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   );
   fs.writeFileSync(sourcePath, "exact authorized change\n", "utf8");
 
-  mustFail([
+  const repeatedCommitCompletion = mustRunJson([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-PR-1",
     "--action", "git.commit",
     "--outcome", "passed",
     "--evidence", "src/change.txt",
-  ], /must be authorized before recording its outcome/u);
+  ]);
+  assert.equal(repeatedCommitCompletion.idempotent, true);
+  assert.equal(
+    repeatedCommitCompletion.action_receipt.id,
+    commitCompletion.action_receipt.id,
+  );
+  assert.equal(
+    repeatedCommitCompletion.action_receipt.authorization_receipt_ref.id,
+    commitAuthorization.action_receipt.id,
+  );
 
   const pushBeforeEnv = fakeGitRemoteEnv(project, beforeCommit);
   const pushAuthorization = mustRunJson([
@@ -2174,7 +2253,30 @@ test("local release governs a failed data migration, verified rollback, and fina
   const dataDirectory = path.join(releaseRoot, "data");
   const dataPath = path.join(dataDirectory, "store.json");
   const backupPath = path.join(dataDirectory, "store.before.json");
-  const previewPath = path.join(project, "evidence", "migration-preview.json");
+  const previewEvidence = "evidence/st-local-data-migration-preview.json";
+  const rollbackEvidence = "evidence/St-Local-Data-rollback-passed.json";
+  const previewPath = path.join(project, previewEvidence);
+  const actionReceiptsDirectory = path.join(project, ".sdlc", "autonomy", "actions");
+  const actionReceiptNames = () => fs.existsSync(actionReceiptsDirectory)
+    ? fs.readdirSync(actionReceiptsDirectory).sort()
+    : [];
+  const authorizationUseNames = (authorizationId) => {
+    const directory = path.join(project, ".sdlc", "authorization-uses", authorizationId);
+    return fs.existsSync(directory) ? fs.readdirSync(directory).sort() : [];
+  };
+  const actionIntentNames = () => {
+    const directory = path.join(project, ".sdlc", "autonomy", "action-intents");
+    return fs.existsSync(directory) ? fs.readdirSync(directory).sort() : [];
+  };
+  const storyTraceEvents = () => {
+    const tracePath = path.join(project, ".sdlc", "traces", "ST-LOCAL-DATA.jsonl");
+    return fs.existsSync(tracePath)
+      ? fs.readFileSync(tracePath, "utf8")
+          .split(/\r?\n/u)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+      : [];
+  };
   fs.mkdirSync(appPath, { recursive: true });
   fs.mkdirSync(dataDirectory, { recursive: true });
   fs.mkdirSync(path.dirname(previewPath), { recursive: true });
@@ -2207,7 +2309,7 @@ test("local release governs a failed data migration, verified rollback, and fina
     "--allow-action", "release.local",
     "--data-target", dataPath,
     "--data-scope", "records[*].schemaVersion",
-    "--migration-preview", "evidence/migration-preview.json",
+    "--migration-preview", previewEvidence,
     "--backup-path", backupPath,
   ];
   mustFail(
@@ -2295,26 +2397,201 @@ test("local release governs a failed data migration, verified rollback, and fina
   ], /existing backup does not match the current target/u);
   fs.rmSync(backupPath);
 
-  const migrationCheckpoint = mustRunJson([
+  const actionReceiptsBeforeMigrationCheckpoint = actionReceiptNames();
+  const migrationCheckpointResult = run([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-DATA",
     "--action", "data.migrate",
+    "--phase", "implementation",
+    "--json",
   ]);
+  assert.equal(migrationCheckpointResult.error, undefined);
+  assert.equal(
+    migrationCheckpointResult.status,
+    0,
+    `${migrationCheckpointResult.stdout}\n${migrationCheckpointResult.stderr}`,
+  );
+  const migrationCheckpoint = JSON.parse(migrationCheckpointResult.stdout);
   assert.equal(migrationCheckpoint.status, "checkpoint_required");
+  assert.equal(migrationCheckpoint.action_receipt, undefined);
+  assert.deepEqual(actionReceiptNames(), actionReceiptsBeforeMigrationCheckpoint);
   assert.match(migrationCheckpoint.human_guidance.required_decision, /store\.json/u);
   assert.match(migrationCheckpoint.human_guidance.required_decision, /records\[\*\]\.schemaVersion/u);
   assert.match(migrationCheckpoint.human_guidance.required_decision, /store\.before\.json/u);
+  assert.doesNotMatch(migrationCheckpoint.human_guidance.required_decision, /st-local-data/iu);
+  assert.match(
+    migrationCheckpoint.human_guidance.required_decision,
+    /preview evidence file listed in the optional technical details/u,
+  );
+  assert.deepEqual(
+    migrationCheckpoint.human_guidance.details.preview_evidence,
+    [previewEvidence],
+  );
 
-  const firstMigrationAuthorization = mustRunJson([
+  const policyValidationAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-LOCAL-DATA-POLICY",
+    "--scope", "Approve one migration only after its policy source validates.",
+    "--allow-use", "autonomy.delivery.action.data.migrate=AUT-LOCAL-DATA",
+    "--max-uses", "1",
+    ...humanApproval("Delegate one policy-validated data migration checkpoint"),
+  ]).authorization;
+  const policySourcePath = path.join(
+    project,
+    migrationCheckpoint.action_details.checkpoint_policy.policy_source_ref.path,
+  );
+  fs.mkdirSync(path.dirname(policySourcePath), { recursive: true });
+  fs.writeFileSync(policySourcePath, '{"tampered":true}\n', "utf8");
+  const receiptsBeforePolicyFailure = actionReceiptNames();
+  mustFail([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-DATA",
     "--action", "data.migrate",
+    "--phase", "implementation",
     "--confirm-action",
-    ...humanApproval("Approve the exact previewed data migration"),
-  ]);
+    "--authorization", policyValidationAuthorization.id,
+    "--actor-type", "agent",
+    "--actor-name", "Migration Test Automation",
+    "--approval-source", "automation",
+    "--summary", "Use the delegation only if the policy source is valid.",
+  ], /checkpoint policy source .*stale or tampered/iu);
+  assert.deepEqual(
+    authorizationUseNames(policyValidationAuthorization.id),
+    [],
+    "logical policy-source failure must not consume the delegated authorization",
+  );
+  assert.deepEqual(actionReceiptNames(), receiptsBeforePolicyFailure);
+  const policyAuthorizationAfterFailure = JSON.parse(fs.readFileSync(
+    path.join(
+      project,
+      ".sdlc",
+      "authorizations",
+      `${policyValidationAuthorization.id}.json`,
+    ),
+    "utf8",
+  ));
+  assert.equal(policyAuthorizationAfterFailure.status, "active");
+  assert.equal(policyAuthorizationAfterFailure.use_count ?? 0, 0);
+  fs.rmSync(policySourcePath);
+
+  const migrationApprovalAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-LOCAL-DATA-MIGRATE",
+    "--scope", "Approve one exact previewed local data migration.",
+    "--allow-use", "autonomy.delivery.action.data.migrate=AUT-LOCAL-DATA",
+    "--max-uses", "1",
+    ...humanApproval("Delegate one exact data migration checkpoint"),
+  ]).authorization;
+  const firstMigrationAuthorizationArgs = [
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--phase", "implementation",
+    "--confirm-action",
+    "--authorization", migrationApprovalAuthorization.id,
+    "--actor-type", "agent",
+    "--actor-name", "Migration Test Automation",
+    "--approval-source", "automation",
+    "--summary", "Use the delegated approval for this exact previewed migration only.",
+  ];
+  const receiptsBeforeInjectedFailure = actionReceiptNames();
+  mustFail(
+    firstMigrationAuthorizationArgs,
+    /after authorization use and before action receipt persistence/iu,
+    {
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE:
+          "after-authorization-use-before-action-receipt",
+      },
+    },
+  );
+  assert.deepEqual(actionReceiptNames(), receiptsBeforeInjectedFailure);
+  assert.equal(authorizationUseNames(migrationApprovalAuthorization.id).length, 1);
+  assert.equal(actionIntentNames().length, 1);
+  const migrationActionIntent = JSON.parse(fs.readFileSync(
+    path.join(
+      project,
+      ".sdlc",
+      "autonomy",
+      "action-intents",
+      actionIntentNames()[0],
+    ),
+    "utf8",
+  ));
+  const migrationAuthorizationTraceId = migrationActionIntent.trace_event.id;
+  mustFail(
+    firstMigrationAuthorizationArgs,
+    /after action receipt persistence and before trace persistence/iu,
+    {
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE:
+          "after-action-receipt-before-trace",
+      },
+    },
+  );
+  assert.equal(
+    actionReceiptNames().length,
+    receiptsBeforeInjectedFailure.length + 1,
+  );
+  assert.equal(
+    storyTraceEvents().filter((event) => event.id === migrationAuthorizationTraceId).length,
+    0,
+  );
+
+  const firstMigrationAuthorization = mustRunJson(firstMigrationAuthorizationArgs);
+  assert.equal(firstMigrationAuthorization.status, "authorized");
   assert.equal(firstMigrationAuthorization.action_receipt.checkpoint_required, true);
+  assert.equal(
+    firstMigrationAuthorization.action_receipt.approval.authorization_ref,
+    migrationApprovalAuthorization.id,
+  );
+  assert.match(
+    firstMigrationAuthorization.action_receipt.approval.authorization_use_ref,
+    /authorization-uses\/AUTH-LOCAL-DATA-MIGRATE\/.+\.json$/u,
+  );
+  assert.doesNotMatch(
+    firstMigrationAuthorization.human_guidance.required_decision,
+    /st-local-data/iu,
+  );
+  assert.deepEqual(
+    firstMigrationAuthorization.human_guidance.details.preview_evidence,
+    [previewEvidence],
+  );
+  assert.equal(
+    fs.existsSync(path.join(project, firstMigrationAuthorization.action_receipt_path)),
+    true,
+  );
+  assert.equal(authorizationUseNames(migrationApprovalAuthorization.id).length, 1);
+  assert.equal(
+    actionReceiptNames().length,
+    receiptsBeforeInjectedFailure.length + 1,
+  );
+  assert.equal(
+    storyTraceEvents().filter((event) => event.id === migrationAuthorizationTraceId).length,
+    1,
+  );
+  const idempotentMigrationAuthorization = mustRunJson(firstMigrationAuthorizationArgs);
+  assert.equal(idempotentMigrationAuthorization.idempotent, true);
+  assert.equal(
+    idempotentMigrationAuthorization.action_receipt.id,
+    firstMigrationAuthorization.action_receipt.id,
+  );
+  assert.equal(authorizationUseNames(migrationApprovalAuthorization.id).length, 1);
+  assert.equal(
+    actionReceiptNames().length,
+    receiptsBeforeInjectedFailure.length + 1,
+  );
+  assert.equal(
+    storyTraceEvents().filter((event) => event.id === migrationAuthorizationTraceId).length,
+    1,
+  );
   assert.equal(
     firstMigrationAuthorization.action_receipt.action_details
       .provider_operation.precondition_receipt.proof.backup.status,
@@ -2336,6 +2613,23 @@ test("local release governs a failed data migration, verified rollback, and fina
   assert.equal(
     failedMigration.action_receipt.authorization_receipt_ref.id,
     firstMigrationAuthorization.action_receipt.id,
+  );
+  const usesAfterFailedMigration = authorizationUseNames(
+    migrationApprovalAuthorization.id,
+  );
+  const receiptsAfterFailedMigration = actionReceiptNames();
+  mustFail(
+    firstMigrationAuthorizationArgs,
+    /already consumed by completion .*Create a new delegated authorization/iu,
+  );
+  assert.deepEqual(
+    authorizationUseNames(migrationApprovalAuthorization.id),
+    usesAfterFailedMigration,
+  );
+  assert.deepEqual(actionReceiptNames(), receiptsAfterFailedMigration);
+  assert.equal(
+    storyTraceEvents().filter((event) => event.id === migrationAuthorizationTraceId).length,
+    1,
   );
 
   const beforeRollbackGate = run([
@@ -2361,14 +2655,14 @@ test("local release governs a failed data migration, verified rollback, and fina
     ...humanApproval("Approve restoration from the exact migration backup"),
   ]);
   fs.copyFileSync(backupPath, dataPath);
-  fs.writeFileSync(path.join(project, "evidence", "rollback-passed.json"), '{"restored":true}\n');
+  fs.writeFileSync(path.join(project, rollbackEvidence), '{"restored":true}\n');
   const rollbackCompletion = mustRunJson([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-DATA",
     "--action", "data.rollback",
     "--outcome", "passed",
-    "--evidence", "evidence/rollback-passed.json",
+    "--evidence", rollbackEvidence,
   ]);
   assert.equal(
     rollbackCompletion.action_receipt.authorization_receipt_ref.id,
@@ -2428,28 +2722,48 @@ test("local release governs a failed data migration, verified rollback, and fina
   assert.ok(afterRetryReport.errors.some((error) =>
     /requires verified rollback evidence/u.test(error)));
 
-  const rollbackEvidencePath = path.join(project, "evidence", "rollback-passed.json");
+  const rollbackEvidencePath = path.join(project, rollbackEvidence);
+  const actionReceiptsBeforeRollbackCheckpoint = actionReceiptNames();
   const rollbackVerificationCheckpoint = mustRunJson([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-DATA",
     "--action", "rollback.verify",
-    "--evidence", "evidence/rollback-passed.json",
+    "--evidence", rollbackEvidence,
   ]);
   assert.equal(rollbackVerificationCheckpoint.status, "checkpoint_required");
+  assert.equal(rollbackVerificationCheckpoint.action_receipt, undefined);
+  assert.deepEqual(actionReceiptNames(), actionReceiptsBeforeRollbackCheckpoint);
+  assert.doesNotMatch(
+    rollbackVerificationCheckpoint.human_guidance.required_decision,
+    /st-local-data/iu,
+  );
   assert.match(
     rollbackVerificationCheckpoint.human_guidance.required_decision,
-    /rollback-passed\.json/u,
+    /rollback evidence file listed in the optional technical details/u,
+  );
+  assert.deepEqual(
+    rollbackVerificationCheckpoint.human_guidance.details.rollback_evidence,
+    [rollbackEvidence],
   );
   const rollbackVerificationAuthorization = mustRunJson([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-DATA",
     "--action", "rollback.verify",
-    "--evidence", "evidence/rollback-passed.json",
+    "--evidence", rollbackEvidence,
     "--confirm-action",
     ...humanApproval("Approve the exact rollback rehearsal evidence"),
   ]);
+  assert.equal(rollbackVerificationAuthorization.status, "authorized");
+  assert.doesNotMatch(
+    rollbackVerificationAuthorization.human_guidance.required_decision,
+    /st-local-data/iu,
+  );
+  assert.deepEqual(
+    rollbackVerificationAuthorization.human_guidance.details.rollback_evidence,
+    [rollbackEvidence],
+  );
   fs.writeFileSync(rollbackEvidencePath, '{"restored":"tampered"}\n');
   mustFail([
     "autonomy", "delivery", "action",
@@ -2457,7 +2771,7 @@ test("local release governs a failed data migration, verified rollback, and fina
     "--id", "AUT-LOCAL-DATA",
     "--action", "rollback.verify",
     "--outcome", "passed",
-    "--evidence", "evidence/rollback-passed.json",
+    "--evidence", rollbackEvidence,
   ], /must use the exact evidence set bound at authorization/u);
   fs.writeFileSync(rollbackEvidencePath, '{"restored":true}\n');
   const rollbackVerification = mustRunJson([
@@ -2466,7 +2780,7 @@ test("local release governs a failed data migration, verified rollback, and fina
     "--id", "AUT-LOCAL-DATA",
     "--action", "rollback.verify",
     "--outcome", "passed",
-    "--evidence", "evidence/rollback-passed.json",
+    "--evidence", rollbackEvidence,
   ]);
   assert.equal(
     rollbackVerification.action_receipt.authorization_receipt_ref.id,
@@ -2559,6 +2873,464 @@ test("local release governs a failed data migration, verified rollback, and fina
     false,
     afterReleaseGate.stdout,
   );
+});
+
+test("delivery action intents keep distinct replay-allowed requests and traces", () => {
+  const project = tmpProject("delivery-action-intent-replay");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-ACTION-INTENT",
+    contractId: "CONTRACT-ACTION-INTENT",
+    profileId: "AUT-ACTION-INTENT",
+  });
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-ACTION-INTENT",
+    "--delivery", "PR-ACTION-INTENT",
+    "--kind", "pull_request",
+    "--story", "ST-ACTION-INTENT",
+    "--contract", "CONTRACT-ACTION-INTENT",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "supervised",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+    "--allow-action", "test.run",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-ACTION-INTENT",
+    ...humanApproval("Approve the supervised replay-policy test delivery"),
+  ]);
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-ACTION-INTENT"),
+    "--delivery-profile", "AUT-ACTION-INTENT",
+    "--confirm-start",
+    "--actor-type", "human",
+  ]);
+  assert.equal(started.execution_allowed, true);
+
+  const authorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ACTION-INTENT",
+    "--scope", "Approve two exact supervised test checkpoints.",
+    "--allow-use", "autonomy.delivery.action.test.run=AUT-ACTION-INTENT",
+    "--max-uses", "2",
+    ...humanApproval("Delegate two exact test checkpoints for this delivery"),
+  ]).authorization;
+  const authorizationPath = path.join(
+    project,
+    ".sdlc",
+    "authorizations",
+    `${authorization.id}.json`,
+  );
+  const replayAllowedAuthorization = JSON.parse(
+    fs.readFileSync(authorizationPath, "utf8"),
+  );
+  replayAllowedAuthorization.use_policy.replay = "allow";
+  replayAllowedAuthorization.approved_content_hash = legacyAuthorizationContentHash(
+    replayAllowedAuthorization,
+  );
+  fs.writeFileSync(
+    authorizationPath,
+    `${JSON.stringify(replayAllowedAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+
+  const authorizationArgs = (summary) => [
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-ACTION-INTENT",
+    "--action", "test.run",
+    "--phase", "implementation",
+    "--confirm-action",
+    "--authorization", authorization.id,
+    "--actor-type", "agent",
+    "--actor-name", "Replay Test Automation",
+    "--approval-source", "automation",
+    "--summary", summary,
+  ];
+  const first = mustRunJson(authorizationArgs(
+    "Approve the first exact supervised test checkpoint.",
+  ));
+  const second = mustRunJson(authorizationArgs(
+    "Approve the second distinct supervised test checkpoint.",
+  ));
+  assert.equal(first.action_receipt.schema_version, "delivery-action-receipt:v2");
+  assert.equal(second.action_receipt.schema_version, "delivery-action-receipt:v2");
+  assert.notEqual(first.action_receipt.id, second.action_receipt.id);
+  assert.notEqual(
+    first.action_receipt.approval.authorization_use_ref,
+    second.action_receipt.approval.authorization_use_ref,
+  );
+  const intents = fs.readdirSync(
+    path.join(project, ".sdlc", "autonomy", "action-intents"),
+  ).filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(
+      path.join(project, ".sdlc", "autonomy", "action-intents", name),
+      "utf8",
+    )));
+  assert.equal(intents.length, 2);
+  assert.notEqual(intents[0].request_hash, intents[1].request_hash);
+  assert.notEqual(intents[0].transaction_key, intents[1].transaction_key);
+  const traces = fs.readFileSync(
+    path.join(project, ".sdlc", "traces", "ST-ACTION-INTENT.jsonl"),
+    "utf8",
+  ).split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  for (const receipt of [first.action_receipt, second.action_receipt]) {
+    assert.equal(
+      traces.filter((event) => event.id === `TR-AUTH-${receipt.id}`).length,
+      1,
+    );
+  }
+
+  const completionEvidence = ".sdlc/requirements/REQ-AUTONOMY.json";
+  const ambiguousCompletionArgs = [
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-ACTION-INTENT",
+    "--action", "test.run",
+    "--outcome", "passed",
+    "--evidence", completionEvidence,
+  ];
+  mustFail(
+    ambiguousCompletionArgs,
+    /More than one unconsumed authorization receipt matches test\.run.*--authorization-receipt/isu,
+  );
+
+  const selectedCompletionArgs = [
+    ...ambiguousCompletionArgs,
+    "--authorization-receipt", second.action_receipt.id,
+  ];
+  mustFail(
+    selectedCompletionArgs,
+    /after action receipt persistence and before trace persistence/iu,
+    {
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE:
+          "after-action-receipt-before-trace",
+      },
+    },
+  );
+  const actionReceiptsRoot = path.join(project, ".sdlc", "autonomy", "actions");
+  const readActionReceipts = () => fs.readdirSync(actionReceiptsRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(
+      path.join(actionReceiptsRoot, name),
+      "utf8",
+    )));
+  const afterInterruptedCompletion = readActionReceipts();
+  const interruptedCompletion = afterInterruptedCompletion.find((receipt) =>
+    receipt.status === "completed"
+    && receipt.authorization_receipt_ref?.id === second.action_receipt.id);
+  assert.ok(interruptedCompletion);
+  assert.equal(
+    interruptedCompletion.schema_version,
+    "delivery-action-receipt:v2",
+  );
+  assert.ok(interruptedCompletion.completion_request);
+  assert.equal(
+    afterInterruptedCompletion.filter((receipt) => receipt.status === "completed").length,
+    1,
+  );
+  const interruptedCompletionPath = path.join(
+    actionReceiptsRoot,
+    `${interruptedCompletion.id}.json`,
+  );
+  const interruptedCompletionText = fs.readFileSync(
+    interruptedCompletionPath,
+    "utf8",
+  );
+  const currentCompletionWithoutRequest = JSON.parse(interruptedCompletionText);
+  delete currentCompletionWithoutRequest.completion_request;
+  currentCompletionWithoutRequest.receipt_hash = lifecycleReceiptHash(
+    currentCompletionWithoutRequest,
+  );
+  fs.writeFileSync(
+    interruptedCompletionPath,
+    `${JSON.stringify(currentCompletionWithoutRequest, null, 2)}\n`,
+    "utf8",
+  );
+  mustFail(
+    ["gate", "check", "--root", project, "--story", "ST-ACTION-INTENT", "--strict"],
+    /Delivery lifecycle receipt .* validation failed: .*completion_request/isu,
+  );
+
+  const legacyCompletionWithoutRequest = structuredClone(
+    currentCompletionWithoutRequest,
+  );
+  legacyCompletionWithoutRequest.schema_version = "delivery-action-receipt:v1";
+  legacyCompletionWithoutRequest.receipt_hash = lifecycleReceiptHash(
+    legacyCompletionWithoutRequest,
+  );
+  fs.writeFileSync(
+    interruptedCompletionPath,
+    `${JSON.stringify(legacyCompletionWithoutRequest, null, 2)}\n`,
+    "utf8",
+  );
+  const legacyGate = run([
+    "gate", "check",
+    "--root", project,
+    "--story", "ST-ACTION-INTENT",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(legacyGate.error, undefined);
+  assert.ok([0, 1].includes(legacyGate.status), legacyGate.stderr);
+  const legacyGateReport = JSON.parse(legacyGate.stdout);
+  assert.ok(
+    legacyGateReport.warnings.some((warning) =>
+      warning.includes(interruptedCompletion.id)
+      && warning.includes("legacy completion without an immutable completion request")),
+    legacyGate.stdout,
+  );
+  assert.equal(
+    legacyGateReport.errors.some((error) =>
+      error.includes(interruptedCompletion.id)
+      && error.includes("completion request")),
+    false,
+    legacyGate.stdout,
+  );
+  fs.writeFileSync(interruptedCompletionPath, interruptedCompletionText, "utf8");
+  const traceAfterInterruptedCompletion = fs.readFileSync(
+    path.join(project, ".sdlc", "traces", "ST-ACTION-INTENT.jsonl"),
+    "utf8",
+  ).split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(
+    traceAfterInterruptedCompletion.filter(
+      (event) => event.id === `TR-COMP-${interruptedCompletion.id}`,
+    ).length,
+    0,
+  );
+
+  const recoveredCompletion = mustRunJson(selectedCompletionArgs);
+  assert.equal(recoveredCompletion.idempotent, true);
+  assert.equal(recoveredCompletion.recovery_status, "repaired");
+  assert.equal(recoveredCompletion.action_receipt.id, interruptedCompletion.id);
+  assert.equal(
+    recoveredCompletion.action_receipt.authorization_receipt_ref.id,
+    second.action_receipt.id,
+  );
+  assert.equal(
+    readActionReceipts().filter((receipt) => receipt.status === "completed").length,
+    1,
+    "an identical completion retry must not consume the other pending authorization",
+  );
+  const traceAfterRecovery = fs.readFileSync(
+    path.join(project, ".sdlc", "traces", "ST-ACTION-INTENT.jsonl"),
+    "utf8",
+  ).split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(
+    traceAfterRecovery.filter(
+      (event) => event.id === `TR-COMP-${interruptedCompletion.id}`,
+    ).length,
+    1,
+  );
+  const repeatedCompletion = mustRunJson(selectedCompletionArgs);
+  assert.equal(repeatedCompletion.idempotent, true);
+  assert.equal(repeatedCompletion.recovery_status, "already_consistent");
+  assert.equal(repeatedCompletion.action_receipt.id, interruptedCompletion.id);
+  assert.equal(
+    readActionReceipts().filter((receipt) => receipt.status === "completed").length,
+    1,
+  );
+
+  const distinctCompletion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-ACTION-INTENT",
+    "--action", "test.run",
+    "--outcome", "passed",
+    "--authorization-receipt", first.action_receipt.id,
+    "--evidence", ".sdlc/project.json",
+  ]);
+  assert.equal(distinctCompletion.idempotent, undefined);
+  assert.equal(
+    distinctCompletion.action_receipt.authorization_receipt_ref.id,
+    first.action_receipt.id,
+  );
+  assert.equal(
+    readActionReceipts().filter((receipt) => receipt.status === "completed").length,
+    2,
+  );
+
+  const originalCompletionPath = interruptedCompletionPath;
+  const originalCompletionText = interruptedCompletionText;
+  const tamperedCompletion = JSON.parse(originalCompletionText);
+  tamperedCompletion.completion_request.request_hash = "0".repeat(64);
+  tamperedCompletion.receipt_hash = lifecycleReceiptHash(tamperedCompletion);
+  fs.writeFileSync(
+    originalCompletionPath,
+    `${JSON.stringify(tamperedCompletion, null, 2)}\n`,
+    "utf8",
+  );
+  mustFail(
+    ["gate", "check", "--root", project, "--story", "ST-ACTION-INTENT", "--strict"],
+    /invalid completion identity.*completion request hash is invalid/isu,
+  );
+  mustFail(
+    selectedCompletionArgs,
+    /invalid completion identity.*completion request hash is invalid/isu,
+  );
+  fs.writeFileSync(originalCompletionPath, originalCompletionText, "utf8");
+
+  const collision = JSON.parse(originalCompletionText);
+  collision.id = "AUT-ACT-COMPLETION-COLLISION";
+  collision.receipt_hash = lifecycleReceiptHash(collision);
+  const collisionPath = path.join(actionReceiptsRoot, `${collision.id}.json`);
+  fs.writeFileSync(collisionPath, `${JSON.stringify(collision, null, 2)}\n`, "utf8");
+  mustFail(
+    selectedCompletionArgs,
+    /Completion retry identity collision/iu,
+  );
+  fs.rmSync(collisionPath);
+});
+
+test("authorization revoke and delivery use serialize without lost revocation or partial consumption", async () => {
+  const project = tmpProject("authorization-revoke-use-race");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-AUTH-RACE",
+    contractId: "CONTRACT-AUTH-RACE",
+    profileId: "AUT-AUTH-RACE",
+  });
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-AUTH-RACE",
+    "--delivery", "PR-AUTH-RACE",
+    "--kind", "pull_request",
+    "--story", "ST-AUTH-RACE",
+    "--contract", "CONTRACT-AUTH-RACE",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "supervised",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+    "--allow-action", "test.run",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-AUTH-RACE",
+    ...humanApproval("Approve the supervised authorization race test delivery"),
+  ]);
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-AUTH-RACE"),
+    "--delivery-profile", "AUT-AUTH-RACE",
+    "--confirm-start",
+    "--actor-type", "human",
+  ]);
+  const authorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-RACE",
+    "--scope", "Approve one exact supervised test checkpoint.",
+    "--allow-use", "autonomy.delivery.action.test.run=AUT-AUTH-RACE",
+    "--max-uses", "1",
+    ...humanApproval("Delegate one exact test checkpoint for the race"),
+  ]).authorization;
+  const authorizationPath = path.join(
+    project,
+    ".sdlc",
+    "authorizations",
+    `${authorization.id}.json`,
+  );
+  const lockPath = `${authorizationPath}.lock`;
+  const lockNonce = crypto.randomBytes(12).toString("hex");
+  fs.writeFileSync(lockPath, JSON.stringify({
+    pid: process.pid,
+    host: os.hostname(),
+    nonce: lockNonce,
+    created_at: new Date().toISOString(),
+  }));
+
+  const usePromise = runAsync([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-AUTH-RACE",
+    "--action", "test.run",
+    "--phase", "implementation",
+    "--confirm-action",
+    "--authorization", authorization.id,
+    "--actor-type", "agent",
+    "--actor-name", "Race Test Automation",
+    "--approval-source", "automation",
+    "--summary", "Consume the exact test checkpoint if it wins the authorization lock.",
+    "--json",
+  ]);
+  const revokePromise = runAsync([
+    "authorization", "revoke",
+    "--root", project,
+    "--id", authorization.id,
+    "--reason", "Race-test revocation",
+    "--actor-type", "human",
+    "--json",
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  const heldLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  assert.equal(heldLock.nonce, lockNonce);
+  fs.rmSync(lockPath);
+
+  const [useResult, revokeResult] = await Promise.all([usePromise, revokePromise]);
+  assert.equal(useResult.signal, null);
+  assert.equal(revokeResult.signal, null);
+  assert.equal(
+    revokeResult.status,
+    0,
+    `STDOUT:\n${revokeResult.stdout}\nSTDERR:\n${revokeResult.stderr}`,
+  );
+  const finalAuthorization = JSON.parse(fs.readFileSync(authorizationPath, "utf8"));
+  assert.equal(finalAuthorization.status, "revoked");
+  assert.equal(
+    finalAuthorization.approved_content_hash,
+    legacyAuthorizationContentHash(finalAuthorization),
+  );
+
+  const usesDirectory = path.join(
+    project,
+    ".sdlc",
+    "authorization-uses",
+    authorization.id,
+  );
+  const useNames = fs.existsSync(usesDirectory)
+    ? fs.readdirSync(usesDirectory).filter((name) => name.endsWith(".json"))
+    : [];
+  if (useResult.status === 0) {
+    assert.equal(useNames.length, 1);
+    const useReceipt = JSON.parse(fs.readFileSync(
+      path.join(usesDirectory, useNames[0]),
+      "utf8",
+    ));
+    assert.ok(
+      Date.parse(useReceipt.used_at) <= Date.parse(finalAuthorization.revoked_at),
+      "a successful use must be serialized before the later revocation",
+    );
+    const actionResult = JSON.parse(useResult.stdout);
+    assert.equal(actionResult.status, "authorized");
+    assert.equal(actionResult.action_receipt.approval.authorization_ref, authorization.id);
+  } else {
+    assert.equal(useNames.length, 0);
+    assert.match(
+      `${useResult.stdout}\n${useResult.stderr}`,
+      /Authorization AUTH-RACE is revoked/u,
+    );
+    const actionReceiptsRoot = path.join(project, ".sdlc", "autonomy", "actions");
+    const actionReceipts = fs.existsSync(actionReceiptsRoot)
+      ? fs.readdirSync(actionReceiptsRoot).filter((name) => name.endsWith(".json"))
+      : [];
+    assert.equal(actionReceipts.length, 0);
+  }
 });
 
 test("local release planning accepts a not-yet-created target while protected release execution requires it", () => {
@@ -3221,7 +3993,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     ...humanApproval("Approve the exact interrupted-release fixture target"),
   ]);
   mustFail(
-    completionArgsFor(interruptedProject),
+    [
+      ...completionArgsFor(interruptedProject),
+      "--authorization-receipt", interruptedAuthorization.action_receipt.id,
+    ],
     /Simulated interruption after the terminal completion receipt was persisted/u,
     {
       timeout: 90_000,
@@ -3235,11 +4010,16 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   fs.cpSync(interruptedProject, interruptedRelocatedProject, { recursive: true });
   tempProjects.add(interruptedRelocatedProject);
   const repairedAfterRelocation = mustRunJson(
-    completionArgsFor(interruptedRelocatedProject),
+    [
+      ...completionArgsFor(interruptedRelocatedProject),
+      "--authorization-receipt", interruptedAuthorization.action_receipt.id,
+    ],
     { timeout: 90_000 },
   );
-  assert.equal(repairedAfterRelocation.status, "terminal");
-  assert.equal(repairedAfterRelocation.idempotent_repair, true);
+  assert.equal(repairedAfterRelocation.status, "completed");
+  assert.equal(repairedAfterRelocation.idempotent, true);
+  assert.equal(repairedAfterRelocation.recovery_status, "repaired");
+  assert.equal(repairedAfterRelocation.lifecycle_status, "terminal");
   assert.equal(
     repairedAfterRelocation.action_receipt.authorization_receipt_ref.id,
     interruptedAuthorization.action_receipt.id,

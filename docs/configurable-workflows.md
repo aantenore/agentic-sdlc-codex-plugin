@@ -34,18 +34,54 @@ one story and derives its guard decisions from canonical project records:
 | `analysis` → `design` | No additional transition guard |
 | `design` → `implementation` | The story's implementation contract is currently approved and matches the story |
 | `implementation` → `validation` | Every output required by that contract is linked with valid current verification |
-| `validation` → `release` | The story has passing strict gate evidence and its exact delivery is terminal successfully |
+| `validation` → `release` | The story has passing intermediate strict-gate evidence |
 
-The runtime loads requirement, contract, output, final-gate, delivery-profile,
+The runtime loads requirement, contract, output, strict-gate, delivery-profile,
 and delivery-close records through the governed project reader, then seals one
 `workflow-canonical-evidence:v1` snapshot. A caller cannot bypass a v2 guard by
 claiming success in `--guard-input-json`; missing, stale, mismatched, modified,
 or unsuccessful canonical evidence fails closed. The final discovery-to-release
-certificate remains the story gate:
+certificate remains the story gate.
+
+The two gate receipts are deliberately different. A passing ordinary strict
+story gate writes `.sdlc/gates/<story-id>-strict.json` as
+`workflow-strict-gate-receipt:v1`; it proves that current validation evidence
+is ready for the guarded transition into `release`, but it is not a final
+lifecycle certificate. After that transition, complete the exact delivery,
+append its passing release trace, and complete the release step. The lifecycle-complete
+gate replays the selected workflow instance, verifies its immutable header,
+event hashes, durable checkpoint, and matching audit-trace chain, and requires
+workflow start before task start, each phase entry before that phase's
+completion, and each next entry after the prior completion. Entry into the
+configured final state must precede both release evidence and terminal
+delivery. Only then does it write
+`.sdlc/gates/<story-id>-final.json` as
+`workflow-final-gate-receipt:v2`. Historical v1 receipts remain readable for
+an already pinned legacy run, but only v2 carries the terminal workflow proof.
+
+The examples in this guide use the npm/package bin shim `agentic-sdlc`. A Codex
+plugin installation does not create that global executable; use
+`node <plugin-root>/bin/agentic-sdlc.mjs` followed by the same arguments:
 
 ```bash
+agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001
+agentic-sdlc workflow instance transition \
+  --id DELIVERY-TRIP-POLICY-001 \
+  --to release \
+  --request-id trip-policy-release-1
 agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
 ```
+
+If a story retains more than one immutable story-bound workflow run, the
+current run is selected deterministically as the newest `created_at` value,
+with the immutable instance ID as a stable tie-breaker. Older runs remain
+historical evidence. The selected run must pin the exact current project phase
+order; this rule applies equally to the included v1/v2 processes and approved
+custom definitions. Start the selected story-bound instance before `task
+start` and before the first completed step. The runtime rejects a post-hoc
+instance, and final certification requires the exact instance reference stored
+by task start. If the configured order differs from the six stock phases, use
+an approved custom story-bound definition with that exact order.
 
 The technical-assessment preset complements the existing
 `assessment-proposal:v1` and `assessment-workflow:v1` records; it does not

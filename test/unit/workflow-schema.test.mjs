@@ -15,6 +15,7 @@ import {
 import {
   WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
   buildWorkflowFinalGateReceipt,
+  buildWorkflowStrictGateReceipt,
   computeWorkflowCanonicalEvidenceHash,
 } from "../../lib/workflow-canonical-evidence.mjs";
 import { buildWorkflowPreset } from "../../lib/workflow-presets.mjs";
@@ -80,11 +81,70 @@ test("workflow domain records conform to their published JSON schemas", () => {
     status: "passed",
     strict: true,
     scope: "story",
+    lifecycle_complete: true,
+    certification_level: "lifecycle_complete",
+    lifecycle_workflow: {
+      selection_policy: "latest-created-at-then-instance-id:v1",
+      story_id: "ST-SCHEMA",
+      instance_id: instance.id,
+      instance_hash: instance.instance_hash,
+      effective_hash: effective.effective_hash,
+      checkpoint_ref: {
+        path: ".sdlc/workflows/instances/schema-instance/checkpoint.json",
+        checkpoint_hash: "1".repeat(64),
+        sequence: 1,
+        last_event_hash: "2".repeat(64),
+        trace_chain_hash: "3".repeat(64),
+      },
+      terminal_state: "release",
+      terminal_event_ref: {
+        event_hash: "2".repeat(64),
+        sequence: 1,
+        timestamp: AT,
+      },
+      event_count: 1,
+      task_start_ref: {
+        id: "START-ST-SCHEMA",
+        path: ".sdlc/stories/ST-SCHEMA/task-start.json",
+        hash: "4".repeat(64),
+        confirmed_at: AT,
+      },
+      phase_timeline: [
+        {
+          phase: "discovery",
+          entered_at: AT,
+          entry_event_hash: null,
+          completed_at: AT,
+          completion_record_id: "STEP-ST-SCHEMA-discovery",
+        },
+        ...["analysis", "design", "implementation", "validation", "release"].map((phase) => ({
+          phase,
+          entered_at: AT,
+          entry_event_hash: "2".repeat(64),
+          completed_at: AT,
+          completion_record_id: `STEP-ST-SCHEMA-${phase}`,
+        })),
+      ],
+      release_trace_at: AT,
+      delivery_closed_at: AT,
+    },
     story_id: "ST-SCHEMA",
     checked_at: AT,
     errors: [],
   }, {
     final_receipt_path: ".sdlc/gates/ST-SCHEMA-final.json",
+  });
+  const strictGateReceipt = buildWorkflowStrictGateReceipt({
+    status: "passed",
+    strict: true,
+    scope: "story",
+    lifecycle_complete: false,
+    certification_level: "strict_intermediate",
+    story_id: "ST-SCHEMA",
+    checked_at: AT,
+    errors: [],
+  }, {
+    strict_receipt_path: ".sdlc/gates/ST-SCHEMA-strict.json",
   });
   const transition = createWorkflowTransition({
     instance,
@@ -107,6 +167,7 @@ test("workflow domain records conform to their published JSON schemas", () => {
     ["workflow-effective-definition.schema.json", effective],
     ["workflow-instance.schema.json", instance],
     ["workflow-canonical-evidence.schema.json", canonicalEvidence],
+    ["workflow-strict-gate-receipt.schema.json", strictGateReceipt],
     ["workflow-final-gate-receipt.schema.json", finalGateReceipt],
     ["workflow-transition-event.schema.json", transition.event],
     ["workflow-checkpoint.schema.json", checkpoint],
@@ -114,6 +175,31 @@ test("workflow domain records conform to their published JSON schemas", () => {
     const result = validate(schema, value);
     assert.equal(result.valid, true, `${schema}: ${JSON.stringify(result.errors)}`);
   }
+
+  const legacyFinalGateReceipt = {
+    kind: "workflow_final_gate_receipt",
+    schema_version: "workflow-final-gate-receipt:v1",
+    status: "passed",
+    strict: true,
+    scope: "story",
+    story_id: "ST-SCHEMA",
+    checked_at: AT,
+    errors: [],
+    final_receipt_path: ".sdlc/gates/ST-SCHEMA-final.json",
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+    receipt_hash: "4".repeat(64),
+  };
+  assert.equal(
+    validate("workflow-final-gate-receipt-v1.schema.json", legacyFinalGateReceipt).valid,
+    true,
+  );
+
+  const incompleteFinalGateReceipt = structuredClone(finalGateReceipt);
+  delete incompleteFinalGateReceipt.lifecycle_workflow.checkpoint_ref.trace_chain_hash;
+  assert.equal(
+    validate("workflow-final-gate-receipt.schema.json", incompleteFinalGateReceipt).valid,
+    false,
+  );
 });
 
 test("workflow schemas reject structural additions to immutable records", () => {

@@ -142,7 +142,6 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "contract-approved",
     "required-output-linked",
     "strict-gate-passed",
-    "delivery-terminal",
   ]);
 
   const italianProposal = mustRun([
@@ -287,6 +286,10 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     name: "Workflow test CI",
   });
   assert.equal(started.instance.metadata.governance_binding.story_id, "ST-WORKFLOW-42");
+  assert.equal(
+    started.instance.metadata.governance_binding.strict_gate_receipt_path,
+    ".sdlc/gates/ST-WORKFLOW-42-strict.json",
+  );
   assert.equal(
     started.instance.metadata.governance_binding.final_gate_receipt_path,
     ".sdlc/gates/ST-WORKFLOW-42-final.json",

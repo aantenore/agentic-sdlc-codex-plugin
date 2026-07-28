@@ -83,8 +83,53 @@ class InstallerTransactionTests(unittest.TestCase):
         )
         (self.repo / "README.md").write_text("fixture\n", encoding="utf-8")
         (self.repo / "LICENSE").write_text("fixture\n", encoding="utf-8")
+        self.original_capture_codex_before = INSTALLER_V2._capture_codex_before
+        self.codex_reconciliation = mock.patch.object(
+            INSTALLER_V2,
+            "_reconcile_codex_installation",
+            return_value={
+                "staging_restored": True,
+                "codex_reconciled": True,
+                "partial_failure": False,
+                "installed": True,
+                "cache_path": str(self.home / ".codex" / "fixture-cache"),
+                "identity": {"package_version": "1.0.0"},
+            },
+        )
+        self.codex_target_resolution = mock.patch.object(
+            INSTALLER_V2,
+            "_resolve_codex_executable",
+            return_value=str(Path(sys.executable).resolve()),
+        )
+        self.codex_before_capture = mock.patch.object(
+            INSTALLER_V2,
+            "_capture_codex_before",
+            return_value={
+                "installed": False,
+                "enabled": None,
+                "version": None,
+                "source_path": None,
+                "identity": None,
+            },
+        )
+        self.codex_candidate_verification = mock.patch.object(
+            INSTALLER_V2,
+            "_verify_codex_candidate",
+            return_value={
+                "installed": True,
+                "identity": {"package_version": "1.0.0"},
+            },
+        )
+        self.codex_target_resolution.start()
+        self.codex_before_capture.start()
+        self.codex_candidate_verification.start()
+        self.codex_reconciliation.start()
 
     def tearDown(self) -> None:
+        self.codex_reconciliation.stop()
+        self.codex_candidate_verification.stop()
+        self.codex_before_capture.stop()
+        self.codex_target_resolution.stop()
         self.temporary.cleanup()
 
     def plan(self):
@@ -873,6 +918,94 @@ class InstallerTransactionTests(unittest.TestCase):
         _, next_pending = self.v2_apply(next_plan)
         self.assertNotEqual(next_pending["transaction_id"], pending["transaction_id"])
 
+    def test_v2_legacy_active_receipt_restores_local_bytes_without_guessing_codex_state(
+        self,
+    ) -> None:
+        self.apply(self.plan())
+        destination = self.home / "plugins" / INSTALLER.PLUGIN_NAME
+        marketplace = self.home / ".agents" / "plugins" / "marketplace.json"
+        original_tree = INSTALLER._snapshot_tree(destination)
+        original_marketplace = marketplace.read_bytes()
+        (self.repo / "lib" / "core.mjs").write_text(
+            'export const version = "legacy-pending";\n',
+            encoding="utf-8",
+        )
+        _, pending = self.v2_apply(self.v2_plan())
+        legacy = json.loads(json.dumps(pending))
+        legacy["schema"] = INSTALLER_V2.LEGACY_RECEIPT_SCHEMA
+        legacy.pop("codex_target")
+        legacy.pop("codex_before")
+        legacy["receipt_hash"] = INSTALLER_V2._canonical_receipt_hash(legacy)
+        INSTALLER_V2._receipt_path(self.home).write_bytes(
+            INSTALLER_V2.V1._json_bytes(legacy)
+        )
+
+        with self.assertRaisesRegex(
+            INSTALLER_V2.InstallError,
+            "active legacy update record cannot be resumed",
+        ):
+            INSTALLER_V2._apply_install_plan(
+                self.repo,
+                self.home,
+                legacy["plan_hash"],
+            )
+        with self.assertRaisesRegex(
+            INSTALLER_V2.InstallError,
+            "legacy update record.*Confirmation is blocked",
+        ):
+            INSTALLER_V2._confirm_install(
+                self.home,
+                legacy["transaction_id"],
+                legacy["receipt_hash"],
+            )
+        self.assertTrue(Path(str(legacy["plugin_backup"])).is_dir())
+
+        with self.assertRaisesRegex(
+            INSTALLER_V2.InstallError,
+            "exact local files.*restored.*predates Codex-state binding",
+        ):
+            INSTALLER_V2._restore_install(
+                self.home,
+                legacy["transaction_id"],
+                legacy["receipt_hash"],
+            )
+        self.assertEqual(INSTALLER._snapshot_tree(destination), original_tree)
+        self.assertEqual(marketplace.read_bytes(), original_marketplace)
+        recovered = INSTALLER_V2._read_receipt(self.home)
+        self.assertEqual(recovered["schema"], INSTALLER_V2.LEGACY_RECEIPT_SCHEMA)
+        self.assertEqual(recovered["phase"], "restore_reconciliation_pending")
+
+    def test_v2_legacy_terminal_receipt_remains_readable(self) -> None:
+        _, pending = self.v2_apply(self.v2_plan())
+        confirmed = INSTALLER_V2._confirm_install(
+            self.home,
+            pending["transaction_id"],
+            pending["receipt_hash"],
+        )
+        legacy = json.loads(json.dumps(confirmed))
+        legacy["schema"] = INSTALLER_V2.LEGACY_RECEIPT_SCHEMA
+        legacy.pop("codex_target")
+        legacy.pop("codex_before")
+        legacy["receipt_hash"] = INSTALLER_V2._canonical_receipt_hash(legacy)
+        INSTALLER_V2._receipt_path(self.home).write_bytes(
+            INSTALLER_V2.V1._json_bytes(legacy)
+        )
+
+        validated = INSTALLER_V2._validate_install(
+            self.home,
+            legacy["transaction_id"],
+            legacy["receipt_hash"],
+        )
+        self.assertEqual(validated["phase"], "confirmed")
+        self.assertEqual(
+            INSTALLER_V2._confirm_install(
+                self.home,
+                legacy["transaction_id"],
+                legacy["receipt_hash"],
+            )["receipt_hash"],
+            legacy["receipt_hash"],
+        )
+
     def test_v2_drift_and_linked_state_fail_closed(self) -> None:
         plan = self.v2_plan()
         _, pending = self.v2_apply(plan)
@@ -919,6 +1052,58 @@ class InstallerTransactionTests(unittest.TestCase):
                 (linked_root / "sentinel.txt").read_text(encoding="utf-8"),
                 "keep\n",
             )
+
+    def test_v2_rejects_linked_codex_cache_ancestor_before_apply(self) -> None:
+        if os.name == "nt":
+            self.skipTest("symlink semantics are platform-specific")
+        codex_home = self.home / ".codex"
+        plugins_root = codex_home / "plugins"
+        plugins_root.mkdir(parents=True)
+        external_cache = self.root / "external-codex-cache"
+        external_cache.mkdir()
+        sentinel = external_cache / "sentinel.txt"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        (plugins_root / "cache").symlink_to(external_cache, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            INSTALLER_V2.InstallError,
+            "Codex plugin cache.*symlink|symlinked.*Codex plugin cache",
+        ):
+            self.v2_apply(self.v2_plan())
+
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
+        self.assertIsNone(INSTALLER_V2._read_receipt(self.home))
+        self.assertFalse(
+            (self.home / "plugins" / INSTALLER.PLUGIN_NAME).exists()
+        )
+
+    def test_v2_rejects_orphaned_codex_cache_before_apply(self) -> None:
+        codex_home = self.home / ".codex"
+        orphaned_version = (
+            codex_home
+            / "plugins"
+            / "cache"
+            / INSTALLER.DEFAULT_MARKETPLACE_NAME
+            / INSTALLER.PLUGIN_NAME
+            / "0.13.0"
+        )
+        orphaned_version.mkdir(parents=True)
+        target = {
+            "executable": str(Path(sys.executable).resolve()),
+            "home": str(codex_home),
+        }
+        with (
+            mock.patch.object(
+                INSTALLER_V2,
+                "_codex_plugin_list",
+                return_value={"installed": [], "available": []},
+            ),
+            self.assertRaisesRegex(
+                INSTALLER_V2.InstallError,
+                "orphaned Agentic SDLC cache",
+            ),
+        ):
+            self.original_capture_codex_before(self.home, target)
 
     def test_v2_rejects_unbounded_or_nonmatching_receipt_inputs(self) -> None:
         with self.assertRaisesRegex(INSTALLER_V2.InstallError, "24 hexadecimal"):
@@ -1181,6 +1366,568 @@ class InstallerTransactionTests(unittest.TestCase):
         self.assertEqual(INSTALLER._snapshot_tree(destination), confirmed_tree)
         self.assertEqual(marketplace.read_bytes(), original_marketplace)
 
+    @unittest.skipIf(os.name == "nt", "the deterministic Codex CLI fixture uses a POSIX shebang")
+    def test_v2_restore_reconciles_codex_cache_and_retries_partial_failure(self) -> None:
+        old_source = self.root / "source-0.13.0"
+        new_source = self.root / "source-0.13.1"
+        ignored = shutil.ignore_patterns(".git", ".sdlc", "node_modules", "test")
+        shutil.copytree(REPO_ROOT, old_source, ignore=ignored)
+        shutil.copytree(REPO_ROOT, new_source, ignore=ignored)
+
+        def set_version(source: Path, version: str) -> None:
+            for relative in ("package.json", ".codex-plugin/plugin.json"):
+                target = source / relative
+                payload = json.loads(target.read_text(encoding="utf-8"))
+                payload["version"] = version
+                target.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+        set_version(old_source, "0.13.0")
+        set_version(new_source, "0.13.1")
+
+        integration_home = self.root / "codex-integration-home"
+        codex_home = integration_home / ".codex"
+        codex_home.mkdir(parents=True)
+        fake_codex = self.root / "codex-fixture"
+        fake_codex.write_text(
+            f"""#!{sys.executable}
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+PLUGIN_ID = "agentic-sdlc-codex-plugin@personal"
+PLUGIN_NAME = "agentic-sdlc-codex-plugin"
+home = Path(os.environ["HOME"])
+codex_home = Path(os.environ.get("CODEX_HOME", home / ".codex"))
+state_path = codex_home / "fixture-installed.json"
+cache_root = codex_home / "plugins" / "cache" / "personal" / PLUGIN_NAME
+args = sys.argv[1:]
+
+def emit(payload):
+    print(json.dumps(payload, sort_keys=True))
+
+def read_state():
+    return json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else None
+
+def marketplace_has_plugin():
+    marketplace_path = home / ".agents" / "plugins" / "marketplace.json"
+    if not marketplace_path.exists():
+        return False
+    marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+    return any(
+        item.get("name") == PLUGIN_NAME
+        for item in marketplace.get("plugins", [])
+        if isinstance(item, dict)
+    )
+
+if args[:2] == ["plugin", "list"]:
+    state = read_state()
+    visible = state if state and marketplace_has_plugin() else None
+    emit({{"installed": [visible] if visible else [], "available": []}})
+    raise SystemExit(0)
+
+if args[:3] == ["plugin", "add", PLUGIN_ID]:
+    fail_once = codex_home / "fail-next-add"
+    if fail_once.exists():
+        fail_once.unlink()
+        print("injected Codex add failure", file=sys.stderr)
+        raise SystemExit(19)
+    marketplace = json.loads(
+        (home / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    plugin = next(item for item in marketplace["plugins"] if item["name"] == PLUGIN_NAME)
+    source_value = Path(plugin["source"]["path"])
+    source = source_value if source_value.is_absolute() else home / source_value
+    source = source.resolve()
+    version = json.loads((source / "package.json").read_text(encoding="utf-8"))["version"]
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+    cache = cache_root / version
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, cache)
+    state = {{
+        "pluginId": PLUGIN_ID,
+        "name": PLUGIN_NAME,
+        "marketplaceName": "personal",
+        "version": version,
+        "installed": True,
+        "enabled": True,
+        "source": {{"source": "local", "path": str(source)}},
+        "installPolicy": "AVAILABLE",
+        "authPolicy": "ON_INSTALL",
+    }}
+    codex_home.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    emit({{"ok": True, "plugin": state}})
+    raise SystemExit(0)
+
+if args[:3] == ["plugin", "remove", PLUGIN_ID]:
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+    state_path.unlink(missing_ok=True)
+    emit({{"ok": True, "removed": PLUGIN_ID}})
+    raise SystemExit(0)
+
+print("unsupported fixture command", file=sys.stderr)
+raise SystemExit(2)
+""",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        environment = {
+            **os.environ,
+            "HOME": str(integration_home),
+            "CODEX_HOME": str(codex_home),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+        def run(
+            arguments: list[str],
+            *,
+            cwd: Path,
+            expected: int = 0,
+            invocation_environment: dict[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            completed = subprocess.run(
+                arguments,
+                cwd=str(cwd),
+                env=invocation_environment or environment,
+                capture_output=True,
+                encoding="utf-8",
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                expected,
+                f"{arguments}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+            return completed
+
+        def prepare(
+            source: Path,
+            target_home: Path = integration_home,
+        ) -> tuple[dict[str, object], list[str]]:
+            installer = source / "scripts" / "install-personal-marketplace-v2.py"
+            preview = json.loads(
+                run(
+                    [
+                        sys.executable,
+                        str(installer),
+                        "plan",
+                        "--home",
+                        str(target_home),
+                        "--json",
+                    ],
+                    cwd=source,
+                ).stdout
+            )
+            applied = json.loads(
+                run(
+                    [
+                        sys.executable,
+                        str(installer),
+                        "apply",
+                        "--plan-hash",
+                        str(preview["data"]["plan_hash"]),
+                        "--home",
+                        str(target_home),
+                        "--codex-executable",
+                        str(fake_codex),
+                        "--codex-home",
+                        str(target_home / ".codex"),
+                        "--json",
+                    ],
+                    cwd=source,
+                ).stdout
+            )
+            self.assertTrue(applied["data"]["candidate_registration_required"])
+            registration = applied["technical_details"]["candidate_registration"]
+            self.assertEqual(registration["required_before"], ["validate", "confirm"])
+            self.assertEqual(
+                registration["command"]["argv"],
+                [
+                    str(fake_codex.resolve()),
+                    "plugin",
+                    "add",
+                    INSTALLER.PLUGIN_NAME + "@personal",
+                    "--json",
+                ],
+            )
+            self.assertEqual(
+                registration["verification"]["argv"],
+                [str(fake_codex.resolve()), "plugin", "list", "--json"],
+            )
+            expected_environment = {
+                "HOME": str(target_home.resolve()),
+                "CODEX_HOME": str((target_home / ".codex").resolve()),
+            }
+            self.assertEqual(
+                registration["command"]["environment"],
+                expected_environment,
+            )
+            self.assertEqual(
+                registration["verification"]["environment"],
+                expected_environment,
+            )
+            bound = [
+                "--transaction-id",
+                str(applied["technical_details"]["transaction_id"]),
+                "--receipt-hash",
+                str(applied["technical_details"]["receipt_hash"]),
+            ]
+            validated = json.loads(
+                run(
+                    [
+                        sys.executable,
+                        str(installer),
+                        "validate",
+                        *bound,
+                        "--home",
+                        str(target_home),
+                        "--json",
+                    ],
+                    cwd=source,
+                ).stdout
+            )
+            return validated, bound
+
+        old_validated, old_bound = prepare(old_source)
+        run(
+            [str(fake_codex), "plugin", "add", INSTALLER.PLUGIN_NAME + "@personal", "--json"],
+            cwd=old_source,
+        )
+        run(
+            [
+                sys.executable,
+                str(old_source / "scripts" / "install-personal-marketplace-v2.py"),
+                "confirm",
+                *old_bound,
+                "--home",
+                str(integration_home),
+                "--json",
+            ],
+            cwd=old_source,
+        )
+        self.assertEqual(old_validated["data"]["state"], "validation_pending")
+
+        state_path = codex_home / "fixture-installed.json"
+        disabled_state = json.loads(state_path.read_text(encoding="utf-8"))
+        disabled_state["enabled"] = False
+        state_path.write_text(json.dumps(disabled_state), encoding="utf-8")
+        disabled_preview = json.loads(
+            run(
+                [
+                    sys.executable,
+                    str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+                    "plan",
+                    "--home",
+                    str(integration_home),
+                    "--json",
+                ],
+                cwd=new_source,
+            ).stdout
+        )
+        disabled_apply = json.loads(
+            run(
+                [
+                    sys.executable,
+                    str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+                    "apply",
+                    "--plan-hash",
+                    str(disabled_preview["data"]["plan_hash"]),
+                    "--home",
+                    str(integration_home),
+                    "--codex-executable",
+                    str(fake_codex),
+                    "--codex-home",
+                    str(codex_home),
+                    "--json",
+                ],
+                cwd=new_source,
+                expected=1,
+            ).stdout
+        )
+        self.assertEqual(disabled_apply["data"]["state"], "stopped")
+        self.assertIn("disabled", disabled_apply["technical_details"]["error"])
+        self.assertEqual(
+            json.loads(
+                (
+                    integration_home
+                    / "plugins"
+                    / INSTALLER.PLUGIN_NAME
+                    / "package.json"
+                ).read_text(encoding="utf-8")
+            )["version"],
+            "0.13.0",
+        )
+        disabled_state["enabled"] = True
+        state_path.write_text(json.dumps(disabled_state), encoding="utf-8")
+
+        new_validated, new_bound = prepare(new_source)
+        missing_add_confirmation = json.loads(
+            run(
+                [
+                    sys.executable,
+                    str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+                    "confirm",
+                    *new_bound,
+                    "--home",
+                    str(integration_home),
+                    "--json",
+                ],
+                cwd=new_source,
+                expected=1,
+            ).stdout
+        )
+        self.assertEqual(missing_add_confirmation["data"]["state"], "stopped")
+        still_pending = INSTALLER_V2._read_receipt(integration_home.resolve())
+        self.assertIsNotNone(still_pending)
+        self.assertEqual(still_pending["phase"], "validation_pending")
+        self.assertTrue(Path(str(still_pending["plugin_backup"])).is_dir())
+        run(
+            [str(fake_codex), "plugin", "add", INSTALLER.PLUGIN_NAME + "@personal", "--json"],
+            cwd=new_source,
+        )
+        new_cache = (
+            codex_home
+            / "plugins"
+            / "cache"
+            / "personal"
+            / INSTALLER.PLUGIN_NAME
+            / "0.13.1"
+        )
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        version_result = run(
+            [str(node), str(new_cache / "bin" / "agentic-sdlc.mjs"), "--version", "--json"],
+            cwd=new_source,
+        )
+        self.assertEqual(json.loads(version_result.stdout)["package_version"], "0.13.1")
+        help_result = run(
+            [str(node), str(new_cache / "bin" / "agentic-sdlc.mjs"), "--help"],
+            cwd=new_source,
+        )
+        self.assertIn("Agentic SDLC", help_result.stdout)
+
+        (codex_home / "fail-next-add").write_text("fail once\n", encoding="utf-8")
+        foreign_codex_home = self.root / "foreign-codex-home"
+        foreign_codex_home.mkdir()
+        foreign_sentinel = foreign_codex_home / "do-not-touch.txt"
+        foreign_sentinel.write_text("unchanged\n", encoding="utf-8")
+        foreign_environment = {
+            **environment,
+            "CODEX_HOME": str(foreign_codex_home),
+        }
+        restore_command = [
+            sys.executable,
+            str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+            "restore",
+            *new_bound,
+            "--codex-executable",
+            str(fake_codex),
+            "--home",
+            str(integration_home),
+            "--json",
+        ]
+        mismatched_target = json.loads(
+            run(
+                [*restore_command, "--codex-home", str(foreign_codex_home)],
+                cwd=new_source,
+                expected=1,
+                invocation_environment=foreign_environment,
+            ).stdout
+        )
+        self.assertEqual(mismatched_target["data"]["state"], "stopped")
+        self.assertEqual(
+            INSTALLER_V2._read_receipt(integration_home.resolve())["phase"],
+            "validation_pending",
+        )
+        partial = json.loads(
+            run(
+                restore_command,
+                cwd=new_source,
+                expected=1,
+                invocation_environment=foreign_environment,
+            ).stdout
+        )
+        self.assertEqual(partial["data"]["state"], "restore_reconciliation_pending")
+        self.assertTrue(partial["data"]["staging_restored"])
+        self.assertFalse(partial["data"]["codex_reconciled"])
+        self.assertTrue(partial["data"]["partial_failure"])
+        self.assertEqual(partial["data"]["next_action"], "retry_restore")
+        self.assertIn(
+            f"--codex-executable {fake_codex}",
+            partial["technical_details"]["retry_restore_command"],
+        )
+        self.assertEqual(foreign_sentinel.read_text(encoding="utf-8"), "unchanged\n")
+        self.assertFalse((foreign_codex_home / "plugins").exists())
+        self.assertEqual(
+            json.loads(
+                (
+                    integration_home
+                    / "plugins"
+                    / INSTALLER.PLUGIN_NAME
+                    / "package.json"
+                ).read_text(encoding="utf-8")
+            )["version"],
+            "0.13.0",
+        )
+        stale_list = json.loads(
+            run(
+                [str(fake_codex), "plugin", "list", "--json"],
+                cwd=new_source,
+            ).stdout
+        )
+        self.assertEqual(stale_list["installed"][0]["version"], "0.13.1")
+
+        retry_bound = [
+            "--transaction-id",
+            str(partial["data"]["transaction_id"]),
+            "--receipt-hash",
+            str(partial["technical_details"]["receipt_hash"]),
+        ]
+        restored = json.loads(
+            run(
+                [
+                    sys.executable,
+                    str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+                    "restore",
+                    *retry_bound,
+                    "--codex-executable",
+                    str(fake_codex),
+                    "--home",
+                    str(integration_home),
+                    "--json",
+                ],
+                cwd=new_source,
+                invocation_environment=foreign_environment,
+            ).stdout
+        )
+        self.assertEqual(restored["data"]["state"], "restored")
+        self.assertTrue(restored["data"]["staging_restored"])
+        self.assertTrue(restored["data"]["codex_reconciled"])
+        self.assertFalse(restored["data"]["partial_failure"])
+        self.assertEqual(foreign_sentinel.read_text(encoding="utf-8"), "unchanged\n")
+        self.assertFalse((foreign_codex_home / "plugins").exists())
+
+        final_list = json.loads(
+            run(
+                [str(fake_codex), "plugin", "list", "--json"],
+                cwd=new_source,
+            ).stdout
+        )
+        self.assertEqual(final_list["installed"][0]["version"], "0.13.0")
+        cache_root = (
+            codex_home
+            / "plugins"
+            / "cache"
+            / "personal"
+            / INSTALLER.PLUGIN_NAME
+        )
+        self.assertEqual([entry.name for entry in cache_root.iterdir()], ["0.13.0"])
+        restored_staging = integration_home / "plugins" / INSTALLER.PLUGIN_NAME
+        restored_cache = cache_root / "0.13.0"
+        self.assertEqual(
+            INSTALLER_V2._plugin_distribution_identity(
+                restored_staging, "restored staging test fixture"
+            ),
+            INSTALLER_V2._plugin_distribution_identity(
+                restored_cache, "restored cache test fixture"
+            ),
+        )
+        retry_with_overrides = INSTALLER_V2._transaction_command(
+            "restore",
+            {
+                "transaction_id": partial["data"]["transaction_id"],
+                "receipt_hash": partial["technical_details"]["receipt_hash"],
+            },
+            integration_home,
+            "en",
+            True,
+            str(fake_codex),
+            str(codex_home),
+        )
+        self.assertIn(f"--codex-executable {fake_codex}", retry_with_overrides)
+        self.assertIn(f"--codex-home {codex_home}", retry_with_overrides)
+
+        first_home = self.root / "first-install-home"
+        first_codex_home = first_home / ".codex"
+        first_codex_home.mkdir(parents=True)
+        first_environment = {
+            **environment,
+            "HOME": str(first_home),
+            "CODEX_HOME": str(first_codex_home),
+        }
+        first_validated, first_bound = prepare(new_source, first_home)
+        self.assertEqual(first_validated["data"]["state"], "validation_pending")
+        self.assertTrue(
+            first_home.joinpath(
+                "plugins",
+                INSTALLER.PLUGIN_NAME,
+            ).is_dir()
+        )
+        run(
+            [
+                str(fake_codex),
+                "plugin",
+                "add",
+                INSTALLER.PLUGIN_NAME + "@personal",
+                "--json",
+            ],
+            cwd=new_source,
+            invocation_environment=first_environment,
+        )
+        first_cache_root = (
+            first_codex_home
+            / "plugins"
+            / "cache"
+            / "personal"
+            / INSTALLER.PLUGIN_NAME
+        )
+        self.assertTrue(first_cache_root.joinpath("0.13.1").is_dir())
+
+        first_restored = json.loads(
+            run(
+                [
+                    sys.executable,
+                    str(new_source / "scripts" / "install-personal-marketplace-v2.py"),
+                    "restore",
+                    *first_bound,
+                    "--codex-executable",
+                    str(fake_codex),
+                    "--home",
+                    str(first_home),
+                    "--json",
+                ],
+                cwd=new_source,
+                invocation_environment=first_environment,
+            ).stdout
+        )
+        self.assertEqual(first_restored["data"]["state"], "restored")
+        self.assertTrue(first_restored["data"]["staging_restored"])
+        self.assertTrue(first_restored["data"]["codex_reconciled"])
+        self.assertFalse(first_restored["data"]["partial_failure"])
+        self.assertFalse(
+            first_home.joinpath("plugins", INSTALLER.PLUGIN_NAME).exists()
+        )
+        self.assertFalse(
+            first_home.joinpath(".agents", "plugins", "marketplace.json").exists()
+        )
+        self.assertFalse(first_cache_root.exists())
+        first_list = json.loads(
+            run(
+                [str(fake_codex), "plugin", "list", "--json"],
+                cwd=new_source,
+                invocation_environment=first_environment,
+            ).stdout
+        )
+        self.assertEqual(first_list["installed"], [])
+
     def test_v2_primary_messages_remain_plain_in_both_languages(self) -> None:
         for locale in ("en", "it"):
             for command, state in (
@@ -1196,6 +1943,11 @@ class InstallerTransactionTests(unittest.TestCase):
                 primary = "\n".join(message.values())
                 self.assertNotRegex(primary, PRIMARY_INTERNAL_JARGON)
                 self.assertNotRegex(primary, PRIMARY_COMMAND_TEXT)
+                if command == "apply":
+                    self.assertRegex(
+                        message["next_action"],
+                        r"registrazione candidata|required candidate-registration",
+                    )
 
 
 if __name__ == "__main__":

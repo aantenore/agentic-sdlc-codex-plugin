@@ -49,16 +49,39 @@ cd agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace-v2.py check
 python3 scripts/install-personal-marketplace-v2.py plan --json
 python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+# Required: run candidate_registration.command.argv with its exact environment,
+# then candidate_registration.verification.argv with its exact environment.
+# Default target example only; do not use it for a custom returned target:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 Installer V2 is the canonical local installation path. `apply` retains the
-byte-exact previous plugin and marketplace state; after validation, use
+byte-exact previous plugin and marketplace state and binds the exact Codex
+executable, state directory, installed entry, and cache identity seen before
+the update. If Codex uses non-default locations, pass `--codex-executable`
+and/or `--codex-home` to `apply`. Before validation, execute
+`technical_details.candidate_registration.command.argv` with exactly its
+`environment`, then execute `verification.argv` with exactly its
+`environment`. The two `env ... codex` lines above illustrate only the default
+target; never substitute them when the returned executable, `HOME`, or
+`CODEX_HOME` differs. The returned `confirm` and `restore` commands reuse that
+target and reject a different one. After registration and validation, use
 `confirm` to keep the update or the returned `restore` command to roll it back.
+Confirmation verifies the candidate Codex list and cache before deleting
+recovery data.
+Restore is not reported as complete until the prior staging copy has also been
+returned to the exact installed-or-absent Codex state captured by `apply`
+through the official Codex command, and its list, cache fingerprint, and
+provenance match. If that Codex step fails, the receipt remains open and
+the JSON result returns `staging_restored`, `codex_reconciled`,
+`partial_failure`, and an exact retry command. Codex is resolved from `PATH`
+during `apply`, and retries reuse that receipt-bound executable and state
+directory. Use `--codex-executable` or `--codex-home` on `apply` when those
+locations are intentionally non-default.
 
 After confirmation, run the returned
 `post_confirm_autoconfigure_command`. The same command is shown above for a
@@ -94,8 +117,10 @@ For implementation work, the order is deliberately linear:
 3. decompose it only when needed;
 4. agree the output and plain-language work brief;
 5. make a fresh autonomy choice for this one PR or local release;
-6. start the task once, then implement and test;
-7. create or update the named PR, or verify the local-only release.
+6. start the exact story-bound workflow before the task, then start the task once;
+7. implement and test, completing each phase before entering the next;
+8. after validation, seal the intermediate strict gate and enter `release`;
+9. complete the named PR or local release, record release evidence, then seal the final lifecycle gate.
 
 Before showing the autonomy choices, Codex explains whether the most independent option can really be used. If this installation cannot digitally verify who approved the delivery, option 3 is reduced to **autonomy with checkpoints**; this is disclosed before you choose.
 
@@ -121,24 +146,34 @@ stages:
    destination, smoke test, rollback, tools, and write boundary.
 4. **Story and workflow** — create the story and bind a
    `software-project` v2 workflow to it, preserving the ordered
-   discovery-to-release journey.
+   discovery-to-release journey. Start that workflow before `task start` and
+   before the first completed story step. A custom `phase_order` requires an
+   approved story-bound definition with the exact same order.
 5. **Implementation and test** — change only approved paths, run the agreed
-   tests, and record the latest successful evidence.
-6. **Release** — complete the named local release, smoke-test that exact result,
+   tests, record the latest successful evidence, complete each phase step, and
+   only then enter the next workflow phase.
+6. **Validation gate** — after completing validation, run the ordinary strict
+   story gate to seal its intermediate receipt.
+7. **Enter release** — use that receipt to move the current story-bound
+   workflow to `release`.
+8. **Release** — only after entering `release`, complete the named local release,
+   append passing release evidence, complete the release step, smoke-test that exact result,
    and retain the declared rollback procedure. Push, PR creation, deployment,
    and production remain excluded.
-7. **Final lifecycle certification** — only after release is terminal, run:
+9. **Final lifecycle certification** — only after the release evidence and
+   terminal delivery close, run:
 
    ```bash
    agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
    ```
 
-The final command is intentionally stronger than an intermediate strict check.
+The final command is intentionally stronger than the distinct intermediate strict check.
 It passes only when every configured story phase, current requirement and
 contract, required output, latest test evidence, exact terminal delivery, and
-release evidence agree. Codex then reports the delivered location, checks,
-exclusions, residual risks, and final receipt. The reader does not need to run
-the preceding low-level commands manually; [Getting Started](docs/getting-started.md#walk-through-one-complete-first-project)
+release evidence agree with the current workflow's verified terminal event and
+checkpoint. Codex then reports the delivered location, checks, exclusions,
+residual risks, and final receipt. The reader does not need to run the preceding
+low-level commands manually; [Getting Started](docs/getting-started.md#walk-through-one-complete-first-project)
 shows what to expect at each decision.
 
 ### Know where work happens
@@ -164,13 +199,18 @@ If you are new to the plugin, continue with [Getting Started](docs/getting-start
 The CLI explains the outcome, practical impact, any decision needed, what remains protected, and one next step before showing optional technical details. Focused help and completion work even outside an initialized project:
 
 ```bash
-agentic-sdlc help
-agentic-sdlc help autonomy delivery approve --locale it
-agentic-sdlc completion zsh
-agentic-sdlc preset list
-agentic-sdlc status --cli-preset human-it
-agentic-sdlc status --cli-preset machine
+PLUGIN_CLI="$HOME/plugins/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs"
+node "$PLUGIN_CLI" help
+node "$PLUGIN_CLI" help autonomy delivery approve --locale it
+node "$PLUGIN_CLI" completion zsh
+node "$PLUGIN_CLI" preset list
+node "$PLUGIN_CLI" status --cli-preset human-it
+node "$PLUGIN_CLI" status --cli-preset machine
 ```
+
+The plugin installation does not create a global `agentic-sdlc` executable.
+An npm package installation may expose that bin through its package-manager
+shim; the plugin-local form above is always explicit.
 
 `--cli-preset` changes presentation only. It cannot authorize an action, change a command or destination, widen writable paths, or supply approval flags. Explicit CLI options take precedence. The existing assessment/output `--preset` option is unchanged. See [Self-service CLI](docs/self-service-cli.md) for deterministic export and shell setup examples.
 
@@ -514,9 +554,11 @@ cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace-v2.py check
 python3 scripts/install-personal-marketplace-v2.py plan --json
 python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+# Execute the exact candidate_registration argv/environment returned by apply.
+# Default target example only:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
@@ -534,10 +576,15 @@ hash, rechecks it under a lock, stages and byte-verifies the package, then
 updates `~/plugins/agentic-sdlc-codex-plugin` and the matching entry in
 `~/.agents/plugins/marketplace.json` while retaining byte-exact recovery data.
 `validate` proves that state is still unchanged; `confirm` removes the retained
-copy, while `restore` puts it back. The installer refuses unsafe destinations
-instead of traversing or replacing a symlink, Windows junction/reparse point,
-Git checkout, source checkout, or unmanaged directory. Running the script
-without a mode is the same as `plan`; it never installs implicitly.
+copy only after the official candidate list/cache matches, while `restore`
+puts the prior local bytes back and uses the official Codex add/remove command
+required by the installed-or-absent state captured during `apply`. A failed or
+missing Codex command leaves a retryable partial state instead of claiming a
+completed rollback. The installer refuses unsafe destinations instead of
+traversing or replacing a symlink, Windows junction/reparse point, Git
+checkout, source checkout, unmanaged directory, or linked Codex cache
+ancestor. Running the script without a mode is the same as `plan`; it never
+installs implicitly.
 
 ## Update
 
@@ -547,9 +594,11 @@ Update the source checkout, rerun the staging installer, and add the plugin agai
 cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace-v2.py plan --json
 python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+# Execute the exact candidate_registration argv/environment returned by apply.
+# Default target example only:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```

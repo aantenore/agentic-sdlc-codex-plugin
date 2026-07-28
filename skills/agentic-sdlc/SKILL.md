@@ -42,9 +42,10 @@ For generic implementation and release work, follow this order:
 3. **Decompose only when needed** — propose stories and dependencies for work that cannot safely remain one bounded story; obtain approval before treating the breakdown as canonical.
 4. **Agree the output and work brief** — resolve the real output, tools, files, tests, contract, branches or local target, verification, and protected actions. Create and approve the contextualized contract only after this content is complete.
 5. **Choose autonomy for this delivery** — for every pull request or local release, ask again; never carry the choice over from earlier work. Before presenting the choices, explain whether option 3 can actually be effective; when this installation cannot digitally verify the approver, say that option 3 will be reduced to “Autonomy with checkpoints”.
-6. **Start once** — after the requirement, optional decomposition, work brief/contract, and current delivery choice are approved, make one logical `task start` decision. Never use an early speculative start as routing or discovery.
-7. **Implement and test** — claim the story, change only approved paths, run the agreed checks, record evidence, and validate the strict gate.
-8. **Finish at the named destination** — create/update and verify the one pull request, or complete and verify the local release. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
+6. **Start the story workflow, then start once** — bind the exact configured phase order to the story before any completed step, then make one logical `task start` decision. Never use an early speculative start as routing or discovery, and never reconstruct the workflow after work has begun.
+7. **Implement, test, and advance phases** — claim the story, change only approved paths, run the agreed checks, record evidence, complete each phase, and enter the next phase only after the previous one is complete.
+8. **Validate, then enter release** — after validation and the latest passing test evidence, seal the intermediate strict receipt and use it to move the task-bound workflow into `release`.
+9. **Finish and certify at the named destination** — only after entering `release`, create/update and verify the one pull request or complete the local release, record release evidence, complete the release step, and run the distinct lifecycle-complete gate. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
 
 For a **new pull request**, the displayed boundary must include the repository, base and new head branch, `pull_request.create`, allowed writes, tests, push, and whether later PR updates are included. For an **existing pull request**, resolve and show the exact PR, repository, base, head, current SHA, and allowed update actions; do not create another PR. For a **local-only result**, exclude Git push, pull-request actions, remote deployment, and production access, and require the exact local target, smoke test, and rollback.
 
@@ -331,7 +332,20 @@ The dedicated assessment journey remains the exception described above: it packa
 
    Only after the optional technical-details divider, explain that `audit_only` narrows requested `bounded-autonomous` to effective `checkpointed`. Explain the practical effect and how to enable verification: a trusted external host or CI issues an Ed25519-signed receipt for the exact delivery-profile approval subject; configure `authority_policy.mode: host_verified` and the matching public key in `authority_policy.trusted_host_keys`, then pass it with `autonomy delivery approve --host-receipt-file <path.json>`. The CLI validates external authority and never mints trusted authority for itself.
 
-   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Only now make the workflow's one logical task-start decision with that profile. Do not use `task start` for preview, routing, requirement discovery, or contract preparation. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. If the CLI requires `--confirm-start`, the explicit confirmation completes this same logical start decision; it does not reopen planning or create a second delivery start. Use `--confirm-start` only after the user confirms this concrete start or with an authorization containing `task.start.confirm`; an agent or system confirmation must cite that grant with `--authorization <id>`. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
+   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Before `task start` and before completing any story step, start exactly one current story-bound workflow. The included `software-project` v2 definition is valid only when the project uses its exact six-phase order. If `phase_order` contains, removes, or reorders a phase, propose and approve a story-bound definition with that exact order first; do not force the included preset across a custom configuration:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow instance start \
+     --root <target-project> \
+     --id DELIVERY-ST-001 \
+     --definition software-project \
+     --definition-version 2 \
+     --story ST-001
+   ```
+
+   Starting a workflow after a task-start receipt or completed step is deliberately rejected. A legacy task without this pre-task binding may continue, but `--lifecycle-complete` cannot certify it and a post-hoc replay is not a repair.
+
+   Only now make the lifecycle's one logical task-start decision with that profile. Do not use `task start` for preview, routing, requirement discovery, or contract preparation. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. If the CLI requires `--confirm-start`, the explicit confirmation completes this same logical start decision; it does not reopen planning or create a second delivery start. Use `--confirm-start` only after the user confirms this concrete start or with an authorization containing `task.start.confirm`; an agent or system confirmation must cite that grant with `--authorization <id>`. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs task start \
@@ -344,7 +358,7 @@ The dedicated assessment journey remains the exception described above: it packa
 
    The effective level is the minimum of host, project, requirement, delivery, contract, capability, environment, and budget. The profile is non-reusable, permits one concurrent run, and closes when terminal. Protected-branch merge, remote deployment, production access, destructive work, and material drift are explicit exceptions.
 
-   Every state-changing delivery action uses an authorize → execute → complete sequence. In the primary explanation say what operation is paused, its concrete target, what the person must decide, and what remains untouched. Put the internal receipt, canonical action, policy mode, codes, hashes, and command only after the optional technical-details divider. First request an authorization receipt for the exact canonical action and runtime target. If the command reports `checkpoint_required`, show the plain-language decision and rerun with `--confirm-action` plus formal approval attribution. Under `authority_policy.mode: host_verified`, this rerun must also supply `--host-receipt-file`; the external Ed25519 receipt signs action `autonomy.delivery.action.<canonical-action>` and the exact subject containing the profile, delivery, runtime target, and action details. In `audit_only`, the explicit approval is recorded but does not become host-verified authority. Then execute exactly the recorded operation through the host/tooling. Finally report `--outcome` with immutable evidence. For `git.commit`, bind the exact changed files with repeatable `--scope-path`; for `git.push`, bind the matching remote; for merge, bind the exact PR URL:
+   Every state-changing delivery action uses an authorize → execute → complete sequence. In the primary explanation say what operation is paused, its concrete target, what the person must decide, and what remains untouched. Put the internal receipt, canonical action, policy mode, codes, hashes, and command only after the optional technical-details divider. First request an authorization receipt for the exact canonical action and runtime target, and retain the returned `AUT-ACT-...` ID with the external operation. If the command reports `checkpoint_required`, show the plain-language decision and rerun with `--confirm-action` plus formal approval attribution. Under `authority_policy.mode: host_verified`, this rerun must also supply `--host-receipt-file`; the external Ed25519 receipt signs action `autonomy.delivery.action.<canonical-action>` and the exact subject containing the profile, delivery, runtime target, and action details. In `audit_only`, the explicit approval is recorded but does not become host-verified authority. Then execute exactly the recorded operation through the host/tooling. Finally report `--outcome` with immutable evidence and pass `--authorization-receipt <AUT-ACT-id>` whenever more than one authorization for that action is waiting. An identical completion retry is safe and returns the original completion; do not change evidence or operation arguments merely to force a retry. For `git.commit`, bind the exact changed files with repeatable `--scope-path`; for `git.push`, bind the matching remote; for merge, bind the exact PR URL:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
@@ -355,6 +369,7 @@ The dedicated assessment journey remains the exception described above: it packa
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
      --root <target-project> --id AUT-PR-184 \
      --action git.commit --outcome passed \
+     --authorization-receipt <AUT-ACT-id-from-authorization> \
      --evidence evidence/PR-184-commit.txt --json
 
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
@@ -364,12 +379,34 @@ The dedicated assessment journey remains the exception described above: it packa
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
      --root <target-project> --id AUT-PR-184 \
      --action git.push --outcome passed \
+     --authorization-receipt <AUT-ACT-id-from-authorization> \
      --evidence evidence/PR-184-push.json --json
    ```
 
    An `authorized` receipt grants only the displayed operation; it does not run it. Push authorization observes the base SHA directly on the selected remote, requires exactly one passing `git.commit` completion for every commit from that SHA to the exact head, and rejects the remote if any configured fetch/push URL identifies another repository. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for the expected post-state after authorization. That observation and the declared evidence are hash-bound, but the observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence and do not call a generic file signed proof. A passing `pull_request.merge` completion or `release.local` completion creates the terminal close receipt automatically; do not manually close either as `merged` or `released`. Other terminal outcomes use `autonomy delivery close` with a formal reason and approval.
 
-   For local release completion, repeat the exact approved shell-free smoke-test argv and rollback. The smoke working directory is governed by `--smoke-cwd`, must be equal to or inside one allowed write path, defaults to the only allowed write path, and is mandatory when several write paths are allowed. Package-manager smoke commands require a real, non-symlinked `package.json` in that exact directory, so they cannot climb to the source project. Historical profiles without this field derive it only when their write path is unambiguous; otherwise completion fails closed. The CLI runs the smoke command from that exact released-artifact directory in its supported read-only, no-network sandbox and stores structured output hashes before automatically closing the profile as `released`. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and remain unreleased:
+   For local release completion, repeat the exact approved shell-free smoke-test argv and rollback. The smoke working directory is governed by `--smoke-cwd`, must be equal to or inside one allowed write path, defaults to the only allowed write path, and is mandatory when several write paths are allowed. Package-manager smoke commands require a real, non-symlinked `package.json` in that exact directory, so they cannot climb to the source project. Historical profiles without this field derive it only when their write path is unambiguous; otherwise completion fails closed. The CLI runs the smoke command from that exact released-artifact directory in its supported read-only, no-network sandbox and stores structured output hashes before automatically closing the profile as `released`. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and remain unreleased.
+
+   Authorize and complete the mandatory rollback rehearsal before asking to authorize `release.local`. For a declared data migration, first complete the initial `data.migrate` and real `data.rollback`; the rollback rehearsal must bind that passing rollback receipt, and a later passing final `data.migrate` must still precede release. In `host_verified` mode, add the exact external `--host-receipt-file` to each checkpoint authorization. In the default `audit_only` mode, omit that option; `--confirm-action` plus direct approval attribution records the checkpoint without claiming verified host authority:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
+     --root <target-project> --id AUT-LOCAL-REL-009 \
+     --action rollback.verify \
+     --evidence evidence/rollback-rehearsal.json \
+     --confirm-action \
+     --actor-type human --approval-source explicit-user \
+     --summary "Approve this exact rollback rehearsal evidence" \
+     --json
+
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
+     --root <target-project> --id AUT-LOCAL-REL-009 \
+     --action rollback.verify --outcome passed \
+     --evidence evidence/rollback-rehearsal.json \
+     --json
+   ```
+
+   Only after that passing receipt may the local release be authorized and completed. In the full lifecycle, execute these `release.local` commands only after the validation step passes, the intermediate strict receipt is sealed, and the bound workflow has entered `release`:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
@@ -377,7 +414,6 @@ The dedicated assessment journey remains the exception described above: it packa
      --action release.local --confirm-action \
      --actor-type human --approval-source explicit-user \
      --summary "Release this exact local target" \
-     --host-receipt-file evidence/AUT-LOCAL-REL-009-release-action.json \
      --json
 
    # Perform the approved local write, then let completion run the exact smoke test.
@@ -426,6 +462,16 @@ The dedicated assessment journey remains the exception described above: it packa
      --summary "Functional analysis accepted for implementation"
    ```
 
+   After each non-terminal phase step is completed, transition the bound workflow to the next configured phase. The ordering is evidence: workflow start must be no later than task start, phase entry must be no later than that phase's completion, and the next phase entry must be no earlier than the previous phase completion:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow instance transition \
+     --root <target-project> \
+     --id DELIVERY-ST-001 \
+     --to <next-configured-phase> \
+     --request-id <unique-phase-transition-id>
+   ```
+
 17. Use `story prepare-handoff` when passing work between chats, machines, or phases. Use `--release-claim` only when the next agent should be able to claim the story after pulling the shared KB:
 
    ```bash
@@ -439,10 +485,31 @@ The dedicated assessment journey remains the exception described above: it packa
 
    Close the handoff when the receiving lane accepts it. Use phase locks only for shared phase artifacts that multiple story lanes could modify.
 
-18. Run a strict gate check before closing a phase or declaring implementation ready. The gate must validate the requirement revision and ceiling, current non-reused delivery profile, most-restrictive effective level, material-scope freshness, exact authorization uses, and local smoke/rollback evidence when applicable. A passing gate does not itself authorize protected-branch merge or remote/production deployment:
+18. After the validation step and latest passing test evidence, run the ordinary strict story gate. It must validate the requirement revision and ceiling, current non-reused delivery profile, most-restrictive effective level, material-scope freshness, exact authorization uses, and applicable evidence. A passing gate does not itself authorize a release, protected-branch merge, or remote/production deployment:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check --root <target-project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
+   ```
+
+   This is an intermediate readiness check, not the final delivery certificate. It verifies validation and seals the distinct strict receipt used to move the current story-bound workflow to its configured terminal `release` phase with a unique request ID:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow instance transition \
+     --root <target-project> \
+     --id <workflow-instance-id> \
+     --to release \
+     --request-id <unique-release-transition-id>
+   ```
+
+   Only after entering `release`, authorize and complete the exact local release or PR delivery, append the passing release trace, and complete the `release` story step. Entry into `release` must precede both the release trace and terminal delivery close. Then run the lifecycle-complete gate. It replays the task-bound workflow's immutable instance, event history, checkpoint, audit trace, and alternating phase timeline, and requires every configured phase to have a completed canonical step. Do not claim that the story or discovery-to-release lifecycle is complete unless this stronger command passes and seals its separate final receipt:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs gate check \
+     --root <target-project> \
+     --story ST-001 \
+     --strict \
+     --lifecycle-complete \
+     --out .sdlc/reports/ST-001-lifecycle-complete.json
    ```
 
 19. Release claims and locks when work is complete or handed off.
@@ -548,5 +615,5 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify completed story lanes have step records under `.sdlc/stories/<story-id>/steps/` when work is handed off;
 - verify activity reports, manifests, and trace compactions cite canonical source paths and do not use cache/index as evidence;
 - verify approvals include `approval_source` and do not treat implementation permission as artifact approval;
-- run `gate check`;
+- start the exact story-bound workflow before task start, complete each phase before entering the next, use ordinary strict `gate check` after validation, enter `release` before release evidence or terminal delivery, and require `gate check --strict --story <story-id> --lifecycle-complete` before claiming the SDLC complete;
 - report any errors or warnings instead of hiding them.

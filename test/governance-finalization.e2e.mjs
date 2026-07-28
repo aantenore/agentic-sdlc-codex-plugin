@@ -116,6 +116,48 @@ function implementationIntent(storyId) {
   });
 }
 
+function customGovernedWorkflowDefinition(customPhase) {
+  const phases = [
+    "discovery",
+    "analysis",
+    "design",
+    customPhase,
+    "implementation",
+    "validation",
+    "release",
+  ];
+  const transition = (from, to, guards = []) => ({
+    id: `${from}-to-${to}`,
+    from,
+    to,
+    guards: guards.map((id) => ({ id, parameters: {} })),
+  });
+  return {
+    label: "Custom governed software project",
+    description: "Exercise every configured project phase with canonical delivery checks.",
+    initial_state: phases[0],
+    phase_order: phases,
+    states: phases.map((id, index) => ({
+      id,
+      label: id,
+      terminal: index === phases.length - 1,
+    })),
+    transitions: [
+      transition("discovery", "analysis", ["requirement-approved"]),
+      transition("analysis", "design"),
+      transition("design", customPhase, ["contract-approved"]),
+      transition(customPhase, "implementation"),
+      transition("implementation", "validation", ["required-output-linked"]),
+      transition("validation", "release", ["strict-gate-passed"]),
+    ],
+    normal_checkpoints: [],
+    metadata: {
+      governance_binding: "story",
+      canonical_evidence_schema: "workflow-canonical-evidence:v1",
+    },
+  };
+}
+
 function pinProjectConfig(project) {
   const preview = mustRunJson(["config", "migrate", "--root", project], project);
   return mustRunJson([
@@ -166,12 +208,14 @@ function initializeGitProject(project, branch, configureProject = null) {
   mustGit(project, ["checkout", "-b", branch]);
 }
 
-function createGovernedPullRequestStory(project, {
+function createGovernedDeliveryStory(project, {
   suffix,
   allowedWritePaths,
   outputType = "implementation-summary",
   configureProject = null,
+  deliveryKind = "pull_request",
   storyActionUses = 1,
+  beforeTaskStart = null,
 }) {
   const requirementId = `REQ-${suffix}`;
   const storyId = `ST-${suffix}`;
@@ -243,23 +287,42 @@ function createGovernedPullRequestStory(project, {
     ...humanApproval(`Approve ${contractId}`),
   ], project);
 
+  const localReleaseRoot = path.join(project, "docs", "local-release");
+  const localReleaseOutput = path.join(localReleaseRoot, "app");
+  const deliveryTargetArgs = deliveryKind === "local_release"
+    ? [
+        "--target-root", localReleaseRoot,
+        "--write-path", localReleaseOutput,
+        "--smoke-test", '["node","--version"]',
+        "--rollback", "Restore the previous governed local release snapshot.",
+      ]
+    : [
+        "--repository", "aantenore/agentic-sdlc-codex-plugin",
+        "--base", "main",
+        "--head", branch,
+      ];
+  const deliveryActionArgs = deliveryKind === "local_release"
+    ? []
+    : [
+        "--allow-action", "repository.read",
+        "--allow-action", "repository.write",
+        "--allow-action", "test.run",
+      ];
   mustRun([
     "autonomy", "delivery", "propose",
     "--root", project,
     "--id", profileId,
-    "--delivery", `PR-${suffix}`,
-    "--kind", "pull_request",
+    "--delivery", deliveryKind === "local_release" ? `LOCAL-${suffix}` : `PR-${suffix}`,
+    "--kind", deliveryKind,
     "--story", storyId,
     "--contract", contractId,
     "--requirement", requirementId,
     "--level", "supervised",
-    "--repository", "aantenore/agentic-sdlc-codex-plugin",
-    "--base", "main",
-    "--head", branch,
-    ...allowedWritePaths.flatMap((writePath) => ["--write-path", writePath]),
-    "--allow-action", "repository.read",
-    "--allow-action", "repository.write",
-    "--allow-action", "test.run",
+    ...deliveryTargetArgs,
+    ...(deliveryKind === "pull_request"
+      ? allowedWritePaths.flatMap((writePath) => ["--write-path", writePath])
+      : []),
+    ...deliveryActionArgs,
   ], project);
   mustRun([
     "autonomy", "delivery", "approve",
@@ -268,6 +331,13 @@ function createGovernedPullRequestStory(project, {
     "--phase", "implementation",
     ...humanApproval(`Approve ${profileId}`),
   ], project);
+  beforeTaskStart?.({
+    project,
+    requirementId,
+    storyId,
+    contractId,
+    profileId,
+  });
   const taskStart = mustRunJson([
     "task", "start",
     "--root", project,
@@ -314,6 +384,9 @@ function createGovernedPullRequestStory(project, {
     branch,
     taskStart,
     storyActionAuthorizationId,
+    deliveryKind,
+    localReleaseRoot,
+    localReleaseOutput,
   };
 }
 
@@ -399,17 +472,167 @@ function appendTrace(project, storyId, type, outcome, evidence) {
   ], project);
 }
 
-test("lifecycle-complete strict gate seals a canonical receipt only after every phase and terminal delivery", () => {
+test("task start rejects workflows already transitioned or stories already completed", () => {
+  const startGovernedWorkflow = (project, storyId, definitionId, instanceId) => {
+    mustRun([
+      "workflow", "definition", "propose",
+      "--root", project,
+      "--id", definitionId,
+      "--definition-version", "1",
+      "--definition-json", JSON.stringify(customGovernedWorkflowDefinition("package-boundary-check")),
+    ], project);
+    mustRun([
+      "workflow", "definition", "approve",
+      "--root", project,
+      "--id", definitionId,
+      "--definition-version", "1",
+      ...humanApproval(`Approve ${definitionId}`),
+    ], project);
+    mustRun([
+      "workflow", "instance", "start",
+      "--root", project,
+      "--id", instanceId,
+      "--definition", definitionId,
+      "--definition-version", "1",
+      "--story", storyId,
+      "--actor", "workflow-e2e-ci",
+      "--actor-type", "ci",
+    ], project);
+  };
+
+  const transitionedProject = temporaryProject("task-start-after-transition");
+  assert.throws(
+    () => createGovernedDeliveryStory(transitionedProject, {
+      suffix: "START-AFTER-TRANSITION",
+      allowedWritePaths: ["docs"],
+      configureProject: (target) => configureCustomPhase(target, "package-boundary-check"),
+      beforeTaskStart: ({ storyId }) => {
+        startGovernedWorkflow(
+          transitionedProject,
+          storyId,
+          "workflow-before-transition-boundary",
+          "delivery-before-transition-boundary",
+        );
+        mustRun([
+          "workflow", "instance", "transition",
+          "--root", transitionedProject,
+          "--id", "delivery-before-transition-boundary",
+          "--to", "analysis",
+          "--request-id", "transition-before-task-start",
+          "--actor", "workflow-e2e-ci",
+          "--actor-type", "ci",
+        ], transitionedProject);
+      },
+    }),
+    /already has 1 transition event|before the first workflow transition/u,
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      transitionedProject,
+      ".sdlc/stories/ST-START-AFTER-TRANSITION/task-start.json",
+    )),
+    false,
+  );
+
+  const completedProject = temporaryProject("task-start-after-completion");
+  assert.throws(
+    () => createGovernedDeliveryStory(completedProject, {
+      suffix: "START-AFTER-COMPLETION",
+      allowedWritePaths: ["docs"],
+      configureProject: (target) => configureCustomPhase(target, "package-boundary-check"),
+      beforeTaskStart: ({ storyId }) => {
+        startGovernedWorkflow(
+          completedProject,
+          storyId,
+          "workflow-before-completion-boundary",
+          "delivery-before-completion-boundary",
+        );
+        writeProjectFile(
+          completedProject,
+          `.sdlc/stories/${storyId}/steps/discovery.json`,
+          `${JSON.stringify({
+            id: `STEP-${storyId}-discovery`,
+            story_id: storyId,
+            step: "discovery",
+            status: "completed",
+            phase: "discovery",
+            completed_at: new Date().toISOString(),
+          }, null, 2)}\n`,
+        );
+      },
+    }),
+    /already has completed lifecycle steps|before the first completed story step/u,
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      completedProject,
+      ".sdlc/stories/ST-START-AFTER-COMPLETION/task-start.json",
+    )),
+    false,
+  );
+});
+
+test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", () => {
   const project = temporaryProject("lifecycle");
   const customPhase = "package-boundary-check";
-  const fixture = createGovernedPullRequestStory(project, {
+  const finalReceiptPath = ".sdlc/gates/ST-FINAL-final.json";
+  const strictReceiptPath = ".sdlc/gates/ST-FINAL-strict.json";
+  const workflowDefinitionId = "software-project-custom-final";
+  const historicalWorkflowInstanceId = "delivery-archive-final";
+  const workflowInstanceId = "delivery-final";
+  const fixture = createGovernedDeliveryStory(project, {
     suffix: "FINAL",
     allowedWritePaths: ["docs"],
     outputType: "implementation-summary",
     configureProject: (target) => configureCustomPhase(target, customPhase),
+    deliveryKind: "local_release",
     storyActionUses: 9,
+    beforeTaskStart: ({ storyId }) => {
+      mustRun([
+        "workflow", "definition", "propose",
+        "--root", project,
+        "--id", workflowDefinitionId,
+        "--definition-version", "1",
+        "--definition-json", JSON.stringify(customGovernedWorkflowDefinition(customPhase)),
+      ], project);
+      mustRun([
+        "workflow", "definition", "approve",
+        "--root", project,
+        "--id", workflowDefinitionId,
+        "--definition-version", "1",
+        ...humanApproval("Approve the exact custom governed project process"),
+      ], project);
+      for (const instanceId of [historicalWorkflowInstanceId, workflowInstanceId]) {
+        mustRun([
+          "workflow", "instance", "start",
+          "--root", project,
+          "--id", instanceId,
+          "--definition", workflowDefinitionId,
+          "--definition-version", "1",
+          "--story", storyId,
+          "--actor", "workflow-e2e-ci",
+          "--actor-type", "ci",
+          "--actor-name", "Workflow E2E CI",
+        ], project);
+      }
+    },
   });
-  const finalReceiptPath = `.sdlc/gates/${fixture.storyId}-final.json`;
+  const taskStartReceipt = readJson(
+    project,
+    `.sdlc/stories/${fixture.storyId}/task-start.json`,
+  );
+  assert.equal(taskStartReceipt.schema_version, "profile-task-start-receipt:v2");
+  assert.equal(taskStartReceipt.workflow_instance_ref.id, workflowInstanceId);
+  mustFail([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", "delivery-post-hoc-final",
+    "--definition", workflowDefinitionId,
+    "--definition-version", "1",
+    "--story", fixture.storyId,
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+  ], project, /already has a task-start receipt|must start before task start|post-hoc workflow replay/u);
 
   const artifact = writeProjectFile(
     project,
@@ -428,7 +651,13 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
-  for (const step of ["discovery", "analysis", "design", customPhase, "implementation"]) {
+  for (const [index, step] of [
+    "discovery",
+    "analysis",
+    "design",
+    customPhase,
+    "implementation",
+  ].entries()) {
     mustRun([
       "story", "complete-step",
       "--root", project,
@@ -437,6 +666,17 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
       "--summary", `${step} completed against the approved boundary`,
       ...(step === "implementation" ? ["--type", "implementation-summary"] : []),
       "--authorization", fixture.storyActionAuthorizationId,
+    ], project);
+    const nextPhase = ["analysis", "design", customPhase, "implementation", "validation"][index];
+    mustRun([
+      "workflow", "instance", "transition",
+      "--root", project,
+      "--id", workflowInstanceId,
+      "--to", nextPhase,
+      "--request-id", `final-workflow-${index + 1}`,
+      "--actor", "workflow-e2e-ci",
+      "--actor-type", "ci",
+      "--actor-name", "Workflow E2E CI",
     ], project);
   }
 
@@ -464,6 +704,48 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
+  const strictReport = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+  ], project);
+  assert.equal(strictReport.kind, "workflow_strict_gate_receipt");
+  assert.equal(strictReport.schema_version, "workflow-strict-gate-receipt:v1");
+  assert.equal(strictReport.lifecycle_complete, false);
+  assert.equal(strictReport.strict_receipt_path, strictReceiptPath);
+  assert.equal(fs.existsSync(path.join(project, strictReceiptPath)), true);
+  assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
+
+  mustRun([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "release",
+    "--request-id", "final-workflow-6",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow E2E CI",
+  ], project);
+  const awaitingReleaseStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(awaitingReleaseStatus.next_action.kind, "complete_release_evidence");
+  assert.deepEqual(
+    awaitingReleaseStatus.next_action.missing_release_evidence,
+    ["terminal successful delivery", "passing release trace", "completed release step"],
+  );
+
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+    "--json",
+  ], project, /requires completed phases: release|latest release trace to pass|requires terminal local_release delivery; found started/u);
+  assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
+
   const releaseEvidence = writeProjectFile(project, ".sdlc/tests/ST-FINAL-release.json", "{\"ready\":true}\n");
   appendTrace(project, fixture.storyId, "release", "passed", releaseEvidence);
   mustRun([
@@ -476,24 +758,63 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
-  mustFail([
-    "gate", "check",
-    "--root", project,
-    "--strict",
-    "--story", fixture.storyId,
-    "--lifecycle-complete",
-    "--json",
-  ], project, /requires terminal pull_request delivery; found started/u);
-  assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
-
+  const rollbackEvidence = writeProjectFile(
+    project,
+    "docs/local-release/rollback-rehearsal.json",
+    '{"target":"docs/local-release/app","restored":true}\n',
+  );
   mustRun([
-    "autonomy", "delivery", "close",
+    "autonomy", "delivery", "action",
     "--root", project,
     "--id", fixture.profileId,
-    "--terminal-status", "closed",
-    "--reason", "The governed pull request delivery completed without further remote action.",
-    ...humanApproval("Approve closing this exact delivery"),
+    "--action", "rollback.verify",
+    "--evidence", rollbackEvidence,
+    "--confirm-action",
+    ...humanApproval("Approve the exact local rollback rehearsal evidence"),
   ], project);
+  mustRun([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--action", "rollback.verify",
+    "--outcome", "passed",
+    "--evidence", rollbackEvidence,
+  ], project);
+
+  const localReleaseEvidence = writeProjectFile(
+    project,
+    "docs/local-release/app/release-proof.txt",
+    "governed local release completed\n",
+  );
+  mustRun([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve this exact governed local release"),
+  ], project);
+  const localRelease = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--action", "release.local",
+    "--outcome", "passed",
+    "--evidence", localReleaseEvidence,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore the previous governed local release snapshot.",
+  ], project);
+  assert.equal(localRelease.lifecycle_status, "terminal");
+  assert.equal(
+    readJson(project, localRelease.close_receipt_path).terminal_status,
+    "released",
+  );
+  const readyToCertifyStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(readyToCertifyStatus.next_action.kind, "certify_lifecycle");
+  assert.match(readyToCertifyStatus.next_action.command, /^node /u);
+  assert.doesNotMatch(readyToCertifyStatus.next_action.command, /^agentic-sdlc /u);
 
   const finalReport = mustRunJson([
     "gate", "check",
@@ -506,8 +827,41 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
   assert.equal(finalReport.lifecycle_complete, true);
   assert.equal(finalReport.certification_level, "lifecycle_complete");
   assert.equal(finalReport.kind, "workflow_final_gate_receipt");
-  assert.equal(finalReport.schema_version, "workflow-final-gate-receipt:v1");
+  assert.equal(finalReport.schema_version, "workflow-final-gate-receipt:v2");
   assert.equal(finalReport.final_receipt_path, finalReceiptPath);
+  assert.equal(
+    finalReport.lifecycle_workflow.selection_policy,
+    "latest-created-at-then-instance-id:v1",
+  );
+  assert.equal(finalReport.lifecycle_workflow.story_id, fixture.storyId);
+  assert.equal(finalReport.lifecycle_workflow.instance_id, workflowInstanceId);
+  assert.match(finalReport.lifecycle_workflow.instance_hash, /^[a-f0-9]{64}$/u);
+  assert.match(finalReport.lifecycle_workflow.effective_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(finalReport.lifecycle_workflow.terminal_state, "release");
+  assert.equal(
+    finalReport.lifecycle_workflow.checkpoint_ref.path,
+    `.sdlc/workflows/instances/${workflowInstanceId}/checkpoint.json`,
+  );
+  assert.match(
+    finalReport.lifecycle_workflow.checkpoint_ref.checkpoint_hash,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.equal(
+    finalReport.lifecycle_workflow.checkpoint_ref.last_event_hash,
+    finalReport.lifecycle_workflow.terminal_event_ref.event_hash,
+  );
+  assert.equal(
+    finalReport.lifecycle_workflow.checkpoint_ref.sequence,
+    finalReport.lifecycle_workflow.terminal_event_ref.sequence,
+  );
+  assert.equal(
+    finalReport.lifecycle_workflow.event_count,
+    finalReport.lifecycle_workflow.checkpoint_ref.sequence,
+  );
+  assert.ok(
+    Date.parse(finalReport.checked_at)
+      >= Date.parse(finalReport.lifecycle_workflow.terminal_event_ref.timestamp),
+  );
 
   const receipt = readJson(project, finalReceiptPath);
   const {
@@ -524,11 +878,46 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
   } = receipt;
   assert.equal(hashAlgorithm, "sha256:stable-json:v1");
   assert.equal(receiptHash, computeStableHash(receiptSubject));
+
+  const certifiedStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.notEqual(certifiedStatus.next_action.kind, "certify_lifecycle");
+});
+
+test("a formally closed pull request remains terminal but cannot certify lifecycle success", () => {
+  const project = temporaryProject("closed-pull-request");
+  const fixture = createGovernedDeliveryStory(project, {
+    suffix: "CLOSED",
+    allowedWritePaths: ["src"],
+  });
+
+  mustRun([
+    "autonomy", "delivery", "close",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--terminal-status", "closed",
+    "--reason", "The pull request was closed without being merged.",
+    ...humanApproval("Approve closing this unmerged pull request"),
+  ], project);
+
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+    "--json",
+  ], project, /requires terminal pull_request delivery; found closed/u);
+  assert.equal(
+    fs.existsSync(path.join(project, `.sdlc/gates/${fixture.storyId}-final.json`)),
+    false,
+  );
 });
 
 test("strict story gate detects an out-of-scope file committed after task start", () => {
   const project = temporaryProject("write-scope");
-  const fixture = createGovernedPullRequestStory(project, {
+  const fixture = createGovernedDeliveryStory(project, {
     suffix: "SCOPE",
     allowedWritePaths: ["src"],
   });

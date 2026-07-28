@@ -23,6 +23,43 @@
     "sdlc_version": {
       "type": "string"
     },
+    "bootstrap_manifest": {
+      "type": "object",
+      "required": [
+        "path",
+        "schema_version"
+      ],
+      "properties": {
+        "path": {
+          "const": ".sdlc/bootstrap-manifest.json"
+        },
+        "schema_version": {
+          "const": "project-bootstrap-manifest:v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "bootstrap_journal": {
+      "type": "object",
+      "required": [
+        "path",
+        "schema_version",
+        "request_hash"
+      ],
+      "properties": {
+        "path": {
+          "const": ".sdlc/bootstrap-journal.json"
+        },
+        "schema_version": {
+          "const": "project-bootstrap-journal:v1"
+        },
+        "request_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "knowledge_base": {
       "type": "object",
       "properties": {

@@ -125,7 +125,7 @@ test("delivery self-service help mirrors the runtime flags and marks the main re
   const action = describe("autonomy delivery action");
   assert.equal(action.get("--id")?.required, true);
   assert.equal(action.get("--action")?.required, true);
-  for (const flag of ["--scope-path", "--remote", "--pr-url", "--confirm-action", "--actor-type", "--approval-source", "--outcome", "--evidence", "--smoke-cwd", "--smoke-test", "--rollback"]) {
+  for (const flag of ["--scope-path", "--remote", "--pr-url", "--confirm-action", "--actor-type", "--approval-source", "--outcome", "--authorization-receipt", "--evidence", "--smoke-cwd", "--smoke-test", "--rollback"]) {
     assert.equal(action.has(flag), true, `missing runtime action flag: ${flag}`);
   }
 
@@ -135,6 +135,12 @@ test("delivery self-service help mirrors the runtime flags and marks the main re
   for (const flag of ["--evidence", "--outcome", "--action", "--related", "--actor-type"]) {
     assert.equal(trace.has(flag), true, `missing runtime trace flag: ${flag}`);
   }
+
+  const localDataExample = findCommand("autonomy delivery propose").examples
+    .find((example) => example.includes("AUT-DATA-009"));
+  assert.match(localDataExample, /--write-path app/u);
+  assert.match(localDataExample, /--write-path data/u);
+  assert.match(localDataExample, /--smoke-cwd app/u);
 });
 
 test("requirement and contract help expose the runtime-required and conditional inputs", () => {

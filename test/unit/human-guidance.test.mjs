@@ -348,6 +348,95 @@ test("distinguishes audit-only and host-verified action checkpoints without exec
   assert.doesNotMatch(authorized.next_action, /Provide|Confirm/u);
 });
 
+test("keeps ID-bearing technical action boundaries out of primary guidance and exact in details", () => {
+  const migrationInput = {
+    status: "checkpoint_required",
+    action: "data.migrate",
+    authority_mode: "audit_only",
+    data_target: "/opt/travel-operations/st-demo/store.json",
+    data_scopes: ["records.st-demo.schemaVersion"],
+    backup_path: "/opt/travel-operations/st-demo/store.before.json",
+    preview_evidence: ["evidence/st-demo-migration-preview.json"],
+    rollback: "Restore st-demo from its approved backup.",
+  };
+  const dataMigration = actionCheckpointGuidance(migrationInput, { locale: "en" });
+
+  assertCanonicalCodesOnlyInDetails(dataMigration);
+  assert.doesNotMatch(humanText(dataMigration), /st-demo/iu);
+  assert.match(
+    dataMigration.required_decision,
+    /approved preview evidence file listed in the optional technical details/u,
+  );
+  assert.deepEqual(dataMigration.details.data_scopes, migrationInput.data_scopes);
+  assert.deepEqual(dataMigration.details.preview_evidence, migrationInput.preview_evidence);
+  assert.equal(dataMigration.details.data_target, migrationInput.data_target);
+  assert.equal(dataMigration.details.backup_path, migrationInput.backup_path);
+  assert.equal(dataMigration.details.rollback, migrationInput.rollback);
+
+  const rollbackInput = {
+    status: "checkpoint_required",
+    action: "rollback.verify",
+    authority_mode: "audit_only",
+    target_root: "/opt/travel-operations/St-Rollback-Demo/release",
+    rollback: "Restore the St-Rollback-Demo release snapshot.",
+    rollback_evidence: ["evidence/St-Rollback-Demo-rehearsal.json"],
+  };
+  const rollbackVerification = actionCheckpointGuidance(rollbackInput, { locale: "en" });
+
+  assertCanonicalCodesOnlyInDetails(rollbackVerification);
+  assert.doesNotMatch(humanText(rollbackVerification), /st-rollback-demo/iu);
+  assert.match(
+    rollbackVerification.required_decision,
+    /approved rollback evidence file listed in the optional technical details/u,
+  );
+  assert.equal(rollbackVerification.details.target_root, rollbackInput.target_root);
+  assert.equal(rollbackVerification.details.rollback, rollbackInput.rollback);
+  assert.deepEqual(
+    rollbackVerification.details.rollback_evidence,
+    rollbackInput.rollback_evidence,
+  );
+
+  const releaseInput = {
+    status: "checkpoint_required",
+    action: "release.local",
+    authority_mode: "audit_only",
+    target_root: "/opt/travel-operations/sT-Local-Demo/release",
+    smoke_cwd: "/opt/travel-operations/sT-Local-Demo/release/app",
+    smoke_tests: ['["node","test/sT-Local-Demo-smoke.mjs"]'],
+    rollback: "Restore the sT-Local-Demo release snapshot.",
+  };
+  const localRelease = actionCheckpointGuidance(releaseInput, { locale: "en" });
+
+  assertCanonicalCodesOnlyInDetails(localRelease);
+  assert.doesNotMatch(humanText(localRelease), /st-local-demo/iu);
+  assert.match(
+    localRelease.required_decision,
+    /approved smoke command listed in the optional technical details/u,
+  );
+  assert.equal(localRelease.details.target_root, releaseInput.target_root);
+  assert.equal(localRelease.details.smoke_cwd, releaseInput.smoke_cwd);
+  assert.deepEqual(localRelease.details.smoke_tests, releaseInput.smoke_tests);
+  assert.equal(localRelease.details.rollback, releaseInput.rollback);
+});
+
+test("does not mistake ordinary words containing an ID-like substring for internal identifiers", () => {
+  const input = {
+    status: "checkpoint_required",
+    action: "release.local",
+    authority_mode: "audit_only",
+    target_root: "/opt/travel-operations/first-demo/release",
+    smoke_cwd: "/opt/travel-operations/first-demo/release/app",
+    smoke_tests: ['["node","test/first-demo-smoke.mjs"]'],
+    rollback: "Restore the first-demo release snapshot.",
+  };
+  const guidance = actionCheckpointGuidance(input, { locale: "en" });
+
+  assertCanonicalCodesOnlyInDetails(guidance);
+  assert.match(guidance.required_decision, /first-demo\/release/u);
+  assert.match(guidance.required_decision, /first-demo-smoke\.mjs/u);
+  assert.match(guidance.required_decision, /Restore the first-demo release snapshot/u);
+});
+
 test("fails closed in human status when an active delivery cannot be evaluated", () => {
   const guidance = deliveryAutonomyStatusGuidance({
     status: "needs_repair",
@@ -482,6 +571,20 @@ test("builds an exact frozen additive block and keeps technical identifiers in d
   assert.throws(() => { guidance.details.profile_id = "AUT-PR-43"; }, TypeError);
   assert.throws(() => buildHumanGuidance({
     result: "The bounded-autonomous profile is ready.",
+    impact: "No files changed.",
+    requiredDecision: "Approve it.",
+    protectionBoundary: "Only this work is covered.",
+    nextAction: "Continue.",
+  }), /internal terminology/u);
+  assert.throws(() => buildHumanGuidance({
+    result: "The work for st-demo is ready.",
+    impact: "No files changed.",
+    requiredDecision: "Approve it.",
+    protectionBoundary: "Only this work is covered.",
+    nextAction: "Continue.",
+  }), /internal terminology/u);
+  assert.throws(() => buildHumanGuidance({
+    result: "The work for St-DeMo is ready.",
     impact: "No files changed.",
     requiredDecision: "Approve it.",
     protectionBoundary: "Only this work is covered.",

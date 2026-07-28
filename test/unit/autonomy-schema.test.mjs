@@ -171,6 +171,98 @@ function validDecision() {
   };
 }
 
+function deliveryActionReceipt({
+  schemaVersion = "delivery-action-receipt:v2",
+  status = "completed",
+  includeCompletionRequest = status === "completed",
+} = {}) {
+  const profileRef = ref(
+    "AUT-DELIVERY-SCHEMA",
+    HASH.requirementProfile,
+    ".sdlc/autonomy/deliveries/AUT-DELIVERY-SCHEMA.json",
+  );
+  const authorizationRef = ref(
+    "AUT-ACT-AUTHORIZED",
+    "1".repeat(64),
+    ".sdlc/autonomy/actions/AUT-ACT-AUTHORIZED.json",
+  );
+  const evidence = [{ path: ".sdlc/tests/ST-SCHEMA.json", sha256: "2".repeat(64) }];
+  const receipt = {
+    id: status === "completed" ? "AUT-ACT-COMPLETED" : "AUT-ACT-AUTHORIZED",
+    kind: "delivery_action_receipt",
+    schema_version: schemaVersion,
+    profile_ref: profileRef,
+    delivery: { id: "PR-SCHEMA", kind: "pull_request" },
+    action: "test.run",
+    effective_level: "checkpointed",
+    checkpoint_required: false,
+    approval: null,
+    runtime_target: null,
+    action_details: {},
+    authorization_receipt_ref: status === "completed" ? authorizationRef : null,
+    local_release_verification: null,
+    evidence: status === "completed" ? evidence : [],
+    outcome: status === "completed" ? "passed" : null,
+    status,
+    authorized_by: { id: "schema-test", type: "agent" },
+    authorized_at: NOW,
+    audit: {},
+    receipt_hash: "3".repeat(64),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  if (includeCompletionRequest) {
+    receipt.completion_request = {
+      schema_version: "delivery-action-completion-request:v1",
+      profile_ref: profileRef,
+      action: "test.run",
+      outcome: "passed",
+      authorization_receipt_ref: authorizationRef,
+      evidence,
+      operation_args: {},
+      request_hash: "4".repeat(64),
+      hash_algorithm: "sha256:stable-json:v1",
+    };
+  }
+  return receipt;
+}
+
+function profileTaskStartReceipt({
+  schemaVersion = "profile-task-start-receipt:v2",
+  includeWorkflowRef = schemaVersion === "profile-task-start-receipt:v2",
+} = {}) {
+  return {
+    id: "START-ST-SCHEMA",
+    kind: "profile_task_start_receipt",
+    schema_version: schemaVersion,
+    story_id: "ST-SCHEMA",
+    phase: "implementation",
+    route: "claim_and_implement",
+    contract_id: "CONTRACT-SCHEMA",
+    contract_approval_hash: HASH.contract,
+    delivery_profile_ref: null,
+    autonomy_decision_ref: null,
+    ...(includeWorkflowRef
+      ? {
+          workflow_instance_ref: ref(
+            "WF-ST-SCHEMA",
+            HASH.story,
+            ".sdlc/workflows/instances/WF-ST-SCHEMA/instance.json",
+          ),
+        }
+      : {}),
+    delivery_start_receipt_ref: null,
+    autonomy_level: "supervised",
+    start_basis: "explicit-confirmation",
+    status: "confirmed",
+    authorization_ref: null,
+    authorization_use_ref: null,
+    authority_assurance: {},
+    confirmed_by: { id: "schema-test", type: "agent" },
+    confirmed_at: NOW,
+    audit: {},
+  };
+}
+
 test("autonomy builders produce schema-valid proposed, PR, and local-release artifacts", () => {
   const proposedRequirement = requirementProfile({
     status: "proposed",
@@ -186,6 +278,99 @@ test("autonomy builders produce schema-valid proposed, PR, and local-release art
   assertAgainstSchema(localRelease, "delivery-execution-profile");
   assert.equal(pullRequest.local_release_target, null);
   assert.equal(localRelease.pull_request_target, null);
+});
+
+test("delivery action receipt v2 binds completions while v1 remains readable", () => {
+  const currentAuthorization = deliveryActionReceipt({ status: "authorized" });
+  const currentCompletion = deliveryActionReceipt();
+  assertAgainstSchema(currentAuthorization, "delivery-action-receipt");
+  assertAgainstSchema(currentCompletion, "delivery-action-receipt");
+
+  const currentCompletionWithoutRequest = deliveryActionReceipt({
+    includeCompletionRequest: false,
+  });
+  assert.equal(
+    validateAgainstSchema(
+      currentCompletionWithoutRequest,
+      "delivery-action-receipt",
+    ).valid,
+    false,
+  );
+
+  const inconsistentAuthorization = deliveryActionReceipt({
+    status: "authorized",
+    includeCompletionRequest: true,
+  });
+  assert.equal(
+    validateAgainstSchema(inconsistentAuthorization, "delivery-action-receipt").valid,
+    false,
+  );
+
+  const legacyCompletion = deliveryActionReceipt({
+    schemaVersion: "delivery-action-receipt:v1",
+    includeCompletionRequest: false,
+  });
+  assertAgainstSchema(legacyCompletion, "delivery-action-receipt");
+});
+
+test("task-start receipt v2 requires workflow binding while byte-compatible v1 forbids it", () => {
+  const schemaDir = path.join(process.cwd(), "schemas");
+  const schemaRegistry = new Map();
+  for (const schemaFile of [
+    "profile-task-start-receipt-v1.schema.json",
+    "profile-task-start-receipt.schema.json",
+  ]) {
+    const schema = JSON.parse(fs.readFileSync(path.join(schemaDir, schemaFile), "utf8"));
+    assert.equal(schemaRegistry.has(schema.$id), false, `duplicate schema id ${schema.$id}`);
+    schemaRegistry.set(schema.$id, schema);
+  }
+  assert.equal(schemaRegistry.size, 2);
+
+  const current = profileTaskStartReceipt();
+  const sharedCache = new Map();
+  assert.equal(
+    validateAgainstSchema(current, "profile-task-start-receipt", {
+      schemaDir,
+      cache: sharedCache,
+    }).valid,
+    true,
+  );
+
+  const currentWithoutBinding = profileTaskStartReceipt({
+    includeWorkflowRef: false,
+  });
+  assert.equal(
+    validateAgainstSchema(currentWithoutBinding, "profile-task-start-receipt").valid,
+    false,
+  );
+
+  const legacy = profileTaskStartReceipt({
+    schemaVersion: "profile-task-start-receipt:v1",
+    includeWorkflowRef: false,
+  });
+  assertAgainstSchema(legacy, "profile-task-start-receipt");
+  assert.equal(
+    validateAgainstSchema(legacy, "profile-task-start-receipt-v1", {
+      schemaDir,
+      cache: sharedCache,
+    }).valid,
+    true,
+  );
+  assert.ok(sharedCache.has(path.join(schemaDir, "profile-task-start-receipt.schema.json")));
+  assert.ok(sharedCache.has(path.join(schemaDir, "profile-task-start-receipt-v1.schema.json")));
+
+  const mislabeledLegacy = profileTaskStartReceipt({
+    schemaVersion: "profile-task-start-receipt:v1",
+    includeWorkflowRef: true,
+  });
+  assert.equal(
+    validateAgainstSchema(mislabeledLegacy, "profile-task-start-receipt").valid,
+    false,
+  );
+  assert.equal(
+    validateAgainstSchema(mislabeledLegacy, "profile-task-start-receipt-v1").valid,
+    false,
+  );
 });
 
 test("profile schemas reject missing approvals, target ambiguity, and phase-level expansion", () => {

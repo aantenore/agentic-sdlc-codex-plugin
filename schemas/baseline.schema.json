@@ -43,6 +43,13 @@
     "summary": {
       "type": "string"
     },
+    "proposal_intent_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "proposal_intent_hash_algorithm": {
+      "const": "sha256:stable-json:v1"
+    },
     "repository_snapshot": {
       "type": "object",
       "additionalProperties": true

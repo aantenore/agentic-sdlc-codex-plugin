@@ -13,24 +13,37 @@ Record IDs, stored policy labels, paths, hashes, and diagnostic codes appear
 after **Technical details (optional)**. JSON retains those fields for
 automation.
 
+Codex plugin installation does not create a global `agentic-sdlc` executable.
+In the examples below, that name is shorthand for the installer-managed entry
+point:
+
+```bash
+PLUGIN_CLI="$HOME/plugins/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs"
+node "$PLUGIN_CLI" help
+```
+
+An npm installation may expose the same CLI through its npm bin shim. To test
+the exact Codex cache instead, derive the version and cache root as shown in
+[Portable Installation](portable-install.md#verify-the-exact-build-not-only-the-version).
+
 ## Find the right command
 
 Focused help works outside an initialized project and follows the command
 hierarchy:
 
 ```bash
-agentic-sdlc help
-agentic-sdlc help autonomy
-agentic-sdlc help autonomy delivery
-agentic-sdlc help autonomy delivery approve --locale it
+node "$PLUGIN_CLI" help
+node "$PLUGIN_CLI" help autonomy
+node "$PLUGIN_CLI" help autonomy delivery
+node "$PLUGIN_CLI" help autonomy delivery approve --locale it
 ```
 
 Use `status` when you only want to know what needs attention now:
 
 ```bash
-agentic-sdlc status
-agentic-sdlc status --locale it
-agentic-sdlc status --json
+node "$PLUGIN_CLI" status
+node "$PLUGIN_CLI" status --locale it
+node "$PLUGIN_CLI" status --json
 ```
 
 The human view gives one recommended next action. The JSON view preserves the
@@ -42,10 +55,10 @@ includes the same summary and next action in a stable machine-readable shape.
 Built-in presets change only language and presentation:
 
 ```bash
-agentic-sdlc preset list
-agentic-sdlc preset show human-it
-agentic-sdlc status --cli-preset human-it
-agentic-sdlc status --cli-preset machine
+node "$PLUGIN_CLI" preset list
+node "$PLUGIN_CLI" preset show human-it
+node "$PLUGIN_CLI" status --cli-preset human-it
+node "$PLUGIN_CLI" status --cli-preset machine
 ```
 
 The built-ins are `human-en`, `human-it`, `machine`, `diagnostic`, and
@@ -59,9 +72,9 @@ quietly changing what the plugin is allowed to do.
 Export is deterministic, so the same preset produces byte-identical JSON:
 
 ```bash
-agentic-sdlc preset export human-it
-agentic-sdlc preset export human-it > human-it.json
-agentic-sdlc status --cli-preset @human-it.json
+node "$PLUGIN_CLI" preset export human-it
+node "$PLUGIN_CLI" preset export human-it > human-it.json
+node "$PLUGIN_CLI" status --cli-preset @human-it.json
 ```
 
 The exported file is directly reimportable. Import validates its schema and
@@ -72,10 +85,10 @@ presentation-only allowlist before reading project state.
 Completion generation is deterministic and does not evaluate project files:
 
 ```bash
-agentic-sdlc completion bash
-agentic-sdlc completion zsh
-agentic-sdlc completion fish
-agentic-sdlc completion powershell
+node "$PLUGIN_CLI" completion bash
+node "$PLUGIN_CLI" completion zsh
+node "$PLUGIN_CLI" completion fish
+node "$PLUGIN_CLI" completion powershell
 ```
 
 Load or install the printed script using the normal completion mechanism for
@@ -103,6 +116,11 @@ The local installer uses a reviewable transaction:
 python3 scripts/install-personal-marketplace-v2.py check --locale it
 python3 scripts/install-personal-marketplace-v2.py plan --locale it --json
 python3 scripts/install-personal-marketplace-v2.py apply --locale it --plan-hash <plan_hash-from-plan> --json
+# Required: execute candidate_registration.command.argv with its exact
+# command.environment, then verification.argv with verification.environment.
+# Default target example only; never use it for a custom returned target:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/install-personal-marketplace-v2.py confirm --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
@@ -112,10 +130,18 @@ V2 is the canonical local installer. `check` and `plan` never write. With no
 command, it also creates a plan only. `apply` accepts one exact plan hash,
 recalculates it under a lock, stages and byte-verifies the package, and retains
 the prior plugin plus marketplace bytes. `validate` proves the installed state
-still matches the receipt; then `confirm` keeps it or the returned `restore`
-command restores the byte-exact previous state. Unexpected data stops recovery
-without being overwritten. Use `--home /absolute/path` to inspect or manage
-another explicit destination.
+still matches the receipt. Refresh and inspect the official Codex copy before
+`confirm`: confirmation verifies that candidate list/cache before removing
+recovery data. The returned `restore` command instead restores the byte-exact
+previous local and Codex state. Unexpected data stops recovery without being
+overwritten. Use `--home /absolute/path` to inspect or manage another explicit
+destination. The two `env ... codex` lines above are only a default-target
+illustration. When `--home`, `--codex-home`, or `--codex-executable` selects a
+non-default target, do not execute those lines and do not reconstruct a bare
+`codex plugin add` command. Execute exclusively
+`technical_details.candidate_registration.command.argv` with its exact
+`environment`, followed by `candidate_registration.verification.argv` with its
+exact `environment`, before `validate`.
 
 V2 never changes global settings. After it is confirmed, the separate
 token-efficiency command verifies bundled Caveman and native-meter files, then

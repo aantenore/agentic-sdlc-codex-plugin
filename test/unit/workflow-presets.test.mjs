@@ -36,7 +36,6 @@ test("catalog exposes exactly the four governed presets", () => {
         "contract-approved",
         "required-output-linked",
         "strict-gate-passed",
-        "delivery-terminal",
       ],
       metadata: {
         compatibility: { phase_order: SOFTWARE_PROJECT_PHASES },
@@ -70,7 +69,7 @@ test("software-project phase changes are bound to canonical lifecycle evidence",
     "analysis->design": [],
     "design->implementation": ["contract-approved"],
     "implementation->validation": ["required-output-linked"],
-    "validation->release": ["strict-gate-passed", "delivery-terminal"],
+    "validation->release": ["strict-gate-passed"],
   });
   assert.equal(preset.metadata.governance_binding, "story");
   assert.equal(preset.metadata.canonical_evidence_schema, "workflow-canonical-evidence:v1");

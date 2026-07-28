@@ -16,6 +16,26 @@ node bin/agentic-sdlc.mjs init --root <project> --project-name "Product Name"
 
 Creates `.sdlc/`, project metadata, KB directories, generated README, and default phase contracts.
 
+An exact manifestless project created by the bundled v0.11 format must be
+adopted explicitly before its first configuration lock. Preview
+`config migrate`, review the identified legacy bootstrap and plan hash, then
+apply with:
+
+```bash
+node bin/agentic-sdlc.mjs config migrate \
+  --root <project> \
+  --apply \
+  --plan-hash <displayed-sha256> \
+  --confirm-legacy-bootstrap \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Adopt this exact legacy bootstrap"
+```
+
+CI adoption uses `--actor-type ci --approval-source ci` and still requires a
+summary or approval-evidence file. The flag is not accepted for incomplete
+newer bootstraps or already locked projects.
+
 For an existing repository, initialize and propose a baseline in one step:
 
 ```bash
@@ -238,6 +258,7 @@ node bin/agentic-sdlc.mjs autonomy delivery action \
 node bin/agentic-sdlc.mjs autonomy delivery action \
   --root <project> --id AUT-PR-184 \
   --action git.commit --outcome passed \
+  --authorization-receipt <AUT-ACT-id-from-authorization> \
   --evidence evidence/PR-184-commit.txt \
   --json
 
@@ -250,10 +271,50 @@ node bin/agentic-sdlc.mjs autonomy delivery action \
 node bin/agentic-sdlc.mjs autonomy delivery action \
   --root <project> --id AUT-PR-184 \
   --action git.push --outcome passed \
+  --authorization-receipt <AUT-ACT-id-from-authorization> \
   --evidence evidence/PR-184-push.json --json
 ```
 
-For a merge checkpoint, include the exact `--pr-url` when authorizing `pull_request.merge`. For local release, authorize `release.local`, perform only the approved local writes, and repeat the exact smoke-test argv and rollback at completion:
+Keep the returned `AUT-ACT-...` ID beside the host operation. Completion may omit
+`--authorization-receipt` only when exactly one matching authorization is still
+waiting. If several are waiting, the CLI pauses instead of guessing. Retrying an
+identical completion returns the original receipt with `idempotent: true` and
+repairs missing trace or close evidence without consuming another authorization.
+
+For every new local release, complete the rollback rehearsal before authorizing
+`release.local`. If the profile declares a data migration, first complete the
+initial `data.migrate` and real `data.rollback`; `rollback.verify` must bind that
+passing rollback receipt, and a later passing final `data.migrate` must still
+precede release:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-009 \
+  --action rollback.verify \
+  --evidence evidence/rollback-rehearsal.json \
+  --confirm-action \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve this exact rollback rehearsal evidence"
+
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-009 \
+  --action rollback.verify \
+  --outcome passed \
+  --evidence evidence/rollback-rehearsal.json
+```
+
+The evidence must be unchanged and outside every approved mutable write path.
+The provider observes the exact root, write paths, procedure, and evidence
+hashes without running shell or rollback code. In `host_verified` mode, add the
+exact external `--host-receipt-file` to the checkpoint authorization. In the
+default `audit_only` mode, omit that option; direct approval attribution records
+the checkpoint without claiming verified host authority.
+
+For a merge checkpoint, include the exact `--pr-url` when authorizing
+`pull_request.merge`. Only after the passing rollback receipt may a local
+release authorize `release.local`, perform the approved local writes, and
+repeat the exact smoke-test argv and rollback at completion:
 
 ```bash
 node bin/agentic-sdlc.mjs autonomy delivery action \
@@ -261,7 +322,6 @@ node bin/agentic-sdlc.mjs autonomy delivery action \
   --action release.local --confirm-action \
   --actor-type human --approval-source explicit-user \
   --summary "Release this exact local target" \
-  --host-receipt-file evidence/AUT-LOCAL-REL-009-release-action.json \
   --json
 
 node bin/agentic-sdlc.mjs autonomy delivery action \
@@ -308,27 +368,6 @@ node bin/agentic-sdlc.mjs autonomy delivery propose \
 ```
 
 Both data actions are checkpoints and use the normal authorize → external execution → complete sequence. `data.migrate` completion proves that the exact backup contains the pre-migration target bytes and that the target changed. `data.rollback` completion proves a real transition from different target bytes back to that exact backup; a no-op is rejected. The CLI accepts no executable or shell option for either action. For a declared data migration, `rollback.verify` must bind that exact passing rollback receipt. `release.local` authorization and completion both require that bound verification plus a later passing migration, so an incomplete sequence cannot terminally close the delivery. The final `--lifecycle-complete` gate revalidates the same receipt chain.
-
-For every new local release, record the rollback rehearsal separately:
-
-```bash
-node bin/agentic-sdlc.mjs autonomy delivery action \
-  --root <project> --id AUT-LOCAL-009 \
-  --action rollback.verify \
-  --evidence evidence/rollback-rehearsal.json \
-  --confirm-action \
-  --actor-type human \
-  --approval-source explicit-user \
-  --summary "Approve this exact rollback rehearsal evidence"
-
-node bin/agentic-sdlc.mjs autonomy delivery action \
-  --root <project> --id AUT-LOCAL-009 \
-  --action rollback.verify \
-  --outcome passed \
-  --evidence evidence/rollback-rehearsal.json
-```
-
-The evidence must be unchanged and outside every approved mutable write path. The provider observes the exact root, write paths, procedure, and evidence hashes without running shell or rollback code. `release.local` and final lifecycle completion fail closed without that earlier passing receipt or after evidence tampering.
 
 ## Create Contract
 
@@ -496,6 +535,24 @@ Minimum canonical intent:
 
 The decision output contains the selected route, confidence result, deterministic checks, blocking reasons, questions for the user, and suggested next CLI commands. Low confidence, missing context, phase skips, implementation starts, new templates, duplicate outputs, and missing capability profiles for technical analysis require confirmation or clarification according to `routing_policy`.
 
+Before `task start`, start the story-bound workflow while the story has neither a
+task-start receipt nor a completed step:
+
+```bash
+node bin/agentic-sdlc.mjs workflow instance start \
+  --root <project> \
+  --id DELIVERY-ST-001 \
+  --definition software-project \
+  --definition-version 2 \
+  --story ST-001
+```
+
+The included v2 definition requires the exact stock six-phase `phase_order`.
+Projects with custom phases must use an approved story-bound definition with
+the exact configured order. A workflow cannot be added retroactively; a legacy
+task without the pre-task binding is not eligible for lifecycle-complete
+certification.
+
 Use `task start` as the operational front door before Codex performs phase work. It runs route decision, finds the applicable story or phase contract, blocks missing/incomplete/unapproved/stale contracts, and returns `ready_to_execute` only when execution is allowed. `--confirm-start` confirms the concrete start of work, but it does not count as formal contract approval. `--revise-contract` deliberately stops for contract revision even when a usable contract exists.
 
 ## Handoff And Locks
@@ -546,7 +603,31 @@ From a Codex plugin installation, use the `change-observatory` skill so it resol
 node bin/agentic-sdlc.mjs gate check --root <project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
 ```
 
-With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Returns non-zero when blocking errors are found. Use `--out` to persist JSON or Markdown gate evidence.
+With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Complete the validation step first. This ordinary strict form then writes the intermediate `workflow-strict-gate-receipt:v1`; it is not final. Use that receipt to move the current story-bound workflow to its configured terminal release phase:
+
+```bash
+node bin/agentic-sdlc.mjs workflow instance transition \
+  --root <project> \
+  --id <workflow-instance-id> \
+  --to release \
+  --request-id <unique-release-transition-id>
+```
+
+Only after that transition, complete the exact delivery, append the passing
+release trace, and complete the release story step. The release-phase entry
+must be no later than both the release trace and terminal delivery close. Then
+certify the completed lifecycle with:
+
+```bash
+node bin/agentic-sdlc.mjs gate check \
+  --root <project> \
+  --story ST-001 \
+  --strict \
+  --lifecycle-complete \
+  --out .sdlc/reports/ST-001-lifecycle-complete.json
+```
+
+Do not present an intermediate strict result as the final discovery-to-release certificate. Both forms return non-zero when blocking errors are found. Use `--out` to persist JSON or Markdown gate evidence.
 
 ## Output Consistency
 

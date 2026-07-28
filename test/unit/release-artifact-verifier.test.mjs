@@ -72,9 +72,12 @@ function replaceEntry(entries, archivePath, replacement) {
 
 test("declares installer v2 as canonical while packaging both installer protocols", () => {
   const policy = JSON.parse(readFileSync(policyPath, "utf8"));
+  const packageMetadata = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   assert.equal(policy.package.installer, "scripts/install-personal-marketplace-v2.py");
   assert.ok(policy.package.required_files.includes("scripts/install-personal-marketplace.py"));
   assert.ok(policy.package.required_files.includes("scripts/install-personal-marketplace-v2.py"));
+  assert.ok(packageMetadata.files.includes(".codex-plugin/plugin.json"));
+  assert.ok(!packageMetadata.files.includes(".codex-plugin/"));
 });
 
 

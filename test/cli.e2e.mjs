@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { computeStableHash } from "../lib/canonical.mjs";
+import { buildEffectiveConfigLock } from "../lib/effective-config.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
@@ -15,6 +16,7 @@ import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
+const projectBootstrapPreload = path.join(repoRoot, "test", "helpers", "project-bootstrap-preload.mjs");
 const portableRtkTestCommand = Object.freeze(["node", "--test"]);
 const tempProjects = new Set();
 const meteringFixtureKeys = new Map();
@@ -73,6 +75,15 @@ function runAsync(args, options = {}) {
       resolve({ status, signal, stdout, stderr });
     });
   });
+}
+
+function projectBootstrapPreloadEnv(mode, values = {}) {
+  const importOption = `--import=${pathToFileURL(projectBootstrapPreload).href}`;
+  return {
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, importOption].filter(Boolean).join(" "),
+    AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MODE: mode,
+    ...values,
+  };
 }
 
 function mustRun(args, options = {}) {
@@ -363,6 +374,31 @@ function writeArtifact(
 
 function sha256File(filePath) {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function snapshotFilesystemTree(root) {
+  const entries = [];
+  const visit = (entryPath, relativePath) => {
+    const stat = fs.lstatSync(entryPath);
+    if (stat.isSymbolicLink()) {
+      entries.push({ path: relativePath, type: "symlink", target: fs.readlinkSync(entryPath) });
+      return;
+    }
+    if (stat.isDirectory()) {
+      entries.push({ path: relativePath, type: "directory" });
+      for (const name of fs.readdirSync(entryPath).sort()) {
+        visit(path.join(entryPath, name), relativePath ? `${relativePath}/${name}` : name);
+      }
+      return;
+    }
+    if (stat.isFile()) {
+      entries.push({ path: relativePath, type: "file", sha256: sha256File(entryPath) });
+      return;
+    }
+    entries.push({ path: relativePath, type: "other" });
+  };
+  visit(root, "");
+  return entries;
 }
 
 function ensureTrustedMeteringFixture(project, {
@@ -996,6 +1032,17 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
     "doctor", "--root", project, "--trust-custom-rtk-command", "--json",
   ]).stdout);
   assert.equal(doctor.status, "passed");
+  const buildIdentityCheck = doctor.checks.find((check) => check.id === "build-identity");
+  assert.equal(buildIdentityCheck.status, "passed");
+  assert.match(buildIdentityCheck.details, /fingerprint [a-f0-9]{64}, source (?:clean|dirty)/u);
+  assert.equal(
+    doctor.checks.find((check) => check.id === "project-bootstrap-manifest-schema").status,
+    "passed",
+  );
+  assert.equal(
+    doctor.checks.find((check) => check.id === "project-bootstrap-journal-schema").status,
+    "passed",
+  );
   assert.equal(doctor.checks.find((check) => check.id === "rtk-optimization-provider").status, "passed");
   const doctorGuidance = splitHumanGuidance(mustRun([
     "doctor", "--root", project, "--trust-custom-rtk-command",
@@ -1461,6 +1508,42 @@ test("terminal stories cannot be claimed or scheduled and status counts story re
   assert.match(statusGuidance.primary, /What remains protected:/u);
   assert.match(statusGuidance.technical, /available_work: 1/u);
   assert.match(statusGuidance.technical, /completed_work: 1/u);
+});
+
+test("status starts the stock story workflow and routes custom phases to an exact definition", () => {
+  const stockProject = tmpProject("status-stock-workflow");
+  initProject(stockProject);
+  story(stockProject, "ST-STOCK");
+  const stockStatus = JSON.parse(mustRun([
+    "status", "--root", stockProject, "--json",
+  ]).stdout);
+  assert.equal(stockStatus.next_action.kind, "start_story_workflow");
+  assert.equal(stockStatus.next_action.definition_id, "software-project");
+  assert.equal(stockStatus.next_action.definition_version, "2");
+  assert.match(stockStatus.next_action.command, /^node /u);
+  assert.match(stockStatus.next_action.command, /workflow instance start/u);
+  assert.doesNotMatch(stockStatus.next_action.command, /^agentic-sdlc /u);
+
+  const customProject = tmpProject("status-custom-workflow");
+  initProject(customProject);
+  const configPath = path.join(customProject, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.phase_order.splice(
+    config.phase_order.indexOf("validation"),
+    0,
+    "integration-review",
+  );
+  config.phases["integration-review"] = structuredClone(config.phases.implementation);
+  writeJson(configPath, config);
+  pinProjectConfig(customProject);
+  story(customProject, "ST-CUSTOM");
+  const customStatus = JSON.parse(mustRun([
+    "status", "--root", customProject, "--json",
+  ]).stdout);
+  assert.equal(customStatus.next_action.kind, "define_custom_workflow");
+  assert.deepEqual(customStatus.next_action.configured_phase_order, config.phase_order);
+  assert.match(customStatus.next_action.command, /^node /u);
+  assert.match(customStatus.next_action.command, /workflow definition propose --help/u);
 });
 
 test("claim TTL is config-driven and legacy unbounded claims become stale", () => {
@@ -3731,6 +3814,1137 @@ test("onboard existing project initializes KB and proposes approvable baseline",
   assert.ok(cache.source_paths.includes(".sdlc/baseline/BASELINE-INITIAL.json"));
 });
 
+test("onboard rejects an incomplete existing bootstrap without adding more partial state", () => {
+  const project = tmpProject("onboard-incomplete-bootstrap");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing project after interrupted onboarding\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const sdlcReadme = path.join(sdlcRoot, "README.md");
+  const outputRegistry = path.join(sdlcRoot, "output-contracts", "registry.json");
+  fs.rmSync(sdlcReadme);
+  fs.rmSync(outputRegistry);
+  const projectHashBefore = sha256File(path.join(sdlcRoot, "project.json"));
+  const configHashBefore = sha256File(path.join(sdlcRoot, "config.json"));
+  const topLevelEntriesBefore = fs.readdirSync(sdlcRoot).sort();
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Interrupted Project",
+  ], /bootstrap is incomplete.*No files were changed.*Restore the canonical files/s);
+
+  assert.equal(sha256File(path.join(sdlcRoot, "project.json")), projectHashBefore);
+  assert.equal(sha256File(path.join(sdlcRoot, "config.json")), configHashBefore);
+  assert.deepEqual(fs.readdirSync(sdlcRoot).sort(), topLevelEntriesBefore);
+  assert.equal(fs.existsSync(sdlcReadme), false);
+  assert.equal(fs.existsSync(outputRegistry), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard accepts a complete existing bootstrap after validating every declared artifact", () => {
+  const project = tmpProject("onboard-complete-bootstrap");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing project with complete bootstrap\n");
+
+  const payload = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Complete Existing Bootstrap",
+    "--json",
+  ]).stdout);
+
+  assert.equal(payload.status, "onboarded");
+  assert.equal(payload.initialized, false);
+  assert.equal(payload.init, null);
+  const manifestPath = path.join(project, ".sdlc", "bootstrap-manifest.json");
+  const manifest = readJson(manifestPath);
+  const { manifest_hash: manifestHash, ...hashSubject } = manifest;
+  assert.equal(
+    validateAgainstSchema(manifest, "project-bootstrap-manifest.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    true,
+  );
+  assert.equal(manifestHash, computeStableHash(hashSubject));
+  assert.equal(manifest.status, "completed");
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "baseline", "BASELINE-INITIAL.json")),
+    true,
+  );
+});
+
+test("onboard resumes exactly once after baseline JSON is committed before its report", () => {
+  const project = tmpProject("onboard-resume-after-baseline-json");
+  fs.writeFileSync(path.join(project, "README.md"), "# Resumable local project\n");
+  const id = "BASELINE-RESUME-REPORT";
+  const sdlcRoot = path.join(project, ".sdlc");
+  const baselinePath = path.join(sdlcRoot, "baseline", `${id}.json`);
+  const reportPath = path.join(sdlcRoot, "baseline", `${id}-current-state.md`);
+  const tracePath = path.join(sdlcRoot, "traces", "project.jsonl");
+  const preloadMarker = path.join(project, "baseline-report-preload-triggered.txt");
+  const args = [
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Resumable Report Project",
+    "--id",
+    id,
+    "--summary",
+    "Exact resumable onboarding request",
+    "--json",
+  ];
+
+  const interrupted = run(args, {
+    env: projectBootstrapPreloadEnv("fail-baseline-report-write", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_BASELINE_REPORT_PATH: reportPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: preloadMarker,
+    }),
+  });
+  assert.notEqual(interrupted.status, 0, `${interrupted.stdout}\n${interrupted.stderr}`);
+  assert.equal(fs.readFileSync(preloadMarker, "utf8").trim(), "baseline-report-write");
+  assert.equal(fs.existsSync(baselinePath), true);
+  assert.equal(fs.existsSync(reportPath), false);
+  assert.equal(fs.existsSync(tracePath), false);
+  const baselineHash = sha256File(baselinePath);
+
+  const recovered = JSON.parse(mustRun(args).stdout);
+  assert.equal(recovered.status, "onboarded");
+  assert.equal(recovered.baseline.proposal_intent_hash_algorithm, "sha256:stable-json:v1");
+  assert.match(recovered.baseline.proposal_intent_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(sha256File(baselinePath), baselineHash);
+  assert.equal(fs.existsSync(reportPath), true);
+  const reportHash = sha256File(reportPath);
+  const proposalTraces = () => readJsonLines(tracePath)
+    .filter((event) => event.action === "baseline.propose" && event.related?.includes(id));
+  assert.equal(proposalTraces().length, 1);
+
+  mustRun(args);
+  assert.equal(sha256File(baselinePath), baselineHash);
+  assert.equal(sha256File(reportPath), reportHash);
+  assert.equal(proposalTraces().length, 1);
+});
+
+test("onboard resumes exactly once after baseline report is committed before its trace", () => {
+  const project = tmpProject("onboard-resume-after-baseline-report");
+  fs.writeFileSync(path.join(project, "README.md"), "# Resumable trace project\n");
+  const id = "BASELINE-RESUME-TRACE";
+  const sdlcRoot = path.join(project, ".sdlc");
+  const baselinePath = path.join(sdlcRoot, "baseline", `${id}.json`);
+  const reportPath = path.join(sdlcRoot, "baseline", `${id}-current-state.md`);
+  const tracePath = path.join(sdlcRoot, "traces", "project.jsonl");
+  const preloadMarker = path.join(project, "baseline-trace-preload-triggered.txt");
+  const args = [
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Resumable Trace Project",
+    "--id",
+    id,
+    "--summary",
+    "Exact trace recovery request",
+    "--json",
+  ];
+
+  const interrupted = run(args, {
+    env: projectBootstrapPreloadEnv("fail-baseline-trace-write", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_TRACE_PATH: tracePath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: preloadMarker,
+    }),
+  });
+  assert.notEqual(interrupted.status, 0, `${interrupted.stdout}\n${interrupted.stderr}`);
+  assert.equal(fs.readFileSync(preloadMarker, "utf8").trim(), "baseline-trace-write");
+  assert.equal(fs.existsSync(baselinePath), true);
+  assert.equal(fs.existsSync(reportPath), true);
+  assert.equal(fs.existsSync(tracePath), false);
+  const baselineHash = sha256File(baselinePath);
+  const reportHash = sha256File(reportPath);
+
+  const recovered = JSON.parse(mustRun(args).stdout);
+  assert.equal(recovered.status, "onboarded");
+  assert.equal(sha256File(baselinePath), baselineHash);
+  assert.equal(sha256File(reportPath), reportHash);
+  const proposalTraces = () => readJsonLines(tracePath)
+    .filter((event) => event.action === "baseline.propose" && event.related?.includes(id));
+  assert.equal(proposalTraces().length, 1);
+
+  mustRun(args);
+  assert.equal(sha256File(baselinePath), baselineHash);
+  assert.equal(sha256File(reportPath), reportHash);
+  assert.equal(proposalTraces().length, 1);
+});
+
+test("onboard refuses to resume a partial baseline after its source evidence changes", () => {
+  const project = tmpProject("onboard-refuse-changed-resume");
+  const readmePath = path.join(project, "README.md");
+  fs.writeFileSync(readmePath, "# Original onboarding evidence\n");
+  const id = "BASELINE-CHANGED-RETRY";
+  const sdlcRoot = path.join(project, ".sdlc");
+  const baselinePath = path.join(sdlcRoot, "baseline", `${id}.json`);
+  const reportPath = path.join(sdlcRoot, "baseline", `${id}-current-state.md`);
+  const tracePath = path.join(sdlcRoot, "traces", "project.jsonl");
+  const args = [
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Changed Retry Project",
+    "--id",
+    id,
+    "--summary",
+    "Request whose evidence must stay exact",
+  ];
+
+  const interrupted = run(args, {
+    env: projectBootstrapPreloadEnv("fail-baseline-report-write", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_BASELINE_REPORT_PATH: reportPath,
+    }),
+  });
+  assert.notEqual(interrupted.status, 0);
+  assert.equal(fs.existsSync(baselinePath), true);
+  assert.equal(fs.existsSync(reportPath), false);
+  const baselineHash = sha256File(baselinePath);
+  fs.appendFileSync(readmePath, "\nEvidence changed before retry.\n");
+
+  mustFail(
+    args,
+    /cannot be resumed safely.*different onboarding request or its source evidence changed.*No files were changed.*new --id.*explicitly decide/s,
+  );
+  assert.equal(sha256File(baselinePath), baselineHash);
+  assert.equal(fs.existsSync(reportPath), false);
+  assert.equal(fs.existsSync(tracePath), false);
+});
+
+test("init cannot overwrite an existing immutable bootstrap manifest", () => {
+  const project = tmpProject("init-immutable-bootstrap-manifest");
+  initProject(project);
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Attempted Reinitialization",
+    "--force",
+  ], /bootstrap is already sealed.*Use the governed configuration and migration commands/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(readJson(manifestPath).status, "completed");
+});
+
+test("init --force cannot reseal a completed project after its manifest is deleted", () => {
+  const project = tmpProject("init-force-cannot-reseal-deleted-manifest");
+  initProject(project, ["--project-id", "sealed-original"]);
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const journalPath = path.join(sdlcRoot, "bootstrap-journal.json");
+  fs.rmSync(manifestPath);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Attempted Reseal",
+    "--project-id",
+    "changed-project-identity",
+    "--force",
+  ], /bootstrap belongs to a different exact initialization request.*No files were changed.*--force cannot change the project identity/isu);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(readJson(path.join(sdlcRoot, "project.json")).project_id, "sealed-original");
+  assert.equal(readJson(journalPath).status, "completed");
+  assert.equal(fs.existsSync(manifestPath), false);
+});
+
+test("init retries only the exact byte-bound bootstrap interrupted before manifest publication", () => {
+  const project = tmpProject("init-recover-exact-bootstrap-journal");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const journalPath = path.join(sdlcRoot, "bootstrap-journal.json");
+  const markerPath = path.join(project, "bootstrap-recovery-preload-triggered.txt");
+  const args = [
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Exact Bootstrap Recovery",
+    "--project-id",
+    "exact-bootstrap-recovery",
+    "--json",
+  ];
+
+  const interrupted = run(args, {
+    env: projectBootstrapPreloadEnv("fail-manifest-write", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MANIFEST_PATH: manifestPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: markerPath,
+    }),
+  });
+  assert.notEqual(interrupted.status, 0, `${interrupted.stdout}\n${interrupted.stderr}`);
+  assert.equal(fs.readFileSync(markerPath, "utf8").trim(), "manifest-write");
+  assert.equal(fs.existsSync(manifestPath), false);
+  const readyJournal = readJson(journalPath);
+  assert.equal(readyJournal.status, "manifest_ready");
+  assert.equal(readyJournal.prepared_manifest.status, "completed");
+  assert.equal(Object.hasOwn(readyJournal.request, "project_id"), false);
+  assert.equal(Object.hasOwn(readyJournal.request, "project_name"), false);
+  assert.equal(
+    readyJournal.request.initial_project_identity_sha256,
+    computeStableHash({
+      project_id: "exact-bootstrap-recovery",
+      project_name: "Exact Bootstrap Recovery",
+    }),
+  );
+  assert.equal(
+    fs.readFileSync(journalPath, "utf8").includes("Exact Bootstrap Recovery"),
+    false,
+  );
+  const coreTreeBeforeRecovery = snapshotFilesystemTree(sdlcRoot);
+
+  const recovered = JSON.parse(mustRun(args).stdout);
+  assert.equal(recovered.status, "initialized");
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.project.project_id, "exact-bootstrap-recovery");
+  assert.equal(fs.existsSync(manifestPath), true);
+  const completedJournal = readJson(journalPath);
+  const recoveredManifest = readJson(manifestPath);
+  assert.equal(completedJournal.status, "completed");
+  assert.deepEqual(completedJournal.prepared_manifest, recoveredManifest);
+  assert.equal(
+    completedJournal.completed_manifest_ref.manifest_hash,
+    recoveredManifest.manifest_hash,
+  );
+  assert.equal(
+    completedJournal.completed_manifest_ref.hash_algorithm,
+    "sha256:stable-json:v1",
+  );
+  assert.equal(
+    completedJournal.completed_manifest_ref.schema_version,
+    "project-bootstrap-manifest:v1",
+  );
+  const coreTreeAfterRecovery = snapshotFilesystemTree(sdlcRoot);
+  const coreTreeAfterByPath = new Map(
+    coreTreeAfterRecovery.map((entry) => [entry.path, entry]),
+  );
+  for (const entry of coreTreeBeforeRecovery) {
+    if (entry.path === "bootstrap-journal.json") continue;
+    assert.deepEqual(
+      coreTreeAfterByPath.get(entry.path),
+      entry,
+      `recovery regenerated ${entry.path}`,
+    );
+  }
+});
+
+test("init with a config-only nested directory overlay fsyncs every bootstrap ancestor before publishing its manifest", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows does not expose portable directory fsync semantics");
+    return;
+  }
+  const project = tmpProject("init-bootstrap-durability-order");
+  const templateDir = tmpProject("init-bootstrap-durability-template");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const markerPath = path.join(project, "bootstrap-durability-order.txt");
+  const config = readJson(path.join(repoRoot, "templates", "sdlc-config.json"));
+  config.kb_directories = config.kb_directories
+    .filter((directory) => !["contracts", "dependencies"].includes(directory));
+  config.kb_directories.push("custom/nested");
+  writeJson(path.join(templateDir, "sdlc-config.json"), config);
+  const expectedFiles = [
+    "config.json",
+    "config.lock.json",
+    "project.json",
+    "README.md",
+    ".gitattributes",
+    ".gitignore",
+    "output-contracts/registry.json",
+    "dependencies/graph.json",
+    ...config.phase_order.map((phase) => `contracts/contract-${phase}-v1.json`),
+  ].map((relativePath) => path.join(sdlcRoot, ...relativePath.split("/")));
+  const directoryCandidates = [
+    sdlcRoot,
+    ...config.kb_directories.map((directory) => path.join(sdlcRoot, directory)),
+    path.join(sdlcRoot, "output-contracts", "templates"),
+    path.join(sdlcRoot, "output-contracts", "decisions"),
+    path.join(sdlcRoot, "work-items", "epics"),
+    path.join(sdlcRoot, "work-items", "tasks"),
+    ...expectedFiles.map((filePath) => path.dirname(filePath)),
+  ];
+  const expectedDirectoryClosure = new Set([project]);
+  for (const candidate of directoryCandidates) {
+    let current = path.resolve(candidate);
+    while (true) {
+      expectedDirectoryClosure.add(current);
+      if (current === sdlcRoot) break;
+      current = path.dirname(current);
+    }
+  }
+  const expectedDirectories = [...expectedDirectoryClosure];
+
+  mustRun([
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Durable Bootstrap",
+    "--template-dir",
+    templateDir,
+  ], {
+    env: projectBootstrapPreloadEnv("assert-bootstrap-durable-before-manifest", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MANIFEST_PATH: manifestPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_EXPECTED_FILES_JSON: JSON.stringify(expectedFiles),
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_EXPECTED_DIRECTORIES_JSON: JSON.stringify(expectedDirectories),
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: markerPath,
+    }),
+  });
+
+  assert.equal(fs.readFileSync(markerPath, "utf8").trim(), "durable-before-manifest");
+  const manifest = readJson(manifestPath);
+  assert.equal(manifest.status, "completed");
+  assert.ok(manifest.directories.includes(".sdlc/custom"));
+  assert.ok(manifest.directories.includes(".sdlc/custom/nested"));
+  assert.ok(manifest.directories.includes(".sdlc/contracts"));
+  assert.ok(manifest.directories.includes(".sdlc/dependencies"));
+
+  const onboard = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Durable Bootstrap",
+    "--template-dir",
+    templateDir,
+    "--json",
+  ]).stdout);
+  assert.equal(onboard.initialized, false);
+});
+
+test("onboard rejects a bootstrap manifest changed after initialization", () => {
+  const project = tmpProject("onboard-tampered-bootstrap-manifest");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Project with tampered bootstrap proof\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const manifest = readJson(manifestPath);
+  manifest.completed_at = new Date(Date.parse(manifest.completed_at) + 1).toISOString();
+  writeJson(manifestPath, manifest);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Tampered Bootstrap Manifest",
+  ], /bootstrap-manifest\.json manifest_hash does not match its content.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard rejects a self-hashed journal that no longer binds the exact manifest", () => {
+  const project = tmpProject("onboard-bootstrap-journal-binding");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Project with changed bootstrap journal\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const journalPath = path.join(sdlcRoot, "bootstrap-journal.json");
+  const journal = readJson(journalPath);
+  journal.completed_manifest_ref.manifest_hash = "0".repeat(64);
+  delete journal.journal_hash;
+  journal.journal_hash = computeStableHash(journal);
+  writeJson(journalPath, journal);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Changed Bootstrap Journal",
+  ], /bootstrap-journal\.json does not prove completion of this exact bootstrap manifest.*No files were changed/isu);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard rejects a bootstrap manifest copied from another project", () => {
+  const sourceProject = tmpProject("onboard-bootstrap-cross-project-source");
+  const targetProject = tmpProject("onboard-bootstrap-cross-project-target");
+  initProject(sourceProject, ["--project-id", "bootstrap-source"]);
+  initProject(targetProject, ["--project-id", "bootstrap-target"]);
+  fs.writeFileSync(path.join(targetProject, "README.md"), "# Cross-project bootstrap target\n");
+  const targetSdlcRoot = path.join(targetProject, ".sdlc");
+  fs.rmSync(path.join(targetSdlcRoot, ".gitattributes"));
+  fs.rmSync(path.join(targetSdlcRoot, ".gitignore"));
+  fs.rmSync(path.join(targetSdlcRoot, "contracts", "contract-design-v1.json"));
+  fs.copyFileSync(
+    path.join(sourceProject, ".sdlc", "bootstrap-manifest.json"),
+    path.join(targetSdlcRoot, "bootstrap-manifest.json"),
+  );
+  const treeBefore = snapshotFilesystemTree(targetSdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    targetProject,
+    "--project-name",
+    "Cross-project bootstrap target",
+  ], /bootstrap-manifest\.json belongs to a different project.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(targetSdlcRoot), treeBefore);
+  assert.equal(
+    fs.existsSync(path.join(targetSdlcRoot, "contracts", "contract-design-v1.json")),
+    false,
+  );
+  assert.equal(
+    fs.existsSync(path.join(targetSdlcRoot, "baseline", "BASELINE-INITIAL.json")),
+    false,
+  );
+});
+
+test("onboard rejects a self-consistent bootstrap manifest with a different phase order", () => {
+  const project = tmpProject("onboard-bootstrap-phase-order-mismatch");
+  initProject(project, ["--project-id", "bootstrap-phase-order"]);
+  fs.writeFileSync(path.join(project, "README.md"), "# Bootstrap phase order mismatch\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const manifest = readJson(manifestPath);
+  manifest.phase_order.reverse();
+  delete manifest.manifest_hash;
+  manifest.manifest_hash = computeStableHash(manifest);
+  writeJson(manifestPath, manifest);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Bootstrap phase order mismatch",
+  ], /bootstrap-manifest\.json phase_order does not match \.sdlc\/project\.json.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard rejects removing both the manifest and its marker from a new project", () => {
+  const project = tmpProject("onboard-bootstrap-downgrade");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Project with removed bootstrap marker\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-manifest.json"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  writeJson(projectPath, projectRecord);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Bootstrap Downgrade",
+  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.1.*require the completed bootstrap record.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard rejects downgrading the project version to disguise a missing new bootstrap manifest", () => {
+  const project = tmpProject("onboard-bootstrap-version-downgrade");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Project with downgraded bootstrap version\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-manifest.json"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  projectRecord.sdlc_version = "0.13.0";
+  writeJson(projectPath, projectRecord);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Bootstrap Version Downgrade",
+  ], /bootstrap-manifest\.json is missing.*no matching first-lock migration receipt proves a legacy bootstrap.*changing the project version cannot bypass.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("config migration cannot manufacture legacy proof for an incomplete newer bootstrap", () => {
+  const project = tmpProject("config-migrate-bootstrap-downgrade");
+  initProject(project);
+  const sdlcRoot = path.join(project, ".sdlc");
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-manifest.json"));
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-journal.json"));
+  fs.rmSync(path.join(sdlcRoot, "config.lock.json"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  projectRecord.sdlc_version = "0.13.0";
+  writeJson(projectPath, projectRecord);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ], /missing bootstrap manifest does not match the exact supported v0\.11 bootstrap evidence.*cannot recreate legacy provenance/isu);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "config.lock.json")), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "migrations", "config")), false);
+});
+
+test("a legacy-shaped bootstrap still needs a separate direct adoption before migration", () => {
+  const project = tmpProject("config-migrate-explicit-legacy-adoption");
+  initProject(project);
+  const sdlcRoot = path.join(project, ".sdlc");
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-manifest.json"));
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-journal.json"));
+  fs.rmSync(path.join(sdlcRoot, "config.lock.json"));
+  fs.rmSync(path.join(sdlcRoot, ".gitattributes"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  delete projectRecord.bootstrap_journal;
+  projectRecord.sdlc_version = "0.11.0";
+  writeJson(projectPath, projectRecord);
+  fs.copyFileSync(
+    path.join(repoRoot, "templates", "config-compat", "sdlc-config-v1-0.11.0.json"),
+    path.join(sdlcRoot, "config.json"),
+  );
+
+  const preview = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ]).stdout);
+  assert.equal(preview.legacy_bootstrap_adoption.required, true);
+  assert.equal(preview.legacy_bootstrap_adoption.subject.project_ref.sdlc_version, "0.11.0");
+  mustFail([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    preview.plan.plan_hash,
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "explicit-user",
+    "--summary",
+    "Attempt migration without the separate adoption confirmation",
+  ], /needs a separate explicit adoption.*no migration receipt was written/isu);
+
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "config.lock.json")), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "migrations", "config")), false);
+});
+
+test("legacy bootstrap CI adoption requires review evidence before writes and remains usable after correction", () => {
+  const project = tmpProject("config-migrate-ci-legacy-adoption-evidence");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Complete legacy project knowledge base\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-manifest.json"));
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-journal.json"));
+  fs.rmSync(path.join(sdlcRoot, "config.lock.json"));
+  fs.rmSync(path.join(sdlcRoot, ".gitattributes"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  delete projectRecord.bootstrap_journal;
+  projectRecord.sdlc_version = "0.11.0";
+  writeJson(projectPath, projectRecord);
+  fs.copyFileSync(
+    path.join(repoRoot, "templates", "config-compat", "sdlc-config-v1-0.11.0.json"),
+    path.join(sdlcRoot, "config.json"),
+  );
+
+  const preview = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ]).stdout);
+  assert.equal(preview.legacy_bootstrap_adoption.required, true);
+  const treeBeforeRejectedApply = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    preview.plan.plan_hash,
+    "--confirm-legacy-bootstrap",
+    "--actor-type",
+    "ci",
+    "--approval-source",
+    "ci",
+  ], /requires --summary or --approval-evidence, including for CI approval.*legacy files remain unchanged.*no migration receipt was written/isu);
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBeforeRejectedApply);
+
+  mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    preview.plan.plan_hash,
+    "--confirm-legacy-bootstrap",
+    "--actor-type",
+    "ci",
+    "--approval-source",
+    "ci",
+    "--summary",
+    "CI reviewed and adopted the exact displayed v0.11 bootstrap",
+  ]);
+
+  const migrationReceiptDirectory = path.join(sdlcRoot, "migrations", "config");
+  const [migrationReceiptName] = fs.readdirSync(migrationReceiptDirectory)
+    .filter((name) => name.endsWith(".json"));
+  const migrationReceipt = readJson(
+    path.join(migrationReceiptDirectory, migrationReceiptName),
+  );
+  assert.equal(
+    migrationReceipt.legacy_bootstrap_adoption.approval.approval_source,
+    "ci",
+  );
+  assert.equal(
+    migrationReceipt.legacy_bootstrap_adoption.approval.summary,
+    "CI reviewed and adopted the exact displayed v0.11 bootstrap",
+  );
+
+  const onboard = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Complete Legacy CI Bootstrap",
+    "--json",
+  ]).stdout);
+  assert.equal(onboard.status, "onboarded");
+  assert.equal(onboard.initialized, false);
+});
+
+test("onboard rejects a new bootstrap interrupted after graph creation but before its final manifest", () => {
+  const project = tmpProject("onboard-interrupted-before-manifest");
+  fs.writeFileSync(path.join(project, "README.md"), "# Project interrupted before bootstrap manifest\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const preloadMarker = path.join(project, "bootstrap-preload-triggered.txt");
+  const initResult = run([
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Interrupted Before Manifest",
+    "--force",
+  ], {
+    env: projectBootstrapPreloadEnv("fail-manifest-write", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MANIFEST_PATH: manifestPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: preloadMarker,
+    }),
+  });
+  assert.notEqual(initResult.status, 0);
+  assert.equal(fs.readFileSync(preloadMarker, "utf8").trim(), "manifest-write");
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "output-contracts", "registry.json")), true);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "dependencies", "graph.json")), true);
+  assert.equal(fs.existsSync(manifestPath), false);
+  assert.equal(
+    readJson(path.join(sdlcRoot, "project.json")).bootstrap_manifest.path,
+    ".sdlc/bootstrap-manifest.json",
+  );
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Interrupted Before Manifest",
+  ], /bootstrap-manifest\.json is missing.*project expects the completed bootstrap record.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("init refuses a project record replaced by a symlink before the bootstrap snapshot", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("init-bootstrap-snapshot-symlink-race");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const replacementPath = path.join(project, "replacement-project.json");
+  const preloadMarker = path.join(project, "bootstrap-snapshot-swap-triggered.txt");
+  writeJson(replacementPath, { untrusted_replacement: true });
+
+  const result = run([
+    "init",
+    "--root",
+    project,
+    "--project-name",
+    "Bootstrap Snapshot Race",
+  ], {
+    env: projectBootstrapPreloadEnv("replace-project-before-bootstrap-snapshot", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_PROJECT_PATH: projectPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_REPLACEMENT_PROJECT: replacementPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: preloadMarker,
+    }),
+  });
+
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(fs.readFileSync(preloadMarker, "utf8").trim(), "project-symlink-swap");
+  assert.equal(fs.lstatSync(projectPath).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "bootstrap-manifest.json")), false);
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Bootstrap Snapshot Race",
+  ], /project\.json is not a regular file.*No files were changed/s);
+});
+
+test("onboard rejects an interrupted bootstrap that reached the registry but lost project.json", () => {
+  const project = tmpProject("onboard-interrupted-after-registry");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing project after interrupted onboarding\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const registryPath = path.join(sdlcRoot, "output-contracts", "registry.json");
+  const registryHash = sha256File(registryPath);
+  fs.rmSync(projectPath);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Interrupted After Registry",
+  ], /\.sdlc\/project\.json is missing.*No files were changed.*archive the incomplete \.sdlc/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(sha256File(registryPath), registryHash);
+  assert.equal(fs.existsSync(projectPath), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
+test("onboard validates current canonical bootstrap records before creating a baseline", () => {
+  const project = tmpProject("onboard-bootstrap-record-health");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing project with damaged bootstrap records\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const cases = [
+    {
+      relativePath: "config.lock.json",
+      damage(filePath) {
+        const record = readJson(filePath);
+        record.lock_hash = "0".repeat(64);
+        writeJson(filePath, record);
+      },
+      pattern: /config\.lock\.json does not lock the current configuration/,
+    },
+    {
+      relativePath: "output-contracts/registry.json",
+      damage(filePath) {
+        const record = readJson(filePath);
+        delete record.policy;
+        writeJson(filePath, record);
+      },
+      pattern: /registry\.json does not match the output contract registry schema/,
+    },
+    {
+      relativePath: "dependencies/graph.json",
+      damage(filePath) {
+        writeJson(filePath, { schema_version: "0.1.0", status: "draft", edges: [] });
+      },
+      pattern: /graph\.json does not match the dependency graph schema/,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const filePath = path.join(sdlcRoot, ...fixture.relativePath.split("/"));
+    const original = fs.readFileSync(filePath);
+    fixture.damage(filePath);
+    const treeBefore = snapshotFilesystemTree(sdlcRoot);
+    mustFail([
+      "onboard",
+      "existing-project",
+      "--root",
+      project,
+      "--project-name",
+      "Damaged Bootstrap",
+    ], fixture.pattern);
+    assert.deepEqual(
+      snapshotFilesystemTree(sdlcRoot),
+      treeBefore,
+      `onboard mutated the damaged bootstrap for ${fixture.relativePath}`,
+    );
+    assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, original);
+  }
+});
+
+test("onboard accepts legitimate scaffold evolution when the immutable bootstrap manifest remains valid", () => {
+  const project = tmpProject("onboard-evolved-bootstrap");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Evolved project knowledge base\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  const manifestHash = sha256File(manifestPath);
+  const configPath = path.join(sdlcRoot, "config.json");
+  const configLockPath = path.join(sdlcRoot, "config.lock.json");
+  const evolvedConfig = {
+    ...readJson(configPath),
+    evolved_bootstrap_policy_marker: true,
+  };
+  const priorLock = readJson(configLockPath);
+  const evolvedLock = buildEffectiveConfigLock({
+    effective_config: evolvedConfig,
+    config_path: ".sdlc/config.json",
+    defaults_profile: priorLock.defaults_profile,
+    inherited_paths: priorLock.inherited_paths,
+    created_at: new Date(Date.parse(priorLock.created_at) + 1).toISOString(),
+  });
+  writeJson(configPath, evolvedConfig);
+  writeJson(configLockPath, evolvedLock);
+  fs.rmSync(path.join(sdlcRoot, ".gitattributes"));
+  fs.rmSync(path.join(sdlcRoot, ".gitignore"));
+  fs.rmSync(path.join(sdlcRoot, "contracts", "contract-design-v1.json"));
+  const dependencyGraphPath = path.join(sdlcRoot, "dependencies", "graph.json");
+  const dependencyGraph = readJson(dependencyGraphPath);
+  dependencyGraph.edges.push({
+    from: "ST-LEGACY",
+    to: "ST-NEXT",
+    type: "related",
+    blocks: "none",
+    required_state: "draft",
+  });
+  writeJson(dependencyGraphPath, dependencyGraph);
+
+  const payload = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Evolved Bootstrap",
+    "--json",
+  ]).stdout);
+
+  assert.equal(payload.status, "onboarded");
+  assert.equal(payload.initialized, false);
+  assert.equal(sha256File(manifestPath), manifestHash);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, ".gitattributes")), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, ".gitignore")), false);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "contracts", "contract-design-v1.json")), false);
+  assert.equal(readJson(dependencyGraphPath).edges.length, 1);
+  assert.equal(readJson(configPath).evolved_bootstrap_policy_marker, true);
+});
+
+test("onboard accepts a migrated v0.11 bootstrap without inventing later scaffold or a manifest", () => {
+  const project = tmpProject("onboard-legacy-bootstrap");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Complete legacy project knowledge base\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const manifestPath = path.join(sdlcRoot, "bootstrap-manifest.json");
+  fs.rmSync(manifestPath);
+  fs.rmSync(path.join(sdlcRoot, "bootstrap-journal.json"));
+  const projectPath = path.join(sdlcRoot, "project.json");
+  const projectRecord = readJson(projectPath);
+  delete projectRecord.bootstrap_manifest;
+  delete projectRecord.bootstrap_journal;
+  projectRecord.sdlc_version = "0.11.0";
+  writeJson(projectPath, projectRecord);
+  const gitAttributesPath = path.join(sdlcRoot, ".gitattributes");
+  fs.rmSync(gitAttributesPath);
+  const configPath = path.join(sdlcRoot, "config.json");
+  const configLockPath = path.join(sdlcRoot, "config.lock.json");
+  fs.rmSync(configLockPath);
+  fs.copyFileSync(
+    path.join(repoRoot, "templates", "config-compat", "sdlc-config-v1-0.11.0.json"),
+    configPath,
+  );
+  const phaseContractPath = path.join(sdlcRoot, "contracts", "contract-design-v1.json");
+  const phaseContractHashBefore = sha256File(phaseContractPath);
+
+  const migrationPreview = JSON.parse(mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ]).stdout);
+  assert.equal(migrationPreview.plan.mode, "materialize_legacy_defaults");
+  assert.equal(migrationPreview.legacy_bootstrap_adoption.required, true);
+  mustRun([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--apply",
+    "--plan-hash",
+    migrationPreview.plan.plan_hash,
+    "--confirm-legacy-bootstrap",
+    "--actor-type",
+    "human",
+    "--approval-source",
+    "explicit-user",
+    "--summary",
+    "Adopt the exact displayed v0.11 bootstrap before creating its first lock",
+  ]);
+  assert.equal(fs.existsSync(configLockPath), true);
+  const migrationReceiptDirectory = path.join(sdlcRoot, "migrations", "config");
+  const [migrationReceiptName] = fs.readdirSync(migrationReceiptDirectory)
+    .filter((name) => name.endsWith(".json"));
+  const migrationReceipt = readJson(
+    path.join(migrationReceiptDirectory, migrationReceiptName),
+  );
+  assert.equal(migrationReceipt.legacy_bootstrap_adoption.status, "approved");
+  assert.equal(
+    migrationReceipt.legacy_bootstrap_adoption.approval.approval_source,
+    "explicit-user",
+  );
+
+  const payload = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Complete Legacy Bootstrap",
+    "--json",
+  ]).stdout);
+
+  assert.equal(payload.status, "onboarded");
+  assert.equal(payload.initialized, false);
+  assert.equal(fs.existsSync(manifestPath), false);
+  assert.equal(fs.existsSync(gitAttributesPath), false);
+  assert.equal(sha256File(phaseContractPath), phaseContractHashBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), true);
+});
+
+test("onboard rejects valid config and lock content swapped after the command context was loaded", () => {
+  const project = tmpProject("onboard-context-drift");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Project with concurrent config evolution\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const configPath = path.join(sdlcRoot, "config.json");
+  const lockPath = path.join(sdlcRoot, "config.lock.json");
+  const replacementConfigPath = path.join(project, "replacement-config.json");
+  const replacementLockPath = path.join(project, "replacement-config.lock.json");
+  const preloadMarker = path.join(project, "bootstrap-swap-triggered.txt");
+  const currentConfig = readJson(configPath);
+  const currentLock = readJson(lockPath);
+  const replacementConfig = {
+    ...currentConfig,
+    concurrent_bootstrap_health_test: true,
+  };
+  const replacementLock = buildEffectiveConfigLock({
+    effective_config: replacementConfig,
+    config_path: ".sdlc/config.json",
+    defaults_profile: currentLock.defaults_profile,
+    inherited_paths: currentLock.inherited_paths,
+    created_at: new Date(Date.parse(currentLock.created_at) + 1).toISOString(),
+  });
+  writeJson(replacementConfigPath, replacementConfig);
+  writeJson(replacementLockPath, replacementLock);
+
+  const result = run([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Concurrent Context Drift",
+  ], {
+    env: projectBootstrapPreloadEnv("swap-config-after-context", {
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_CONFIG_PATH: configPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_LOCK_PATH: lockPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_REPLACEMENT_CONFIG: replacementConfigPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_REPLACEMENT_LOCK: replacementLockPath,
+      AGENTIC_SDLC_BOOTSTRAP_PRELOAD_MARKER: preloadMarker,
+    }),
+  });
+  assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(fs.readFileSync(preloadMarker, "utf8").trim(), "config-lock-swap");
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /config\.json changed after the command context was loaded.*config\.lock\.json changed after the command context was loaded/s,
+  );
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+  assert.deepEqual(readJson(configPath), replacementConfig);
+  assert.deepEqual(readJson(lockPath), replacementLock);
+});
+
+test("onboard rejects a dangling project.json without following or replacing it", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("onboard-dangling-project-record");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing project with interrupted project record\n");
+  const sdlcRoot = path.join(project, ".sdlc");
+  const projectPath = path.join(sdlcRoot, "project.json");
+  fs.rmSync(projectPath);
+  fs.symlinkSync("missing-project-record.json", projectPath);
+  const treeBefore = snapshotFilesystemTree(sdlcRoot);
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Dangling Project Record",
+  ], /\.sdlc\/project\.json is not a regular file.*No files were changed/s);
+
+  assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
+  assert.equal(fs.lstatSync(projectPath).isSymbolicLink(), true);
+  assert.equal(fs.readlinkSync(projectPath), "missing-project-record.json");
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
+});
+
 test("onboard auto-discovers product and architecture evidence for a decision-ready baseline", () => {
   const project = tmpProject("onboard-semantic-context");
   fs.mkdirSync(path.join(project, "docs"), { recursive: true });
@@ -4128,6 +5342,149 @@ test("unsafe config directories are blocked", () => {
   writeJson(configPath, config);
   mustFail(["init", "--root", project, "--template-dir", templateDir], /unsafe|must match pattern/);
   assert.equal(fs.existsSync(path.resolve(project, "..", "escape")), false);
+});
+
+test("config-only template overlays fall back to bundled assets and onboard cleanly", () => {
+  const project = tmpProject("config-only-template-overlay");
+  const templateDir = tmpProject("config-only-template");
+  const config = readJson(path.join(repoRoot, "templates", "sdlc-config.json"));
+  config.phase_order.splice(-1, 0, "integration-review");
+  config.phases["integration-review"] = {
+    ...config.phases.validation,
+    purpose: "Review integration boundaries before release.",
+    owner_agent: "integration-review-agent",
+  };
+  writeJson(path.join(templateDir, "sdlc-config.json"), config);
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing local monorepo\n");
+
+  const onboard = JSON.parse(mustRun([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--project-name",
+    "Existing Local Monorepo",
+    "--template-dir",
+    templateDir,
+    "--json",
+  ]).stdout);
+
+  assert.equal(onboard.initialized, true);
+  assert.ok(onboard.init.project.phase_order.includes("integration-review"));
+  assert.equal(readJson(path.join(project, ".sdlc", "config.json")).phases["integration-review"].owner_agent, "integration-review-agent");
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "contracts", "contract-integration-review-v1.json")), true);
+  assert.match(fs.readFileSync(path.join(project, ".sdlc", "README.md"), "utf8"), /Existing Local Monorepo SDLC Knowledge Base/);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "output-contracts", "registry.json")), true);
+
+  fs.writeFileSync(
+    path.join(templateDir, "story-plan.md"),
+    "# Custom integration plan for {{STORY_ID}}\n",
+    "utf8",
+  );
+  mustRun([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-INTEGRATION-REVIEW",
+    "--title",
+    "Review integration boundaries",
+    "--phase",
+    "integration-review",
+    "--template-dir",
+    templateDir,
+  ]);
+  assert.match(
+    fs.readFileSync(path.join(project, ".sdlc", "stories", "ST-INTEGRATION-REVIEW", "plan.md"), "utf8"),
+    /Custom integration plan for ST-INTEGRATION-REVIEW/,
+  );
+  assert.match(fs.readFileSync(path.join(project, ".sdlc", "stories", "ST-INTEGRATION-REVIEW", "implementation-log.md"), "utf8"), /ST-INTEGRATION-REVIEW/);
+
+  mustRun([
+    "output",
+    "template",
+    "propose",
+    "--root",
+    project,
+    "--type",
+    "technical-analysis",
+    "--id",
+    "technical-assessment-overlay",
+    "--preset",
+    "technical-assessment",
+    "--template-dir",
+    templateDir,
+  ]);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "output-contracts", "templates", "technical-assessment-overlay.md")), true);
+
+  const doctor = JSON.parse(mustRun(["doctor", "--root", project, "--json"]).stdout);
+  assert.equal(doctor.status, "passed");
+  assert.equal(doctor.checks.find((check) => check.id === "effective-config").status, "passed");
+  assert.equal(doctor.checks.find((check) => check.id === "output-registry").status, "passed");
+});
+
+test("invalid custom template assets fail before project initialization writes", () => {
+  const project = tmpProject("invalid-template-overlay");
+  const templateDir = tmpProject("invalid-template");
+  fs.copyFileSync(
+    path.join(repoRoot, "templates", "sdlc-config.json"),
+    path.join(templateDir, "sdlc-config.json"),
+  );
+  fs.mkdirSync(path.join(templateDir, "kb-readme.md"));
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing local project\n");
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--template-dir",
+    templateDir,
+  ], /Custom template overlay asset must be a readable regular file/);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc")), false);
+});
+
+test("template overlays require configuration before project initialization writes", () => {
+  const project = tmpProject("missing-template-overlay-config");
+  const templateDir = tmpProject("missing-template-config");
+  fs.writeFileSync(path.join(templateDir, "kb-readme.md"), "# Custom readme\n");
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing local project\n");
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--template-dir",
+    templateDir,
+  ], /Unable to read required template configuration.*sdlc-config\.json/);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc")), false);
+});
+
+test("custom template symlinks fail before project initialization writes", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("symlink-template-overlay");
+  const templateDir = tmpProject("symlink-template");
+  fs.copyFileSync(
+    path.join(repoRoot, "templates", "sdlc-config.json"),
+    path.join(templateDir, "sdlc-config.json"),
+  );
+  fs.symlinkSync(
+    path.join(repoRoot, "templates", "kb-readme.md"),
+    path.join(templateDir, "kb-readme.md"),
+  );
+  fs.writeFileSync(path.join(project, "README.md"), "# Existing local project\n");
+
+  mustFail([
+    "onboard",
+    "existing-project",
+    "--root",
+    project,
+    "--template-dir",
+    templateDir,
+  ], /Custom template overlay asset must be a readable regular file/);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc")), false);
 });
 
 test("symlink context escapes are blocked", (t) => {
@@ -7823,6 +9180,34 @@ test("personal marketplace installer v2 keeps an exact recovery point until conf
     "--transaction-id", pending.data.transaction_id,
     "--receipt-hash", pending.technical_details.receipt_hash,
   ];
+  const registration = pending.technical_details.candidate_registration;
+  assert.deepEqual(registration.required_before, ["validate", "confirm"]);
+  const registered = spawnSync(
+    registration.command.argv[0],
+    registration.command.argv.slice(1),
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, ...registration.command.environment },
+      timeout: 30_000,
+    },
+  );
+  assert.equal(registered.status, 0, `${registered.stdout}\n${registered.stderr}`);
+  const listed = spawnSync(
+    registration.verification.argv[0],
+    registration.verification.argv.slice(1),
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, ...registration.verification.environment },
+      timeout: 30_000,
+    },
+  );
+  assert.equal(listed.status, 0, `${listed.stdout}\n${listed.stderr}`);
+  const installed = JSON.parse(listed.stdout).installed.find(
+    (plugin) => plugin.pluginId === "agentic-sdlc-codex-plugin@personal",
+  );
+  assert.equal(installed.enabled, true);
   const validated = invoke(["validate", "--json", ...bound]);
   assert.equal(validated.status, 0, `${validated.stdout}\n${validated.stderr}`);
   assert.equal(JSON.parse(validated.stdout).data.state, "validation_pending");
@@ -8165,6 +9550,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.ok(files.includes("lib/codex-session-metering-adapter.mjs"));
   assert.ok(files.includes("lib/context-optimization.mjs"));
   assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
+  assert.ok(files.includes("schemas/project-bootstrap-manifest.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
   assert.ok(files.includes("skills/caveman/SKILL.md"));
   assert.ok(files.includes("skills/caveman/agents/openai.yaml"));
@@ -8207,6 +9593,7 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "codex-session-metering-adapter.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "context-optimization.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "schemas", "context-optimization-observation.schema.json")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "schemas", "project-bootstrap-manifest.schema.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "caveman", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "caveman", "agents", "openai.yaml")), true);
@@ -8223,7 +9610,20 @@ test("npm package installs as a complete reusable plugin", async (t) => {
     { cwd: packageRoot, encoding: "utf8", timeout: 30_000 },
   );
   assert.equal(installedDoctor.status, 0, `installed doctor failed\n${installedDoctor.stdout}\n${installedDoctor.stderr}`);
-  assert.equal(JSON.parse(installedDoctor.stdout).status, "passed");
+  const installedDoctorPayload = JSON.parse(installedDoctor.stdout);
+  assert.equal(installedDoctorPayload.status, "passed");
+  assert.equal(
+    installedDoctorPayload.checks.find((check) => check.id === "project-bootstrap-manifest-schema").status,
+    "passed",
+  );
+  const installedBuildIdentityCheck = installedDoctorPayload.checks.find(
+    (check) => check.id === "build-identity",
+  );
+  assert.equal(installedBuildIdentityCheck.status, "passed");
+  assert.match(
+    installedBuildIdentityCheck.details,
+    /fingerprint [a-f0-9]{64}, provenance not embedded \(allowed for source checkouts and generic npm installs\)/u,
+  );
 
   const observedProject = path.join(packageRoot, "observed-project");
   fs.mkdirSync(observedProject);

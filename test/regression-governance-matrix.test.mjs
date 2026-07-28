@@ -328,7 +328,6 @@ test("workflow matrix preserves v1, governs v2 canonically, and keeps presets an
         "contract-approved",
         "required-output-linked",
         "strict-gate-passed",
-        "delivery-terminal",
       ],
     );
 

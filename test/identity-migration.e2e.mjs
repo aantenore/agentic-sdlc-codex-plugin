@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { computeStableHash } from "../lib/canonical.mjs";
+import { validateAgainstSchema } from "../lib/json-schema-validator.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -19,10 +20,75 @@ test("migration identity CLI is dry-run-first, rebuilds derived state, and is id
   git(project, "init");
   git(project, "config", "user.name", "Former User");
   git(project, "config", "user.email", sourceEmail);
-  run(project, "init", "--project-id", "identity-fixture", "--project-name", "Identity Fixture");
+  run(
+    project,
+    "init",
+    "--project-id",
+    "identity-fixture",
+    "--project-name",
+    `Identity Fixture ${sourceEmail}`,
+    "--run-id",
+    sourceEmail,
+  );
 
   const projectFile = path.join(project, ".sdlc", "project.json");
+  const bootstrapManifestFile = path.join(project, ".sdlc", "bootstrap-manifest.json");
+  const bootstrapJournalFile = path.join(project, ".sdlc", "bootstrap-journal.json");
   const collisionFile = path.join(project, ".sdlc", "identity-collision.json");
+  // Markdown migration is intentionally outside the identity workflow. Remove
+  // the generated display name from that separate surface so this regression
+  // isolates JSON identity lineage and the immutable bootstrap manifest.
+  fs.writeFileSync(path.join(project, ".sdlc", "README.md"), "# Identity Fixture\n");
+  const bootstrapManifestBefore = fs.readFileSync(bootstrapManifestFile, "utf8");
+  const parsedBootstrapManifestBefore = JSON.parse(bootstrapManifestBefore);
+  const { manifest_hash: bootstrapManifestHashBefore, ...bootstrapManifestSubjectBefore } =
+    parsedBootstrapManifestBefore;
+  assert.equal(bootstrapManifestHashBefore, computeStableHash(bootstrapManifestSubjectBefore));
+  assert.equal(Object.hasOwn(parsedBootstrapManifestBefore, "project"), false);
+  assert.equal(Object.hasOwn(parsedBootstrapManifestBefore.audit, "git"), false);
+  assert.equal(Object.hasOwn(parsedBootstrapManifestBefore.audit, "run"), false);
+  assert.equal(bootstrapManifestBefore.includes(sourceEmail), false);
+  assert.equal(
+    validateAgainstSchema(parsedBootstrapManifestBefore, "project-bootstrap-manifest.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    true,
+  );
+  const bootstrapJournalBefore = fs.readFileSync(bootstrapJournalFile, "utf8");
+  const parsedBootstrapJournalBefore = JSON.parse(bootstrapJournalBefore);
+  assert.equal(bootstrapJournalBefore.includes(sourceEmail), false);
+  assert.equal(Object.hasOwn(parsedBootstrapJournalBefore.request, "project_id"), false);
+  assert.equal(Object.hasOwn(parsedBootstrapJournalBefore.request, "project_name"), false);
+  assert.equal(
+    parsedBootstrapJournalBefore.request.initial_project_identity_sha256,
+    computeStableHash({
+      project_id: "identity-fixture",
+      project_name: `Identity Fixture ${sourceEmail}`,
+    }),
+  );
+  assert.equal(
+    validateAgainstSchema(parsedBootstrapJournalBefore, "project-bootstrap-journal.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    true,
+  );
+  assert.equal(Object.hasOwn(parsedBootstrapJournalBefore.completed_manifest_ref, "hash"), false);
+  assert.equal(
+    parsedBootstrapJournalBefore.completed_manifest_ref.hash_algorithm,
+    "sha256:stable-json:v1",
+  );
+  const ambiguousManifestReferenceJournal = structuredClone(parsedBootstrapJournalBefore);
+  ambiguousManifestReferenceJournal.completed_manifest_ref.hash =
+    ambiguousManifestReferenceJournal.completed_manifest_ref.manifest_hash;
+  delete ambiguousManifestReferenceJournal.completed_manifest_ref.manifest_hash;
+  assert.equal(
+    validateAgainstSchema(
+      ambiguousManifestReferenceJournal,
+      "project-bootstrap-journal.schema.json",
+      { schemaDir: path.join(repoRoot, "schemas") },
+    ).valid,
+    false,
+  );
   fs.writeFileSync(collisionFile, `${JSON.stringify({
     exact: sourceEmail,
     near_collision: `not${sourceEmail}`,
@@ -50,6 +116,26 @@ test("migration identity CLI is dry-run-first, rebuilds derived state, and is id
   assert.equal(applied.status, "applied");
   assert.equal(containsIdentityToken(readTree(path.join(project, ".sdlc")), sourceEmail), false);
   assert.equal(JSON.parse(fs.readFileSync(projectFile, "utf8")).audit.git.user.email, targetEmail);
+  assert.equal(fs.readFileSync(bootstrapManifestFile, "utf8"), bootstrapManifestBefore);
+  assert.equal(fs.readFileSync(bootstrapJournalFile, "utf8"), bootstrapJournalBefore);
+  const parsedBootstrapManifestAfter = JSON.parse(fs.readFileSync(bootstrapManifestFile, "utf8"));
+  const { manifest_hash: bootstrapManifestHashAfter, ...bootstrapManifestSubjectAfter } =
+    parsedBootstrapManifestAfter;
+  assert.equal(bootstrapManifestHashAfter, computeStableHash(bootstrapManifestSubjectAfter));
+  assert.equal(
+    validateAgainstSchema(parsedBootstrapManifestAfter, "project-bootstrap-manifest.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    true,
+  );
+  assert.equal(
+    validateAgainstSchema(
+      JSON.parse(fs.readFileSync(bootstrapJournalFile, "utf8")),
+      "project-bootstrap-journal.schema.json",
+      { schemaDir: path.join(repoRoot, "schemas") },
+    ).valid,
+    true,
+  );
   assert.deepEqual(JSON.parse(fs.readFileSync(collisionFile, "utf8")), {
     exact: targetEmail,
     near_collision: `not${sourceEmail}`,
@@ -83,6 +169,44 @@ test("migration identity CLI is dry-run-first, rebuilds derived state, and is id
   );
   assert.equal(recovery.status, "no_recovery_needed");
   assert.equal(recovery.recovered, false);
+});
+
+test("migration identity fails closed on self-hashed bootstrap journal reference tampering", (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "identity-migration-bootstrap-tamper-"));
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }));
+  git(project, "init");
+  git(project, "config", "user.name", "Former User");
+  git(project, "config", "user.email", sourceEmail);
+  run(
+    project,
+    "init",
+    "--project-id",
+    "identity-bootstrap-tamper",
+    "--project-name",
+    "Identity Bootstrap Tamper",
+  );
+
+  const sdlcRoot = path.join(project, ".sdlc");
+  const journalFile = path.join(sdlcRoot, "bootstrap-journal.json");
+  const journal = JSON.parse(fs.readFileSync(journalFile, "utf8"));
+  journal.completed_manifest_ref.manifest_hash = "0".repeat(64);
+  delete journal.journal_hash;
+  journal.journal_hash = computeStableHash(journal);
+  fs.writeFileSync(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+  const treeBefore = readTree(sdlcRoot);
+
+  const failure = runFailure(
+    project,
+    "migration", "identity",
+    "--from-email", sourceEmail,
+    "--to-email", targetEmail,
+  );
+  assert.match(
+    failure,
+    /bootstrap journal does not bind the exact immutable manifest/u,
+  );
+  assert.equal(readTree(sdlcRoot), treeBefore);
+  assert.equal(fs.existsSync(path.join(sdlcRoot, "migrations", "identity")), false);
 });
 
 test("migration identity CLI requires the reviewed plan hash and rejects snapshot drift", (t) => {

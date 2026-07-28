@@ -57,21 +57,44 @@ cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace-v2.py check
 python3 scripts/install-personal-marketplace-v2.py plan --json
 python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+# Required: run candidate_registration.command.argv with its exact environment,
+# then candidate_registration.verification.argv with its exact environment.
+# Default target example only; do not use it for a custom returned target:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 V2 is the canonical local installer. `check` and `plan` do not change files,
 and running it without a command is also plan-only. `apply` recalculates the
-plan while holding a lock, stages and byte-verifies the new plugin, and retains
-the byte-exact previous plugin and marketplace bytes. Run the exact `validate`
-command returned by `apply`, exercise the installed plugin, then run the
-returned `confirm` command to keep the update or `restore` to recover the prior
-state. Every transition is bound to the transaction ID and current receipt
-hash. Source drift, destination drift, unexpected recovery data, or an
+plan while holding locks for both HOME and the selected Codex state directory,
+rejects linked cache ancestors, records the exact prior installed-or-absent
+Codex list/cache identity, stages and byte-verifies the new plugin, and retains
+the byte-exact previous plugin and marketplace bytes. Before validation,
+execute `technical_details.candidate_registration.command.argv` with exactly
+its `environment`, then execute `verification.argv` with exactly its
+`environment`. The two `env ... codex` lines above illustrate only the default
+target; never substitute them when the returned executable, `HOME`, or
+`CODEX_HOME` differs. Run the exact `validate` command returned by `apply`,
+exercise the installed plugin, then run the returned `confirm` command to keep
+the update or `restore` to recover the prior state. `confirm` verifies the
+candidate Codex entry and cache identity before removing any recovery copy.
+Restore is complete only after V2 has put the prior
+staging and marketplace bytes back, used the official Codex add/remove command
+to reproduce the exact prior state, and verified the resulting Codex list,
+cache fingerprint, and installer provenance. If the Codex command is missing
+or fails, V2 reports `staging_restored: true`,
+`codex_reconciled: false`, and `partial_failure: true`; it keeps the
+transaction open and returns the exact retry command. Codex is resolved from
+`PATH` during `apply`; when a non-default target is required, pass
+`--codex-executable /absolute/path/to/codex` and/or
+`--codex-home /absolute/path` to `apply`. That target is receipt-bound and
+cannot be changed during `confirm` or `restore`. The default target is
+`<home>/.codex` and never inherits a different ambient `CODEX_HOME`. Every
+transition is bound to the transaction ID and current receipt hash. Source
+drift, destination drift, Codex-state drift, unexpected recovery data, or an
 unproven interrupted state stops without overwriting it.
 
 After confirmation, run the exact `post_confirm_autoconfigure_command` returned
@@ -111,14 +134,27 @@ Start a new Codex task after installing. Existing tasks do not need to be treate
 
 The semantic version identifies a release line; it does not prove that two
 plugin trees contain the same bytes. After staging or updating, inspect the
-source checkout and the installed command:
+source checkout, generated staging copy, and Codex cache directly. Plugin
+installation does not create a global `agentic-sdlc` shell command, so do not
+use one as installation evidence:
 
 ```bash
 # Run in the source checkout.
 node bin/agentic-sdlc.mjs --version --json
 
-# Run the installed plugin command.
-agentic-sdlc --version --json
+# Run the installer-managed staging copy.
+node "$HOME/plugins/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs" --version --json
+
+# Derive the cache path from staging; no release number is hard-coded.
+VERSION="$(node -p 'require(process.argv[1]).version' "$HOME/plugins/agentic-sdlc-codex-plugin/package.json")"
+# Use technical_details.codex_target.home from apply. This is the exact default;
+# replace it only when apply bound an explicit --codex-home.
+CODEX_STATE_HOME="$HOME/.codex"
+CACHE_COMMAND="$CODEX_STATE_HOME/plugins/cache/personal/agentic-sdlc-codex-plugin/$VERSION/bin/agentic-sdlc.mjs"
+
+# Run the exact cache loaded by Codex, including help; no global bin is assumed.
+node "$CACHE_COMMAND" --version --json
+node "$CACHE_COMMAND" --help
 ```
 
 Each result contains at least:
@@ -140,7 +176,7 @@ Interpret the fields as follows:
 | `build_fingerprint` | A deterministic SHA-256 over every distributed relative path and its exact bytes | Require the source and installed values to match when verifying that this exact checkout was installed |
 | `git_commit` | The checkout `HEAD` that supplied the command, preserved by the official V2 installer | Require the source and officially installed values to match |
 | `git_dirty` | Whether the source checkout had tracked or untracked changes when the install plan was created | Require `false` for a release build so the displayed commit fully describes the source |
-| `provenance` | `official-installer-v2` when identity came from installer-managed metadata | Require this marker when validating an installed copy outside Git |
+| `provenance` | `official-installer-v2` when identity came from installer-managed metadata | Require this marker on both staging and cache when validating an installed copy outside Git |
 
 The fingerprint excludes Git metadata, dependencies, runtime `.sdlc/` state,
 coverage, other non-distributed directories, and the installer-generated
@@ -154,9 +190,10 @@ asset, or document changes.
 An arbitrary unpacked copy can still omit Git fields when it has neither a Git
 checkout nor official installer provenance. The canonical V2 installation must
 not omit them. Invalid, stale, or mismatched provenance fails closed. If any of
-version, commit, dirty state, provenance marker, or fingerprint differs, do not
-treat the installed cache as verified: restore or rerun the reviewed V2
-transaction, add the plugin again, open a new task, and repeat both commands.
+version, commit, dirty state, provenance marker, or fingerprint differs across
+source, staging, and cache, do not treat the installed cache as verified: use
+the still-open V2 transaction to restore, or rerun the reviewed update, then
+open a new task and repeat all three identity commands.
 
 ### What The Installer Changes
 
@@ -168,7 +205,7 @@ The apply step:
 4. replaces `~/plugins/agentic-sdlc-codex-plugin` only when the destination is managed and safe;
 5. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
 6. retains byte-exact plugin and marketplace recovery data after apply;
-7. confirms or restores only the exact transaction receipt supplied by the user;
+7. confirms only after the receipt-bound candidate list/cache is verified, or restores the prior staging and marketplace bytes and the exact receipt-bound official Codex state before declaring success;
 8. exposes a separate post-confirm token-efficiency autoconfiguration step.
 
 V2 never modifies RTK's global Codex instruction profile. The separate
@@ -190,9 +227,11 @@ cd /path/to/agentic-sdlc-codex-plugin
 python3 scripts/install-personal-marketplace-v2.py check
 python3 scripts/install-personal-marketplace-v2.py plan --json
 python3 scripts/install-personal-marketplace-v2.py apply --plan-hash <plan_hash-from-plan> --json
+# Execute the exact candidate_registration argv/environment returned by apply.
+# Default target example only:
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin add agentic-sdlc-codex-plugin@personal --json
+env HOME="$HOME" CODEX_HOME="$HOME/.codex" codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```

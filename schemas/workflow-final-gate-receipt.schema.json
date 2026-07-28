@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "workflow-final-gate-receipt.schema.json",
-  "title": "Governed final story gate receipt",
+  "title": "Governed terminal workflow lifecycle receipt",
   "type": "object",
   "required": [
     "kind",
@@ -9,6 +9,9 @@
     "status",
     "strict",
     "scope",
+    "lifecycle_complete",
+    "certification_level",
+    "lifecycle_workflow",
     "story_id",
     "checked_at",
     "errors",
@@ -18,10 +21,114 @@
   ],
   "properties": {
     "kind": { "const": "workflow_final_gate_receipt" },
-    "schema_version": { "const": "workflow-final-gate-receipt:v1" },
+    "schema_version": { "const": "workflow-final-gate-receipt:v2" },
     "status": { "const": "passed" },
     "strict": { "const": true },
     "scope": { "const": "story" },
+    "lifecycle_complete": { "const": true },
+    "certification_level": { "const": "lifecycle_complete" },
+    "lifecycle_workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_policy",
+        "story_id",
+        "instance_id",
+        "instance_hash",
+        "effective_hash",
+        "checkpoint_ref",
+        "terminal_state",
+        "terminal_event_ref",
+        "event_count",
+        "task_start_ref",
+        "phase_timeline",
+        "release_trace_at",
+        "delivery_closed_at"
+      ],
+      "properties": {
+        "selection_policy": { "const": "latest-created-at-then-instance-id:v1" },
+        "story_id": { "type": "string", "minLength": 1 },
+        "instance_id": { "type": "string", "minLength": 1 },
+        "instance_hash": { "$ref": "#/$defs/hash" },
+        "effective_hash": { "$ref": "#/$defs/hash" },
+        "checkpoint_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "checkpoint_hash",
+            "sequence",
+            "last_event_hash",
+            "trace_chain_hash"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^\\.sdlc/workflows/instances/[A-Za-z0-9._-]+/checkpoint\\.json$"
+            },
+            "checkpoint_hash": { "$ref": "#/$defs/hash" },
+            "sequence": { "type": "integer", "minimum": 1 },
+            "last_event_hash": { "$ref": "#/$defs/hash" },
+            "trace_chain_hash": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "terminal_state": { "type": "string", "minLength": 1 },
+        "terminal_event_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event_hash", "sequence", "timestamp"],
+          "properties": {
+            "event_hash": { "$ref": "#/$defs/hash" },
+            "sequence": { "type": "integer", "minimum": 1 },
+            "timestamp": { "type": "string", "format": "date-time" }
+          }
+        },
+        "event_count": { "type": "integer", "minimum": 1 },
+        "task_start_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "path", "hash", "confirmed_at"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "path": {
+              "type": "string",
+              "pattern": "^\\.sdlc/stories/[A-Za-z0-9._-]+/task-start\\.json$"
+            },
+            "hash": { "$ref": "#/$defs/hash" },
+            "confirmed_at": { "type": "string", "format": "date-time" }
+          }
+        },
+        "phase_timeline": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "phase",
+              "entered_at",
+              "entry_event_hash",
+              "completed_at",
+              "completion_record_id"
+            ],
+            "properties": {
+              "phase": { "type": "string", "minLength": 1 },
+              "entered_at": { "type": "string", "format": "date-time" },
+              "entry_event_hash": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "$ref": "#/$defs/hash" }
+                ]
+              },
+              "completed_at": { "type": "string", "format": "date-time" },
+              "completion_record_id": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "release_trace_at": { "type": "string", "format": "date-time" },
+        "delivery_closed_at": { "type": "string", "format": "date-time" }
+      }
+    },
     "story_id": { "type": "string", "minLength": 1 },
     "checked_at": { "type": "string", "format": "date-time" },
     "errors": {
@@ -33,7 +140,10 @@
       "pattern": "^\\.sdlc/gates/[A-Za-z0-9._-]+-final\\.json$"
     },
     "hash_algorithm": { "const": "sha256:stable-json:v1" },
-    "receipt_hash": {
+    "receipt_hash": { "$ref": "#/$defs/hash" }
+  },
+  "$defs": {
+    "hash": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     }

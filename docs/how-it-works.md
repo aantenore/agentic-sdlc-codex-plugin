@@ -24,17 +24,22 @@ The technical chain for `ST-TRIP-POLICY-001` is:
    source and test paths, capabilities, checks, delivery profile, and write
    scope.
 4. **Story and workflow** start one `software-project` v2 instance bound to
-   `ST-TRIP-POLICY-001`. Its transitions consult canonical requirement,
+   `ST-TRIP-POLICY-001` before task start or any completed step. A custom
+   `phase_order` requires an approved story-bound definition with that exact
+   order. Its transitions consult canonical requirement,
    contract, output, gate, and delivery records rather than trusting
    caller-supplied guard claims.
 5. **Implementation and validation** write only the intersection of approved
-   scopes, link the real output, and record the latest test and verification
-   evidence. A newer failure supersedes an older passing trace.
-6. **Release** closes the exact local delivery as `released` only after its
-   build, smoke test, destination, and rollback evidence agree. Repository
-   publication and production remain separate.
-7. **Final certification** evaluates the complete story after the terminal
-   release:
+   scopes, link the real output, record the latest test and verification
+   evidence, and complete each phase before entering the next. A newer failure
+   supersedes an older passing trace.
+6. **Release entry** runs the ordinary strict validation gate and moves the
+   bound workflow into `release`.
+7. **Release** only then closes the exact local delivery as `released`, appends
+   the passing release trace, and completes the release step after build, smoke
+   test, destination, and rollback evidence agree. Repository publication and
+   production remain separate.
+8. **Final certification** evaluates the complete story after that release:
 
    ```bash
    agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
@@ -73,12 +78,27 @@ Each part has one job:
 - **`.sdlc/`** is the project-local control plane. It travels through normal Git review and contains the records needed to reproduce why a write or release was allowed.
 - **The plugin** is reusable and project-agnostic. Project-specific choices live in `.sdlc/config.json` and in approved records, rather than in hardcoded product logic.
 
-The installed command is `agentic-sdlc`. From a source checkout, the equivalent entry point is:
+A Codex plugin installation does not create a global `agentic-sdlc` command.
+The command name used in the examples below is concise notation for the CLI
+entry point. Run the installer-managed staging copy directly:
 
 ```bash
-node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
+PLUGIN_CLI="$HOME/plugins/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs"
+node "$PLUGIN_CLI" --help
 ```
 
+To exercise the exact copy loaded by Codex, derive its version from staging and
+use the `codex_target.home` reported by installer `apply` (the default is
+`$HOME/.codex`):
+
+```bash
+VERSION="$(node -p 'require(process.argv[1]).version' "$HOME/plugins/agentic-sdlc-codex-plugin/package.json")"
+CODEX_STATE_HOME="$HOME/.codex"
+node "$CODEX_STATE_HOME/plugins/cache/personal/agentic-sdlc-codex-plugin/$VERSION/bin/agentic-sdlc.mjs" --help
+```
+
+An npm installation may additionally create an npm bin shim. From a source
+checkout, use `node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs`.
 All examples below use commands exposed by the `Agentic SDLC 0.13.1` help output and assume the shell is in the target project:
 
 ```bash
@@ -291,11 +311,11 @@ After the immutable delivery-start receipt exists, each state-changing delivery 
 
 1. `autonomy delivery action` evaluates the current effective policy and writes a single-use `authorized` receipt for the exact canonical action, runtime target, and action details. A configured checkpoint first returns `checkpoint_required`; only an explicitly confirmed rerun may authorize it. Under `host_verified`, that rerun also requires an external Ed25519 `--host-receipt-file` for action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject. Under `audit_only`, the explicit approval remains recorded but unverified.
 2. The host, Git client, CI job, or local tooling executes exactly that recorded operation. The authorization receipt does not perform the operation.
-3. The same command records `--outcome passed|failed` plus at least one immutable evidence file and consumes the authorization. Replay or a changed runtime boundary fails closed.
+3. The same command records `--outcome passed|failed` plus at least one immutable evidence file and consumes one exact action authorization. When exactly one matching authorization is waiting, the CLI selects it safely. When several are waiting, completion pauses and requires `--authorization-receipt <AUT-ACT-id>` so the host identifies the operation it actually executed. An identical retry returns the original completion with `idempotent: true` and repairs a missing trace or terminal close without querying the provider again or consuming another authorization. A different authorization selector, evidence set, outcome, or operation argument is a new completion request and is validated independently.
 
 For `git.push`, pull-request create/update/merge, and `release.local`, v2 profiles also bind one registered verification provider per action. Authorization stores that provider's hash-bound precondition receipt; successful completion stores a second receipt linked to the first. Providers expose observation and verification only. The host remains the only component that executes the operation. A missing, changed, unknown, or unsupported binding stops the action before it can be recorded as authorized or successfully completed.
 
-Canonical PR actions are `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, and `pull_request.merge`. Canonical local actions are `build.local`, `test.run`, and `release.local`. `git.commit` authorization additionally binds repeatable exact `--scope-path` values; completion accepts only one non-merge commit with the authorized parent and file set. `git.push` binds one matching remote, source SHA, destination ref, and non-force/non-delete semantics. Before push authorization, the CLI observes the base SHA directly on that remote; every commit from that SHA to the exact head must have one passing completed `git.commit` receipt, and every fetch/push URL configured for the selected remote must identify the approved repository. Merge authorization binds the exact `--pr-url`.
+Canonical PR actions are `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, and `pull_request.merge`. Canonical local actions are `build.local`, `test.run`, mandatory non-executing `rollback.verify`, optional paired `data.migrate` and `data.rollback`, and `release.local`. The rollback receipt must pass before release authorization; a declared data migration follows initial migrate → real rollback → rollback verification → later final migrate → release. `git.commit` authorization additionally binds repeatable exact `--scope-path` values; completion accepts only one non-merge commit with the authorized parent and file set. `git.push` binds one matching remote, source SHA, destination ref, and non-force/non-delete semantics. Before push authorization, the CLI observes the base SHA directly on that remote; every commit from that SHA to the exact head must have one passing completed `git.commit` receipt, and every fetch/push URL configured for the selected remote must identify the approved repository. Merge authorization binds the exact `--pr-url`.
 
 For local release, smoke tests are shell-free JSON argv arrays such as `--smoke-test '["npm","run","smoke:local"]'`. `--smoke-cwd` binds their working directory to the released artifact: it must be equal to or inside an allowed write path, defaults to the only allowed write path, and is required when more than one write path exists. Package-manager commands also require a real, non-symlinked `package.json` in that exact directory, so npm, pnpm, Yarn, or Bun cannot climb to the source project and accidentally certify it instead. Historical profiles without this field remain valid and derive it only from one unambiguous write path; otherwise smoke execution fails closed. Completion must repeat the exact approved command set and rollback procedure. The CLI executes those commands from the governed working directory in a supported read-only, no-network sandbox, records command/cwd/sandbox/exit/output hashes, and only then creates a `released` close receipt. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and leave the delivery started. A passing `pull_request.merge` completion similarly creates `merged` automatically. Manual close remains available for approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other valid non-success terminal outcomes; it cannot be used to assert `merged` or `released` without the terminal action receipt.
 

@@ -75,9 +75,10 @@ test("core skill documents the required order and discloses autonomy reduction b
     "**Decompose only when needed**",
     "**Agree the output and work brief**",
     "**Choose autonomy for this delivery**",
-    "**Start once**",
-    "**Implement and test**",
-    "**Finish at the named destination**",
+    "**Start the story workflow, then start once**",
+    "**Implement, test, and advance phases**",
+    "**Validate, then enter release**",
+    "**Finish and certify at the named destination**",
   ];
 
   let previous = -1;
@@ -92,4 +93,52 @@ test("core skill documents the required order and discloses autonomy reduction b
   assert.match(orderSection, /reduced to “Autonomy with checkpoints”/);
   assert.match(skill, /--allow-action pull_request\.create/);
   assert.match(skill, /For an existing pull request/);
+});
+
+test("local novice guidance verifies rollback before release and requires a terminal lifecycle certificate", () => {
+  const skill = read("skills/agentic-sdlc/SKILL.md");
+  const rollbackAuthorization = skill.indexOf("--action rollback.verify");
+  const releaseAuthorization = skill.indexOf("--action release.local --confirm-action");
+
+  assert.ok(rollbackAuthorization >= 0, "skill is missing rollback verification");
+  assert.ok(
+    releaseAuthorization > rollbackAuthorization,
+    "skill must verify rollback before authorizing local release",
+  );
+  assert.match(skill, /intermediate readiness check, not the final delivery certificate/u);
+  assert.match(skill, /--lifecycle-complete/u);
+  assert.match(skill, /requires every configured phase to have a completed canonical step/u);
+  assert.match(skill, /current story-bound workflow to its configured terminal `release` phase/u);
+  assert.doesNotMatch(
+    skill.slice(releaseAuthorization, releaseAuthorization + 500),
+    /--host-receipt-file/u,
+    "default audit-only release example must not require a host receipt",
+  );
+});
+
+test("installer guides bind candidate registration to the exact returned target", () => {
+  for (const relativePath of ["README.md", "docs/portable-install.md", "docs/self-service-cli.md"]) {
+    const document = read(relativePath);
+    assert.match(document, /candidate_registration\.command\.argv/u, relativePath);
+    assert.match(document, /candidate_registration\.verification\.argv/u, relativePath);
+    assert.match(document, /Default target example only/u, relativePath);
+    assert.match(document, /CODEX_HOME/u, relativePath);
+  }
+});
+
+test("configuration and autonomy references use executable local guidance and current profile lineage", () => {
+  const configurationSafety = read("docs/configuration-safety.md");
+  assert.match(configurationSafety, /PLUGIN_CLI=/u);
+  assert.match(configurationSafety, /node "\$PLUGIN_CLI" config status/u);
+  assert.doesNotMatch(configurationSafety, /^agentic-sdlc config/gmu);
+
+  for (const relativePath of [
+    "skills/agentic-sdlc/references/contracts.md",
+    "skills/agentic-sdlc/references/knowledge-base.md",
+  ]) {
+    const reference = read(relativePath);
+    assert.match(reference, /delivery-execution-profile:v2/u, relativePath);
+    assert.match(reference, /historical `?delivery-execution-profile:v1/iu, relativePath);
+    assert.match(reference, /never rewritten/u, relativePath);
+  }
 });

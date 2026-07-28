@@ -16,7 +16,7 @@ test("root help explains practical behavior before technical details", () => {
   assert.match(primary, /Next step:/u);
   assert.match(primary, /Talk naturally to Codex about the outcome you want\./u);
   assert.match(primary, /This CLI is for structured recovery and automation/u);
-  assert.match(primary, /requirement -> story -> work brief\/output -> autonomy for this delivery -> one task start -> implement\/test -> delivery/u);
+  assert.match(primary, /requirement -> story -> work brief\/output -> autonomy -> story workflow start -> one task start -> complete each phase and advance -> validation gate -> enter release -> delivery\/release evidence -> final lifecycle gate/u);
   assert.doesNotMatch(primary, FORBIDDEN_PRIMARY_JARGON);
   assert.doesNotMatch(primary, /(?:agentic-sdlc|--[a-z])/iu);
   assert.match(technical, /Usage:/u);
@@ -26,7 +26,7 @@ test("root help explains practical behavior before technical details", () => {
   const [italianPrimary] = italian.split("Dettagli tecnici (facoltativi):");
   assert.match(italianPrimary, /Parla naturalmente con Codex del risultato che vuoi ottenere\./u);
   assert.match(italianPrimary, /Questa CLI serve per recupero strutturato e automazione/u);
-  assert.match(italianPrimary, /requisito -> story -> accordo di lavoro\/output -> autonomia per questa consegna -> un solo avvio attività -> implementazione\/test -> consegna/u);
+  assert.match(italianPrimary, /requisito -> story -> accordo di lavoro\/output -> autonomia -> avvio workflow della story -> un solo avvio attività -> completa e avanza ogni fase -> gate di validazione -> ingresso in release -> consegna\/prove di release -> gate lifecycle finale/u);
 });
 
 test("Italian leaf help is understandable without plugin terminology", () => {
@@ -49,9 +49,8 @@ test("Italian leaf help is understandable without plugin terminology", () => {
 test("delivery help exposes required runtime inputs rather than internal aliases", () => {
   const propose = renderHelp(["autonomy", "delivery", "propose"]);
   const [proposePrimary, proposeTechnical] = propose.split("Technical details (optional):");
-  assert.match(proposePrimary, /For this pull request, how independently should I work\?/u);
-  assert.match(proposePrimary, /A local release uses its own separate question/u);
-  assert.doesNotMatch(proposePrimary, /pull request or local release/u);
+  assert.match(proposePrimary, /Choose how independently I should work for this one exact delivery/u);
+  assert.match(proposePrimary, /Pull requests and local releases always use separate choices/u);
   assert.doesNotMatch(proposePrimary, FORBIDDEN_PRIMARY_JARGON);
   for (const flag of ["--id", "--delivery", "--kind", "--story", "--contract", "--requirement", "--level"]) {
     assert.match(proposeTechnical, new RegExp(`${flag}[^\\n]*\\(required\\)`, "u"));
@@ -73,9 +72,8 @@ test("delivery help exposes required runtime inputs rather than internal aliases
 
   const italian = renderHelp(["autonomy", "delivery", "propose"], { locale: "it" });
   const [italianPrimary] = italian.split("Dettagli tecnici (facoltativi):");
-  assert.match(italianPrimary, /Per questa PR, quanto vuoi che lavori in autonomia\?/u);
-  assert.match(italianPrimary, /Un rilascio locale usa una domanda separata/u);
-  assert.doesNotMatch(italianPrimary, /PR o rilascio locale/u);
+  assert.match(italianPrimary, /Scegli quanta autonomia devo avere per questa singola consegna esatta/u);
+  assert.match(italianPrimary, /Pull request e rilasci locali usano sempre scelte separate/u);
 
   const action = buildHelpModel(["autonomy", "delivery", "action"]);
   const flags = new Map(action.options.map((entry) => [entry.flag, entry]));

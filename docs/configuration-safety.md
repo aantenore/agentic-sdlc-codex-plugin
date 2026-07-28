@@ -2,12 +2,24 @@
 
 The plugin pins each initialized project's complete effective configuration. Updating the plugin can add new defaults, but it cannot silently change the rules already governing that project.
 
+A Codex plugin installation does not create a global `agentic-sdlc`
+executable. Set the installer-managed entry point once before using the
+commands in this guide:
+
+```bash
+PLUGIN_CLI="$HOME/plugins/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs"
+node "$PLUGIN_CLI" help config
+```
+
+An npm installation may expose an equivalent bin shim. The explicit Node form
+below always identifies the plugin-local copy.
+
 ## The short version
 
 Run:
 
 ```bash
-agentic-sdlc config status --root /path/to/project
+node "$PLUGIN_CLI" config status --root /path/to/project
 ```
 
 The first three lines tell you the result, its impact, and the next action. Technical hashes and internal labels follow only as supporting detail.
@@ -26,7 +38,7 @@ Commands that only inspect state remain available during recovery. Commands that
 The preview is read-only:
 
 ```bash
-agentic-sdlc config migrate --root /path/to/project
+node "$PLUGIN_CLI" config migrate --root /path/to/project
 ```
 
 It reports every JSON path that would be added, replaced, or removed and prints a deterministic plan hash. It does not change `config.json`, create a lock, or write a migration receipt.
@@ -34,7 +46,7 @@ It reports every JSON path that would be added, replaced, or removed and prints 
 Apply only the plan you just reviewed:
 
 ```bash
-agentic-sdlc config migrate \
+node "$PLUGIN_CLI" config migrate \
   --root /path/to/project \
   --apply \
   --plan-hash <displayed-sha256>
@@ -42,12 +54,39 @@ agentic-sdlc config migrate \
 
 Before writing, the CLI recomputes the plan under a project lock. If the config, previous lock, or plan changed after review, the command stops and preserves the existing files. A successful apply atomically materializes the reviewed config, writes `config.lock.json`, and stores an immutable receipt under `.sdlc/migrations/config/`.
 
+### Adopt an exact manifestless v0.11 project
+
+Projects initialized by the bundled v0.11 format predate
+`.sdlc/bootstrap-manifest.json`. The CLI recognizes only that exact legacy
+shape. Preview remains read-only and identifies the adoption separately; it
+does not treat a changed project version as proof of a legacy bootstrap.
+
+After reviewing both the migration plan and the identified legacy bootstrap,
+apply them with a separate, directly attributed decision:
+
+```bash
+node "$PLUGIN_CLI" config migrate \
+  --root /path/to/project \
+  --apply \
+  --plan-hash <displayed-sha256> \
+  --confirm-legacy-bootstrap \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Adopt this exact legacy bootstrap"
+```
+
+An approved CI actor may instead use `--actor-type ci --approval-source ci`.
+Both human and CI adoption require a decision summary or approval-evidence
+file. A missing, mismatched, or previously locked bootstrap stops before any
+configuration file, lock, or receipt is written. This flag is only for the
+first v0.11 lock; it cannot repair or bypass an incomplete newer bootstrap.
+
 ## Change the autonomy rollout mode
 
 Do not edit `autonomy_policy.mode` by hand. Preview one of the four supported modes through the same hash-bound configuration workflow:
 
 ```bash
-agentic-sdlc config migrate \
+node "$PLUGIN_CLI" config migrate \
   --root /path/to/project \
   --autonomy-mode observe
 ```
@@ -61,7 +100,7 @@ replace /autonomy_policy/mode: "enforce_new_only" -> "observe"
 Apply the exact reviewed mode and plan together:
 
 ```bash
-agentic-sdlc config migrate \
+node "$PLUGIN_CLI" config migrate \
   --root /path/to/project \
   --autonomy-mode observe \
   --apply \

@@ -84,7 +84,7 @@ Those artifacts must stay in the project `.sdlc/` directory.
 
 ## Autonomy Records
 
-Store requirement ceilings and delivery choices under `.sdlc/autonomy/`. A `requirement-execution-profile:v1` binds the ceiling to one immutable requirement revision. A `delivery-execution-profile:v1` binds the explicit choice to one `pull_request` or `local_release` and exactly one story/approved-contract pair; it is never reusable across deliveries. An `autonomy-decision:v1` records the most restrictive effective result and reason codes.
+Store requirement ceilings and delivery choices under `.sdlc/autonomy/`. A `requirement-execution-profile:v1` binds the ceiling to one immutable requirement revision. A new `delivery-execution-profile:v2` binds the explicit choice, verification-provider bindings, one `pull_request` or `local_release`, and exactly one story/approved-contract pair; it is never reusable across deliveries. Historical `delivery-execution-profile:v1` records remain byte- and hash-compatible and receive only the conservative in-memory legacy provider mapping; they are never rewritten. An `autonomy-decision:v1` records the most restrictive effective result and reason codes.
 
 For a pull request, retain repository, base/head branches, canonical actions, explicit write paths, story/contract refs, and merge boundary. For a local release, retain the target root, allowed writes/actions, shell-free JSON-argv smoke tests, and rollback. `audit_only` is capped at `checkpointed`, even for local targets; effective `bounded-autonomous` requires an external trusted host/CI Ed25519 receipt under `host_verified` policy. Protected-branch merge and remote/production deployment require separate explicit authority.
 

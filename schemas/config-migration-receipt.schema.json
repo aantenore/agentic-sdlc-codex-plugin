@@ -50,6 +50,9 @@
     "lock_hash": { "$ref": "#/$defs/sha256" },
     "applied_at": { "type": "string", "format": "date-time" },
     "audit": { "$ref": "common.schema.json#/$defs/audit" },
+    "legacy_bootstrap_adoption": {
+      "$ref": "#/$defs/legacy_bootstrap_adoption"
+    },
     "hash_algorithm": { "const": "sha256:stable-json:v1" },
     "receipt_hash": { "$ref": "#/$defs/sha256" }
   },
@@ -64,6 +67,78 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "legacy_bootstrap_adoption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "project_ref",
+        "source_config_sha256",
+        "legacy_defaults_profile",
+        "plan_hash",
+        "approval",
+        "hash_algorithm",
+        "adoption_hash"
+      ],
+      "properties": {
+        "schema_version": { "const": "legacy-bootstrap-adoption:v1" },
+        "status": { "const": "approved" },
+        "project_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "path", "sdlc_version", "content_sha256"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "path": { "const": ".sdlc/project.json" },
+            "sdlc_version": { "const": "0.11.0" },
+            "content_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "source_config_sha256": { "$ref": "#/$defs/sha256" },
+        "legacy_defaults_profile": { "$ref": "#/$defs/defaults_profile" },
+        "plan_hash": { "$ref": "#/$defs/sha256" },
+        "approval": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "id",
+            "status",
+            "summary",
+            "evidence",
+            "approval_source",
+            "approved_content_hash",
+            "hash_algorithm",
+            "approved_by",
+            "created_at"
+          ],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "status": { "const": "approved" },
+            "summary": { "type": ["string", "null"] },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "sha256"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "sha256": { "$ref": "#/$defs/sha256" }
+                }
+              }
+            },
+            "approval_source": { "enum": ["explicit-user", "ci"] },
+            "approved_content_hash": { "$ref": "#/$defs/sha256" },
+            "hash_algorithm": { "const": "sha256:stable-json:v1" },
+            "approved_by": { "$ref": "common.schema.json#/$defs/actor" },
+            "created_at": { "type": "string", "format": "date-time" }
+          }
+        },
+        "hash_algorithm": { "const": "sha256:stable-json:v1" },
+        "adoption_hash": { "$ref": "#/$defs/sha256" }
       }
     }
   }

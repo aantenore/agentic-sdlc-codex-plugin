@@ -80,7 +80,7 @@ The business requirement and the autonomy policy are related but separate:
 
 - `requirement:v2` captures the agreed outcome, boundaries, acceptance criteria, non-goals, NFRs, integrations, and revision lineage;
 - `requirement-execution-profile:v1` sets the maximum autonomy for that immutable requirement revision;
-- `delivery-execution-profile:v1` records the explicit choice for one `pull_request` or `local_release`;
+- `delivery-execution-profile:v2` records the explicit choice for one `pull_request` or `local_release`, including its verification-provider bindings; historical `delivery-execution-profile:v1` records remain readable through the conservative in-memory compatibility mapping and are never rewritten;
 - the contract can only narrow that delivery level for its phase.
 
 Delivery binding is deliberately one-way. Reserve a stable `delivery_execution_profile_id` in the final contract, approve that contract, then create and approve the matching delivery profile against the immutable requirement-profile, story, and contract hashes. The contract does not hash-bind the delivery profile and is not rewritten after profile approval, which avoids a circular hash dependency.
@@ -95,11 +95,13 @@ Execution actions are two-receipt operations: authorize the exact action/runtime
 
 ## Template Source
 
-The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template directory through:
+The default contract templates are defined in `templates/sdlc-config.json` at the plugin root. Teams can fork or replace that file, then pass a custom template overlay directory through:
 
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs --template-dir <dir> ...
 ```
+
+The overlay must contain a valid, readable `sdlc-config.json`. Other template assets are optional: when an asset is absent from the overlay, the CLI uses the matching bundled asset. `init` and the initialization part of `onboard existing-project` resolve and validate the configuration plus the knowledge-base README before writing the `.sdlc` bootstrap. Later commands resolve only the assets they need—for example, story creation resolves its plan and implementation-log templates—and reject an invalid selected asset before that command starts its own writes. Initialization does not proactively validate optional assets used only by later commands.
 
 At `init`, the effective config is copied into the target project's `.sdlc/config.json`. Existing projects use that project-local policy for gate and orchestration commands, so later template-dir changes cannot silently weaken the process.
 

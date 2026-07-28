@@ -47,14 +47,27 @@ For implementation work, Codex follows one visible order:
 5. **Choose autonomy for this one delivery**
    Every new pull request, existing pull request, or local release gets a fresh choice. A choice from an earlier delivery is never reused.
 
-6. **Start once**
-   Only after the preceding content is approved does Codex make the task-start decision. An explicit start confirmation, when required, completes that same start; it is not a second planning phase.
+6. **Start the story workflow, then start once**
+   Codex first binds the exact configured phase order to the story. This must
+   happen before task start and before the first completed step. Only then does
+   Codex make the task-start decision. An explicit start confirmation, when
+   required, completes that same start; it is not a second planning phase.
 
 7. **Implement and test**
-   Codex changes only the displayed paths, runs the agreed checks, records evidence, and validates the result.
+   Codex changes only the displayed paths, runs the agreed checks, records
+   evidence, completes each phase, and enters the next phase only after the
+   previous one is complete.
 
-8. **Finish at the named destination**
-   Codex creates or updates the one approved PR, or completes the local-only release and its smoke test. Merge, remote deployment, and production remain separate unless they were explicitly included and approved.
+8. **Validate, then enter release**
+   After validation is complete, Codex seals the intermediate strict receipt
+   and moves the bound workflow into `release`.
+
+9. **Finish and certify at the named destination**
+   Only after entering `release`, Codex creates or updates the one approved PR,
+   or completes the local-only release, release trace, release step, and smoke
+   test. It then runs the distinct lifecycle-complete gate. Merge, remote
+   deployment, and production remain separate unless explicitly included and
+   approved.
 
 If a material requirement, branch, path, tool, budget, environment, or destination changes, Codex shows the changed boundary before continuing.
 
@@ -80,23 +93,32 @@ stage understandable before moving to the next:
 | Discovery | Observed project facts, inferences, relevant files, assumptions, and missing decisions | You correct or accept the displayed context; no implementation has started |
 | Requirement | Configurable limit behavior, observable acceptance checks, non-goals, constraints, and maximum autonomy | One exact requirement revision is approved |
 | Contract | Source/test paths, configuration boundary, commands, local destination, allowed smoke-test working directory, smoke test, rollback, allowed writes, and excluded actions | One exact implementation agreement is approved |
-| Story and workflow | Story `ST-TRIP-POLICY-001` and a story-bound `software-project` v2 journey through discovery, analysis, design, implementation, validation, and release | The workflow status names the current stage and any canonical evidence still missing |
+| Story and workflow | Story `ST-TRIP-POLICY-001` and a story-bound `software-project` v2 journey through discovery, analysis, design, implementation, validation, and release | The workflow starts before task start and the first completed step; a custom phase order uses an approved exact-match definition |
 | Implementation | Only the approved source, configuration, test, and documentation changes | The implementation matches the requirement and contract |
 | Test and validation | The exact test command, latest outcome, evidence location, and any failed or skipped check | The latest required test and output verification pass; an older success cannot hide a newer failure |
-| Local release | Exact local destination, terminal `released` status, successful smoke evidence, and usable rollback | The one approved delivery is closed; push, PR, deployment, and production remain excluded |
+| Release entry | The ordinary strict validation receipt and the transition into `release` | Validation is complete before release entry; no release trace or delivery close exists yet |
+| Local release | Exact local destination, passing release trace, completed release step, terminal `released` status, successful smoke evidence, and usable rollback | All release evidence occurs after entry into `release`; push, PR, deployment, and production remain excluded |
 | Final certification | One strict lifecycle result bound to this story and its terminal delivery | Every configured phase and current canonical record passes together |
 
-After the local release is terminal, Codex runs:
+After validation is complete, Codex runs the ordinary strict check and uses its
+distinct intermediate receipt to move the story-bound workflow into its
+terminal `release` phase. Only then does it perform the local release, append
+the passing release trace, complete the release step, and close the delivery.
+After those records exist, it runs:
 
 ```bash
-agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
+node <plugin-root>/bin/agentic-sdlc.mjs gate check \
+  --strict \
+  --story ST-TRIP-POLICY-001 \
+  --lifecycle-complete
 ```
 
-A strict check without `--lifecycle-complete` may be useful while work is still
-in progress, but it is not the final delivery certificate. The lifecycle
-command must fail before required phases, current test evidence, and the named
-release are complete. On success, ask Codex to show the final receipt, delivered
-path, checks run, exclusions, and residual risks in plain language.
+A strict check without `--lifecycle-complete` is the intermediate readiness
+receipt, not the final delivery certificate. The lifecycle command must fail
+before required phases, current test evidence, the named release, and the
+current workflow's terminal state are complete. On success, ask Codex to show
+the final receipt, delivered path, checks run, exclusions, and residual risks
+in plain language.
 
 If the same requirement later needs a pull request, create a new delivery
 profile and autonomy choice for that PR. Do not reuse the completed local
@@ -200,10 +222,10 @@ Why is Agentic SDLC blocked? Explain what happened, what remains protected, and 
 Operators can use:
 
 ```bash
-agentic-sdlc status
-agentic-sdlc status --locale it
-agentic-sdlc doctor --root /path/to/project
-agentic-sdlc config status --root /path/to/project
+node <plugin-root>/bin/agentic-sdlc.mjs status
+node <plugin-root>/bin/agentic-sdlc.mjs status --locale it
+node <plugin-root>/bin/agentic-sdlc.mjs doctor --root /path/to/project
+node <plugin-root>/bin/agentic-sdlc.mjs config status --root /path/to/project
 ```
 
 `status`, `doctor`, and `config status` inspect and explain; they do not approve work or widen permissions.

@@ -36,6 +36,7 @@ import {
   validateWorkflowOverlay,
 } from "../lib/workflow-engine.mjs";
 import {
+  SOFTWARE_PROJECT_PHASES,
   buildWorkflowPreset,
   getWorkflowPreset,
   listWorkflowPresets,
@@ -44,6 +45,7 @@ import {
   CANONICAL_WORKFLOW_GUARD_CHECKS,
   buildWorkflowCanonicalEvidence,
   buildWorkflowFinalGateReceipt,
+  buildWorkflowStrictGateReceipt,
 } from "../lib/workflow-canonical-evidence.mjs";
 import {
   applyBudgetAmendment,
@@ -240,7 +242,13 @@ const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
 const PROJECT_CONFIG_FILE_NAME = "config.json";
 const MAX_CLI_ERROR_CONFIG_BYTES = 2 * 1024 * 1024;
+const MAX_TEMPLATE_ASSET_BYTES = 2 * 1024 * 1024;
 const PROJECT_CONFIG_LOCK_FILE_NAME = "config.lock.json";
+const PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME = "bootstrap-manifest.json";
+const PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION = "project-bootstrap-manifest:v1";
+const PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME = "bootstrap-journal.json";
+const PROJECT_BOOTSTRAP_JOURNAL_SCHEMA_VERSION = "project-bootstrap-journal:v1";
+const PROJECT_BOOTSTRAP_MANIFEST_INTRODUCED_VERSION = "0.13.1";
 const LEGACY_CONFIG_PROFILE_ID = "sdlc-config-v1@0.11.0";
 const INTERNAL_LOCK_WAIT_MS = 5000;
 const INTERNAL_LOCK_STALE_MS = 30000;
@@ -419,6 +427,7 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "approval-evidence",
   "approval-source",
   "authorization",
+  "authorization-receipt",
   "authority-assurance",
   "artifact",
   "assumption",
@@ -1306,11 +1315,34 @@ function workflowFinalGateReceiptPath(context, storyId) {
   return path.join(workflowFinalGatesRoot(context), `${normalizeId(storyId)}-final.json`);
 }
 
+function workflowStrictGateReceiptPath(context, storyId) {
+  return path.join(workflowFinalGatesRoot(context), `${normalizeId(storyId)}-strict.json`);
+}
+
 function sealWorkflowFinalGateReceipt(context, report) {
   const filePath = workflowFinalGateReceiptPath(context, report.story_id);
-  return buildWorkflowFinalGateReceipt(report, {
+  const receipt = buildWorkflowFinalGateReceipt(report, {
     final_receipt_path: toProjectPath(context, filePath),
   });
+  assertRecordSchema(
+    receipt,
+    "workflow-final-gate-receipt.schema.json",
+    `Final workflow gate receipt ${report.story_id}`,
+  );
+  return receipt;
+}
+
+function sealWorkflowStrictGateReceipt(context, report) {
+  const filePath = workflowStrictGateReceiptPath(context, report.story_id);
+  const receipt = buildWorkflowStrictGateReceipt(report, {
+    strict_receipt_path: toProjectPath(context, filePath),
+  });
+  assertRecordSchema(
+    receipt,
+    "workflow-strict-gate-receipt.schema.json",
+    `Intermediate workflow gate receipt ${report.story_id}`,
+  );
+  return receipt;
 }
 
 function normalizeWorkflowVersion(value, optionName) {
@@ -2555,9 +2587,31 @@ function startWorkflowInstance(context, options) {
     if (!readStory(context, storyId)) {
       fail(`Story ${storyId} does not exist and cannot be bound to this workflow instance.`);
     }
+    const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+    if (fs.existsSync(taskStartPath)) {
+      fail(
+        `Story ${storyId} already has a task-start receipt. `
+        + "A story-bound workflow must start before task start; post-hoc workflow replay cannot certify lifecycle completion.",
+      );
+    }
+    const completedSteps = readStoryStepRecords(context, storyId)
+      .filter((record) => record.status === "completed");
+    if (completedSteps.length > 0) {
+      fail(
+        `Story ${storyId} already has completed lifecycle steps (${completedSteps
+          .map((record) => record.phase || record.step)
+          .filter(Boolean)
+          .join(", ")}). `
+        + "A story-bound workflow must start before the first completed step; post-hoc workflow replay is not allowed.",
+      );
+    }
     assertStoryBoundWorkflowPhaseOrder(context, effectiveDefinition);
     governanceBinding = {
       story_id: storyId,
+      strict_gate_receipt_path: toProjectPath(
+        context,
+        workflowStrictGateReceiptPath(context, storyId),
+      ),
       final_gate_receipt_path: toProjectPath(
         context,
         workflowFinalGateReceiptPath(context, storyId),
@@ -2689,6 +2743,7 @@ function startWorkflowInstance(context, options) {
     `Initial state: ${instance.current_state || instance.initial_state || effectiveDefinition.initial_state}`,
     ...(governanceBinding ? [
       `Story binding: ${governanceBinding.story_id}`,
+      `Strict gate receipt: ${governanceBinding.strict_gate_receipt_path}`,
       `Final gate receipt: ${governanceBinding.final_gate_receipt_path}`,
     ] : []),
     `Path: ${toProjectPath(context, instancePath)}`,
@@ -4323,6 +4378,13 @@ function buildCanonicalEvidenceForWorkflowInstance(context, instance) {
   if (path.resolve(boundGatePath) !== path.resolve(expectedGatePath)) {
     fail(`Workflow instance ${instance.id} final-gate binding does not match story ${storyId}.`);
   }
+  const expectedStrictGatePath = workflowStrictGateReceiptPath(context, storyId);
+  const boundStrictGatePath = binding.strict_gate_receipt_path
+    ? resolveProjectFilePath(context, binding.strict_gate_receipt_path, { mustExist: false })
+    : null;
+  if (boundStrictGatePath && path.resolve(boundStrictGatePath) !== path.resolve(expectedStrictGatePath)) {
+    fail(`Workflow instance ${instance.id} strict-gate binding does not match story ${storyId}.`);
+  }
   const story = readStory(context, storyId);
   const requirements = (story?.requirement_refs || [])
     .map((reference) => readRequirement(context, reference?.id, { missingOk: true }))
@@ -4337,14 +4399,27 @@ function buildCanonicalEvidenceForWorkflowInstance(context, instance) {
   const deliveryCloseReceipt = deliveryProfile
     ? currentDeliveryExecutionState(context, deliveryProfile).close_receipt
     : null;
-  const gateReport = fs.existsSync(expectedGatePath)
-    ? readProjectJson(context, expectedGatePath)
-    : null;
+  const strictGatePath = boundStrictGatePath || expectedStrictGatePath;
+  const useLegacyFinalGate = !binding.strict_gate_receipt_path
+    && !fs.existsSync(strictGatePath)
+    && fs.existsSync(expectedGatePath);
+  const gateReport = fs.existsSync(strictGatePath)
+    ? readProjectJson(context, strictGatePath)
+    : useLegacyFinalGate
+      ? readProjectJson(context, expectedGatePath)
+      : null;
   if (gateReport) {
+    const legacyFinalSchema = gateReport.schema_version === "workflow-final-gate-receipt:v1";
     assertRecordSchema(
       gateReport,
-      "workflow-final-gate-receipt.schema.json",
-      `Final workflow gate receipt ${binding.final_gate_receipt_path}`,
+      useLegacyFinalGate
+        ? legacyFinalSchema
+          ? "workflow-final-gate-receipt-v1.schema.json"
+          : "workflow-final-gate-receipt.schema.json"
+        : "workflow-strict-gate-receipt.schema.json",
+      useLegacyFinalGate
+        ? `Legacy final workflow gate receipt ${binding.final_gate_receipt_path}`
+        : `Intermediate workflow gate receipt ${toProjectPath(context, strictGatePath)}`,
     );
   }
   return buildDomainRecord(
@@ -4894,8 +4969,14 @@ function handleCliPresetCommand(subcommand, rest, parsed) {
 
 function buildContext(options) {
   const root = path.resolve(String(options.root || process.cwd()));
-  const templateDir = path.resolve(String(options["template-dir"] || DEFAULT_TEMPLATE_DIR));
-  const templateConfig = validateSdlcConfig(readJson(path.join(templateDir, "sdlc-config.json")));
+  const bundledTemplateDirectory = resolveStableTemplateDirectory(DEFAULT_TEMPLATE_DIR);
+  const templateDirectory = options["template-dir"] === undefined
+    ? bundledTemplateDirectory
+    : resolveStableTemplateDirectory(String(options["template-dir"]));
+  const templateDir = templateDirectory.path;
+  const templateConfig = validateSdlcConfig(
+    readRequiredTemplateConfig(templateDir, templateDirectory.identity),
+  );
   const projectConfigPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_FILE_NAME);
   const configLockPath = path.join(root, SDLC_DIR, PROJECT_CONFIG_LOCK_FILE_NAME);
   if (fs.existsSync(projectConfigPath)) {
@@ -4913,16 +4994,15 @@ function buildContext(options) {
   const projectConfigExists = fs.existsSync(projectConfigPath);
   const rawProjectConfig = projectConfigExists ? readProjectJson({ root }, projectConfigPath) : null;
   const projectConfigLock = fs.existsSync(configLockPath) ? readProjectJson({ root }, configLockPath) : null;
+  const projectConfigSnapshotHash = rawProjectConfig ? computeStableHash(rawProjectConfig) : null;
+  const projectConfigLockSnapshotHash = projectConfigLock ? computeStableHash(projectConfigLock) : null;
   const legacyConfig = projectConfigExists && !projectConfigLock
     ? validateSdlcConfig(
         readJson(path.join(DEFAULT_TEMPLATE_DIR, "config-compat", "sdlc-config-v1-0.11.0.json")),
       )
     : null;
   const legacyDefaultsProfile = legacyConfig
-    ? {
-        id: LEGACY_CONFIG_PROFILE_ID,
-        sha256: computeStableHash(legacyConfig),
-      }
+    ? buildLegacyDefaultsProfile(legacyConfig)
     : null;
   let configResolutionError = null;
   let configState;
@@ -4991,6 +5071,9 @@ function buildContext(options) {
     root,
     sdlcRoot: path.join(root, SDLC_DIR),
     templateDir,
+    templateDirIdentity: templateDirectory.identity,
+    bundledTemplateDir: bundledTemplateDirectory.path,
+    bundledTemplateDirIdentity: bundledTemplateDirectory.identity,
     config: selectedConfig,
     templateConfig,
     legacyConfig,
@@ -4998,10 +5081,19 @@ function buildContext(options) {
     configLockPath,
     rawProjectConfig,
     projectConfigLock,
+    projectConfigSnapshotHash,
+    projectConfigLockSnapshotHash,
     configState,
     configValidationError,
     legacyDefaultsProfile,
     templateDefaultsProfile,
+  };
+}
+
+function buildLegacyDefaultsProfile(legacyConfig) {
+  return {
+    id: LEGACY_CONFIG_PROFILE_ID,
+    sha256: computeStableHash(legacyConfig),
   };
 }
 
@@ -5162,6 +5254,7 @@ function prepareProjectConfigMigration(context, projectConfig, projectLock, auto
         target_config: targetConfig,
       });
     }
+    legacyBootstrapAdoptionSubject(context, projectConfig, projectLock, plan);
   } catch (error) {
     if (error instanceof TypeError) {
       fail([
@@ -5185,6 +5278,117 @@ function prepareProjectConfigMigration(context, projectConfig, projectLock, auto
     ].join("\n"));
   }
   return plan;
+}
+
+function legacyBootstrapAdoptionSubject(
+  context,
+  projectConfig,
+  projectLock,
+  plan,
+) {
+  if (projectLock) return null;
+  const manifestPath = path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME);
+  if (pathEntryExistsNoFollow(manifestPath)) {
+    const entry = fs.lstatSync(manifestPath);
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new TypeError("The existing bootstrap manifest is not a stable regular file");
+    }
+    return null;
+  }
+  const projectPath = path.join(context.sdlcRoot, "project.json");
+  if (!pathEntryExistsNoFollow(projectPath)) {
+    throw new TypeError("A first configuration lock requires an initialized project record");
+  }
+  const project = readProjectJson(context, projectPath);
+  const legacyConfig = validateSdlcConfig(
+    readJson(path.join(DEFAULT_TEMPLATE_DIR, "config-compat", "sdlc-config-v1-0.11.0.json")),
+  );
+  const exactLegacyBootstrap = project.sdlc_version === "0.11.0"
+    && !project.bootstrap_manifest
+    && !project.bootstrap_journal
+    && !pathEntryExistsNoFollow(projectBootstrapJournalPath(context))
+    && !pathEntryExistsNoFollow(path.join(context.sdlcRoot, ".gitattributes"))
+    && computeStableHash(projectConfig) === computeStableHash(legacyConfig)
+    && ["materialize_legacy_defaults", "adopt_lock"].includes(plan.mode);
+  if (!exactLegacyBootstrap) {
+    throw new TypeError(
+      "The missing bootstrap manifest does not match the exact supported v0.11 bootstrap evidence; "
+      + "a normal configuration migration cannot recreate legacy provenance for an incomplete newer bootstrap",
+    );
+  }
+  return {
+    schema_version: "legacy-bootstrap-adoption:v1",
+    status: "approved",
+    project_ref: {
+      id: project.project_id,
+      path: `${SDLC_DIR}/project.json`,
+      sdlc_version: project.sdlc_version,
+      content_sha256: computeStableHash(project),
+    },
+    source_config_sha256: computeStableHash(projectConfig),
+    legacy_defaults_profile: buildLegacyDefaultsProfile(legacyConfig),
+    plan_hash: plan.plan_hash,
+  };
+}
+
+function attachLegacyBootstrapAdoption(context, options, application, adoptionSubject) {
+  if (!adoptionSubject || application.status === "already_applied") return application;
+  if (options["confirm-legacy-bootstrap"] !== true) {
+    fail([
+      "The first configuration lock was not created because this manifestless v0.11 bootstrap needs a separate explicit adoption.",
+      "Impact: the legacy files remain unchanged and no migration receipt was written.",
+      "Next: review the exact legacy adoption shown by the preview, then repeat the apply command with --confirm-legacy-bootstrap, --actor-type human|ci, --approval-source explicit-user|ci, and --summary.",
+    ].join("\n"));
+  }
+  const source = getOptionString(options, "approval-source");
+  if (!["explicit-user", "ci"].includes(source)) {
+    fail(
+      "Legacy bootstrap adoption requires direct --approval-source explicit-user or ci; "
+      + "automation and bootstrap attribution cannot adopt historical project state.",
+    );
+  }
+  const approvalSummary = getOptionString(options, "summary");
+  const approvalEvidence = normalizeListOption(options["approval-evidence"]);
+  if (!approvalSummary && approvalEvidence.length === 0) {
+    fail([
+      "The first configuration lock was not created because legacy bootstrap adoption requires --summary or --approval-evidence, including for CI approval.",
+      "Impact: the legacy files remain unchanged and no migration receipt was written.",
+      "Next: describe the exact reviewed adoption with --summary, or bind a stable project file with --approval-evidence, then retry the same reviewed plan.",
+    ].join("\n"));
+  }
+  const attribution = buildAttribution(context, options, "config.migrate.legacy-bootstrap-adopt");
+  const approval = buildApprovalRecord(context, options, attribution, {
+    label: "Legacy bootstrap adoption",
+    subject: adoptionSubject,
+    subject_id: adoptionSubject.project_ref.id,
+    scope: {
+      adoption_only: true,
+      project_id: adoptionSubject.project_ref.id,
+      plan_hash: adoptionSubject.plan_hash,
+      does_not_approve_future_migrations: true,
+    },
+  });
+  const adoptionBase = {
+    ...adoptionSubject,
+    approval,
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  const legacyBootstrapAdoption = {
+    ...adoptionBase,
+    adoption_hash: computeStableHash(adoptionBase),
+  };
+  const { receipt_hash: _priorReceiptHash, ...receiptBase } = application.receipt;
+  const receiptSubject = {
+    ...receiptBase,
+    legacy_bootstrap_adoption: legacyBootstrapAdoption,
+  };
+  return {
+    ...application,
+    receipt: {
+      ...receiptSubject,
+      receipt_hash: computeStableHash(receiptSubject),
+    },
+  };
 }
 
 function configMigrationChangeSummary(plan) {
@@ -5272,26 +5476,41 @@ function migrateProjectConfig(context, options) {
     }
     const impact = configMigrationChangeSummary(plan);
     const autonomyModeArgument = autonomyMode ? ` --autonomy-mode ${autonomyMode}` : "";
+    const legacyAdoption = legacyBootstrapAdoptionSubject(
+      context,
+      context.rawProjectConfig,
+      context.projectConfigLock,
+      plan,
+    );
+    const legacyAdoptionArgument = legacyAdoption
+      ? " --confirm-legacy-bootstrap --actor-type human --approval-source explicit-user --summary \"I adopt this exact legacy bootstrap\""
+      : "";
     output(options, {
       status: "planned",
       files_changed: 0,
       impact,
       requested_autonomy_mode: autonomyMode,
       semantic_diff: plan.changes,
+      legacy_bootstrap_adoption: legacyAdoption
+        ? { required: true, subject: legacyAdoption }
+        : { required: false },
       next_action: plan.status === "already_applied"
         ? "No action is required."
-        : `Review the changes, then apply plan ${plan.plan_hash}.`,
+        : legacyAdoption
+          ? `Review the changes and the exact legacy bootstrap, then explicitly adopt and apply plan ${plan.plan_hash}.`
+          : `Review the changes, then apply plan ${plan.plan_hash}.`,
       plan,
     }, [
       "Configuration migration preview is ready; no files were changed.",
       `Impact: ${impact}`,
       plan.status === "already_applied"
         ? "Next: no action is required."
-        : `Next: review the changes, then run \`agentic-sdlc config migrate${autonomyModeArgument} --apply --plan-hash ${plan.plan_hash}\`.`,
+        : `Next: review the changes, then run \`agentic-sdlc config migrate${autonomyModeArgument} --apply --plan-hash ${plan.plan_hash}${legacyAdoptionArgument}\`.`,
       "",
       "Details:",
       `- Plan: ${plan.plan_hash}`,
       `- Mode: ${plan.mode}`,
+      ...(legacyAdoption ? ["- Legacy bootstrap adoption: separate direct approval required"] : []),
       `- Reviewed changes: ${plan.changes.length}`,
       ...plan.changes.map(formatConfigMigrationChange),
     ]);
@@ -5325,6 +5544,12 @@ function migrateProjectConfig(context, options) {
     }
     const currentLock = lockExisted ? JSON.parse(lockBefore) : null;
     plan = prepareProjectConfigMigration(context, currentConfig, currentLock, autonomyMode);
+    const legacyAdoption = legacyBootstrapAdoptionSubject(
+      context,
+      currentConfig,
+      currentLock,
+      plan,
+    );
     try {
       application = buildConfigMigrationApplyData({
         plan,
@@ -5334,6 +5559,12 @@ function migrateProjectConfig(context, options) {
         applied_at: now(),
         audit: buildAttribution(context, options, "config.migrate"),
       });
+      application = attachLegacyBootstrapAdoption(
+        context,
+        options,
+        application,
+        legacyAdoption,
+      );
     } catch (error) {
       if (error instanceof TypeError) {
         fail([
@@ -5489,6 +5720,12 @@ function configMigrationBootstrapMutations(context, plan) {
 }
 
 function assertConfigAllowsCommand(context, resolution, options, positionals = []) {
+  if (
+    resolution?.canonical_action === "onboard.existing-project"
+    && pathEntryExistsNoFollow(context.sdlcRoot)
+  ) {
+    assertHealthyExistingBootstrapForOnboard(context);
+  }
   if (!context.configState || context.configState.mutation_allowed !== false) return;
   // Unknown commands and invalid metadata are deliberately treated as
   // mutations: configuration recovery must never guess that they are safe.
@@ -5600,6 +5837,12 @@ function assertRecordSchema(record, schemaName, label) {
     fail(formatSchemaErrors(label, result.errors));
   }
   return record;
+}
+
+function profileTaskStartReceiptSchemaName(receipt) {
+  return receipt?.schema_version === "profile-task-start-receipt:v1"
+    ? "profile-task-start-receipt-v1.schema.json"
+    : "profile-task-start-receipt.schema.json";
 }
 
 function appendRecordSchemaIssues(report, record, schemaName, label) {
@@ -5877,38 +6120,112 @@ function startTaskLocked(context, options) {
     && (options["confirm-start"] || autonomyAuthorizedStart)
     && !decision.assessment_proposal_id
   ) {
-    const attribution = buildAttribution(context, options, "task.start.confirm");
-    const taskContract = decision.contract_id
-      ? readContractById(context, decision.contract_id, { missingOk: true })
-      : null;
-    const authorization = attribution.actor.type === "human" || decision.autonomy?.task_start_automatic === true
-      ? null
-      : requireAutomationAuthorization(context, options, attribution.action, {
-          label: `task start${decision.story_id ? ` for ${decision.story_id}` : ""}`,
-          subject_id: decision.story_id || "PROJECT",
-          artifact_types: contractArtifactTypes(taskContract || {}),
-        });
-    decision.authorization_ref = authorization?.id || null;
-    decision.authorization_use_ref = authorization?.__use_receipt?.path || null;
-    decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
-    const trace = appendTraceEvent(context, decision.story_id || null, {
-      type: "decision",
-      summary: `${options["confirm-start"] ? "Confirmed" : "Profile-authorized"} start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
-      action: "task.start.confirm",
-      actor: attribution.actor,
-      ...buildTraceAuthorityMetadata(context, options, attribution),
-      evidence: [
-        decision.contract?.path,
-        decision.delivery_profile_path,
-        decision.autonomy_decision_path,
-        decision.execution_context_preflight,
-      ].filter(Boolean),
-      related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
-      authorization_ref: authorization?.id || null,
-      git: attribution.git,
-      run: attribution.run,
-    });
-    decision.confirmation_trace_id = trace.id;
+    const releaseTaskStartBoundaryLock = decision.story_id
+      ? acquireFileLock(path.join(
+          context.sdlcRoot,
+          "stories",
+          decision.story_id,
+          "task-start-boundary.lock",
+        ))
+      : () => {};
+    let releaseWorkflowEventLock = () => {};
+    try {
+      const attribution = buildAttribution(context, options, "task.start.confirm");
+      const taskContract = decision.contract_id
+        ? readContractById(context, decision.contract_id, { missingOk: true })
+        : null;
+      const authorization = attribution.actor.type === "human" || decision.autonomy?.task_start_automatic === true
+        ? null
+        : requireAutomationAuthorization(context, options, attribution.action, {
+            label: `task start${decision.story_id ? ` for ${decision.story_id}` : ""}`,
+            subject_id: decision.story_id || "PROJECT",
+            artifact_types: contractArtifactTypes(taskContract || {}),
+          });
+      decision.authorization_ref = authorization?.id || null;
+      decision.authorization_use_ref = authorization?.__use_receipt?.path || null;
+      if (decision.story_id) {
+        const workflowProbe = { errors: [] };
+        const selectedWorkflow = currentStoryBoundWorkflowInstance(
+          context,
+          decision.story_id,
+          workflowProbe,
+        );
+        if (workflowProbe.errors.length > 0) {
+          fail(
+            `Cannot bind task start to the current story workflow: ${workflowProbe.errors.join("; ")}`,
+          );
+        }
+        if (selectedWorkflow) {
+          const { instance } = readCompletedWorkflowInstance(context, selectedWorkflow.entry);
+          const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+          const eventsPath = workflowEventsPath(context, selectedWorkflow.entry);
+          releaseWorkflowEventLock = acquireFileLock(`${eventsPath}.lock`);
+          const events = readWorkflowEvents(context, selectedWorkflow.entry);
+          const integrity = inspectWorkflowRuntimeIntegrity(
+            context,
+            selectedWorkflow.entry,
+            instance,
+            effectiveDefinition,
+            events,
+          );
+          if (!integrity.valid) {
+            fail(
+              `Cannot bind task start to workflow ${instance.id}: `
+              + `${(integrity.errors || []).join("; ") || "invalid workflow history"}`,
+            );
+          }
+          if (events.length > 0) {
+            fail(
+              `Story ${decision.story_id} workflow ${instance.id} already has ${events.length} transition event(s). `
+              + "Task start must be recorded after workflow start and before the first workflow transition.",
+            );
+          }
+          const completedSteps = readStoryStepRecords(context, decision.story_id)
+            .filter((record) => record.status === "completed");
+          if (completedSteps.length > 0) {
+            fail(
+              `Story ${decision.story_id} already has completed lifecycle steps (${completedSteps
+                .map((record) => record.phase || record.step)
+                .filter(Boolean)
+                .join(", ")}). `
+              + "Task start must be recorded before the first completed story step.",
+            );
+          }
+          decision.workflow_instance_ref = {
+            id: instance.id,
+            path: toProjectPath(context, workflowInstancePath(context, selectedWorkflow.entry)),
+            hash: instance.instance_hash,
+          };
+        } else {
+          decision.workflow_instance_ref = null;
+          decision.lifecycle_certification_warning =
+            `Story ${decision.story_id} has no pre-task story-bound workflow. `
+            + "This task may continue for legacy compatibility, but --lifecycle-complete cannot certify it.";
+        }
+      }
+      decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
+      const trace = appendTraceEvent(context, decision.story_id || null, {
+        type: "decision",
+        summary: `${options["confirm-start"] ? "Confirmed" : "Profile-authorized"} start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
+        action: "task.start.confirm",
+        actor: attribution.actor,
+        ...buildTraceAuthorityMetadata(context, options, attribution),
+        evidence: [
+          decision.contract?.path,
+          decision.delivery_profile_path,
+          decision.autonomy_decision_path,
+          decision.execution_context_preflight,
+        ].filter(Boolean),
+        related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
+        authorization_ref: authorization?.id || null,
+        git: attribution.git,
+        run: attribution.run,
+      });
+      decision.confirmation_trace_id = trace.id;
+    } finally {
+      releaseWorkflowEventLock();
+      releaseTaskStartBoundaryLock();
+    }
   }
   output(options, decision, formatTaskStartDecision(decision));
 }
@@ -5955,10 +6272,13 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
           verified: false,
           limitation: "Legacy string attribution is recorded but cannot independently prove authority.",
         };
+  const workflowInstanceRef = decision.workflow_instance_ref || null;
   const receipt = {
     id: `START-${decision.story_id || "PROJECT"}-${uniqueRecordSuffix()}`,
     kind: "profile_task_start_receipt",
-    schema_version: "profile-task-start-receipt:v1",
+    schema_version: workflowInstanceRef
+      ? "profile-task-start-receipt:v2"
+      : "profile-task-start-receipt:v1",
     story_id: decision.story_id || null,
     phase: decision.phase || null,
     route: decision.route,
@@ -5974,6 +6294,7 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
         }
       : null,
     autonomy_decision_ref: autonomyDecisionRef,
+    ...(workflowInstanceRef ? { workflow_instance_ref: workflowInstanceRef } : {}),
     delivery_start_receipt_ref: null,
     execution_context_preflight_ref: preparedPreflight
       ? {
@@ -6058,7 +6379,11 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     if (preparedPreflight) {
       revalidateExecutionContextPreflightSnapshot(context, preparedPreflight.receipt);
     }
-    assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id}`);
+    assertRecordSchema(
+      receipt,
+      profileTaskStartReceiptSchemaName(receipt),
+      `Task start receipt ${receipt.id}`,
+    );
     writeJsonFile(receiptPath, receipt, { force: true });
     taskStartWritten = true;
     if (preparedPreflight) {
@@ -7751,6 +8076,9 @@ function formatTaskStartDecision(decision) {
     `- ${italian ? "Attività" : "Story"}: ${decision.story_id || "n/a"}`,
     `- ${italian ? "Incarico" : "Contract"}: ${decision.contract_id || "n/a"}`,
     `- ${italian ? "Azione sull’incarico" : "Contract action"}: ${decision.contract_action || "n/a"}`,
+    decision.lifecycle_certification_warning
+      ? `- ${italian ? "Avviso certificazione lifecycle" : "Lifecycle certification warning"}: ${decision.lifecycle_certification_warning}`
+      : null,
   ];
   lines.push(
     decision.blocking_reasons.length
@@ -8765,7 +9093,11 @@ function validateTaskStartReceipt(context, storyId, contract) {
   const issues = [];
   if (receipt.kind === "profile_task_start_receipt") {
     try {
-      assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id || storyId}`);
+      assertRecordSchema(
+        receipt,
+        profileTaskStartReceiptSchemaName(receipt),
+        `Task start receipt ${receipt.id || storyId}`,
+      );
     } catch (error) {
       issues.push(error.message);
     }
@@ -9215,36 +9547,95 @@ function initProject(context, options) {
       output(options, result.payload, result.messages);
     });
   }
-  const result = initializeProject(context, options);
+  const result = recoverInterruptedProjectBootstrap(context, options);
   output(options, result.payload, result.messages);
 }
 
 function initBootstrapMutations(context) {
-  const directories = [
-    context.sdlcRoot,
-    ...context.config.kb_directories.map((directory) => path.join(context.sdlcRoot, directory)),
-    path.join(context.sdlcRoot, "output-contracts", "templates"),
-    path.join(context.sdlcRoot, "output-contracts", "decisions"),
-    path.join(context.sdlcRoot, "work-items", "epics"),
-    path.join(context.sdlcRoot, "work-items", "tasks"),
-  ];
+  const directories = projectBootstrapDirectoryPaths(context);
   const files = [
-    path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME),
-    path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME),
-    path.join(context.sdlcRoot, "project.json"),
-    path.join(context.sdlcRoot, "README.md"),
-    path.join(context.sdlcRoot, ".gitattributes"),
-    path.join(context.sdlcRoot, ".gitignore"),
-    path.join(context.sdlcRoot, "output-contracts", "registry.json"),
-    path.join(context.sdlcRoot, "dependencies", "graph.json"),
-    ...context.config.phase_order.map((phase) =>
-      path.join(context.sdlcRoot, "contracts", `contract-${phase}-v1.json`)),
+    ...projectBootstrapArtifactSpecifications(context).map((artifact) => artifact.path),
+    path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME),
+    path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME),
   ];
   const exact = [
     ...directories.map((directoryPath) => ({ operation: "directory.create", path: directoryPath })),
     ...files.map((filePath) => ({ operation: "file.write", path: filePath })),
   ];
   return [...new Map(exact.map((entry) => [`${entry.operation}\0${path.resolve(entry.path)}`, entry])).values()];
+}
+
+function projectBootstrapDirectoryPaths(context) {
+  const configuredDirectories = context.config.kb_directories.map((directory) =>
+    path.resolve(
+      context.sdlcRoot,
+      ...String(directory).replaceAll("\\", "/").split("/"),
+    ));
+  const artifactParents = projectBootstrapArtifactSpecifications(context)
+    .map((artifact) => path.dirname(artifact.path));
+  return projectBootstrapDirectoryAncestorClosure(context, [
+    ...configuredDirectories,
+    path.join(context.sdlcRoot, "output-contracts", "templates"),
+    path.join(context.sdlcRoot, "output-contracts", "decisions"),
+    path.join(context.sdlcRoot, "work-items", "epics"),
+    path.join(context.sdlcRoot, "work-items", "tasks"),
+    ...artifactParents,
+  ]);
+}
+
+function projectBootstrapDirectoryAncestorClosure(context, directoryPaths) {
+  const projectRoot = path.resolve(context.root);
+  const sdlcRoot = path.resolve(context.sdlcRoot);
+  if (sdlcRoot !== path.resolve(projectRoot, SDLC_DIR)) {
+    fail("Project bootstrap directory inventory is not bound to the canonical .sdlc root.");
+  }
+  assertNoSymlinkSegmentsWithinBoundary(projectRoot, sdlcRoot);
+
+  const closure = new Map();
+  for (const directoryPath of directoryPaths) {
+    let current = path.resolve(String(directoryPath));
+    if (!isInsidePath(sdlcRoot, current)) {
+      fail(`Project bootstrap directory escapes the canonical .sdlc root: ${directoryPath}`);
+    }
+    assertNoSymlinkSegmentsWithinBoundary(projectRoot, current);
+    while (true) {
+      closure.set(current, current);
+      if (current === sdlcRoot) break;
+      const parent = path.dirname(current);
+      if (parent === current || !isInsidePath(sdlcRoot, parent)) {
+        fail(`Project bootstrap directory has an ambiguous ancestor chain: ${directoryPath}`);
+      }
+      current = parent;
+    }
+  }
+  closure.set(sdlcRoot, sdlcRoot);
+  return [...closure.values()].sort((left, right) => {
+    const depthDifference = left.split(path.sep).length - right.split(path.sep).length;
+    return depthDifference || left.localeCompare(right);
+  });
+}
+
+function projectBootstrapArtifactSpecifications(context) {
+  return [
+    { role: "config", path: path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME) },
+    { role: "config_lock", path: path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME) },
+    { role: "project", path: path.join(context.sdlcRoot, "project.json") },
+    { role: "readme", path: path.join(context.sdlcRoot, "README.md") },
+    { role: "git_attributes", path: path.join(context.sdlcRoot, ".gitattributes") },
+    { role: "git_ignore", path: path.join(context.sdlcRoot, ".gitignore") },
+    {
+      role: "output_contract_registry",
+      path: path.join(context.sdlcRoot, "output-contracts", "registry.json"),
+    },
+    { role: "dependency_graph", path: path.join(context.sdlcRoot, "dependencies", "graph.json") },
+    ...context.config.phase_order.map((phase) =>
+      ({
+        role: "phase_contract",
+        id: `contract-${phase}-v1`,
+        phase,
+        path: path.join(context.sdlcRoot, "contracts", `contract-${phase}-v1.json`),
+      })),
+  ];
 }
 
 async function runDoctor(context, options) {
@@ -9270,6 +9661,25 @@ async function runDoctor(context, options) {
     add("plugin-metadata", "failed", error.message);
   }
 
+  try {
+    const identity = inspectBuildIdentity(PLUGIN_ROOT);
+    const versionMatches = identity.package_version === VERSION;
+    const fingerprintValid = /^[a-f0-9]{64}$/u.test(identity.build_fingerprint);
+    const sourceState = typeof identity.git_dirty === "boolean"
+      ? `, source ${identity.git_dirty ? "dirty" : "clean"}`
+      : "";
+    const provenanceState = identity.provenance
+      ? `, provenance ${identity.provenance}`
+      : ", provenance not embedded (allowed for source checkouts and generic npm installs)";
+    add(
+      "build-identity",
+      versionMatches && fingerprintValid ? "passed" : "failed",
+      `package ${identity.package_version}, fingerprint ${identity.build_fingerprint || "missing"}${sourceState}${provenanceState}`,
+    );
+  } catch (error) {
+    add("build-identity", "failed", error.message);
+  }
+
   const configGuidance = configStatusGuidance(context, humanGuidanceLocale(options));
   add(
     "effective-config",
@@ -9293,6 +9703,8 @@ async function runDoctor(context, options) {
     ["token-efficiency-autoconfiguration", "scripts/autoconfigure-token-efficiency.py"],
     ["context-optimization-domain", "lib/context-optimization.mjs"],
     ["context-optimization-schema", "schemas/context-optimization-observation.schema.json"],
+    ["project-bootstrap-manifest-schema", "schemas/project-bootstrap-manifest.schema.json"],
+    ["project-bootstrap-journal-schema", "schemas/project-bootstrap-journal.schema.json"],
     ["observatory-entry-point", "lib/change-observatory/index.mjs"],
     ["observatory-launcher", "lib/change-observatory/cli.mjs"],
     ["observatory-skill", "skills/change-observatory/SKILL.md"],
@@ -10041,17 +10453,365 @@ function spawnCommandWithoutShell(executable, argv, cwd, options = {}) {
   });
 }
 
+function projectBootstrapJournalPath(context) {
+  return path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME);
+}
+
+function projectBootstrapInitialIdentityHash(projectId, projectName) {
+  return computeStableHash({
+    project_id: String(projectId),
+    project_name: String(projectName),
+  });
+}
+
+function buildProjectBootstrapJournalRequest(context, options) {
+  const projectName = String(options["project-name"] || path.basename(context.root));
+  const projectId = String(options["project-id"] || slugify(projectName));
+  const config = context.templateConfig || context.config;
+  return {
+    initial_project_identity_sha256: projectBootstrapInitialIdentityHash(
+      projectId,
+      projectName,
+    ),
+    plugin_version: VERSION,
+    config_sha256: computeStableHash(config),
+    phase_order: [...config.phase_order],
+    kb_directories: [...config.kb_directories],
+  };
+}
+
+function sealProjectBootstrapJournal(journalBase) {
+  const { journal_hash: _priorHash, ...hashSubject } = journalBase;
+  const journal = {
+    ...hashSubject,
+    journal_hash: computeStableHash(hashSubject),
+  };
+  assertRecordSchema(
+    journal,
+    "project-bootstrap-journal.schema.json",
+    "Project bootstrap journal",
+  );
+  return journal;
+}
+
+function buildPreparedProjectBootstrapJournal(context, options) {
+  const request = buildProjectBootstrapJournalRequest(context, options);
+  const createdAt = now();
+  return sealProjectBootstrapJournal({
+    kind: "project_bootstrap_journal",
+    schema_version: PROJECT_BOOTSTRAP_JOURNAL_SCHEMA_VERSION,
+    version: 1,
+    status: "prepared",
+    request,
+    request_hash: computeStableHash(request),
+    prepared_manifest: null,
+    completed_manifest_ref: null,
+    previous_journal_hash: null,
+    created_at: createdAt,
+    updated_at: createdAt,
+    hash_algorithm: "sha256:stable-json:v1",
+  });
+}
+
+function transitionProjectBootstrapJournal(journal, status, preparedManifest = null) {
+  if (!["manifest_ready", "completed"].includes(status)) {
+    fail(`Unsupported project bootstrap journal transition: ${status}`);
+  }
+  const manifest = preparedManifest || journal.prepared_manifest;
+  if (!manifest) {
+    fail("Project bootstrap journal transition requires its exact prepared manifest.");
+  }
+  const completedManifestRef = status === "completed"
+    ? {
+        path: `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
+        schema_version: PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
+        manifest_hash: manifest.manifest_hash,
+        hash_algorithm: "sha256:stable-json:v1",
+      }
+    : null;
+  return sealProjectBootstrapJournal({
+    ...journal,
+    status,
+    prepared_manifest: manifest,
+    completed_manifest_ref: completedManifestRef,
+    previous_journal_hash: journal.journal_hash,
+    updated_at: now(),
+  });
+}
+
+function writeProjectBootstrapJournal(context, journal, options = {}) {
+  const journalPath = projectBootstrapJournalPath(context);
+  writeJsonFile(journalPath, journal, options);
+  if (options.force) {
+    // Forced journal transitions use an atomic rename. Flush the renamed file
+    // and its directory explicitly so the recovery marker cannot lag the
+    // manifest state after a crash.
+    syncWorkflowFile(journalPath);
+  }
+}
+
+function readProjectBootstrapJournal(context) {
+  const journalPath = projectBootstrapJournalPath(context);
+  const journal = readProjectJson(context, journalPath);
+  assertRecordSchema(
+    journal,
+    "project-bootstrap-journal.schema.json",
+    "Project bootstrap journal",
+  );
+  const { journal_hash: storedHash, ...hashSubject } = journal;
+  if (
+    journal.hash_algorithm !== "sha256:stable-json:v1"
+    || storedHash !== computeStableHash(hashSubject)
+    || journal.request_hash !== computeStableHash(journal.request)
+  ) {
+    fail(
+      `Existing ${SDLC_DIR} bootstrap journal is stale or tampered. No files were changed. `
+      + "Restore the canonical bootstrap records from version control.",
+    );
+  }
+  return journal;
+}
+
+function projectBootstrapJournalReference(requestHash) {
+  return {
+    path: `${SDLC_DIR}/${PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME}`,
+    schema_version: PROJECT_BOOTSTRAP_JOURNAL_SCHEMA_VERSION,
+    request_hash: requestHash,
+  };
+}
+
+function validatePreparedProjectBootstrapRecovery(context, journal) {
+  const manifest = journal.prepared_manifest;
+  assertRecordSchema(
+    manifest,
+    "project-bootstrap-manifest.schema.json",
+    "Prepared project bootstrap manifest",
+  );
+  const problems = [];
+  const projectPath = path.join(context.sdlcRoot, "project.json");
+  const configLockPath = path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME);
+  let project = null;
+  let configLock = null;
+  try {
+    project = readProjectJson(context, projectPath);
+    assertRecordSchema(project, "project.schema.json", "Project bootstrap project record");
+    configLock = readProjectJson(context, configLockPath);
+    assertRecordSchema(
+      configLock,
+      "effective-config-lock.schema.json",
+      "Project bootstrap effective config lock",
+    );
+  } catch (error) {
+    problems.push(`a required core record is unavailable or invalid (${error.message})`);
+  }
+  if (project) {
+    appendProjectBootstrapManifestProblems(context, manifest, project, problems);
+  }
+  const expectedJournalRef = projectBootstrapJournalReference(journal.request_hash);
+  if (
+    stableJson(project?.bootstrap_journal) !== stableJson(expectedJournalRef)
+    || stableJson(manifest.bootstrap_journal) !== stableJson(expectedJournalRef)
+    || journal.request.initial_project_identity_sha256
+      !== projectBootstrapInitialIdentityHash(
+        project?.project_id,
+        project?.project_name,
+      )
+  ) {
+    problems.push("the project, manifest, and recovery journal do not bind the same bootstrap request");
+  }
+  if (
+    configLock
+    && configLock.lock_hash !== manifest.initial_config?.lock_hash
+  ) {
+    problems.push("the current configuration lock differs from the prepared bootstrap manifest");
+  }
+  for (const artifact of manifest.artifacts || []) {
+    try {
+      const artifactPath = resolveProjectFilePath(
+        context,
+        artifact.path,
+        { mustExist: true, fileOnly: true },
+      );
+      const snapshot = readStableRegularFileBuffer(artifactPath, context.root);
+      if (snapshot.sha256 !== artifact.initial_content_sha256) {
+        problems.push(`${artifact.path} differs from the prepared byte snapshot`);
+      }
+    } catch (error) {
+      problems.push(`${artifact.path || "unknown bootstrap artifact"} is unavailable (${error.message})`);
+    }
+  }
+  for (const directory of manifest.directories || []) {
+    try {
+      const directoryPath = resolveProjectFilePath(
+        context,
+        directory,
+        { mustExist: true, directoryOnly: true },
+      );
+      assertNoSymlinkSegmentsWithinBoundary(context.root, directoryPath);
+    } catch (error) {
+      problems.push(`${directory || "unknown bootstrap directory"} is unavailable (${error.message})`);
+    }
+  }
+  if (problems.length > 0) {
+    fail(
+      `Interrupted ${SDLC_DIR} bootstrap cannot be recovered safely: ${problems.join("; ")}. `
+      + "No files were changed. Preserve useful evidence and archive the incomplete "
+      + `${SDLC_DIR} before starting a different project bootstrap.`,
+    );
+  }
+  return { manifest, project, configLock };
+}
+
+function projectBootstrapRecoveryResult(context, project, configLock, manifest) {
+  return {
+    payload: {
+      status: "initialized",
+      recovered: true,
+      root: context.root,
+      sdlc_root: context.sdlcRoot,
+      project,
+      config_lock: {
+        path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+        hash: configLock.lock_hash,
+      },
+      bootstrap_manifest: {
+        path: `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
+        hash: manifest.manifest_hash,
+      },
+      contracts_created: [],
+    },
+    messages: [
+      `Recovered the exact interrupted Agentic SDLC bootstrap at ${SDLC_DIR}.`,
+      `Project: ${project.project_name} (${project.project_id})`,
+      "No project identity or core bootstrap record was regenerated.",
+      `Bootstrap completion sealed: ${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
+    ],
+  };
+}
+
+function recoverInterruptedProjectBootstrap(context, options) {
+  const manifestPath = path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME);
+  const journalPath = projectBootstrapJournalPath(context);
+  const manifestExists = pathEntryExistsNoFollow(manifestPath);
+  if (!pathEntryExistsNoFollow(journalPath)) {
+    if (manifestExists) {
+      fail(
+        `Project bootstrap is already sealed by ${toProjectPath(context, manifestPath)}. `
+        + "Use the governed configuration and migration commands instead of reinitializing this knowledge base.",
+      );
+    }
+    fail(
+      `Existing ${SDLC_DIR} has no completed bootstrap manifest or hash-bound recovery journal. `
+      + "No files were changed. --force cannot reset or reseal existing project governance. "
+      + "A manifestless v0.11 project must use the explicit config migration and legacy-adoption flow; "
+      + "otherwise restore the canonical bootstrap from version control or archive the incomplete directory.",
+    );
+  }
+  const journal = readProjectBootstrapJournal(context);
+  if (journal.status === "completed" && manifestExists) {
+    fail(
+      `Project bootstrap is already sealed by ${toProjectPath(context, manifestPath)}. `
+      + "Use the governed configuration and migration commands instead of reinitializing this knowledge base.",
+    );
+  }
+  const currentRequest = buildProjectBootstrapJournalRequest(context, options);
+  if (
+    journal.request_hash !== computeStableHash(currentRequest)
+    || stableJson(journal.request) !== stableJson(currentRequest)
+  ) {
+    fail(
+      `Existing ${SDLC_DIR} bootstrap belongs to a different exact initialization request. `
+      + "No files were changed. --force cannot change the project identity or regenerate core records.",
+    );
+  }
+  if (journal.status === "completed") {
+    fail(
+      `Completed project bootstrap is missing ${toProjectPath(context, manifestPath)}. `
+      + "No files were changed. Restore the exact manifest from version control; --force cannot reseal it.",
+    );
+  }
+  if (journal.status !== "manifest_ready") {
+    fail(
+      `Interrupted ${SDLC_DIR} bootstrap stopped before an exact byte snapshot was prepared. `
+      + "No files were changed. Preserve useful evidence and archive the incomplete directory before retrying.",
+    );
+  }
+  const { manifest, project, configLock } = validatePreparedProjectBootstrapRecovery(
+    context,
+    journal,
+  );
+  if (manifestExists) {
+    const currentManifest = readProjectJson(context, manifestPath);
+    if (stableJson(currentManifest) !== stableJson(manifest)) {
+      fail(
+        `Existing ${SDLC_DIR} bootstrap manifest differs from its hash-bound recovery journal. `
+        + "No files were changed. Restore the canonical records from version control.",
+      );
+    }
+  }
+  const exactMutations = [
+    { operation: "file.write", path: journalPath },
+    ...(!manifestExists ? [{ operation: "file.write", path: manifestPath }] : []),
+  ];
+  const grant = createBootstrapMutationGrant({
+    root: context.root,
+    canonical_action: "init",
+    first_time: true,
+    exact_mutations: exactMutations,
+  });
+  return consumeBootstrapMutationGrant(grant, () => {
+    if (!manifestExists) {
+      syncProjectBootstrapState(context);
+      validatePreparedProjectBootstrapRecovery(context, journal);
+      writeJsonFile(manifestPath, manifest, {
+        atomicCreate: true,
+        durable: true,
+      });
+    }
+    const completedJournal = transitionProjectBootstrapJournal(
+      journal,
+      "completed",
+      manifest,
+    );
+    writeProjectBootstrapJournal(context, completedJournal, {
+      force: true,
+      durable: true,
+    });
+    return projectBootstrapRecoveryResult(context, project, configLock, manifest);
+  });
+}
+
 function initializeProject(context, options) {
   const projectName = String(options["project-name"] || path.basename(context.root));
   const projectId = String(options["project-id"] || slugify(projectName));
   const force = Boolean(options.force);
   const attribution = buildAttribution(context, options, "project.init");
   const config = context.templateConfig || context.config;
+  const kbReadmeTemplate = readTemplateFile(context, "kb-readme.md");
+  const bootstrapManifestPath = path.join(context.sdlcRoot, PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME);
+  if (pathEntryExistsNoFollow(bootstrapManifestPath)) {
+    fail(
+      `Project bootstrap is already sealed by ${toProjectPath(context, bootstrapManifestPath)}. `
+      + "Use the governed configuration and migration commands instead of reinitializing this knowledge base.",
+    );
+  }
   context.config = config;
-
+  const bootstrapJournal = buildPreparedProjectBootstrapJournal(context, options);
+  const bootstrapJournalPath = projectBootstrapJournalPath(context);
+  if (pathEntryExistsNoFollow(bootstrapJournalPath)) {
+    fail(
+      `Existing ${SDLC_DIR} bootstrap journal requires exact recovery; `
+      + "normal initialization cannot overwrite it.",
+    );
+  }
   ensureDir(context.sdlcRoot);
-  for (const directory of context.config.kb_directories) {
-    ensureDir(path.join(context.sdlcRoot, directory));
+  writeProjectBootstrapJournal(context, bootstrapJournal, {
+    atomicCreate: true,
+    durable: true,
+  });
+
+  for (const directoryPath of projectBootstrapDirectoryPaths(context)) {
+    ensureDir(directoryPath);
   }
   const configPath = path.join(context.sdlcRoot, PROJECT_CONFIG_FILE_NAME);
   const configLockPath = path.join(context.sdlcRoot, PROJECT_CONFIG_LOCK_FILE_NAME);
@@ -10094,6 +10854,13 @@ function initializeProject(context, options) {
       output_contracts_registry: `${SDLC_DIR}/output-contracts/registry.json`,
       cache_policy_path: `${SDLC_DIR}/cache/${CACHE_FILE_NAME}`,
     },
+    bootstrap_manifest: {
+      path: `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
+      schema_version: PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
+    },
+    bootstrap_journal: projectBootstrapJournalReference(
+      bootstrapJournal.request_hash,
+    ),
     phase_order: context.config.phase_order,
     audit: {
       created_by: attribution.actor,
@@ -10104,11 +10871,9 @@ function initializeProject(context, options) {
   };
   writeJsonFile(projectPath, project, { force });
 
-  renderTemplateFile(
-    context,
-    "kb-readme.md",
+  writeTextFile(
     path.join(context.sdlcRoot, "README.md"),
-    { PROJECT_NAME: projectName },
+    renderTemplate(kbReadmeTemplate, { PROJECT_NAME: projectName }),
     { force },
   );
 
@@ -10157,6 +10922,35 @@ function initializeProject(context, options) {
     }
   }
 
+  syncProjectBootstrapState(context);
+  const bootstrapManifest = buildProjectBootstrapManifest(context, {
+    configLock,
+    projectId,
+    journalRequestHash: bootstrapJournal.request_hash,
+  });
+  const manifestReadyJournal = transitionProjectBootstrapJournal(
+    bootstrapJournal,
+    "manifest_ready",
+    bootstrapManifest,
+  );
+  writeProjectBootstrapJournal(context, manifestReadyJournal, {
+    force: true,
+    durable: true,
+  });
+  writeJsonFile(bootstrapManifestPath, bootstrapManifest, {
+    atomicCreate: true,
+    durable: true,
+  });
+  const completedJournal = transitionProjectBootstrapJournal(
+    manifestReadyJournal,
+    "completed",
+    bootstrapManifest,
+  );
+  writeProjectBootstrapJournal(context, completedJournal, {
+    force: true,
+    durable: true,
+  });
+
   return {
     payload: {
       status: "initialized",
@@ -10167,23 +10961,112 @@ function initializeProject(context, options) {
         path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
         hash: configLock.lock_hash,
       },
+      bootstrap_manifest: {
+        path: `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
+        hash: bootstrapManifest.manifest_hash,
+      },
       contracts_created: createdContracts,
     },
     messages: [
       `Initialized Agentic SDLC at ${path.relative(context.root, context.sdlcRoot) || SDLC_DIR}`,
       `Project: ${projectName} (${projectId})`,
       "Configuration pinned: plugin updates cannot silently change this project's policy.",
+      `Bootstrap completion sealed: ${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`,
       `Phase contracts available: ${context.config.phase_order.join(", ")}`,
     ],
   };
 }
 
+function syncProjectBootstrapState(context) {
+  const artifacts = projectBootstrapArtifactSpecifications(context);
+  for (const artifact of artifacts) {
+    syncWorkflowFile(artifact.path);
+  }
+  const directories = new Set([
+    context.root,
+    ...projectBootstrapDirectoryPaths(context),
+  ].map((directoryPath) => path.resolve(directoryPath)));
+  for (const directoryPath of [...directories].sort((left, right) => {
+    const depthDifference = right.split(path.sep).length - left.split(path.sep).length;
+    return depthDifference || right.localeCompare(left);
+  })) {
+    if (!isInsidePath(context.root, directoryPath)) {
+      fail(`Project bootstrap durability path escapes the project root: ${directoryPath}`);
+    }
+    assertNoSymlinkSegmentsWithinBoundary(context.root, directoryPath);
+    syncWorkflowDirectory(directoryPath);
+  }
+}
+
+function buildProjectBootstrapManifest(
+  context,
+  { configLock, projectId, journalRequestHash },
+) {
+  const artifacts = projectBootstrapArtifactSpecifications(context).map((artifact) => {
+    const snapshot = readStableRegularFileBuffer(artifact.path, context.root);
+    return {
+      role: artifact.role,
+      path: toProjectPath(context, artifact.path),
+      initial_content_sha256: snapshot.sha256,
+      ...(artifact.id ? { id: artifact.id } : {}),
+      ...(artifact.phase ? { phase: artifact.phase } : {}),
+    };
+  });
+  const configArtifact = artifacts.find((artifact) => artifact.role === "config");
+  const configLockArtifact = artifacts.find((artifact) => artifact.role === "config_lock");
+  if (!configArtifact || !configLockArtifact) {
+    fail("Project bootstrap inventory is missing its configuration snapshots.");
+  }
+  const manifest = {
+    kind: "project_bootstrap_manifest",
+    schema_version: PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
+    version: 1,
+    status: "completed",
+    plugin_version: VERSION,
+    project_binding_sha256: computeStableHash({ project_id: projectId }),
+    bootstrap_journal: projectBootstrapJournalReference(journalRequestHash),
+    initial_config: {
+      path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      initial_content_sha256: configArtifact.initial_content_sha256,
+      lock_path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+      initial_lock_content_sha256: configLockArtifact.initial_content_sha256,
+      lock_hash: configLock.lock_hash,
+    },
+    phase_order: [...context.config.phase_order],
+    kb_directories: [...context.config.kb_directories],
+    directories: [...new Set(
+      projectBootstrapDirectoryPaths(context)
+        .map((directoryPath) => toProjectPath(context, directoryPath)),
+    )],
+    artifacts,
+    completed_at: now(),
+    audit: {
+      actor: {
+        id: "agentic-sdlc-bootstrap",
+        type: "system",
+        name: null,
+        email: null,
+        source: "bootstrap",
+      },
+    },
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  manifest.manifest_hash = computeStableHash(manifest);
+  assertRecordSchema(
+    manifest,
+    "project-bootstrap-manifest.schema.json",
+    "Project bootstrap manifest",
+  );
+  return manifest;
+}
+
 function onboardExistingProject(context, options) {
-  const initializedBefore = fs.existsSync(path.join(context.sdlcRoot, "project.json"));
+  const initializedBefore = pathEntryExistsNoFollow(context.sdlcRoot);
   let initialization = null;
   if (!initializedBefore) {
     initialization = initializeProject(context, options);
   } else {
+    assertHealthyExistingBootstrapForOnboard(context);
     ensureInitialized(context);
   }
 
@@ -10218,6 +11101,603 @@ function onboardExistingProject(context, options) {
       "",
       ...assistantMessage.split("\n"),
     ],
+  );
+}
+
+function assertHealthyExistingBootstrapForOnboard(context) {
+  const problems = [];
+  const rootPath = context.sdlcRoot;
+  const rootRelativePath = toProjectPath(context, rootPath);
+  let rootEntry;
+  try {
+    rootEntry = fs.lstatSync(rootPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      problems.push(`${rootRelativePath} is missing`);
+    } else {
+      problems.push(`${rootRelativePath} cannot be inspected safely (${error.message})`);
+    }
+  }
+  if (rootEntry && (rootEntry.isSymbolicLink() || !rootEntry.isDirectory())) {
+    problems.push(`${rootRelativePath} is not a stable directory`);
+  }
+  if (problems.length > 0) {
+    failIncompleteExistingBootstrap(problems);
+  }
+
+  const requireDirectory = (directoryPath) => {
+    const relativePath = toProjectPath(context, directoryPath);
+    try {
+      const entry = fs.lstatSync(directoryPath);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        problems.push(`${relativePath} is not a stable directory`);
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        problems.push(`${relativePath} is missing`);
+      } else {
+        problems.push(`${relativePath} cannot be inspected safely (${error.message})`);
+      }
+    }
+  };
+  const readRequiredFile = (filePath) => {
+    const relativePath = toProjectPath(context, filePath);
+    try {
+      const entry = fs.lstatSync(filePath);
+      if (entry.isSymbolicLink() || !entry.isFile()) {
+        problems.push(`${relativePath} is not a regular file`);
+        return null;
+      }
+      return readProjectText(context, filePath);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        problems.push(`${relativePath} is missing`);
+      } else {
+        problems.push(`${relativePath} cannot be read safely (${error.message})`);
+      }
+      return null;
+    }
+  };
+  const readRequiredJson = (filePath, schemaName, label) => {
+    const contents = readRequiredFile(filePath);
+    if (contents === null) return null;
+    const relativePath = toProjectPath(context, filePath);
+    let record;
+    try {
+      record = JSON.parse(contents);
+    } catch (error) {
+      problems.push(`${relativePath} is not valid JSON (${error.message})`);
+      return null;
+    }
+    const validation = validateRecordSchema(record, schemaName);
+    if (!validation.valid) {
+      const details = (validation.errors || [])
+        .slice(0, 3)
+        .map((issue) => `${issue.instance_path || "$"} ${issue.message}`)
+        .join(", ");
+      problems.push(`${relativePath} does not match ${label}${details ? ` (${details})` : ""}`);
+      return null;
+    }
+    return record;
+  };
+
+  const configPath = path.join(rootPath, PROJECT_CONFIG_FILE_NAME);
+  const configContents = readRequiredFile(configPath);
+  let bootstrapConfig = null;
+  if (configContents !== null) {
+    try {
+      bootstrapConfig = validateSdlcConfig(JSON.parse(configContents));
+      if (
+        context.projectConfigSnapshotHash === null
+        || computeStableHash(bootstrapConfig) !== context.projectConfigSnapshotHash
+      ) {
+        problems.push(
+          `${toProjectPath(context, configPath)} changed after the command context was loaded`,
+        );
+      }
+    } catch (error) {
+      problems.push(
+        `${toProjectPath(context, configPath)} is not a valid SDLC configuration (${error.message})`,
+      );
+    }
+  }
+
+  const configLockPath = path.join(rootPath, PROJECT_CONFIG_LOCK_FILE_NAME);
+  const configLock = readRequiredJson(
+    configLockPath,
+    "effective-config-lock.schema.json",
+    "the effective configuration lock schema",
+  );
+  if (
+    configLock
+    && (
+      context.projectConfigLockSnapshotHash === null
+      || computeStableHash(configLock) !== context.projectConfigLockSnapshotHash
+    )
+  ) {
+    problems.push(
+      `${toProjectPath(context, configLockPath)} changed after the command context was loaded`,
+    );
+  }
+  const projectPath = path.join(rootPath, "project.json");
+  const project = readRequiredJson(projectPath, "project.schema.json", "the project schema");
+  readRequiredFile(path.join(rootPath, "README.md"));
+
+  if (bootstrapConfig && configLock) {
+    try {
+      const resolution = resolveEffectiveConfig({
+        project_config: bootstrapConfig,
+        lock: configLock,
+        config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+      });
+      if (resolution.status !== "locked") {
+        const details = (resolution.lock_verification?.errors || [])
+          .slice(0, 3)
+          .map((issue) => issue.message)
+          .join(", ");
+        problems.push(
+          `${toProjectPath(context, configLockPath)} does not lock the current configuration`
+          + `${details ? ` (${details})` : ""}`,
+        );
+      }
+    } catch (error) {
+      problems.push(
+        `${toProjectPath(context, configLockPath)} cannot verify the current configuration (${error.message})`,
+      );
+    }
+  }
+
+  const effectiveConfig = bootstrapConfig || context.config;
+  const registryPath = path.join(rootPath, "output-contracts", "registry.json");
+  const registry = readRequiredJson(
+    registryPath,
+    "output-contract-registry.schema.json",
+    "the output contract registry schema",
+  );
+  const dependencyGraphPath = path.join(rootPath, "dependencies", "graph.json");
+  const dependencyGraph = readRequiredJson(
+    dependencyGraphPath,
+    "dependency-graph.schema.json",
+    "the dependency graph schema",
+  );
+
+  if (project && bootstrapConfig) {
+    if (!arraysEqual(project.phase_order, bootstrapConfig.phase_order)) {
+      problems.push(
+        `${toProjectPath(context, projectPath)} phase_order does not match the current configuration`,
+      );
+    }
+    if (project.schema_version !== bootstrapConfig.schema_version) {
+      problems.push(
+        `${toProjectPath(context, projectPath)} schema_version does not match the current configuration`,
+      );
+    }
+  }
+  if (project) {
+    if (project.knowledge_base?.canonical_path !== SDLC_DIR) {
+      problems.push(`${toProjectPath(context, projectPath)} has an invalid canonical knowledge-base path`);
+    }
+    if (
+      project.knowledge_base?.output_contracts_registry
+      !== `${SDLC_DIR}/output-contracts/registry.json`
+    ) {
+      problems.push(`${toProjectPath(context, projectPath)} has an invalid output registry path`);
+    }
+  }
+  if (project && registry) {
+    if (registry.project_id !== project.project_id) {
+      problems.push(
+        `${toProjectPath(context, registryPath)} project_id does not match ${toProjectPath(context, projectPath)}`,
+      );
+    }
+    if (bootstrapConfig && registry.schema_version !== bootstrapConfig.schema_version) {
+      problems.push(
+        `${toProjectPath(context, registryPath)} schema_version does not match the current configuration`,
+      );
+    }
+  }
+  if (
+    dependencyGraph
+    && bootstrapConfig
+    && dependencyGraph.schema_version !== bootstrapConfig.schema_version
+  ) {
+    problems.push(
+      `${toProjectPath(context, dependencyGraphPath)} schema_version does not match the current configuration`,
+    );
+  }
+
+  const bootstrapManifestPath = path.join(rootPath, PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME);
+  if (pathEntryExistsNoFollow(bootstrapManifestPath)) {
+    const manifest = readRequiredJson(
+      bootstrapManifestPath,
+      "project-bootstrap-manifest.schema.json",
+      "the project bootstrap manifest schema",
+    );
+    if (manifest) {
+      appendProjectBootstrapManifestProblems(context, manifest, project, problems);
+      appendProjectBootstrapJournalProblems(
+        context,
+        manifest,
+        project,
+        problems,
+        readRequiredJson,
+      );
+    }
+    if (
+      project
+      && (
+        project.bootstrap_manifest?.path !== `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`
+        || project.bootstrap_manifest?.schema_version !== PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION
+      )
+    ) {
+      problems.push(
+        `${toProjectPath(context, projectPath)} does not bind the canonical bootstrap manifest`,
+      );
+    }
+  } else if (project?.bootstrap_manifest) {
+    problems.push(
+      `${toProjectPath(context, bootstrapManifestPath)} is missing even though the project expects the completed bootstrap record`,
+    );
+  } else if (project && projectVersionRequiresBootstrapManifest(project.sdlc_version)) {
+    problems.push(
+      `${toProjectPath(context, bootstrapManifestPath)} is missing for a project created by Agentic SDLC `
+      + `${project.sdlc_version || "an unknown version"}; version `
+      + `${PROJECT_BOOTSTRAP_MANIFEST_INTRODUCED_VERSION} and later require the completed bootstrap record`,
+    );
+  } else if (project && bootstrapConfig && configLock && registry && dependencyGraph) {
+    if (!hasMatchingLegacyConfigMigrationReceipt(context, bootstrapConfig, configLock)) {
+      problems.push(
+        `${toProjectPath(context, bootstrapManifestPath)} is missing and no matching first-lock migration receipt proves a legacy bootstrap; changing the project version cannot bypass the completed bootstrap record`,
+      );
+    } else {
+      appendLegacyBootstrapEvidenceProblems(context, effectiveConfig, {
+        problems,
+        readRequiredFile,
+        readRequiredJson,
+        requireDirectory,
+      });
+    }
+  }
+
+  if (problems.length === 0) return;
+  failIncompleteExistingBootstrap(problems);
+}
+
+function hasMatchingLegacyConfigMigrationReceipt(context, bootstrapConfig, configLock) {
+  const migrationDirectory = path.join(context.sdlcRoot, "migrations", "config");
+  const configHash = computeStableHash(bootstrapConfig);
+  const project = readProjectJson(context, path.join(context.sdlcRoot, "project.json"));
+  const legacyConfig = validateSdlcConfig(
+    readJson(path.join(DEFAULT_TEMPLATE_DIR, "config-compat", "sdlc-config-v1-0.11.0.json")),
+  );
+  const expectedLegacyProfile = buildLegacyDefaultsProfile(legacyConfig);
+  return safeReadDir(migrationDirectory)
+    .filter((entry) => entry.endsWith(".json"))
+    .some((entry) => {
+      const receipt = readProjectJson(context, path.join(migrationDirectory, entry));
+      const validation = validateRecordSchema(receipt, "config-migration-receipt.schema.json");
+      if (!validation.valid) return false;
+      const { receipt_hash: storedHash, ...hashSubject } = receipt;
+      const adoption = receipt.legacy_bootstrap_adoption;
+      if (!adoption) return false;
+      const {
+        approval,
+        hash_algorithm: adoptionHashAlgorithm,
+        adoption_hash: adoptionHash,
+        ...adoptionSubject
+      } = adoption;
+      const approvalEvidencePresent = Boolean(approval?.summary)
+        || (Array.isArray(approval?.evidence) && approval.evidence.length > 0);
+      if (
+        adoptionHashAlgorithm !== "sha256:stable-json:v1"
+        || adoptionHash !== computeStableHash({
+          ...adoptionSubject,
+          approval,
+          hash_algorithm: adoptionHashAlgorithm,
+        })
+        || adoptionSubject.project_ref?.id !== project.project_id
+        || adoptionSubject.project_ref?.path !== `${SDLC_DIR}/project.json`
+        || adoptionSubject.project_ref?.sdlc_version !== project.sdlc_version
+        || adoptionSubject.project_ref?.content_sha256 !== computeStableHash(project)
+        || adoptionSubject.source_config_sha256 !== receipt.source_config_hash
+        || computeStableHash(adoptionSubject.legacy_defaults_profile)
+          !== computeStableHash(expectedLegacyProfile)
+        || adoptionSubject.plan_hash !== receipt.plan_hash
+        || approval?.status !== "approved"
+        || !["explicit-user", "ci"].includes(approval?.approval_source)
+        || !hasFormalApprovalAttribution(approval?.approved_by, approval?.approval_source)
+        || !approvalEvidencePresent
+        || approval?.approved_content_hash !== hashApprovalSubject(adoptionSubject)
+        || approval?.hash_algorithm !== "sha256:stable-json:v1"
+      ) {
+        return false;
+      }
+      try {
+        validateApprovalEvidenceIntegrity(
+          context,
+          approval,
+          `Legacy bootstrap adoption ${approval.id || "unknown"}`,
+        );
+      } catch {
+        return false;
+      }
+      return storedHash === computeStableHash(hashSubject)
+        && ["materialize_legacy_defaults", "adopt_lock"].includes(receipt.mode)
+        && receipt.config_path === `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`
+        && receipt.lock_path === `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`
+        && receipt.target_config_hash === configHash
+        && receipt.effective_config_hash === configHash
+        && receipt.lock_hash === configLock.lock_hash
+        && receipt.applied_at === configLock.created_at
+        && computeStableHash(receipt.defaults_profile) === computeStableHash(configLock.defaults_profile)
+        && arraysEqual(receipt.inherited_paths, configLock.inherited_paths);
+    });
+}
+
+function appendProjectBootstrapManifestProblems(context, manifest, project, problems) {
+  const { manifest_hash: storedHash, ...hashSubject } = manifest;
+  if (storedHash !== computeStableHash(hashSubject)) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} manifest_hash does not match its content`,
+    );
+  }
+  if (project) {
+    if (manifest.plugin_version !== project.sdlc_version) {
+      problems.push(
+        `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} SDLC version does not match ${SDLC_DIR}/project.json`,
+      );
+    }
+    if (
+      manifest.project_binding_sha256
+      !== computeStableHash({ project_id: project.project_id })
+    ) {
+      problems.push(
+        `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} belongs to a different project`,
+      );
+    }
+    if (!arraysEqual(manifest.phase_order, project.phase_order)) {
+      problems.push(
+        `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} phase_order does not match ${SDLC_DIR}/project.json`,
+      );
+    }
+  }
+
+  const expectedArtifacts = [
+    ["config", `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`, null],
+    ["config_lock", `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`, null],
+    ["project", `${SDLC_DIR}/project.json`, null],
+    ["readme", `${SDLC_DIR}/README.md`, null],
+    ["git_attributes", `${SDLC_DIR}/.gitattributes`, null],
+    ["git_ignore", `${SDLC_DIR}/.gitignore`, null],
+    ["output_contract_registry", `${SDLC_DIR}/output-contracts/registry.json`, null],
+    ["dependency_graph", `${SDLC_DIR}/dependencies/graph.json`, null],
+    ...manifest.phase_order.map((phase) => [
+      "phase_contract",
+      `${SDLC_DIR}/contracts/contract-${phase}-v1.json`,
+      phase,
+    ]),
+  ];
+  if (manifest.artifacts.length !== expectedArtifacts.length) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} does not contain the exact initial artifact inventory`,
+    );
+  }
+  for (const [role, artifactPath, phase] of expectedArtifacts) {
+    const matches = manifest.artifacts.filter((artifact) =>
+      artifact.role === role
+      && artifact.path === artifactPath
+      && (phase === null || (artifact.phase === phase && artifact.id === `contract-${phase}-v1`)));
+    if (matches.length !== 1) {
+      problems.push(
+        `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} does not prove initial artifact ${artifactPath}`,
+      );
+    }
+  }
+  const configArtifact = manifest.artifacts.find((artifact) => artifact.role === "config");
+  const configLockArtifact = manifest.artifacts.find((artifact) => artifact.role === "config_lock");
+  if (
+    manifest.initial_config.path !== `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`
+    || manifest.initial_config.initial_content_sha256 !== configArtifact?.initial_content_sha256
+    || manifest.initial_config.lock_path !== `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`
+    || manifest.initial_config.initial_lock_content_sha256
+      !== configLockArtifact?.initial_content_sha256
+  ) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} initial configuration references are inconsistent`,
+    );
+  }
+
+  const expectedDirectoryCandidates = [
+    ...manifest.kb_directories.map((directory) =>
+      path.resolve(
+        context.sdlcRoot,
+        ...String(directory).replaceAll("\\", "/").split("/"),
+      )),
+    path.join(context.sdlcRoot, "output-contracts", "templates"),
+    path.join(context.sdlcRoot, "output-contracts", "decisions"),
+    path.join(context.sdlcRoot, "work-items", "epics"),
+    path.join(context.sdlcRoot, "work-items", "tasks"),
+    ...expectedArtifacts.map(([, artifactPath]) =>
+      path.dirname(path.resolve(context.root, ...artifactPath.split("/")))),
+  ];
+  let expectedDirectories = new Set();
+  try {
+    expectedDirectories = new Set(
+      projectBootstrapDirectoryAncestorClosure(context, expectedDirectoryCandidates)
+        .map((directoryPath) => toProjectPath(context, directoryPath)),
+    );
+  } catch (error) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} has an unsafe initial directory inventory (${error.message})`,
+    );
+  }
+  const recordedDirectories = new Set(manifest.directories);
+  if (
+    expectedDirectories.size !== recordedDirectories.size
+    || [...expectedDirectories].some((directory) => !recordedDirectories.has(directory))
+  ) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME} does not contain the exact initial directory inventory`,
+    );
+  }
+}
+
+function appendProjectBootstrapJournalProblems(
+  context,
+  manifest,
+  project,
+  problems,
+  readRequiredJson,
+) {
+  const journalPath = projectBootstrapJournalPath(context);
+  const manifestRef = manifest.bootstrap_journal || null;
+  const projectRef = project?.bootstrap_journal || null;
+  const journalExists = pathEntryExistsNoFollow(journalPath);
+  if (!manifestRef && !projectRef && !journalExists) {
+    // Backward compatibility for projects sealed before the recovery journal
+    // was introduced.
+    return;
+  }
+  if (!manifestRef || !projectRef || stableJson(manifestRef) !== stableJson(projectRef)) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME} is not bound consistently by the project and bootstrap manifest`,
+    );
+    return;
+  }
+  const expectedRef = projectBootstrapJournalReference(manifestRef.request_hash);
+  if (stableJson(manifestRef) !== stableJson(expectedRef)) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME} reference is invalid`,
+    );
+    return;
+  }
+  const journal = readRequiredJson(
+    journalPath,
+    "project-bootstrap-journal.schema.json",
+    "the project bootstrap journal schema",
+  );
+  if (!journal) return;
+  const { journal_hash: storedHash, ...hashSubject } = journal;
+  if (
+    storedHash !== computeStableHash(hashSubject)
+    || journal.request_hash !== computeStableHash(journal.request)
+  ) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME} integrity hashes do not match its content`,
+    );
+  }
+  if (
+    journal.status !== "completed"
+    || journal.request_hash !== manifestRef.request_hash
+    || stableJson(journal.prepared_manifest) !== stableJson(manifest)
+    || journal.completed_manifest_ref?.path
+      !== `${SDLC_DIR}/${PROJECT_BOOTSTRAP_MANIFEST_FILE_NAME}`
+    || journal.completed_manifest_ref?.schema_version
+      !== PROJECT_BOOTSTRAP_MANIFEST_SCHEMA_VERSION
+    || journal.completed_manifest_ref?.manifest_hash !== manifest.manifest_hash
+    || journal.completed_manifest_ref?.hash_algorithm
+      !== "sha256:stable-json:v1"
+  ) {
+    problems.push(
+      `${SDLC_DIR}/${PROJECT_BOOTSTRAP_JOURNAL_FILE_NAME} does not prove completion of this exact bootstrap manifest`,
+    );
+  }
+}
+
+function appendLegacyBootstrapEvidenceProblems(context, config, helpers) {
+  const { problems, readRequiredFile, readRequiredJson, requireDirectory } = helpers;
+  readRequiredFile(path.join(context.sdlcRoot, ".gitignore"));
+  const legacyDirectories = [
+    context.sdlcRoot,
+    ...config.kb_directories.map((directory) => path.join(context.sdlcRoot, directory)),
+    path.join(context.sdlcRoot, "output-contracts", "templates"),
+    path.join(context.sdlcRoot, "output-contracts", "decisions"),
+    path.join(context.sdlcRoot, "work-items", "epics"),
+    path.join(context.sdlcRoot, "work-items", "tasks"),
+  ];
+  for (const directoryPath of new Set(legacyDirectories)) {
+    requireDirectory(directoryPath);
+  }
+  for (const phase of config.phase_order) {
+    const expectedId = `contract-${phase}-v1`;
+    const contractPath = path.join(context.sdlcRoot, "contracts", `${expectedId}.json`);
+    const contract = readRequiredJson(
+      contractPath,
+      "contract.schema.json",
+      "the legacy bootstrap phase contract schema",
+    );
+    if (contract && (contract.id !== expectedId || contract.phase !== phase)) {
+      problems.push(
+        `${toProjectPath(context, contractPath)} is not the expected legacy bootstrap contract for phase '${phase}'`,
+      );
+    }
+  }
+}
+
+function arraysEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function parseSemanticVersion(value) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(
+    String(value || "").trim(),
+  );
+  if (!match) return null;
+  const core = match.slice(1, 4).map(Number);
+  if (core.some((part) => !Number.isSafeInteger(part))) return null;
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((part) => /^\d+$/u.test(part) && !Number.isSafeInteger(Number(part)))) {
+    return null;
+  }
+  return { core, prerelease };
+}
+
+function compareSemanticVersions(left, right) {
+  const parsedLeft = parseSemanticVersion(left);
+  const parsedRight = parseSemanticVersion(right);
+  if (!parsedLeft || !parsedRight) return null;
+  for (let index = 0; index < parsedLeft.core.length; index += 1) {
+    if (parsedLeft.core[index] !== parsedRight.core[index]) {
+      return parsedLeft.core[index] < parsedRight.core[index] ? -1 : 1;
+    }
+  }
+  if (parsedLeft.prerelease.length === 0 || parsedRight.prerelease.length === 0) {
+    if (parsedLeft.prerelease.length === parsedRight.prerelease.length) return 0;
+    return parsedLeft.prerelease.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(parsedLeft.prerelease.length, parsedRight.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = parsedLeft.prerelease[index];
+    const rightPart = parsedRight.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) {
+      return leftPart === rightPart ? 0 : leftPart === undefined ? -1 : 1;
+    }
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/u.test(leftPart);
+    const rightNumeric = /^\d+$/u.test(rightPart);
+    if (leftNumeric && rightNumeric) return Number(leftPart) < Number(rightPart) ? -1 : 1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function projectVersionRequiresBootstrapManifest(version) {
+  const comparison = compareSemanticVersions(
+    version,
+    PROJECT_BOOTSTRAP_MANIFEST_INTRODUCED_VERSION,
+  );
+  return comparison === null || comparison >= 0;
+}
+
+function failIncompleteExistingBootstrap(problems) {
+  fail(
+    `Existing ${SDLC_DIR} bootstrap is incomplete: ${problems.join("; ")}. No files were changed. `
+    + "Restore the canonical files or completed bootstrap manifest from version control. "
+    + "If this directory came only from an interrupted first onboarding, preserve any useful evidence and archive the incomplete .sdlc outside the project before rerunning onboard.",
   );
 }
 
@@ -10316,27 +11796,192 @@ function createBaselineProposal(context, options) {
       run: attribution.run,
     },
   };
+  baseline.proposal_intent_hash_algorithm = "sha256:stable-json:v1";
+  baseline.proposal_intent_hash = baselineProposalIntentHash(baseline);
+  assertRecordSchema(baseline, "baseline.schema.json", `Baseline ${id}`);
 
   const baselinePath = baselinePathById(context, id);
   const reportPath = path.join(baselineRoot(context), `${id}-current-state.md`);
   const releaseLock = acquireFileLock(`${baselinePath}.lock`);
+  let persistedBaseline = baseline;
   try {
-    writeJsonFile(baselinePath, baseline, { force: Boolean(options.force) });
-    writeTextFile(reportPath, renderBaselineReport(baseline), { force: Boolean(options.force) });
+    const baselineExists = pathEntryExistsNoFollow(baselinePath);
+    if (baselineExists && !options.force) {
+      persistedBaseline = readProjectJson(context, baselinePath);
+      assertRecordSchema(persistedBaseline, "baseline.schema.json", `Baseline ${id}`);
+      assertBaselineProposalCanResume(persistedBaseline, baseline);
+      ensureBaselineProposalReport(context, persistedBaseline, reportPath);
+    } else {
+      writeJsonFile(baselinePath, baseline, { force: Boolean(options.force) });
+      writeTextFile(reportPath, renderBaselineReport(baseline), { force: Boolean(options.force) });
+    }
+    ensureBaselineProposalTrace(context, persistedBaseline, baselinePath, reportPath);
   } finally {
     releaseLock();
   }
-  appendTraceEvent(context, null, {
-    type: "decision",
-    summary: `Proposed project baseline ${id}`,
-    action: "baseline.propose",
-    actor: attribution.actor,
-    evidence: [toProjectPath(context, baselinePath), toProjectPath(context, reportPath), ...documents.map((item) => item.path)],
-    related: [id],
-    git: attribution.git,
-    run: attribution.run,
+  return { baseline: persistedBaseline, baseline_path: baselinePath, report_path: reportPath };
+}
+
+function baselineProposalIntent(baseline) {
+  const {
+    audit: _audit,
+    created_at: _createdAt,
+    updated_at: _updatedAt,
+    proposal_intent_hash: _proposalIntentHash,
+    proposal_intent_hash_algorithm: _proposalIntentHashAlgorithm,
+    ...intent
+  } = baseline || {};
+  const repositorySnapshot = intent.repository_snapshot || {};
+  const repositoryGit = repositorySnapshot.git || {};
+  return {
+    ...intent,
+    repository_snapshot: {
+      ...repositorySnapshot,
+      git: {
+        is_git_repo: repositoryGit.is_git_repo ?? false,
+        branch: repositoryGit.branch ?? null,
+        head_sha: repositoryGit.head_sha ?? null,
+        remotes: Array.isArray(repositoryGit.remotes) ? repositoryGit.remotes : [],
+      },
+    },
+  };
+}
+
+function baselineProposalIntentHash(baseline) {
+  return computeStableHash(baselineProposalIntent(baseline));
+}
+
+function failBaselineProposalResume(id, reason) {
+  fail(
+    `Baseline ${id} cannot be resumed safely: ${reason}. No files were changed. `
+    + "Keep the existing proposal and use a new --id, or review it and explicitly decide whether to replace it with --force; replacement is never implicit.",
+  );
+}
+
+function assertBaselineProposalCanResume(existing, candidate) {
+  const id = candidate.id;
+  if (
+    existing.id !== id
+    || existing.status !== "proposed"
+    || !Array.isArray(existing.approvals)
+    || existing.approvals.length !== 0
+  ) {
+    failBaselineProposalResume(id, "the existing record has a different identity or has already progressed");
+  }
+  if (
+    existing.proposal_intent_hash_algorithm !== "sha256:stable-json:v1"
+    || !/^[a-f0-9]{64}$/u.test(String(existing.proposal_intent_hash || ""))
+    || existing.proposal_intent_hash !== baselineProposalIntentHash(existing)
+  ) {
+    failBaselineProposalResume(id, "the existing proposal has no valid immutable request fingerprint");
+  }
+  if (existing.proposal_intent_hash !== candidate.proposal_intent_hash) {
+    failBaselineProposalResume(
+      id,
+      "the existing record represents a different onboarding request or its source evidence changed",
+    );
+  }
+  if (
+    typeof existing.created_at !== "string"
+    || !existing.audit?.proposed_by
+    || typeof existing.audit.proposed_by !== "object"
+  ) {
+    failBaselineProposalResume(id, "the existing proposal is missing the audit data required for deterministic recovery");
+  }
+}
+
+function ensureBaselineProposalReport(context, baseline, reportPath) {
+  const expectedReport = renderBaselineReport(baseline);
+  if (!pathEntryExistsNoFollow(reportPath)) {
+    writeTextFile(reportPath, expectedReport);
+    return { created: true };
+  }
+  const existingReport = readProjectText(context, reportPath);
+  if (existingReport !== expectedReport) {
+    failBaselineProposalResume(
+      baseline.id,
+      "the existing current-state report differs from the persisted proposal",
+    );
+  }
+  return { created: false };
+}
+
+function buildBaselineProposalTraceEvent(context, baseline, baselinePath, reportPath) {
+  const traceFingerprint = computeStableHash({
+    baseline_id: baseline.id,
+    proposal_intent_hash: baseline.proposal_intent_hash,
+    created_at: baseline.created_at,
   });
-  return { baseline, baseline_path: baselinePath, report_path: reportPath };
+  return {
+    id: `TR-BASELINE-${traceFingerprint.slice(0, 24)}`,
+    story_id: null,
+    type: "decision",
+    summary: `Proposed project baseline ${baseline.id}`,
+    outcome: null,
+    actor: baseline.audit.proposed_by,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: "baseline.propose",
+    evidence: [
+      toProjectPath(context, baselinePath),
+      toProjectPath(context, reportPath),
+      ...(baseline.imported_documents || []).map((item) => item.path),
+    ],
+    related: [baseline.id],
+    git: baseline.audit.git || {},
+    run: baseline.audit.run || {},
+    created_at: baseline.created_at,
+  };
+}
+
+function ensureBaselineProposalTrace(context, baseline, baselinePath, reportPath) {
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  const traceEvent = buildBaselineProposalTraceEvent(
+    context,
+    baseline,
+    baselinePath,
+    reportPath,
+  );
+  const preparedEvent = prepareGovernedTraceEvent(context, traceEvent);
+  assertRecordSchema(preparedEvent, "trace.schema.json", `Baseline proposal trace ${traceEvent.id}`);
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    const snapshot = workflowTraceIntegritySnapshotLocked(context, tracePath);
+    if (!snapshot.integrity.valid) {
+      fail(
+        `Baseline proposal trace ${traceEvent.id} cannot be recovered because trace integrity failed: `
+        + `${snapshot.integrity.errors.map((entry) => entry.code).join(", ") || "invalid trace"}.`,
+      );
+    }
+    const matches = snapshot.records
+      .filter((entry) => entry.valid === true && entry.event?.id === preparedEvent.id)
+      .map((entry) => entry.event);
+    if (matches.length > 1) {
+      fail(`Baseline proposal trace ${traceEvent.id} is duplicated.`);
+    }
+    if (matches.length === 1) {
+      if (!workflowTraceIntentMatches(matches[0], preparedEvent)) {
+        fail(`Baseline proposal trace ${traceEvent.id} has different content.`);
+      }
+      syncWorkflowFile(tracePath);
+      return { appended: false, event: matches[0] };
+    }
+    const storedEvent = sealPreparedTraceEventLocked(context, tracePath, preparedEvent);
+    const verifiedEvent = assertWorkflowStoredTraceIntegrityLocked(
+      context,
+      tracePath,
+      preparedEvent,
+    );
+    if (!workflowTraceIntentMatches(storedEvent, preparedEvent)) {
+      fail(`Baseline proposal trace ${traceEvent.id} was not committed exactly once.`);
+    }
+    return { appended: true, event: verifiedEvent };
+  } finally {
+    releaseTraceLock();
+  }
 }
 
 function discoverExistingProjectDocuments(context) {
@@ -10566,6 +12211,10 @@ function autonomyExecutionsRoot(context) {
 
 function autonomyActionsRoot(context) {
   return path.join(autonomyRoot(context), "actions");
+}
+
+function autonomyActionIntentsRoot(context) {
+  return path.join(autonomyRoot(context), "action-intents");
 }
 
 function deliveryExecutionRoot(context, profileId) {
@@ -14473,6 +16122,280 @@ function compareDeliveryAuthorizationOrder(left, right) {
     || String(left.id).localeCompare(String(right.id));
 }
 
+function deliveryActionAuthorizationRequestHash(options = {}) {
+  const ignored = new Set(["full", "json", "locale"]);
+  const request = {};
+  for (const key of Object.keys(options).sort()) {
+    if (ignored.has(key) || options[key] === undefined) continue;
+    request[key] = Array.isArray(options[key]) ? [...options[key]] : options[key];
+  }
+  return hashApprovalSubject(request);
+}
+
+function deliveryActionAuthorizationIntentIdentity(context, profile, action, options = {}) {
+  if (getOptionString(options, "approval-source") !== "automation") {
+    return null;
+  }
+  const authorizationOption = getOptionString(options, "authorization");
+  if (!authorizationOption) {
+    return null;
+  }
+  const authorizationId = normalizeId(authorizationOption);
+  const requestHash = deliveryActionAuthorizationRequestHash(options);
+  const transactionKey = shortHashFull(stableJson({
+    profile_id: profile.id,
+    profile_hash: profile.profile_hash,
+    action,
+    authorization_id: authorizationId,
+    request_hash: requestHash,
+  }));
+  const id = `AUT-INT-${transactionKey}`;
+  return {
+    id,
+    transactionKey,
+    authorizationId,
+    profileId: profile.id,
+    profileHash: profile.profile_hash,
+    action,
+    requestHash,
+    path: path.join(autonomyActionIntentsRoot(context), `${id}.json`),
+  };
+}
+
+function deliveryActionIntentUseReceiptId(identity) {
+  return `AUSE-${identity.authorizationId}-${identity.transactionKey.slice(0, 24)}`;
+}
+
+function buildDeliveryActionAuthorizationTraceEvent(
+  context,
+  profile,
+  receipt,
+  correlationId = CLI_OPERATION_CONTEXT.correlation_id,
+) {
+  const storyId = profile.story_refs[0]?.id || null;
+  return {
+    id: `TR-AUTH-${normalizeId(receipt.id)}`,
+    story_id: storyId,
+    type: "gate",
+    summary: `Authorized ${receipt.action} for exact delivery ${profile.delivery_id}`,
+    outcome: "ready",
+    actor: receipt.authorized_by,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: receipt.action,
+    evidence: [
+      toProjectPath(
+        context,
+        path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+      ),
+    ],
+    related: [profile.id, profile.delivery_id],
+    git: receipt.audit?.git || {},
+    run: receipt.audit?.run || {},
+    correlation_id: correlationId,
+    created_at: receipt.authorized_at,
+  };
+}
+
+function ensureDeliveryActionAuthorizationTrace(context, traceEvent) {
+  const traceFile = traceEvent.story_id ? `${normalizeId(traceEvent.story_id)}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const preparedEvent = prepareGovernedTraceEvent(context, traceEvent);
+  const releaseTraceLock = acquireFileLock(`${tracePath}.lock`);
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    const snapshot = workflowTraceIntegritySnapshotLocked(context, tracePath);
+    if (!snapshot.integrity.valid) {
+      fail(
+        `Delivery action trace ${traceEvent.id} cannot be recovered because trace integrity failed: `
+        + `${snapshot.integrity.errors.map((entry) => entry.code).join(", ") || "invalid trace"}.`,
+      );
+    }
+    const matches = snapshot.records
+      .filter((entry) => entry.valid === true && entry.event?.id === preparedEvent.id)
+      .map((entry) => entry.event);
+    if (matches.length > 1) {
+      fail(`Delivery action trace ${traceEvent.id} is duplicated.`);
+    }
+    if (matches.length === 1) {
+      if (!workflowTraceIntentMatches(matches[0], preparedEvent)) {
+        fail(`Delivery action trace ${traceEvent.id} has different content.`);
+      }
+      syncWorkflowFile(tracePath);
+      return { appended: false, event: matches[0] };
+    }
+    const storedEvent = sealPreparedTraceEventLocked(context, tracePath, preparedEvent);
+    const verifiedEvent = assertWorkflowStoredTraceIntegrityLocked(
+      context,
+      tracePath,
+      preparedEvent,
+    );
+    if (!workflowTraceIntentMatches(storedEvent, preparedEvent)) {
+      fail(`Delivery action trace ${traceEvent.id} was not committed exactly once.`);
+    }
+    return { appended: true, event: verifiedEvent };
+  } finally {
+    releaseTraceLock();
+  }
+}
+
+function readDeliveryActionAuthorizationIntent(context, identity, profile) {
+  if (!identity || !fs.existsSync(identity.path)) {
+    return null;
+  }
+  const intent = readProjectJson(context, identity.path);
+  const {
+    intent_hash: storedHash,
+    hash_algorithm: hashAlgorithm,
+    ...intentBase
+  } = intent || {};
+  if (
+    storedHash !== hashApprovalSubject(intentBase)
+    || hashAlgorithm !== "sha256:stable-json:v1"
+  ) {
+    fail(`Delivery action authorization intent ${identity.id} is stale or tampered.`);
+  }
+  if (
+    intent.kind !== "delivery_action_authorization_intent"
+    || intent.schema_version !== "delivery-action-authorization-intent:v1"
+    || intent.id !== identity.id
+    || intent.transaction_key !== identity.transactionKey
+    || intent.request_hash !== identity.requestHash
+    || intent.profile_ref?.id !== identity.profileId
+    || intent.profile_ref?.hash !== identity.profileHash
+    || intent.action !== identity.action
+    || intent.profile_ref?.id !== intent.action_receipt?.profile_ref?.id
+    || intent.profile_ref?.hash !== intent.action_receipt?.profile_ref?.hash
+    || intent.action !== intent.action_receipt?.action
+    || intent.authorization_ref?.id !== identity.authorizationId
+  ) {
+    fail(
+      `Delivery action authorization intent ${identity.id} does not match this exact retry. `
+      + "Use the original command boundary or create a new delegated authorization.",
+    );
+  }
+  const useReceiptId = deliveryActionIntentUseReceiptId(identity);
+  const expectedUsePath = toProjectPath(
+    context,
+    authorizationUsePath(context, identity.authorizationId, useReceiptId),
+  );
+  const expectedActionReceiptPath = toProjectPath(
+    context,
+    path.join(
+      autonomyActionsRoot(context),
+      `${normalizeId(intent.action_receipt?.id || "missing")}.json`,
+    ),
+  );
+  const expectedTraceEvent = buildDeliveryActionAuthorizationTraceEvent(
+    context,
+    profile,
+    intent.action_receipt,
+    intent.trace_event?.correlation_id,
+  );
+  if (
+    intent.authorization_use?.id !== useReceiptId
+    || intent.authorization_use?.path !== expectedUsePath
+    || intent.authorization_use?.action
+      !== `autonomy.delivery.action.${intent.action}`
+    || intent.action_receipt?.approval?.approval_source !== "automation"
+    || intent.action_receipt?.approval?.authorization_ref !== identity.authorizationId
+    || intent.action_receipt?.approval?.authorization_use_ref !== expectedUsePath
+    || intent.action_receipt?.status !== "authorized"
+    || intent.action_receipt?.outcome !== null
+    || intent.action_receipt_path !== expectedActionReceiptPath
+    || typeof intent.trace_event?.correlation_id !== "string"
+    || intent.trace_event.correlation_id.length === 0
+    || stableJson(intent.trace_event) !== stableJson(expectedTraceEvent)
+  ) {
+    fail(`Delivery action authorization intent ${identity.id} has an invalid use or receipt binding.`);
+  }
+  const {
+    receipt_hash: receiptHash,
+    hash_algorithm: receiptHashAlgorithm,
+    ...receiptBase
+  } = intent.action_receipt;
+  if (
+    receiptHashAlgorithm !== "sha256:stable-json:v1"
+    || receiptHash !== autonomyLifecycleReceiptHash(receiptBase)
+  ) {
+    fail(`Delivery action authorization intent ${identity.id} contains a stale action receipt.`);
+  }
+  assertRecordSchema(
+    intent.action_receipt,
+    "delivery-action-receipt.schema.json",
+    `Delivery action authorization intent receipt ${identity.id}`,
+  );
+  return intent;
+}
+
+function buildDeliveryActionAuthorizationIntent(
+  context,
+  identity,
+  profile,
+  action,
+  authorization,
+  authorizationUse,
+  receipt,
+  preparedPolicySource,
+) {
+  const intentBase = {
+    id: identity.id,
+    kind: "delivery_action_authorization_intent",
+    schema_version: "delivery-action-authorization-intent:v1",
+    transaction_key: identity.transactionKey,
+    request_hash: identity.requestHash,
+    profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+    action,
+    authorization_ref: {
+      id: authorization.id,
+      hash: authorizationRecordHash(authorization),
+    },
+    authorization_use: {
+      id: authorizationUse.id,
+      path: authorizationUse.path,
+      action: `autonomy.delivery.action.${action}`,
+    },
+    policy_source_ref: preparedPolicySource.ref,
+    action_receipt_path: toProjectPath(
+      context,
+      path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+    ),
+    action_receipt: receipt,
+    trace_event: buildDeliveryActionAuthorizationTraceEvent(context, profile, receipt),
+    created_at: receipt.authorized_at,
+  };
+  return {
+    ...intentBase,
+    intent_hash: hashApprovalSubject(intentBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+}
+
+function deliveryActionApprovalRecoveryProjection(approval = {}) {
+  return {
+    status: approval.status,
+    summary: approval.summary,
+    scope: approval.scope,
+    evidence: approval.evidence,
+    approval_source: approval.approval_source,
+    authorization_ref: approval.authorization_ref,
+    authorization_use_ref: approval.authorization_use_ref,
+    authorization_action: approval.authorization_action,
+    explicit_user_confirmation: approval.explicit_user_confirmation,
+    provisional: approval.provisional,
+    approved_content_hash: approval.approved_content_hash,
+    hash_algorithm: approval.hash_algorithm,
+    approved_by: approval.approved_by,
+    authority_assurance: approval.authority_assurance,
+  };
+}
+
 function dataOperationReceiptErrors(context, profile, receipt, actions) {
   const errors = [];
   if (
@@ -15539,6 +17462,357 @@ function terminalStatusForDeliveryAction(action) {
       : null;
 }
 
+function canonicalDeliveryCompletionEvidence(evidence = []) {
+  return [...evidence]
+    .map((item) => ({ path: item.path, sha256: item.sha256 }))
+    .sort((left, right) => (
+      left.path.localeCompare(right.path)
+      || left.sha256.localeCompare(right.sha256)
+    ));
+}
+
+function deliveryCompletionOperationArgs(profile, action, options = {}) {
+  const operationArgs = {};
+  const scopePaths = normalizeRawListOption(options["scope-path"])
+    .map((item) => String(item).replace(/\\/gu, "/"))
+    .sort();
+  if (scopePaths.length > 0) {
+    operationArgs.scope_paths = scopePaths;
+  }
+  if (action === "git.push") {
+    operationArgs.remote = getOptionString(options, "remote") || null;
+  }
+  if (["pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
+    operationArgs.pr_url = getOptionString(options, "pr-url") || null;
+    operationArgs.expected_pr_title = getOptionString(options, "expected-pr-title") || null;
+    operationArgs.expected_pr_body_sha256 = getOptionString(options, "expected-pr-body-sha256") || null;
+    operationArgs.expected_pr_state = getOptionString(options, "expected-pr-state") || null;
+    operationArgs.expected_pr_base = getOptionString(options, "expected-pr-base") || null;
+  }
+  if (action === "release.local") {
+    const smokeCwdOption = getOptionString(options, "smoke-cwd");
+    operationArgs.smoke_cwd = smokeCwdOption
+      ? path.isAbsolute(smokeCwdOption)
+        ? path.resolve(smokeCwdOption)
+        : path.resolve(profile.local_release_target.root_path, smokeCwdOption)
+      : null;
+    operationArgs.smoke_tests = normalizeListOption(options["smoke-test"])
+      .map(normalizeSmokeTestCommand)
+      .sort();
+    operationArgs.rollback = getOptionString(options, "rollback") || null;
+  }
+  return operationArgs;
+}
+
+function buildDeliveryCompletionRequest(
+  context,
+  profile,
+  action,
+  outcome,
+  evidence,
+  options,
+  authorization,
+) {
+  const requestBase = {
+    schema_version: "delivery-action-completion-request:v1",
+    profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+    action,
+    outcome,
+    authorization_receipt_ref: deliveryActionReceiptRef(context, authorization),
+    evidence: canonicalDeliveryCompletionEvidence(evidence),
+    operation_args: deliveryCompletionOperationArgs(profile, action, options),
+  };
+  return {
+    ...requestBase,
+    request_hash: hashApprovalSubject(requestBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+}
+
+function validateDeliveryCompletionRequest(context, receipt, authorization) {
+  const request = receipt?.completion_request;
+  if (!request) {
+    const legacy = receipt?.schema_version === "delivery-action-receipt:v1";
+    return {
+      valid: false,
+      legacy,
+      errors: legacy
+        ? []
+        : ["delivery-action-receipt:v2 completion requires a completion request"],
+    };
+  }
+  const {
+    request_hash: requestHash,
+    hash_algorithm: hashAlgorithm,
+    ...requestBase
+  } = request;
+  const errors = [];
+  if (request.schema_version !== "delivery-action-completion-request:v1") {
+    errors.push("completion request schema version is unsupported");
+  }
+  if (hashAlgorithm !== "sha256:stable-json:v1") {
+    errors.push("completion request hash algorithm is invalid");
+  }
+  if (requestHash !== hashApprovalSubject(requestBase)) {
+    errors.push("completion request hash is invalid");
+  }
+  if (
+    stableJson(request.profile_ref) !== stableJson(receipt.profile_ref)
+    || request.action !== receipt.action
+    || request.outcome !== receipt.outcome
+    || stableJson(request.authorization_receipt_ref)
+      !== stableJson(receipt.authorization_receipt_ref)
+    || stableJson(request.authorization_receipt_ref)
+      !== stableJson(deliveryActionReceiptRef(context, authorization))
+    || stableJson(request.evidence)
+      !== stableJson(canonicalDeliveryCompletionEvidence(receipt.evidence))
+    || !request.operation_args
+    || typeof request.operation_args !== "object"
+    || Array.isArray(request.operation_args)
+  ) {
+    errors.push("completion request differs from its persisted action receipt");
+  }
+  return { valid: errors.length === 0, legacy: false, errors };
+}
+
+function buildDeliveryActionCompletionTraceEvent(context, profile, receipt) {
+  const requestHash = receipt.completion_request?.request_hash || receipt.receipt_hash;
+  return {
+    id: `TR-COMP-${normalizeId(receipt.id)}`,
+    story_id: profile.story_refs[0]?.id || null,
+    type: receipt.action === "release.local" ? "release" : "gate",
+    summary: `Completed ${receipt.action} for exact delivery ${profile.delivery_id}`,
+    outcome: receipt.outcome,
+    actor: receipt.authorized_by,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: receipt.action,
+    evidence: [
+      toProjectPath(
+        context,
+        path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`),
+      ),
+      ...(receipt.evidence || []).map((item) => item.path),
+    ],
+    related: [profile.id, profile.delivery_id],
+    git: receipt.audit?.git || {},
+    run: receipt.audit?.run || {},
+    correlation_id: `completion-${requestHash}`,
+    created_at: receipt.authorized_at,
+  };
+}
+
+function buildTerminalDeliveryCloseTraceEvent(context, profile, closeReceipt, completion) {
+  return {
+    id: `TR-CLOSE-${normalizeId(closeReceipt.id)}`,
+    story_id: profile.story_refs[0]?.id || null,
+    type: "gate",
+    summary: `Closed ${profile.delivery_kind} ${profile.delivery_id} from passing ${completion.action} receipt`,
+    outcome: "passed",
+    actor: closeReceipt.closed_by,
+    requested_by: null,
+    authorized_by: null,
+    request: null,
+    authorization_ref: null,
+    action: "autonomy.delivery.close.terminal-action",
+    evidence: [
+      toProjectPath(
+        context,
+        path.join(autonomyActionsRoot(context), `${normalizeId(completion.id)}.json`),
+      ),
+      toProjectPath(context, deliveryCloseReceiptPath(context, profile.id)),
+    ],
+    related: [profile.id, profile.delivery_id, completion.id],
+    git: closeReceipt.audit?.git || {},
+    run: closeReceipt.audit?.run || {},
+    correlation_id: `close-${completion.receipt_hash}`,
+    created_at: closeReceipt.closed_at,
+  };
+}
+
+function matchingPersistedDeliveryCompletion(context, profile, action, outcome, options) {
+  const evidence = buildActionEvidence(context, options.evidence);
+  if (evidence.length === 0) {
+    fail(`Delivery action ${action} completion requires at least one immutable --evidence file.`);
+  }
+  const selectorOption = getOptionString(options, "authorization-receipt");
+  const selector = selectorOption ? normalizeId(selectorOption) : null;
+  const actions = deliveryActionReceipts(context, profile.id);
+  const authorizationsById = new Map(
+    actions
+      .filter((receipt) => receipt.status === "authorized")
+      .map((receipt) => [receipt.id, receipt]),
+  );
+  const matches = [];
+  for (const completion of actions.filter((receipt) =>
+    receipt.status === "completed"
+    && receipt.action === action
+    && receipt.profile_ref?.hash === profile.profile_hash)) {
+    const authorization = authorizationsById.get(completion.authorization_receipt_ref?.id);
+    if (
+      !authorization
+      || authorization.receipt_hash !== completion.authorization_receipt_ref?.hash
+    ) {
+      fail(`Persisted completion ${completion.id} lacks its exact authorization receipt.`);
+    }
+    const validation = validateDeliveryCompletionRequest(context, completion, authorization);
+    if (validation.legacy) continue;
+    if (!validation.valid) {
+      fail(`Persisted completion ${completion.id} has an invalid completion identity: ${validation.errors.join("; ")}.`);
+    }
+    if (selector && authorization.id !== selector) continue;
+    const expected = buildDeliveryCompletionRequest(
+      context,
+      profile,
+      action,
+      outcome,
+      evidence,
+      options,
+      authorization,
+    );
+    if (
+      completion.completion_request.request_hash === expected.request_hash
+      && stableJson(completion.completion_request) === stableJson(expected)
+    ) {
+      matches.push({ completion, authorization, evidence });
+    }
+  }
+  if (matches.length > 1) {
+    fail(
+      `Completion retry identity collision for ${action}: ${matches.map((item) => item.completion.id).join(", ")}. `
+      + "No additional completion was recorded.",
+    );
+  }
+  return matches[0] || null;
+}
+
+function recoverPersistedDeliveryCompletion(
+  context,
+  profile,
+  action,
+  outcome,
+  options,
+  executionState,
+) {
+  const match = matchingPersistedDeliveryCompletion(
+    context,
+    profile,
+    action,
+    outcome,
+    options,
+  );
+  if (!match) return false;
+  const completionTrace = ensureDeliveryActionAuthorizationTrace(
+    context,
+    buildDeliveryActionCompletionTraceEvent(context, profile, match.completion),
+  );
+  let state = executionState;
+  let autoClose = null;
+  if (outcome === "passed" && terminalStatusForDeliveryAction(action)) {
+    if (state.lifecycle_status === "started") {
+      autoClose = repairTerminalDeliveryClose(context, profile, state);
+      state = currentDeliveryExecutionState(context, profile);
+    } else if (
+      state.lifecycle_status !== "terminal"
+      || state.close_receipt?.terminal_action_receipt_ref?.id !== match.completion.id
+      || state.close_receipt?.terminal_action_receipt_ref?.hash !== match.completion.receipt_hash
+    ) {
+      fail(`Persisted terminal completion ${match.completion.id} conflicts with the delivery close state.`);
+    } else {
+      ensureDeliveryActionAuthorizationTrace(
+        context,
+        buildTerminalDeliveryCloseTraceEvent(
+          context,
+          profile,
+          state.close_receipt,
+          match.completion,
+        ),
+      );
+    }
+  }
+  output(options, {
+    status: "completed",
+    idempotent: true,
+    recovery_status: completionTrace.appended || autoClose
+      ? "repaired"
+      : "already_consistent",
+    execution_allowed: false,
+    profile_id: profile.id,
+    action,
+    action_receipt: match.completion,
+    action_receipt_path: toProjectPath(
+      context,
+      path.join(autonomyActionsRoot(context), `${normalizeId(match.completion.id)}.json`),
+    ),
+    lifecycle_status: state.lifecycle_status,
+    terminal_status: state.close_receipt?.terminal_status || autoClose?.receipt?.terminal_status || null,
+    close_receipt: state.close_receipt || autoClose?.receipt || null,
+    close_receipt_path: state.close_receipt_path || autoClose?.path || null,
+  }, [
+    `Completion ${match.completion.id} was already recorded for ${action}; no other authorization was consumed.`,
+    completionTrace.appended || autoClose
+      ? "Recovered the missing lifecycle evidence."
+      : "The persisted completion and lifecycle evidence are already consistent.",
+  ]);
+  return true;
+}
+
+function selectPendingDeliveryActionAuthorization(
+  context,
+  profile,
+  action,
+  actions,
+  options,
+) {
+  const consumedAuthorizationIds = new Set(actions
+    .filter((receipt) => receipt.status === "completed")
+    .map((receipt) => receipt.authorization_receipt_ref?.id)
+    .filter(Boolean));
+  const matchingAuthorizations = actions
+    .filter((receipt) =>
+      receipt.action === action
+      && receipt.status === "authorized"
+      && receipt.profile_ref?.hash === profile.profile_hash)
+    .sort(compareDeliveryAuthorizationOrder);
+  const selectorOption = getOptionString(options, "authorization-receipt");
+  if (selectorOption) {
+    const selector = normalizeId(selectorOption);
+    const selected = matchingAuthorizations.find((receipt) => receipt.id === selector);
+    if (!selected) {
+      fail(
+        `Delivery action authorization receipt ${selector} does not authorize ${action} `
+        + `for exact profile ${profile.id}.`,
+      );
+    }
+    if (consumedAuthorizationIds.has(selected.id)) {
+      fail(
+        `Delivery action authorization receipt ${selector} is already consumed, and this completion `
+        + "request does not match its persisted result. Use a different unconsumed receipt for a new operation.",
+      );
+    }
+    return selected;
+  }
+  const pending = matchingAuthorizations.filter((receipt) =>
+    !consumedAuthorizationIds.has(receipt.id));
+  if (pending.length === 0) {
+    fail(`Delivery action ${action} must be authorized before recording its outcome.`);
+  }
+  if (pending.length > 1) {
+    fail(
+      `More than one unconsumed authorization receipt matches ${action}: `
+      + `${pending.map((receipt) => receipt.id).join(", ")}. `
+      + "Repeat completion with --authorization-receipt <AUT-ACT-id> so the exact executed operation is unambiguous.",
+    );
+  }
+  return pending[0];
+}
+
 function repairTerminalDeliveryClose(context, profile, executionState) {
   if (executionState.lifecycle_status !== "started") return null;
   const actions = deliveryActionReceipts(context, profile.id);
@@ -15612,20 +17886,10 @@ function repairTerminalDeliveryClose(context, profile, executionState) {
   assertRecordSchema(closeReceipt, "delivery-close-receipt.schema.json", `Delivery close receipt ${profile.id}`);
   const closePath = deliveryCloseReceiptPath(context, profile.id);
   writeJsonFile(closePath, closeReceipt, { atomicCreate: true });
-  appendTraceEvent(context, profile.story_refs[0]?.id || null, {
-    type: "gate",
-    summary: `Closed ${profile.delivery_kind} ${profile.delivery_id} from passing ${completion.action} receipt`,
-    action: "autonomy.delivery.close.terminal-action",
-    actor: completion.authorized_by,
-    outcome: "passed",
-    evidence: [
-      toProjectPath(context, path.join(autonomyActionsRoot(context), `${normalizeId(completion.id)}.json`)),
-      toProjectPath(context, closePath),
-    ],
-    related: [profile.id, profile.delivery_id, completion.id],
-    git: completion.audit?.git || {},
-    run: completion.audit?.run || {},
-  });
+  ensureDeliveryActionAuthorizationTrace(
+    context,
+    buildTerminalDeliveryCloseTraceEvent(context, profile, closeReceipt, completion),
+  );
   return { receipt: closeReceipt, path: toProjectPath(context, closePath), completion };
 }
 
@@ -15639,7 +17903,34 @@ function evaluateDeliveryAction(context, options) {
     const profile = readDeliveryAutonomyProfile(context, profileId);
     const action = normalizeDeliveryAction(profile.delivery_kind, requestedAction);
     const executionState = currentDeliveryExecutionState(context, profile);
+    const reportedOutcome = getOptionString(options, "outcome");
+    const completingAction = Boolean(reportedOutcome);
+    if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
+      fail("Delivery action completion --outcome must be passed or failed.");
+    }
+    if (!completingAction && options["authorization-receipt"] !== undefined) {
+      fail("--authorization-receipt is only valid when recording --outcome passed|failed.");
+    }
+    if (
+      completingAction
+      && recoverPersistedDeliveryCompletion(
+        context,
+        profile,
+        action,
+        reportedOutcome,
+        options,
+        executionState,
+      )
+    ) {
+      return;
+    }
     if (executionState.lifecycle_status === "terminal") {
+      if (completingAction) {
+        fail(
+          `Delivery ${profile.delivery_id} is already terminal, and this completion request `
+          + "does not match its persisted terminal result.",
+        );
+      }
       const expectedAction = executionState.close_receipt.terminal_status === "merged"
         ? "pull_request.merge"
         : executionState.close_receipt.terminal_status === "released"
@@ -15664,7 +17955,9 @@ function evaluateDeliveryAction(context, options) {
     if (executionState.lifecycle_status !== "started") {
       fail(`Delivery action ${action} requires ${profileId} to be started and non-terminal.`);
     }
-    const recoveredTerminal = repairTerminalDeliveryClose(context, profile, executionState);
+    const recoveredTerminal = completingAction
+      ? null
+      : repairTerminalDeliveryClose(context, profile, executionState);
     if (recoveredTerminal) {
       output(options, {
         status: "terminal",
@@ -15706,13 +17999,47 @@ function evaluateDeliveryAction(context, options) {
     }
     const actionPolicy = deliveryActionCheckpointRequired(context, profile, decision.effective_level, action);
     let checkpointRequired = actionPolicy.required;
-    const reportedOutcome = getOptionString(options, "outcome");
-    const completingAction = Boolean(reportedOutcome);
-    if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
-      fail("Delivery action completion --outcome must be passed or failed.");
+    const actionIntentIdentity = !completingAction
+      && checkpointRequired
+      && options["confirm-action"] === true
+      ? deliveryActionAuthorizationIntentIdentity(context, profile, action, options)
+      : null;
+    const pendingActionIntent = readDeliveryActionAuthorizationIntent(
+      context,
+      actionIntentIdentity,
+      profile,
+    );
+    const consumedIntentCompletion = pendingActionIntent
+      ? deliveryActionReceipts(context, profile.id).find((candidate) =>
+          candidate.status === "completed"
+          && candidate.authorization_receipt_ref?.id
+            === pendingActionIntent.action_receipt.id
+          && candidate.authorization_receipt_ref?.hash
+            === pendingActionIntent.action_receipt.receipt_hash)
+      : null;
+    if (consumedIntentCompletion) {
+      fail(
+        `Delivery action authorization intent ${pendingActionIntent.id} was already consumed by `
+        + `completion ${consumedIntentCompletion.id}. Create a new delegated authorization for a new action attempt.`,
+      );
     }
-    const actionReceiptId = `AUT-ACT-${uniqueRecordSuffix()}`;
-    const actionReceiptTimestamp = now();
+    const actionReceiptId = pendingActionIntent?.action_receipt?.id
+      || `AUT-ACT-${uniqueRecordSuffix()}`;
+    const actionReceiptTimestamp = pendingActionIntent?.action_receipt?.authorized_at
+      || now();
+    const plannedAuthorizationUse = actionIntentIdentity
+      ? {
+          id: deliveryActionIntentUseReceiptId(actionIntentIdentity),
+          path: toProjectPath(
+            context,
+            authorizationUsePath(
+              context,
+              actionIntentIdentity.authorizationId,
+              deliveryActionIntentUseReceiptId(actionIntentIdentity),
+            ),
+          ),
+        }
+      : null;
     const preparedPolicySource = completingAction ? null : buildDeliveryCheckpointPolicySource(context);
     let actionDetails = completingAction
       ? null
@@ -15800,6 +18127,7 @@ function evaluateDeliveryAction(context, options) {
     }
     const attribution = buildAttribution(context, options, `autonomy.delivery.action.${action}`);
     let approval = null;
+    let approvalAuthorizationSettings = null;
     if (!completingAction && checkpointRequired) {
       requireFormalApprovalActor(context, options, attribution, `Authorizing delivery action ${action}`);
       const subject = {
@@ -15816,37 +18144,68 @@ function evaluateDeliveryAction(context, options) {
         `autonomy.delivery.action.${action}`,
         subject,
       );
-      approval = {
-        ...buildApprovalRecord(context, options, attribution, {
+      approvalAuthorizationSettings = {
         subject,
         subject_id_field: "profile_id",
         subject_id: profile.id,
         status: "approved",
         scope: `delivery-action:${action}`,
         label: `delivery action ${action} for ${profile.id}`,
-        }),
+        record_use: false,
+        ...(plannedAuthorizationUse
+          ? {
+              receipt_id: plannedAuthorizationUse.id,
+              used_at: actionReceiptTimestamp,
+            }
+          : {}),
+      };
+      const candidateApproval = {
+        ...buildApprovalRecord(context, options, attribution, approvalAuthorizationSettings),
         authority_assurance: authorityAssurance,
       };
+      if (plannedAuthorizationUse) {
+        candidateApproval.authorization_use_ref = plannedAuthorizationUse.path;
+      }
+      if (pendingActionIntent) {
+        const currentAuthorization = readAuthorization(
+          context,
+          actionIntentIdentity.authorizationId,
+        );
+        if (
+          authorizationRecordHash(currentAuthorization)
+            !== pendingActionIntent.authorization_ref.hash
+        ) {
+          fail(
+            `Delivery action authorization intent ${pendingActionIntent.id} `
+            + "does not match the current delegated authorization.",
+          );
+        }
+        const storedApproval = pendingActionIntent.action_receipt.approval;
+        if (
+          stableJson(deliveryActionApprovalRecoveryProjection(candidateApproval))
+            !== stableJson(deliveryActionApprovalRecoveryProjection(storedApproval))
+        ) {
+          fail(
+            `Delivery action authorization intent ${pendingActionIntent.id} `
+            + "does not match this exact approval retry.",
+          );
+        }
+        approval = storedApproval;
+      } else {
+        approval = candidateApproval;
+      }
     }
     const evidence = buildActionEvidence(context, options.evidence);
     const existingActionReceipts = completingAction ? deliveryActionReceipts(context, profile.id) : [];
-    const consumedAuthorizationIds = new Set(existingActionReceipts
-      .filter((receipt) => receipt.status === "completed")
-      .map((receipt) => receipt.authorization_receipt_ref?.id)
-      .filter(Boolean));
     const priorAuthorization = completingAction
-      ? existingActionReceipts
-          .filter((receipt) =>
-            receipt.action === action
-            && receipt.status === "authorized"
-            && receipt.profile_ref?.hash === profile.profile_hash
-            && !consumedAuthorizationIds.has(receipt.id))
-          .sort(compareDeliveryAuthorizationOrder)
-          .at(-1) || null
+      ? selectPendingDeliveryActionAuthorization(
+          context,
+          profile,
+          action,
+          existingActionReceipts,
+          options,
+        )
       : null;
-    if (completingAction && !priorAuthorization) {
-      fail(`Delivery action ${action} must be authorized before recording its outcome.`);
-    }
     if (
       completingAction
       && action === "rollback.verify"
@@ -16089,11 +18448,47 @@ function evaluateDeliveryAction(context, options) {
         rollback_verified: action === "data.rollback",
       };
     }
+    const authorizationGuidance = !completingAction
+      ? actionCheckpointGuidance({
+          status: "authorized",
+          profile_id: profile.id,
+          delivery_id: profile.delivery_id,
+          action,
+          authority_mode: approval?.authority_assurance?.mode || context.config.authority_policy?.mode || "audit_only",
+          authority_verified: approval?.authority_assurance?.verified === true,
+          host_receipt_required: (context.config.authority_policy?.mode || "audit_only") === "host_verified",
+          execution_performed: false,
+          merge_executed: false,
+          target_root: profile.local_release_target?.root_path || null,
+          smoke_cwd: actionDetails?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
+          smoke_tests: profile.local_release_target?.smoke_tests || [],
+          data_target: profile.local_release_target?.data_migration?.target_path || null,
+          data_scopes: profile.local_release_target?.data_migration?.scopes || [],
+          backup_path: profile.local_release_target?.data_migration?.backup?.path || null,
+          preview_evidence: (profile.local_release_target?.data_migration?.preview_evidence || [])
+            .map((item) => item.path),
+          rollback_evidence: (actionDetails?.rollback_verification?.evidence || [])
+            .map((item) => item.path),
+          rollback: profile.local_release_target?.rollback?.procedure || null,
+        }, { locale: humanGuidanceLocale(options) })
+      : null;
     const createdAt = actionReceiptTimestamp;
+    const completionRequest = completingAction
+      ? buildDeliveryCompletionRequest(
+          context,
+          profile,
+          action,
+          reportedOutcome,
+          evidence,
+          options,
+          priorAuthorization,
+        )
+      : null;
     const receiptBase = {
       id: actionReceiptId,
       kind: "delivery_action_receipt",
-      schema_version: "delivery-action-receipt:v1",
+      schema_version: pendingActionIntent?.action_receipt?.schema_version
+        || "delivery-action-receipt:v2",
       profile_ref: {
         id: profile.id,
         path: toProjectPath(context, profilePath),
@@ -16116,17 +18511,19 @@ function evaluateDeliveryAction(context, options) {
             hash: priorAuthorization.receipt_hash,
           }
         : null,
+      ...(completionRequest ? { completion_request: completionRequest } : {}),
       local_release_verification: localReleaseVerification,
       ...(rollbackVerification ? { rollback_verification: rollbackVerification } : {}),
       ...(dataOperationVerification ? { data_operation_verification: dataOperationVerification } : {}),
       evidence,
       outcome: reportedOutcome || null,
       status: completingAction ? "completed" : "authorized",
-      authorized_by: attribution.actor,
+      authorized_by: pendingActionIntent?.action_receipt?.authorized_by || attribution.actor,
       authorized_at: createdAt,
-      audit: { git: attribution.git, run: attribution.run },
+      audit: pendingActionIntent?.action_receipt?.audit
+        || { git: attribution.git, run: attribution.run },
     };
-    const receipt = {
+    let receipt = {
       ...receiptBase,
       receipt_hash: autonomyLifecycleReceiptHash(receiptBase),
       hash_algorithm: "sha256:stable-json:v1",
@@ -16136,7 +18533,112 @@ function evaluateDeliveryAction(context, options) {
       persistDeliveryCheckpointPolicySource(context, preparedPolicySource);
     }
     const receiptPath = path.join(autonomyActionsRoot(context), `${normalizeId(receipt.id)}.json`);
-    writeJsonFile(receiptPath, receipt, { atomicCreate: true });
+    let actionAuthorizationIntent = pendingActionIntent;
+    if (!completingAction && approval?.approval_source === "automation") {
+      if (!actionIntentIdentity || !plannedAuthorizationUse) {
+        fail(`Automation approval for ${action} is missing its exact recovery identity.`);
+      }
+      if (pendingActionIntent) {
+        if (stableJson(receipt) !== stableJson(pendingActionIntent.action_receipt)) {
+          fail(
+            `Delivery action authorization intent ${pendingActionIntent.id} `
+            + "does not match the currently validated action boundary.",
+          );
+        }
+        receipt = pendingActionIntent.action_receipt;
+      } else {
+        const currentAuthorization = readAuthorization(
+          context,
+          actionIntentIdentity.authorizationId,
+        );
+        actionAuthorizationIntent = buildDeliveryActionAuthorizationIntent(
+          context,
+          actionIntentIdentity,
+          profile,
+          action,
+          currentAuthorization,
+          plannedAuthorizationUse,
+          receipt,
+          preparedPolicySource,
+        );
+        writeJsonFile(actionIntentIdentity.path, actionAuthorizationIntent, {
+          atomicCreate: true,
+          durable: true,
+        });
+        actionAuthorizationIntent = readDeliveryActionAuthorizationIntent(
+          context,
+          actionIntentIdentity,
+          profile,
+        );
+      }
+      if (
+        stableJson(actionAuthorizationIntent.policy_source_ref)
+          !== stableJson(preparedPolicySource.ref)
+        || stableJson(actionAuthorizationIntent.action_receipt) !== stableJson(receipt)
+      ) {
+        fail(
+          `Delivery action authorization intent ${actionAuthorizationIntent.id} `
+          + "does not bind the validated policy source and action receipt.",
+        );
+      }
+      const existingReceipt = fs.existsSync(receiptPath)
+        ? readDeliveryLifecycleReceipt(
+            context,
+            receiptPath,
+            "delivery-action-receipt.schema.json",
+          )
+        : null;
+      if (existingReceipt && stableJson(existingReceipt) !== stableJson(receipt)) {
+        fail(`Delivery action receipt ${receipt.id} conflicts with its immutable recovery intent.`);
+      }
+      const automationAuthorization = requireAutomationAuthorization(
+        context,
+        options,
+        attribution.action,
+        {
+          ...approvalAuthorizationSettings,
+          record_use: true,
+          receipt_id: plannedAuthorizationUse.id,
+          used_at: actionReceiptTimestamp,
+        },
+      );
+      if (
+        automationAuthorization.id !== approval.authorization_ref
+        || automationAuthorization.__use_receipt?.receipt?.id !== plannedAuthorizationUse.id
+        || automationAuthorization.__use_receipt?.path !== plannedAuthorizationUse.path
+      ) {
+        fail(`Automation approval for ${action} did not produce its exact authorization-use receipt.`);
+      }
+      if (
+        process.env.NODE_ENV === "test"
+        && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE
+          === "after-authorization-use-before-action-receipt"
+        && !pendingActionIntent
+      ) {
+        fail("Simulated interruption after authorization use and before action receipt persistence.");
+      }
+    }
+    const receiptAlreadyPersisted = fs.existsSync(receiptPath);
+    if (receiptAlreadyPersisted) {
+      const existingReceipt = readDeliveryLifecycleReceipt(
+        context,
+        receiptPath,
+        "delivery-action-receipt.schema.json",
+      );
+      if (stableJson(existingReceipt) !== stableJson(receipt)) {
+        fail(`Delivery action receipt ${receipt.id} is stale or tampered.`);
+      }
+    }
+    writeJsonFile(receiptPath, receipt, { atomicCreate: true, durable: true });
+    if (
+      process.env.NODE_ENV === "test"
+      && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE
+        === "after-action-receipt-before-trace"
+      && !receiptAlreadyPersisted
+      && (actionAuthorizationIntent || completingAction)
+    ) {
+      fail("Simulated interruption after action receipt persistence and before trace persistence.");
+    }
     if (
       process.env.NODE_ENV === "test"
       && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE === "after-terminal-completion-receipt"
@@ -16150,45 +18652,33 @@ function evaluateDeliveryAction(context, options) {
       ? repairTerminalDeliveryClose(context, profile, executionState)
       : null;
     const autoClosePath = autoClose?.path || null;
-    appendTraceEvent(context, profile.story_refs[0]?.id || null, {
-      type: action === "release.local" && completingAction ? "release" : "gate",
-      summary: `${completingAction ? "Completed" : "Authorized"} ${action} for exact delivery ${profile.delivery_id}`,
-      action,
-      actor: attribution.actor,
-      outcome: completingAction ? reportedOutcome : "ready",
-      evidence: [
-        toProjectPath(context, receiptPath),
-        autoClosePath,
-        ...evidence.map((item) => item.path),
-      ].filter(Boolean),
-      related: [profile.id, profile.delivery_id],
-      git: attribution.git,
-      run: attribution.run,
-    });
-    const guidance = !completingAction
-      ? actionCheckpointGuidance({
-          status: "authorized",
-          profile_id: profile.id,
-          delivery_id: profile.delivery_id,
-          action,
-          authority_mode: approval?.authority_assurance?.mode || context.config.authority_policy?.mode || "audit_only",
-          authority_verified: approval?.authority_assurance?.verified === true,
-          host_receipt_required: (context.config.authority_policy?.mode || "audit_only") === "host_verified",
-          execution_performed: false,
-          merge_executed: false,
-          target_root: profile.local_release_target?.root_path || null,
-          smoke_cwd: receipt.action_details?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
-          smoke_tests: profile.local_release_target?.smoke_tests || [],
-          data_target: profile.local_release_target?.data_migration?.target_path || null,
-          data_scopes: profile.local_release_target?.data_migration?.scopes || [],
-          backup_path: profile.local_release_target?.data_migration?.backup?.path || null,
-          preview_evidence: (profile.local_release_target?.data_migration?.preview_evidence || [])
-            .map((item) => item.path),
-          rollback_evidence: (receipt.action_details?.rollback_verification?.evidence || [])
-            .map((item) => item.path),
-          rollback: profile.local_release_target?.rollback?.procedure || null,
-        }, { locale: humanGuidanceLocale(options) })
-      : null;
+    if (completingAction) {
+      ensureDeliveryActionAuthorizationTrace(
+        context,
+        buildDeliveryActionCompletionTraceEvent(context, profile, receipt),
+      );
+    } else if (actionAuthorizationIntent) {
+      ensureDeliveryActionAuthorizationTrace(
+        context,
+        actionAuthorizationIntent.trace_event,
+      );
+    } else if (!receiptAlreadyPersisted) {
+      appendTraceEvent(context, profile.story_refs[0]?.id || null, {
+        type: action === "release.local" && completingAction ? "release" : "gate",
+        summary: `${completingAction ? "Completed" : "Authorized"} ${action} for exact delivery ${profile.delivery_id}`,
+        action,
+        actor: attribution.actor,
+        outcome: completingAction ? reportedOutcome : "ready",
+        evidence: [
+          toProjectPath(context, receiptPath),
+          autoClosePath,
+          ...evidence.map((item) => item.path),
+        ].filter(Boolean),
+        related: [profile.id, profile.delivery_id],
+        git: attribution.git,
+        run: attribution.run,
+      });
+    }
     const locale = humanGuidanceLocale(options);
     const italian = locale === "it";
     const completedSuccessfully = reportedOutcome === "passed";
@@ -16223,6 +18713,7 @@ function evaluateDeliveryAction(context, options) {
       : null;
     output(options, {
       status: completingAction ? "completed" : "authorized",
+      ...(receiptAlreadyPersisted ? { idempotent: true } : {}),
       execution_allowed: !completingAction,
       profile_id: profile.id,
       action,
@@ -16233,7 +18724,7 @@ function evaluateDeliveryAction(context, options) {
       lifecycle_status: autoClosePath ? "terminal" : "started",
       close_receipt_path: autoClosePath,
       audit_warnings: actionAuditWarnings,
-      human_guidance: completingAction ? completionGuidance : guidance,
+      human_guidance: completingAction ? completionGuidance : authorizationGuidance,
     }, completingAction
       ? humanGuidanceLines(completionGuidance, [
           `- Profile: ${profile.id}`,
@@ -16242,7 +18733,7 @@ function evaluateDeliveryAction(context, options) {
           `- Outcome: ${reportedOutcome}`,
           `- Evidence record: ${toProjectPath(context, receiptPath)}`,
         ].map((line) => line.replace(/^- /u, "")), options)
-      : humanGuidanceLines(guidance, [
+      : humanGuidanceLines(authorizationGuidance, [
           `Delivery: ${profile.delivery_id}`,
           `Canonical action: ${action}`,
           `Profile: ${profile.id}`,
@@ -17823,6 +20314,12 @@ async function applyAssessmentProposal(context, options) {
   if (!authorization.proposal_ref || authorization.proposal_ref.id !== id || authorization.proposal_ref.hash !== proposal.proposal_hash) {
     fail(`Authorization ${authorization.id} is not content-bound to proposal ${id} at ${proposal.proposal_hash}.`);
   }
+  const storyTemplates = readStory(context, proposal.story_reservation.id)
+    ? null
+    : {
+        plan: readTemplateFile(context, "story-plan.md"),
+        implementation_log: readTemplateFile(context, "implementation-log.md"),
+      };
   const attribution = buildAttribution(context, options, "assessment.proposal.apply");
   const releaseLock = acquireFileLock(`${assessmentProposalPath(context, id)}.lock`);
   try {
@@ -17838,7 +20335,15 @@ async function applyAssessmentProposal(context, options) {
       artifact_types: [],
     }));
     const requirementResult = applyProposalRequirement(context, proposal, attribution, authorization, baseSettings, useReceipts);
-    const storyResult = applyProposalStory(context, proposal, attribution, authorization, baseSettings, useReceipts);
+    const storyResult = applyProposalStory(
+      context,
+      proposal,
+      attribution,
+      authorization,
+      baseSettings,
+      useReceipts,
+      storyTemplates,
+    );
     const templateResult = applyProposalTemplate(context, proposal, attribution, authorization, baseSettings, useReceipts);
     const contractResult = applyProposalContract(context, proposal, attribution, authorization, baseSettings, useReceipts);
     const taskStartResult = applyProposalTaskStart(context, proposal, attribution, authorization, baseSettings, useReceipts, contractResult.contract);
@@ -18200,7 +20705,7 @@ function applyProposalRequirement(context, proposal, attribution, authorization,
   return { kind: "requirement", id, status: "created", path: toProjectPath(context, filePath), sha256: hashFile(filePath) };
 }
 
-function applyProposalStory(context, proposal, attribution, authorization, baseSettings, useReceipts) {
+function applyProposalStory(context, proposal, attribution, authorization, baseSettings, useReceipts, templates = null) {
   const reservation = proposal.story_reservation;
   const storyDir = path.join(context.sdlcRoot, "stories", reservation.id);
   const storyPath = path.join(storyDir, "story.json");
@@ -18211,6 +20716,8 @@ function applyProposalStory(context, proposal, attribution, authorization, baseS
     }
     return { kind: "story", id: reservation.id, status: "reused", path: toProjectPath(context, storyPath), sha256: hashFile(storyPath) };
   }
+  const storyPlanTemplate = templates?.plan ?? readTemplateFile(context, "story-plan.md");
+  const implementationLogTemplate = templates?.implementation_log ?? readTemplateFile(context, "implementation-log.md");
   const use = recordOrReuseAuthorizationUse(context, authorization, "story.create", {
     ...baseSettings,
     subject_id: reservation.id,
@@ -18242,8 +20749,14 @@ function applyProposalStory(context, proposal, attribution, authorization, baseS
     },
   };
   writeJsonFile(storyPath, record);
-  renderTemplateFile(context, "story-plan.md", path.join(storyDir, "plan.md"), { STORY_ID: reservation.id });
-  renderTemplateFile(context, "implementation-log.md", path.join(storyDir, "implementation-log.md"), { STORY_ID: reservation.id, CREATED_AT: now() });
+  writeTextFile(
+    path.join(storyDir, "plan.md"),
+    renderTemplate(storyPlanTemplate, { STORY_ID: reservation.id }),
+  );
+  writeTextFile(
+    path.join(storyDir, "implementation-log.md"),
+    renderTemplate(implementationLogTemplate, { STORY_ID: reservation.id, CREATED_AT: now() }),
+  );
   return { kind: "story", id: reservation.id, status: "created", path: toProjectPath(context, storyPath), sha256: hashFile(storyPath) };
 }
 
@@ -21465,30 +23978,47 @@ function revokeAuthorization(context, options) {
     fail("Revoking delegated automation authorization requires --actor-type human or ci.");
   }
   const filePath = authorizationPath(context, id);
-  const record = readAuthorization(context, id);
-  if (isCanonicalContentAuthorization(record)) {
-    const reason = getOptionString(options, "reason") || "Revoked by an authorized human or CI actor.";
-    const revocation = createAuthorizationRevocation({
-      id: `AREVOKE-${id}-${uniqueRecordSuffix()}`,
-      authorization_id: id,
-      authorization_hash: record.authorization_hash,
-      effective_at: now(),
-      reason,
-      revoked_by: attribution.actor,
-    });
-    const lifecyclePath = authorizationLifecyclePath(context, id);
-    ensureDir(path.dirname(lifecyclePath));
-    writeJsonFile(lifecyclePath, revocation, { force: Boolean(options.force) });
-    output(options, { status: "revoked", authorization: record, revocation, lifecycle_path: toProjectPath(context, lifecyclePath) }, [`Revoked authorization ${id}`]);
-    return;
+  const releaseLock = acquireFileLock(`${filePath}.lock`);
+  let result;
+  try {
+    const record = readAuthorization(context, id);
+    if (isCanonicalContentAuthorization(record)) {
+      const reason = getOptionString(options, "reason") || "Revoked by an authorized human or CI actor.";
+      const revocation = createAuthorizationRevocation({
+        id: `AREVOKE-${id}-${uniqueRecordSuffix()}`,
+        authorization_id: id,
+        authorization_hash: record.authorization_hash,
+        effective_at: now(),
+        reason,
+        revoked_by: attribution.actor,
+      });
+      const lifecyclePath = authorizationLifecyclePath(context, id);
+      ensureDir(path.dirname(lifecyclePath));
+      writeJsonFile(lifecyclePath, revocation, { force: Boolean(options.force) });
+      result = {
+        status: "revoked",
+        authorization: record,
+        revocation,
+        lifecycle_path: toProjectPath(context, lifecyclePath),
+      };
+    } else {
+      record.status = "revoked";
+      record.revoked_at = now();
+      record.revocation_reason = getOptionString(options, "reason") || null;
+      record.updated_at = now();
+      record.audit = {
+        ...(record.audit || {}),
+        revoked_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      };
+      writeJsonFile(filePath, record, { force: true, durable: true });
+      result = { status: "revoked", authorization: record };
+    }
+  } finally {
+    releaseLock();
   }
-  record.status = "revoked";
-  record.revoked_at = now();
-  record.revocation_reason = getOptionString(options, "reason") || null;
-  record.updated_at = now();
-  record.audit = { ...(record.audit || {}), revoked_by: attribution.actor, git: attribution.git, run: attribution.run };
-  writeJsonFile(filePath, record, { force: true });
-  output(options, { status: "revoked", authorization: record }, [`Revoked authorization ${id}`]);
+  output(options, result, [`Revoked authorization ${id}`]);
 }
 
 function authorizationAllowsAction(record, action) {
@@ -21664,11 +24194,65 @@ function authorizationUseKey(action, settings = {}) {
   }));
 }
 
+function existingExactAuthorizationUse(context, authorization, action, settings = {}) {
+  if (!settings.receipt_id) {
+    return null;
+  }
+  const expectedReceiptId = normalizeId(settings.receipt_id);
+  const receiptPath = authorizationUsePath(context, authorization.id, expectedReceiptId);
+  if (!fs.existsSync(receiptPath)) {
+    return null;
+  }
+  const receipt = readProjectJson(context, receiptPath);
+  const receiptErrors = validateAuthorizationUseReceipt(receipt, {
+    authorization_id: authorization.id,
+    action,
+    subject_id: settings.subject_id,
+    proposal_ref: settings.proposal_ref,
+    subject_hash: settings.subject_hash,
+    artifact_types: settings.artifact_types,
+    approval_boundaries: settings.approval_boundaries,
+  });
+  if (receipt.id !== expectedReceiptId) {
+    receiptErrors.push(
+      `authorization usage receipt id is ${receipt.id || "missing"}, expected ${expectedReceiptId}`,
+    );
+  }
+  if (settings.used_at && receipt.used_at !== settings.used_at) {
+    receiptErrors.push(
+      `authorization usage receipt time is ${receipt.used_at || "missing"}, expected ${settings.used_at}`,
+    );
+  }
+  if (
+    receiptErrors.length > 0
+    || receipt.authorization_hash !== authorizationRecordHash(authorization)
+  ) {
+    fail(
+      `Delivery action authorization use ${receipt.id || expectedReceiptId} `
+      + `cannot be recovered: ${receiptErrors.join("; ") || "authorization hash mismatch"}.`,
+    );
+  }
+  return {
+    receipt,
+    path: toProjectPath(context, receiptPath),
+    authorization,
+  };
+}
+
 function recordAuthorizationUse(context, authorization, action, settings = {}) {
   const authorizationFile = authorizationPath(context, authorization.id);
   const releaseLock = acquireFileLock(`${authorizationFile}.lock`);
   try {
     const current = readAuthorization(context, authorization.id);
+    const exactRecovery = existingExactAuthorizationUse(
+      context,
+      current,
+      action,
+      settings,
+    );
+    if (exactRecovery) {
+      return exactRecovery;
+    }
     const errors = authorizationUseErrors(current, action, settings);
     if (errors.length > 0) {
       fail(errors[0]);
@@ -21694,12 +24278,15 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
     if (maxUses > 0 && previousAccepted >= maxUses) {
       fail(`Authorization ${current.id} has reached its maximum of ${maxUses} accepted use(s).`);
     }
-    const usedAt = now();
+    const usedAt = settings.used_at || now();
+    const requestedReceiptId = settings.receipt_id
+      ? normalizeId(settings.receipt_id)
+      : null;
     let receipt;
     if (isCanonicalContentAuthorization(current)) {
       try {
         receipt = buildCanonicalAuthorizationUsageReceipt(current, {
-          id: `AUSE-${current.id}-${uniqueRecordSuffix()}`,
+          id: requestedReceiptId || `AUSE-${current.id}-${uniqueRecordSuffix()}`,
           action: String(action || "").trim().toLowerCase(),
           subject: canonicalAuthorizationUseSubject(settings),
           used_at: usedAt,
@@ -21718,7 +24305,7 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
           label: `Authorization ${current.id}`,
         });
       receipt = {
-        id: `AUSE-${current.id}-${uniqueRecordSuffix()}`,
+        id: requestedReceiptId || `AUSE-${current.id}-${uniqueRecordSuffix()}`,
         kind: "authorization_usage_receipt",
         schema_version: "authorization-usage-receipt:legacy-v2",
         authorization_id: current.id,
@@ -21749,7 +24336,7 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
     }
     ensureDir(usesRoot);
     const receiptPath = authorizationUsePath(context, current.id, receipt.id);
-    writeJsonFile(receiptPath, receipt);
+    writeJsonFile(receiptPath, receipt, { durable: true });
     const acceptedCount = previousAccepted + 1;
     if (!isCanonicalContentAuthorization(current)) {
       current.use_count = acceptedCount;
@@ -21758,7 +24345,7 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
         current.consumed_at = usedAt;
       }
       current.updated_at = usedAt;
-      writeJsonFile(authorizationFile, current, { force: true });
+      writeJsonFile(authorizationFile, current, { force: true, durable: true });
     }
     return { receipt, path: toProjectPath(context, receiptPath), authorization: current };
   } finally {
@@ -21887,6 +24474,20 @@ function requireAutomationAuthorization(context, options, action, settings = {})
     fail(`${settings.label || action} uses delegated automation approval and requires --authorization <id>. Free-text --scope is not sufficient.`);
   }
   const record = readAuthorization(context, normalizeId(id));
+  const exactRecovery = existingExactAuthorizationUse(
+    context,
+    record,
+    action,
+    settings,
+  );
+  if (exactRecovery) {
+    Object.defineProperty(record, "__use_receipt", {
+      value: exactRecovery,
+      enumerable: false,
+      configurable: false,
+    });
+    return record;
+  }
   const errors = authorizationUseErrors(record, action, settings);
   if (errors.length > 0) {
     fail(errors[0]);
@@ -25568,7 +28169,8 @@ function createStory(context, options) {
   }
   const status = normalizeStoryStatus(options.status || "draft");
   const storyDir = path.join(context.sdlcRoot, "stories", id);
-  ensureDir(storyDir);
+  const storyPlanTemplate = readTemplateFile(context, "story-plan.md");
+  const implementationLogTemplate = readTemplateFile(context, "implementation-log.md");
 
   const acceptanceCriteria = normalizeListOption(options.acceptance);
   const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
@@ -25622,19 +28224,16 @@ function createStory(context, options) {
     },
   };
 
+  ensureDir(storyDir);
   writeJsonFile(path.join(storyDir, "story.json"), story, { force: Boolean(options.force) });
-  renderTemplateFile(
-    context,
-    "story-plan.md",
+  writeTextFile(
     path.join(storyDir, "plan.md"),
-    { STORY_ID: id },
+    renderTemplate(storyPlanTemplate, { STORY_ID: id }),
     { force: Boolean(options.force) },
   );
-  renderTemplateFile(
-    context,
-    "implementation-log.md",
+  writeTextFile(
     path.join(storyDir, "implementation-log.md"),
-    { STORY_ID: id, CREATED_AT: now() },
+    renderTemplate(implementationLogTemplate, { STORY_ID: id, CREATED_AT: now() }),
     { force: Boolean(options.force) },
   );
 
@@ -27658,129 +30257,136 @@ function completeStoryStep(context, options) {
   if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
-  assertReleaseClaimPrecondition(context, storyId, options);
-  const step = normalizeStoryStep(context, requireOption(options, "step"));
-  const summary = getOptionString(options, "summary") || null;
-  const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
-  validateApprovedStoryContractForPhaseOutput(
-    context,
-    story,
-    "story.complete-step",
-    outputTypes.map((artifactType) => ({ artifact_type: artifactType })),
-    options,
+  const releaseTaskStartBoundaryLock = acquireFileLock(
+    path.join(context.sdlcRoot, "stories", storyId, "task-start-boundary.lock"),
   );
-  const artifactEvidence = buildCanonicalEvidence(context, normalizeListOption(options.artifact), "Story step artifact");
-  const extraEvidence = buildCanonicalEvidence(context, normalizeListOption(options.evidence), "Story step evidence");
-  if (!summary && outputTypes.length === 0 && artifactEvidence.length === 0 && extraEvidence.length === 0) {
-    fail("Complete-step requires --summary, --type, --artifact, or --evidence.");
-  }
+  try {
+    assertReleaseClaimPrecondition(context, storyId, options);
+    const step = normalizeStoryStep(context, requireOption(options, "step"));
+    const summary = getOptionString(options, "summary") || null;
+    const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
+    validateApprovedStoryContractForPhaseOutput(
+      context,
+      story,
+      "story.complete-step",
+      outputTypes.map((artifactType) => ({ artifact_type: artifactType })),
+      options,
+    );
+    const artifactEvidence = buildCanonicalEvidence(context, normalizeListOption(options.artifact), "Story step artifact");
+    const extraEvidence = buildCanonicalEvidence(context, normalizeListOption(options.evidence), "Story step evidence");
+    if (!summary && outputTypes.length === 0 && artifactEvidence.length === 0 && extraEvidence.length === 0) {
+      fail("Complete-step requires --summary, --type, --artifact, or --evidence.");
+    }
 
-  const registry = readOutputRegistry(context, { missingOk: true });
-  const outputLinks = collectStoryOutputLinksForStep(context, registry, storyId, outputTypes);
-  if (outputTypes.length > 0) {
-    const linkedTypes = new Set(outputLinks.map((link) => link.artifact_type));
-    for (const artifactType of outputTypes) {
-      if (!linkedTypes.has(artifactType)) {
+    const registry = readOutputRegistry(context, { missingOk: true });
+    const outputLinks = collectStoryOutputLinksForStep(context, registry, storyId, outputTypes);
+    if (outputTypes.length > 0) {
+      const linkedTypes = new Set(outputLinks.map((link) => link.artifact_type));
+      for (const artifactType of outputTypes) {
+        if (!linkedTypes.has(artifactType)) {
+          fail(
+            `Story ${storyId} has no linked ${artifactType} output. Run output resolve/link before completing this step.`,
+          );
+        }
+      }
+    }
+    if (["validation", "release"].includes(step)) {
+      if (artifactEvidence.length === 0 && extraEvidence.length === 0 && outputLinks.length === 0) {
+        fail(`${step} completion requires --artifact, --evidence, or a linked output; a summary alone is not release evidence.`);
+      }
+      const requiredTraceType = step === "validation" ? "test" : "release";
+      const acceptableOutcomes = step === "validation" ? ["passed"] : ["ready", "passed"];
+      const supportingTrace = latestTraceEvent(readTraceEvents(context, storyId), requiredTraceType);
+      if (!supportingTrace || !acceptableOutcomes.includes(supportingTrace.outcome)) {
         fail(
-          `Story ${storyId} has no linked ${artifactType} output. Run output resolve/link before completing this step.`,
+          `${step} completion requires the latest ${requiredTraceType} trace to have outcome `
+          + `${acceptableOutcomes.join(" or ")}.`,
         );
       }
     }
-  }
-  if (["validation", "release"].includes(step)) {
-    if (artifactEvidence.length === 0 && extraEvidence.length === 0 && outputLinks.length === 0) {
-      fail(`${step} completion requires --artifact, --evidence, or a linked output; a summary alone is not release evidence.`);
-    }
-    const requiredTraceType = step === "validation" ? "test" : "release";
-    const acceptableOutcomes = step === "validation" ? ["passed"] : ["ready", "passed"];
-    const supportingTrace = latestTraceEvent(readTraceEvents(context, storyId), requiredTraceType);
-    if (!supportingTrace || !acceptableOutcomes.includes(supportingTrace.outcome)) {
-      fail(
-        `${step} completion requires the latest ${requiredTraceType} trace to have outcome `
-        + `${acceptableOutcomes.join(" or ")}.`,
-      );
-    }
-  }
 
-  const checkpoint = consumeStoryActionCheckpoint(
-    context,
-    storyId,
-    "story.complete-step",
-    options,
-    { artifact_types: outputTypes },
-  );
-  const attribution = buildAttribution(context, options, "story.complete-step");
-  const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
-  const stepPath = path.join(stepDir, `${step}.json`);
-  const relativeStepPath = toProjectPath(context, stepPath);
-  const record = {
-    id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${uniqueRecordSuffix()}`)),
-    story_id: storyId,
-    step,
-    status: "completed",
-    phase: storyStepPhase(context, step),
-    summary,
-    output_types: outputTypes,
-    output_links: outputLinks.map((link) => ({
-      id: link.id,
-      artifact_type: link.artifact_type,
-      artifact_path: link.artifact_path,
-      template_id: link.template_id,
-      mode: link.mode,
-      base_artifact: link.base_artifact || null,
-      requirements: Array.isArray(link.requirements) ? link.requirements : [],
-    })),
-    artifacts: artifactEvidence,
-    evidence: extraEvidence,
-    next_step: options["next-step"]
-      ? normalizeStoryStep(context, options["next-step"])
-      : defaultNextStoryStep(context, step),
-    completed_at: now(),
-    ...(checkpoint || {}),
-    audit: {
-      completed_by: attribution.actor,
+    const checkpoint = consumeStoryActionCheckpoint(
+      context,
+      storyId,
+      "story.complete-step",
+      options,
+      { artifact_types: outputTypes },
+    );
+    const attribution = buildAttribution(context, options, "story.complete-step");
+    const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
+    const stepPath = path.join(stepDir, `${step}.json`);
+    const relativeStepPath = toProjectPath(context, stepPath);
+    const record = {
+      id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${uniqueRecordSuffix()}`)),
+      story_id: storyId,
+      step,
+      status: "completed",
+      phase: storyStepPhase(context, step),
+      summary,
+      output_types: outputTypes,
+      output_links: outputLinks.map((link) => ({
+        id: link.id,
+        artifact_type: link.artifact_type,
+        artifact_path: link.artifact_path,
+        template_id: link.template_id,
+        mode: link.mode,
+        base_artifact: link.base_artifact || null,
+        requirements: Array.isArray(link.requirements) ? link.requirements : [],
+      })),
+      artifacts: artifactEvidence,
+      evidence: extraEvidence,
+      next_step: options["next-step"]
+        ? normalizeStoryStep(context, options["next-step"])
+        : defaultNextStoryStep(context, step),
+      completed_at: now(),
+      ...(checkpoint || {}),
+      audit: {
+        completed_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+    writeJsonFile(stepPath, record, { force: true });
+    appendJsonLine(path.join(stepDir, "history.jsonl"), record);
+    const traceEvent = appendTraceEvent(context, storyId, {
+      type: "gate",
+      summary: summary || `Completed ${step} for ${storyId}`,
+      action: "story.complete-step",
+      actor: attribution.actor,
+      evidence: Array.from(new Set([
+        relativeStepPath,
+        ...record.artifacts.map((item) => item.path),
+        ...record.evidence.map((item) => item.path),
+        ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
+        record.authorization_use_ref,
+        record.checkpoint_profile_ref?.path,
+      ].filter(Boolean))),
+      related: [storyId, step, ...record.output_links.map((item) => item.id)],
       git: attribution.git,
       run: attribution.run,
-    },
-  };
-  writeJsonFile(stepPath, record, { force: true });
-  appendJsonLine(path.join(stepDir, "history.jsonl"), record);
-  const traceEvent = appendTraceEvent(context, storyId, {
-    type: "gate",
-    summary: summary || `Completed ${step} for ${storyId}`,
-    action: "story.complete-step",
-    actor: attribution.actor,
-    evidence: Array.from(new Set([
-      relativeStepPath,
-      ...record.artifacts.map((item) => item.path),
-      ...record.evidence.map((item) => item.path),
-      ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
-      record.authorization_use_ref,
-      record.checkpoint_profile_ref?.path,
-    ].filter(Boolean))),
-    related: [storyId, step, ...record.output_links.map((item) => item.id)],
-    git: attribution.git,
-    run: attribution.run,
-  });
+    });
 
-  const release = options["release-claim"]
-    ? releaseStoryClaimRecord(context, {
-        ...options,
-        id: storyId,
-        status: "released",
-        reason: getOptionString(options, "reason") || `Completed ${step}; story prepared for handoff`,
-      })
-    : null;
+    const release = options["release-claim"]
+      ? releaseStoryClaimRecord(context, {
+          ...options,
+          id: storyId,
+          status: "released",
+          reason: getOptionString(options, "reason") || `Completed ${step}; story prepared for handoff`,
+        })
+      : null;
 
-  output(
-    options,
-    { status: "completed", step_path: stepPath, step: record, trace_event: traceEvent, release },
-    [
-      `Completed ${step} for story ${storyId}`,
-      `Step record: ${relativeStepPath}`,
-      release ? `Released claim for story ${storyId}` : null,
-    ].filter(Boolean),
-  );
+    output(
+      options,
+      { status: "completed", step_path: stepPath, step: record, trace_event: traceEvent, release },
+      [
+        `Completed ${step} for story ${storyId}`,
+        `Step record: ${relativeStepPath}`,
+        release ? `Released claim for story ${storyId}` : null,
+      ].filter(Boolean),
+    );
+  } finally {
+    releaseTaskStartBoundaryLock();
+  }
 }
 
 function prepareStoryHandoff(context, options) {
@@ -28314,17 +30920,17 @@ function initializeOutputContracts(context, options = {}) {
 
 function proposeOutputTemplate(context, options) {
   ensureInitialized(context);
-  return withOutputRegistryLock(context, () => {
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const id = normalizeId(options.id || `${artifactType}-v1`);
   const delivery = buildOutputDelivery(options);
+  const attribution = buildAttribution(context, options, "output.template.propose");
+  const content = buildOutputTemplateContent(context, options, artifactType, id);
+  return withOutputRegistryLock(context, () => {
   const registry = readOutputRegistry(context, { create: true, options, action: "output.template.propose" });
   if (findOutputTemplate(registry, id) && !options.force) {
     fail(`Output template ${id} already exists. Use --force to replace its proposal metadata.`);
   }
 
-  const attribution = buildAttribution(context, options, "output.template.propose");
-  const content = buildOutputTemplateContent(context, options, artifactType, id);
   const templatePath = path.join(outputContractsRoot(context), "templates", `${id}.md`);
   writeTextFile(templatePath, content.text, { force: Boolean(options.force) });
 
@@ -31105,12 +33711,8 @@ function buildOutputTemplateContent(context, options, artifactType, id) {
     if (normalizedPreset !== "technical-assessment") {
       fail(`Unknown output template preset '${preset}'. Valid presets: technical-assessment`);
     }
-    const presetPath = path.join(context.templateDir, "technical-assessment.md");
-    if (!fs.existsSync(presetPath) || !fs.statSync(presetPath).isFile()) {
-      fail(`Bundled output template preset is missing: ${presetPath}`);
-    }
     return {
-      text: fs.readFileSync(presetPath, "utf8"),
+      text: readTemplateFile(context, "technical-assessment.md"),
       source_paths: [],
       preset: normalizedPreset,
     };
@@ -33427,12 +36029,18 @@ function gateCheck(context, options) {
     report.status === "passed"
     && report.strict === true
     && scope === "story"
-    && options["lifecycle-complete"] === true
   ) {
-    const finalReceipt = sealWorkflowFinalGateReceipt(context, report);
-    const finalReceiptPath = workflowFinalGateReceiptPath(context, storyId);
-    writeWorkflowJsonDurably(finalReceiptPath, finalReceipt, { force: true });
-    Object.assign(report, finalReceipt);
+    if (options["lifecycle-complete"] === true) {
+      const finalReceipt = sealWorkflowFinalGateReceipt(context, report);
+      const finalReceiptPath = workflowFinalGateReceiptPath(context, storyId);
+      writeWorkflowJsonDurably(finalReceiptPath, finalReceipt, { force: true });
+      Object.assign(report, finalReceipt);
+    } else {
+      const strictReceipt = sealWorkflowStrictGateReceipt(context, report);
+      const strictReceiptPath = workflowStrictGateReceiptPath(context, storyId);
+      writeWorkflowJsonDurably(strictReceiptPath, strictReceipt, { force: true });
+      Object.assign(report, strictReceipt);
+    }
   }
   if (options.out) {
     writeGateReport(context, report, options);
@@ -33621,13 +36229,296 @@ function showStatus(context, options) {
   );
 }
 
+function statusCliCommand(...args) {
+  const cliPath = path.join(PLUGIN_ROOT, "bin", "agentic-sdlc.mjs");
+  return [
+    "node",
+    JSON.stringify(cliPath),
+    ...args.map((value) => (
+      /^[A-Za-z0-9._:@/=-]+$/u.test(String(value))
+        ? String(value)
+        : JSON.stringify(String(value))
+    )),
+  ].join(" ");
+}
+
+function matchingApprovedStoryWorkflowDefinition(context) {
+  return listVersionedWorkflowRecords(context, workflowDefinitionsRoot(context))
+    .map(({ record }) => record)
+    .filter((definition) =>
+      definition.status === "approved"
+      && definition.metadata?.governance_binding === "story"
+      && workflowPhaseOrderDifference(context, definition).exact)
+    .sort((left, right) =>
+      String(left.id).localeCompare(String(right.id), "en")
+      || String(left.version).localeCompare(String(right.version), "en"))
+    .at(-1) || null;
+}
+
+function validCurrentWorkflowFinalReceipt(context, storyId, instance) {
+  const receiptPath = workflowFinalGateReceiptPath(context, storyId);
+  if (!fs.existsSync(receiptPath)) return { exists: false, valid: false };
+  try {
+    const receipt = readProjectJson(context, receiptPath);
+    assertRecordSchema(
+      receipt,
+      "workflow-final-gate-receipt.schema.json",
+      `Final workflow gate receipt ${storyId}`,
+    );
+    const { receipt_hash: receiptHash, ...subject } = receipt;
+    return {
+      exists: true,
+      valid:
+        receiptHash === computeStableHash(subject)
+        && receipt.story_id === storyId
+        && receipt.lifecycle_workflow?.instance_id === instance.id
+        && receipt.lifecycle_workflow?.instance_hash === instance.instance_hash,
+    };
+  } catch {
+    return { exists: true, valid: false };
+  }
+}
+
+function storyReleaseReadiness(context, storyId) {
+  const missing = [];
+  const releaseStep = readStoryStepRecords(context, storyId)
+    .find((record) => record.status === "completed" && record.phase === configuredPhaseOrder(context).at(-1));
+  const releaseTrace = latestTraceEvent(readTraceEvents(context, storyId), "release");
+  const story = readStory(context, storyId);
+  const contract = story?.contract_id
+    ? readContractById(context, story.contract_id, { missingOk: true })
+    : null;
+  const profileId = contract?.delivery_execution_profile_id || null;
+  let deliveryReady = false;
+  if (profileId) {
+    try {
+      const profile = readDeliveryAutonomyProfile(context, profileId);
+      const state = currentDeliveryExecutionState(context, profile);
+      deliveryReady = state.lifecycle_status === "terminal"
+        && ["merged", "released"].includes(state.status);
+    } catch {
+      deliveryReady = false;
+    }
+  }
+  if (!deliveryReady) missing.push("terminal successful delivery");
+  if (releaseTrace?.outcome !== "passed") missing.push("passing release trace");
+  if (!releaseStep) missing.push("completed release step");
+  return {
+    ready: missing.length === 0,
+    missing,
+    profile_id: profileId,
+  };
+}
+
+function buildStoryWorkflowNextAction(context, story) {
+  if (!story?.id) return null;
+  const taskStartPath = path.join(context.sdlcRoot, "stories", story.id, "task-start.json");
+  const completedSteps = readStoryStepRecords(context, story.id)
+    .filter((record) => record.status === "completed");
+  const probe = { errors: [] };
+  const selected = currentStoryBoundWorkflowInstance(context, story.id, probe);
+  if (probe.errors.length > 0) {
+    return {
+      kind: "inspect_story_workflow",
+      reason: "workflow_state_unreadable",
+      label: "Inspect the story workflow before continuing.",
+      command: statusCliCommand("workflow", "definition", "list"),
+      protected: true,
+      story_id: story.id,
+    };
+  }
+  if (!selected) {
+    if (fs.existsSync(taskStartPath) || completedSteps.length > 0) {
+      return {
+        kind: "lifecycle_not_certifiable",
+        reason: "workflow_missing_before_task_or_step",
+        label:
+          "This legacy task has no pre-task workflow binding; a post-hoc workflow cannot certify lifecycle completion.",
+        command: null,
+        protected: true,
+        story_id: story.id,
+      };
+    }
+    const configured = configuredPhaseOrder(context);
+    const stock = configured.length === SOFTWARE_PROJECT_PHASES.length
+      && configured.every((phase, index) => phase === SOFTWARE_PROJECT_PHASES[index]);
+    const definition = stock ? null : matchingApprovedStoryWorkflowDefinition(context);
+    if (!stock && !definition) {
+      return {
+        kind: "define_custom_workflow",
+        reason: "custom_phase_order_needs_matching_workflow",
+        label:
+          `Define and approve a story-bound workflow with this exact phase order: ${configured.join(" -> ")}.`,
+        command: statusCliCommand("workflow", "definition", "propose", "--help"),
+        protected: true,
+        story_id: story.id,
+        configured_phase_order: configured,
+      };
+    }
+    const definitionId = stock ? "software-project" : definition.id;
+    const definitionVersion = stock ? "2" : definition.version;
+    return {
+      kind: "start_story_workflow",
+      reason: "story_workflow_not_started",
+      label: "Start the governed story workflow before task start or the first completed step.",
+      command: statusCliCommand(
+        "workflow", "instance", "start",
+        "--id", `DELIVERY-${story.id}`,
+        "--definition", definitionId,
+        "--definition-version", definitionVersion,
+        "--story", story.id,
+      ),
+      protected: true,
+      story_id: story.id,
+      definition_id: definitionId,
+      definition_version: definitionVersion,
+    };
+  }
+
+  let instance;
+  let effectiveDefinition;
+  let events;
+  try {
+    ({ instance } = readCompletedWorkflowInstance(context, selected.entry));
+    ({ effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance));
+    events = readWorkflowEvents(context, selected.entry);
+  } catch {
+    return {
+      kind: "inspect_story_workflow",
+      reason: "workflow_state_unreadable",
+      label: "Inspect the bound story workflow before continuing.",
+      command: statusCliCommand("workflow", "instance", "status", "--id", selected.entry),
+      protected: true,
+      story_id: story.id,
+      workflow_instance_id: selected.entry,
+    };
+  }
+  const replay = replayWorkflowEvents({
+    instance,
+    effective_definition: effectiveDefinition,
+    events,
+  });
+  if (!replay.valid) {
+    return {
+      kind: "inspect_story_workflow",
+      reason: "workflow_state_unreadable",
+      label: "Inspect the bound story workflow before continuing.",
+      command: statusCliCommand("workflow", "instance", "status", "--id", selected.entry),
+      protected: true,
+      story_id: story.id,
+      workflow_instance_id: selected.entry,
+    };
+  }
+  const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
+  if (!fs.existsSync(taskStartPath)) {
+    return {
+      kind: "start_available_work",
+      reason: "workflow_started_before_task",
+      label: "The story workflow is bound; provide the governed task intent before starting work.",
+      command: statusCliCommand("help", "task", "start"),
+      protected: true,
+      story_id: story.id,
+      workflow_instance_id: selected.entry,
+    };
+  }
+  const terminal = (effectiveDefinition.states || [])
+    .find((state) => state.id === currentState)?.terminal === true;
+  if (terminal) {
+    const finalReceipt = validCurrentWorkflowFinalReceipt(context, story.id, instance);
+    if (finalReceipt.valid) return null;
+    if (finalReceipt.exists) {
+      return {
+        kind: "inspect_story_workflow",
+        reason: "final_lifecycle_receipt_invalid",
+        label: "The existing final lifecycle receipt is invalid or belongs to another workflow run.",
+        command: statusCliCommand("workflow", "instance", "status", "--id", selected.entry),
+        protected: true,
+        story_id: story.id,
+        workflow_instance_id: selected.entry,
+      };
+    }
+    const releaseReadiness = storyReleaseReadiness(context, story.id);
+    if (!releaseReadiness.ready) {
+      const command = releaseReadiness.profile_id
+        ? statusCliCommand("autonomy", "delivery", "status", "--id", releaseReadiness.profile_id)
+        : statusCliCommand("help", "trace", "append");
+      return {
+        kind: "complete_release_evidence",
+        reason: "release_phase_evidence_incomplete",
+        label: `Complete release evidence before final certification: ${releaseReadiness.missing.join(", ")}.`,
+        command,
+        protected: true,
+        story_id: story.id,
+        workflow_instance_id: selected.entry,
+        missing_release_evidence: releaseReadiness.missing,
+      };
+    }
+    return {
+      kind: "certify_lifecycle",
+      reason: "workflow_terminal",
+      label: "Certify the complete local lifecycle after release evidence and terminal delivery are ready.",
+      command: statusCliCommand(
+        "gate", "check", "--strict", "--story", story.id, "--lifecycle-complete",
+      ),
+      protected: true,
+      story_id: story.id,
+      workflow_instance_id: selected.entry,
+    };
+  }
+  const currentStepCompleted = completedSteps.some((record) => record.phase === currentState);
+  const nextState = (effectiveDefinition.transitions || [])
+    .find((transition) => transition.from === currentState)?.to || null;
+  if (currentStepCompleted && nextState === configuredPhaseOrder(context).at(-1)) {
+    const strictPath = workflowStrictGateReceiptPath(context, story.id);
+    if (!fs.existsSync(strictPath)) {
+      return {
+        kind: "seal_strict_gate",
+        reason: "release_transition_needs_strict_gate",
+        label: "Seal the intermediate strict receipt before entering the release phase.",
+        command: statusCliCommand("gate", "check", "--strict", "--story", story.id),
+        protected: true,
+        story_id: story.id,
+        workflow_instance_id: selected.entry,
+      };
+    }
+  }
+  if (currentStepCompleted && nextState) {
+    return {
+      kind: "advance_story_workflow",
+      reason: "current_phase_completed",
+      label: `Advance the governed workflow from ${currentState} to ${nextState}.`,
+      command: statusCliCommand(
+        "workflow", "instance", "transition",
+        "--id", selected.entry,
+        "--to", nextState,
+        "--request-id", `${selected.entry}-${currentState}-to-${nextState}`,
+      ),
+      protected: true,
+      story_id: story.id,
+      workflow_instance_id: selected.entry,
+      current_phase: currentState,
+      next_phase: nextState,
+    };
+  }
+  return {
+    kind: "inspect_story_workflow",
+    reason: "current_phase_in_progress",
+    label: `Complete the governed '${currentState}' step before advancing the workflow.`,
+    command: statusCliCommand("workflow", "instance", "status", "--id", selected.entry),
+    protected: false,
+    story_id: story.id,
+    workflow_instance_id: selected.entry,
+    current_phase: currentState,
+  };
+}
+
 function buildStatusNextAction(context, summary, orchestration, counts, project) {
   if (summary.pending_decisions > 0) {
     return {
       kind: "review_decision",
       reason: "pending_human_decision",
       label: "Review the pending project decision.",
-      command: "agentic-sdlc approval requests",
+      command: statusCliCommand("approval", "requests"),
       protected: true,
     };
   }
@@ -33637,7 +36528,9 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
       kind: "resolve_blocker",
       reason: "blocked_story",
       label: "Resolve the first blocked story.",
-      command: story ? `agentic-sdlc story deps --id ${story.id}` : "agentic-sdlc orchestrate status",
+      command: story
+        ? statusCliCommand("story", "deps", "--id", story.id)
+        : statusCliCommand("orchestrate", "status"),
       protected: false,
       story_id: story?.id || null,
     };
@@ -33648,32 +36541,23 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
       kind: "repair_claim",
       reason: "stale_claim",
       label: "Repair the stale work reservation.",
-      command: story ? `agentic-sdlc story release --id ${story.id}` : "agentic-sdlc orchestrate status",
+      command: story
+        ? statusCliCommand("story", "release", "--id", story.id)
+        : statusCliCommand("orchestrate", "status"),
       protected: true,
       story_id: story?.id || null,
     };
   }
-  if (summary.available_work > 0) {
-    const story = orchestration.stories.find((item) => item.orchestration_state === "available");
-    return {
-      kind: "start_available_work",
-      reason: "available_story",
-      label: "Start the first available story within its active scope.",
-      command: story ? `agentic-sdlc task start --story ${story.id}` : "agentic-sdlc orchestrate plan",
-      protected: true,
-      story_id: story?.id || null,
-    };
-  }
-  if (summary.active_work > 0) {
-    const story = orchestration.stories.find((item) => item.orchestration_state === "claimed");
-    return {
-      kind: "continue_active_work",
-      reason: "active_story",
-      label: "Continue and verify the active story.",
-      command: story ? `agentic-sdlc gate check --story ${story.id}` : "agentic-sdlc orchestrate status",
-      protected: false,
-      story_id: story?.id || null,
-    };
+  const terminalWorkflowStories = orchestration.stories.filter((item) => {
+    if (item.orchestration_state !== "terminal") return false;
+    const probe = { errors: [] };
+    return Boolean(currentStoryBoundWorkflowInstance(context, item.id, probe));
+  });
+  const operationalStories = orchestration.stories.filter((item) =>
+    ["available", "claimed"].includes(item.orchestration_state));
+  for (const story of [...terminalWorkflowStories, ...operationalStories]) {
+    const workflowNextAction = buildStoryWorkflowNextAction(context, story);
+    if (workflowNextAction) return workflowNextAction;
   }
   const baselines = readBaselines(context);
   if (baselines.length === 0) {
@@ -33685,7 +36569,11 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
         kind: "onboard_project",
         reason: "project_context_not_onboarded",
         label: "Onboard the existing project context, then review what was inferred.",
-        command: `agentic-sdlc onboard existing-project --root ${JSON.stringify(context.root)} --project-name ${JSON.stringify(project.project_name)}`,
+        command: statusCliCommand(
+          "onboard", "existing-project",
+          "--root", context.root,
+          "--project-name", project.project_name,
+        ),
         protected: true,
       };
     }
@@ -33729,6 +36617,54 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           impact: "Nessun nuovo lavoro dovrebbe partire su quella prenotazione finché non viene sistemata.",
           decision: "Decidi se chiudere la prenotazione vecchia o riassegnare il lavoro.",
           next: "Controlla la prenotazione non più attuale.",
+        },
+        start_story_workflow: {
+          result: "La storia è pronta, ma il suo processo governato non è ancora iniziato.",
+          impact: "Avviandolo ora, ogni fase resterà collegata al task e alla certificazione finale.",
+          decision: "Non serve cambiare l’ambito; conferma soltanto il processo proposto per questa storia.",
+          next: "Avvia il workflow prima del task e del primo step completato.",
+        },
+        define_custom_workflow: {
+          result: "Le fasi configurate non corrispondono al workflow software incluso.",
+          impact: "Serve una definizione approvata con lo stesso ordine esatto, incluse le fasi personalizzate.",
+          decision: "Rivedi e approva la definizione personalizzata prima di iniziare il task.",
+          next: "Crea la definizione usando l’ordine delle fasi mostrato.",
+        },
+        advance_story_workflow: {
+          result: "La fase corrente è completata e il workflow può avanzare.",
+          impact: "La transizione conserva l’ordine verificabile tra completamento e ingresso nella fase successiva.",
+          decision: "Non serve ampliare l’ambito; esegui soltanto la transizione indicata.",
+          next: "Avanza alla fase successiva.",
+        },
+        seal_strict_gate: {
+          result: "La validazione è completata; manca il controllo intermedio prima del release.",
+          impact: "La ricevuta strict consente l’ingresso governato nella fase release.",
+          decision: "Correggi eventuali blocchi del gate; non chiudere ancora la delivery.",
+          next: "Esegui il gate strict intermedio.",
+        },
+        certify_lifecycle: {
+          result: "Il workflow è nella fase terminale.",
+          impact: "La certificazione finale verificherà timeline, evidenze di release e delivery locale chiusa.",
+          decision: "Eseguila solo quando release e rollback risultano verificati.",
+          next: "Esegui la certificazione lifecycle-complete.",
+        },
+        complete_release_evidence: {
+          result: "Il workflow è entrato in release, ma le prove finali non sono complete.",
+          impact: "Il gate finale resta intenzionalmente bloccato finché delivery, trace e step di release non concordano.",
+          decision: "Completa soltanto la consegna locale e le prove già approvate.",
+          next: "Completa gli elementi di release indicati prima della certificazione.",
+        },
+        lifecycle_not_certifiable: {
+          result: "Questo task legacy non ha un workflow collegato prima dell’avvio.",
+          impact: "Il lavoro può restare leggibile, ma un replay creato ora non può ottenere la certificazione finale.",
+          decision: "Decidi se conservare il percorso legacy o riavviare correttamente una nuova esecuzione governata.",
+          next: "Non creare un workflow retroattivo.",
+        },
+        inspect_story_workflow: {
+          result: "Il workflow esiste e richiede il prossimo passo della fase corrente.",
+          impact: "Il controllo mostra stato, condizioni e transizione ammessa senza modificare il progetto.",
+          decision: "Completa la fase corrente prima di avanzare.",
+          next: "Controlla lo stato del workflow.",
         },
         start_available_work: {
           result: "C’è lavoro pronto per essere avviato.",
@@ -33779,6 +36715,54 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           impact: "No new work should start on that reservation until it is repaired.",
           decision: "Choose whether to close the old reservation or reassign the work.",
           next: "Review the outdated work reservation.",
+        },
+        start_story_workflow: {
+          result: "The story is ready, but its governed workflow has not started.",
+          impact: "Starting it now binds every phase to task start and final certification.",
+          decision: "No scope change is needed; confirm only this story workflow.",
+          next: "Start the workflow before task start or the first completed step.",
+        },
+        define_custom_workflow: {
+          result: "The configured phases do not match the included software workflow.",
+          impact: "An approved definition with the exact same order must include every custom phase.",
+          decision: "Review and approve that custom definition before task start.",
+          next: "Define the workflow with the displayed phase order.",
+        },
+        advance_story_workflow: {
+          result: "The current phase is complete and the workflow can advance.",
+          impact: "The transition preserves verifiable ordering between phase completion and the next entry.",
+          decision: "No scope expansion is needed; run only the indicated transition.",
+          next: "Advance to the next phase.",
+        },
+        seal_strict_gate: {
+          result: "Validation is complete; the intermediate release-entry check is pending.",
+          impact: "Its strict receipt permits a governed transition into release.",
+          decision: "Fix any gate blockers; do not close delivery yet.",
+          next: "Run the intermediate strict gate.",
+        },
+        certify_lifecycle: {
+          result: "The workflow is in its terminal phase.",
+          impact: "Final certification will verify the timeline, release evidence, and closed local delivery.",
+          decision: "Run it only after release and rollback evidence are verified.",
+          next: "Run lifecycle-complete certification.",
+        },
+        complete_release_evidence: {
+          result: "The workflow has entered release, but final evidence is incomplete.",
+          impact: "The final gate remains intentionally blocked until delivery, release trace, and release step agree.",
+          decision: "Complete only the already approved local delivery and evidence.",
+          next: "Complete the listed release evidence before certification.",
+        },
+        lifecycle_not_certifiable: {
+          result: "This legacy task has no workflow bound before start.",
+          impact: "The work remains readable, but a workflow replay created now cannot earn final certification.",
+          decision: "Choose whether to retain the legacy path or begin a new correctly governed run.",
+          next: "Do not create a retroactive workflow.",
+        },
+        inspect_story_workflow: {
+          result: "The workflow exists and awaits the current phase result.",
+          impact: "Status shows its checks and allowed transition without changing the project.",
+          decision: "Complete the current phase before advancing.",
+          next: "Inspect the workflow state.",
         },
         start_available_work: {
           result: "Work is ready to start.",
@@ -35629,15 +38613,31 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         report.errors.push(`${actionLabel} does not reference its matching authorization receipt`);
       } else if (receipt.effective_level !== authorization.effective_level) {
         report.errors.push(`${actionLabel} completion differs from its authorized effective level`);
-      } else if (receipt.action === "git.commit" && receipt.outcome === "passed") {
-        validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
-      } else if (DELIVERY_PROVIDER_ACTIONS.has(receipt.action) && receipt.outcome === "passed") {
-        validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, actionLabel);
-      } else if (
-        stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
-        || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
-      ) {
-        report.errors.push(`${actionLabel} completion differs from its exact authorization boundary`);
+      } else {
+        const completionRequestValidation = validateDeliveryCompletionRequest(
+          context,
+          receipt,
+          authorization,
+        );
+        if (completionRequestValidation.legacy) {
+          const warning = `${actionLabel} is a legacy completion without an immutable completion request`;
+          if (!report.warnings.includes(warning)) report.warnings.push(warning);
+        } else if (!completionRequestValidation.valid) {
+          report.errors.push(
+            `${actionLabel} has an invalid completion identity: `
+            + `${completionRequestValidation.errors.join("; ")}`,
+          );
+        }
+        if (receipt.action === "git.commit" && receipt.outcome === "passed") {
+          validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
+        } else if (DELIVERY_PROVIDER_ACTIONS.has(receipt.action) && receipt.outcome === "passed") {
+          validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, actionLabel);
+        } else if (
+          stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
+          || stableJson(receipt.action_details) !== stableJson(authorization.action_details)
+        ) {
+          report.errors.push(`${actionLabel} completion differs from its exact authorization boundary`);
+        }
       }
       if (receipt.action === "release.local") {
         const verification = receipt.local_release_verification;
@@ -37103,36 +40103,320 @@ function validateStoryChangedPathsWithinRequirementScope(context, storyId, requi
   report.checked.push(`story ${storyId} changed-path scope`);
 }
 
-function validateStoryWorkflowPhaseOrders(context, storyId, report) {
-  const instancesRoot = workflowInstancesRoot(context);
-  for (const entry of safeReadDir(instancesRoot).sort((left, right) => left.localeCompare(right, "en"))) {
+function currentStoryBoundWorkflowInstance(context, storyId, report) {
+  const candidates = [];
+  for (const entry of safeReadDir(workflowInstancesRoot(context))
+    .sort((left, right) => left.localeCompare(right, "en"))) {
     if (entry.startsWith(".")) continue;
-    const instancePath = path.join(instancesRoot, entry, "instance.json");
+    const instancePath = path.join(workflowInstancesRoot(context), entry, "instance.json");
     if (!fs.existsSync(instancePath)) continue;
     let instance;
     try {
       instance = readProjectJson(context, instancePath);
     } catch (error) {
-      report.errors.push(`Workflow instance ${entry} cannot be read: ${error.message}`);
+      report.errors.push(
+        `Story ${storyId} cannot select its current workflow while instance ${entry} is unreadable: ${error.message}`,
+      );
       continue;
     }
     if (instance.metadata?.governance_binding?.story_id !== storyId) continue;
-    const label = `story ${storyId} workflow instance ${instance.id || entry}`;
+    if (!Number.isFinite(Date.parse(String(instance.created_at || "")))) {
+      report.errors.push(
+        `Story ${storyId} workflow instance ${instance.id || entry} has no valid immutable creation time`,
+      );
+      continue;
+    }
+    candidates.push({ entry, instance });
+  }
+  if (candidates.length === 0) return null;
+  // One story may retain older immutable runs. The current run is the newest
+  // immutable instance; the stable id is the deterministic tie-breaker.
+  candidates.sort((left, right) =>
+    String(left.instance.created_at).localeCompare(String(right.instance.created_at), "en")
+    || String(left.instance.id || left.entry).localeCompare(String(right.instance.id || right.entry), "en"));
+  return candidates.at(-1);
+}
+
+function validateCurrentStoryWorkflowCompletion(
+  context,
+  storyId,
+  report,
+  { deliveryClosedAt = null, releaseTrace = null } = {},
+) {
+  const selected = currentStoryBoundWorkflowInstance(context, storyId, report);
+  if (!selected) {
+    report.errors.push(
+      `Story ${storyId} lifecycle completion requires one current story-bound workflow instance`,
+    );
+    return;
+  }
+  const instanceId = selected.entry;
+  const label = `story ${storyId} current workflow instance ${instanceId}`;
+  try {
+    const { instance } = readCompletedWorkflowInstance(context, instanceId);
+    if (instance.id !== instanceId) {
+      report.errors.push(`${label} immutable id does not match its canonical directory`);
+    }
+    const binding = instance.metadata?.governance_binding;
+    const expectedStrictPath = workflowStrictGateReceiptPath(context, storyId);
+    const expectedFinalPath = workflowFinalGateReceiptPath(context, storyId);
+    const strictPath = binding?.strict_gate_receipt_path
+      ? resolveProjectFilePath(context, binding.strict_gate_receipt_path, { mustExist: false })
+      : null;
+    const finalPath = binding?.final_gate_receipt_path
+      ? resolveProjectFilePath(context, binding.final_gate_receipt_path, { mustExist: false })
+      : null;
+    if (
+      binding?.story_id !== storyId
+      || (strictPath && path.resolve(strictPath) !== path.resolve(expectedStrictPath))
+      || !finalPath
+      || path.resolve(finalPath) !== path.resolve(expectedFinalPath)
+    ) {
+      report.errors.push(`${label} has an invalid immutable story or gate binding`);
+    }
+
+    const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+    const phaseDifference = workflowPhaseOrderDifference(context, effectiveDefinition);
+    if (!phaseDifference.exact) {
+      report.errors.push(
+        `${label} does not match the configured phase order `
+        + `[${phaseDifference.configured.join(", ")}]; pinned workflow order is `
+        + `[${phaseDifference.selected.join(", ")}]`,
+      );
+    }
+
+    const eventsPath = workflowEventsPath(context, instanceId);
+    const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+    let events;
+    let integrity;
     try {
-      const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
-      const difference = workflowPhaseOrderDifference(context, effectiveDefinition);
-      if (!difference.exact) {
+      events = readWorkflowEvents(context, instanceId);
+      integrity = inspectWorkflowRuntimeIntegrity(
+        context,
+        instanceId,
+        instance,
+        effectiveDefinition,
+        events,
+      );
+    } finally {
+      releaseLock();
+    }
+    if (!integrity.valid) {
+      report.errors.push(
+        `${label} failed instance, event, checkpoint, or audit-trace integrity: `
+        + `${(integrity.errors || []).join("; ") || "invalid workflow history"}`,
+      );
+      report.checked.push(label);
+      return;
+    }
+
+    const currentState = workflowCurrentState(integrity.replay, instance, effectiveDefinition);
+    const terminalState = (effectiveDefinition.states || [])
+      .find((state) => state.id === currentState);
+    const configuredTerminalState = configuredPhaseOrder(context).at(-1);
+    if (
+      terminalState?.terminal !== true
+      || currentState !== configuredTerminalState
+    ) {
+      report.errors.push(
+        `${label} must be terminal in configured final phase '${configuredTerminalState}'; found '${currentState}'`,
+      );
+    }
+
+    const terminalEvent = events.at(-1) || null;
+    const terminalAt = terminalEvent?.to === currentState
+      && Number.isFinite(Date.parse(String(terminalEvent.timestamp || "")))
+      ? terminalEvent.timestamp
+      : null;
+    if (!terminalAt) {
+      report.errors.push(`${label} has no valid terminal transition event`);
+    }
+
+    const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+    const taskStart = fs.existsSync(taskStartPath)
+      ? readProjectJson(context, taskStartPath)
+      : null;
+    const workflowCreatedAt = Number.isFinite(Date.parse(String(instance.created_at || "")))
+      ? instance.created_at
+      : null;
+    const taskStartedAt = Number.isFinite(Date.parse(String(taskStart?.confirmed_at || "")))
+      ? taskStart.confirmed_at
+      : null;
+    const expectedInstancePath = toProjectPath(context, workflowInstancePath(context, instanceId));
+    const taskWorkflowRef = taskStart?.workflow_instance_ref || null;
+    if (!taskStart) {
+      report.errors.push(`${label} has no task-start receipt to prove the pre-task workflow binding`);
+    } else if (!taskWorkflowRef) {
+      report.errors.push(
+        `${label} was not bound by task start. Start the story-bound workflow before task start; `
+        + "a post-hoc replay cannot be lifecycle-certified.",
+      );
+    } else if (
+      taskWorkflowRef.id !== instance.id
+      || taskWorkflowRef.hash !== instance.instance_hash
+      || taskWorkflowRef.path !== expectedInstancePath
+    ) {
+      report.errors.push(`${label} does not match the exact workflow instance bound by task start`);
+    }
+    if (!taskStartedAt) {
+      report.errors.push(`${label} has no valid task-start timestamp`);
+    } else if (
+      workflowCreatedAt
+      && Date.parse(workflowCreatedAt) > Date.parse(taskStartedAt)
+    ) {
+      report.errors.push(
+        `${label} started after task start; post-hoc workflow replay cannot certify lifecycle completion`,
+      );
+    }
+
+    const requiredPhases = configuredPhaseOrder(context);
+    const phaseCompletions = readStoryStepRecords(context, storyId)
+      .filter((record) => record.status === "completed");
+    const firstTransitionAt = events.length > 0
+      && Number.isFinite(Date.parse(String(events[0]?.timestamp || "")))
+      ? events[0].timestamp
+      : null;
+    const earliestPhaseCompletionAt = phaseCompletions
+      .map((record) => record.completed_at)
+      .filter((timestamp) => Number.isFinite(Date.parse(String(timestamp || ""))))
+      .sort((left, right) => String(left).localeCompare(String(right), "en"))[0] || null;
+    if (
+      taskStartedAt
+      && firstTransitionAt
+      && Date.parse(taskStartedAt) > Date.parse(firstTransitionAt)
+    ) {
+      report.errors.push(
+        `${label} task start occurred after the first workflow transition; `
+        + "replayed or post-transition task-start evidence cannot certify lifecycle completion",
+      );
+    }
+    if (
+      taskStartedAt
+      && earliestPhaseCompletionAt
+      && Date.parse(taskStartedAt) > Date.parse(earliestPhaseCompletionAt)
+    ) {
+      report.errors.push(
+        `${label} task start occurred after the first completed story step; `
+        + "replayed or post-completion task-start evidence cannot certify lifecycle completion",
+      );
+    }
+    const entryByPhase = new Map();
+    if (workflowCreatedAt) {
+      entryByPhase.set(effectiveDefinition.initial_state, {
+        entered_at: workflowCreatedAt,
+        event_hash: null,
+      });
+    }
+    for (const event of events) {
+      if (
+        requiredPhases.includes(event.to)
+        && !entryByPhase.has(event.to)
+        && Number.isFinite(Date.parse(String(event.timestamp || "")))
+      ) {
+        entryByPhase.set(event.to, {
+          entered_at: event.timestamp,
+          event_hash: event.event_hash,
+        });
+      }
+    }
+    const phaseTimeline = requiredPhases.map((phase, index) => {
+      const entry = entryByPhase.get(phase) || null;
+      const completion = phaseCompletions
+        .filter((record) => record.phase === phase)
+        .sort((left, right) =>
+          String(left.completed_at || "").localeCompare(String(right.completed_at || ""), "en"))[0] || null;
+      if (!entry) {
+        report.errors.push(`${label} has no verified entry into configured phase '${phase}'`);
+      }
+      if (!completion) {
+        report.errors.push(`${label} has no completed story step for configured phase '${phase}'`);
+      }
+      if (
+        entry
+        && completion
+        && Date.parse(entry.entered_at) > Date.parse(completion.completed_at)
+      ) {
         report.errors.push(
-          `${label} does not match the configured phase order `
-          + `[${difference.configured.join(", ")}]; pinned workflow order is `
-          + `[${difference.selected.join(", ")}]`,
+          `${label} entered phase '${phase}' after that phase had already been completed`,
         );
       }
-    } catch (error) {
-      report.errors.push(`${label} cannot verify its pinned phase order: ${error.message}`);
+      const previousPhase = requiredPhases[index - 1] || null;
+      const previousCompletion = previousPhase
+        ? phaseCompletions
+          .filter((record) => record.phase === previousPhase)
+          .sort((left, right) =>
+            String(left.completed_at || "").localeCompare(String(right.completed_at || ""), "en"))[0] || null
+        : null;
+      if (
+        entry
+        && previousCompletion
+        && Date.parse(entry.entered_at) < Date.parse(previousCompletion.completed_at)
+      ) {
+        report.errors.push(
+          `${label} entered phase '${phase}' before phase '${previousPhase}' was completed`,
+        );
+      }
+      return {
+        phase,
+        entered_at: entry?.entered_at || null,
+        entry_event_hash: entry?.event_hash || null,
+        completed_at: completion?.completed_at || null,
+        completion_record_id: completion?.id || null,
+      };
+    });
+
+    for (const [dependency, timestamp] of [
+      ["terminal delivery", deliveryClosedAt],
+      ["latest passing release trace", releaseTrace?.created_at],
+    ]) {
+      if (
+        terminalAt
+        && Number.isFinite(Date.parse(String(timestamp || "")))
+        && Date.parse(terminalAt) > Date.parse(timestamp)
+      ) {
+        report.errors.push(
+          `${label} entered the release phase after the ${dependency}; release entry must precede release evidence`,
+        );
+      }
     }
-    report.checked.push(label);
+    report.lifecycle_workflow = {
+      selection_policy: "latest-created-at-then-instance-id:v1",
+      story_id: storyId,
+      instance_id: instance.id,
+      instance_hash: instance.instance_hash,
+      effective_hash: effectiveDefinition.effective_hash,
+      checkpoint_ref: {
+        path: toProjectPath(context, workflowCheckpointPath(context, instanceId)),
+        checkpoint_hash: integrity.checkpoint.checkpoint_hash,
+        sequence: integrity.checkpoint.sequence,
+        last_event_hash: integrity.checkpoint.last_event_hash,
+        trace_chain_hash: integrity.checkpoint.trace_chain_hash,
+      },
+      terminal_state: currentState,
+      terminal_event_ref: terminalEvent
+        ? {
+            event_hash: terminalEvent.event_hash,
+            sequence: terminalEvent.sequence,
+            timestamp: terminalEvent.timestamp,
+          }
+        : null,
+      event_count: events.length,
+      task_start_ref: taskStart
+        ? {
+            id: taskStart.id,
+            path: toProjectPath(context, taskStartPath),
+            hash: hashJsonFileValue(taskStart),
+            confirmed_at: taskStart.confirmed_at,
+          }
+        : null,
+      phase_timeline: phaseTimeline,
+      release_trace_at: releaseTrace?.created_at || null,
+      delivery_closed_at: deliveryClosedAt,
+    };
+  } catch (error) {
+    report.errors.push(`${label} cannot be verified: ${error.message}`);
   }
+  report.checked.push(label);
 }
 
 function validateStoryLifecycleCompletion(context, storyId, report) {
@@ -37163,13 +40447,13 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
       break;
     }
   }
-  validateStoryWorkflowPhaseOrders(context, storyId, report);
-
   const traceEvents = readTraceEvents(context, storyId);
-  if (latestTraceEvent(traceEvents, "test")?.outcome !== "passed") {
+  const latestTestTrace = latestTraceEvent(traceEvents, "test");
+  const latestReleaseTrace = latestTraceEvent(traceEvents, "release");
+  if (latestTestTrace?.outcome !== "passed") {
     report.errors.push(`Story ${storyId} lifecycle completion requires the latest test trace to pass`);
   }
-  if (latestTraceEvent(traceEvents, "release")?.outcome !== "passed") {
+  if (latestReleaseTrace?.outcome !== "passed") {
     report.errors.push(`Story ${storyId} lifecycle completion requires the latest release trace to pass`);
   }
 
@@ -37178,6 +40462,7 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
     ? readContractById(context, story.contract_id, { missingOk: true })
     : null;
   const deliveryProfileId = contract?.delivery_execution_profile_id || null;
+  let deliveryClosedAt = null;
   if (!deliveryProfileId) {
     report.errors.push(`Story ${storyId} lifecycle completion requires one exact delivery profile`);
   } else {
@@ -37186,7 +40471,7 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
       const state = currentDeliveryExecutionState(context, profile);
       const successfulStatuses = profile.delivery_kind === "local_release"
         ? ["released"]
-        : ["merged", "closed"];
+        : ["merged"];
       if (
         state.lifecycle_status !== "terminal"
         || !successfulStatuses.includes(state.status)
@@ -37194,6 +40479,8 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
         report.errors.push(
           `Story ${storyId} lifecycle completion requires terminal ${profile.delivery_kind} delivery; found ${state.status}`,
         );
+      } else {
+        deliveryClosedAt = state.close_receipt?.closed_at || null;
       }
       if (profile.local_release_target?.rollback?.verification_required === true) {
         const actions = deliveryActionReceipts(context, profile.id);
@@ -37302,6 +40589,10 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
       report.errors.push(`Story ${storyId} lifecycle delivery cannot be verified: ${error.message}`);
     }
   }
+  validateCurrentStoryWorkflowCompletion(context, storyId, report, {
+    deliveryClosedAt,
+    releaseTrace: latestReleaseTrace,
+  });
   report.checked.push(`story ${storyId} complete lifecycle`);
 }
 
@@ -37609,10 +40900,131 @@ function ensureInitialized(context) {
   assertNoSymlinkPathSegments(projectPath, context.root);
 }
 
-function renderTemplateFile(context, templateName, destination, variables, options = {}) {
-  const templatePath = path.join(context.templateDir, templateName);
-  const rendered = renderTemplate(fs.readFileSync(templatePath, "utf8"), variables);
-  writeTextFile(destination, rendered, options);
+function readTemplateFile(context, templateName) {
+  if (path.basename(templateName) !== templateName || templateName === "." || templateName === "..") {
+    fail(`Invalid template asset name: ${templateName}`);
+  }
+  const customPath = path.join(context.templateDir, templateName);
+  const bundledPath = path.join(context.bundledTemplateDir, templateName);
+  const customIsBundled = context.templateDir === context.bundledTemplateDir;
+  let selection = null;
+  let selectedSource = customIsBundled ? "bundled fallback" : "custom overlay";
+  let attemptedPath = customIsBundled ? bundledPath : customPath;
+  try {
+    if (!customIsBundled) {
+      selection = selectStableTemplateAsset(customPath, {
+        parentIdentity: context.templateDirIdentity,
+        allowMissing: true,
+        invalidMessage: `Custom template overlay asset must be a readable regular file, not a directory or symlink: ${customPath}`,
+      });
+    }
+    if (!selection) {
+      selectedSource = "bundled fallback";
+      attemptedPath = bundledPath;
+      selection = selectStableTemplateAsset(bundledPath, {
+        parentIdentity: context.bundledTemplateDirIdentity,
+        invalidMessage: `Bundled fallback template asset must be a readable regular file: ${bundledPath}`,
+      });
+    }
+    return readStableTemplateAsset(selection);
+  } catch (error) {
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Unable to read ${selectedSource} template asset ${attemptedPath}: ${error.message}`);
+  }
+}
+
+function readRequiredTemplateConfig(templateDir, templateDirIdentity) {
+  const configPath = path.join(templateDir, "sdlc-config.json");
+  try {
+    const selection = selectStableTemplateAsset(configPath, {
+      parentIdentity: templateDirIdentity,
+      invalidMessage: `Template overlay must contain sdlc-config.json as a readable regular file: ${configPath}`,
+    });
+    return JSON.parse(readStableTemplateAsset(selection));
+  } catch (error) {
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Unable to read required template configuration ${configPath}: ${error.message}`);
+  }
+}
+
+function resolveStableTemplateDirectory(requestedPath) {
+  const resolvedPath = path.resolve(requestedPath);
+  try {
+    const requestedBefore = fs.lstatSync(resolvedPath);
+    if (requestedBefore.isSymbolicLink()) {
+      fail(`Template directory itself must not be a symlink: ${resolvedPath}`);
+    }
+    if (!requestedBefore.isDirectory()) {
+      fail(`Template directory must be a readable directory: ${resolvedPath}`);
+    }
+    const canonicalPath = fs.realpathSync.native(resolvedPath);
+    const canonicalEntry = fs.lstatSync(canonicalPath);
+    const requestedAfter = fs.lstatSync(resolvedPath);
+    if (
+      canonicalEntry.isSymbolicLink()
+      || !canonicalEntry.isDirectory()
+      || !sameStableFileIdentity(requestedBefore, canonicalEntry)
+      || !sameStableFileIdentity(requestedBefore, requestedAfter)
+    ) {
+      fail(`Template directory changed while resolving it: ${resolvedPath}`);
+    }
+    const identity = captureDirectoryIdentity(canonicalPath);
+    if (
+      identity.realpath !== canonicalPath
+      || !sameStableFileIdentity(requestedBefore, identity)
+      || !directoryIdentityMatches(canonicalPath, identity)
+    ) {
+      fail(`Template directory changed while pinning its identity: ${resolvedPath}`);
+    }
+    return { path: canonicalPath, identity };
+  } catch (error) {
+    if (error instanceof UserError) {
+      throw error;
+    }
+    fail(`Unable to resolve template directory ${resolvedPath}: ${error.message}`);
+  }
+}
+
+function selectStableTemplateAsset(filePath, options = {}) {
+  const parentPath = path.dirname(filePath);
+  const parentIdentity = options.parentIdentity ?? captureDirectoryIdentity(parentPath);
+  assertDirectoryIdentity(parentPath, parentIdentity);
+  let selected;
+  try {
+    selected = fs.lstatSync(filePath);
+  } catch (error) {
+    if (options.allowMissing && error?.code === "ENOENT") {
+      assertDirectoryIdentity(parentPath, parentIdentity);
+      return null;
+    }
+    throw error;
+  }
+  if (selected.isSymbolicLink() || !selected.isFile()) {
+    fail(options.invalidMessage || `Template asset must be a readable regular file: ${filePath}`);
+  }
+  assertDirectoryIdentity(parentPath, parentIdentity);
+  const selectedAgain = fs.lstatSync(filePath);
+  if (!sameStableFileSnapshot(selected, selectedAgain)) {
+    fail(`Template asset changed while selecting it: ${filePath}`);
+  }
+  return {
+    filePath,
+    parentIdentity,
+    selectedStat: selected,
+  };
+}
+
+function readStableTemplateAsset(selection) {
+  return readFileFromStableParent(selection.filePath, selection.parentIdentity, {
+    maxBytes: MAX_TEMPLATE_ASSET_BYTES,
+    tooLargeMessage: `Template asset exceeds ${MAX_TEMPLATE_ASSET_BYTES} bytes: ${selection.filePath}`,
+    expectedStat: selection.selectedStat,
+    identityMismatchMessage: `Template asset changed after selection: ${selection.filePath}`,
+  });
 }
 
 function renderTemplate(template, variables) {
@@ -37951,6 +41363,9 @@ function readFileFromStableParent(filePath, parentIdentity, options = {}) {
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
     const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (options.expectedStat && !sameStableFileSnapshot(options.expectedStat, before)) {
+      fail(options.identityMismatchMessage || `File changed after selection: ${filePath}`);
+    }
     if (options.maxBytes === undefined) return fs.readFileSync(descriptor, "utf8");
     const maxBytes = options.maxBytes;
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail("Stable read maxBytes must be a positive safe integer.");
@@ -37991,6 +41406,15 @@ function readFileFromStableParent(filePath, parentIdentity, options = {}) {
 function sameStableFileIdentity(left, right) {
   if (Number(left.ino) === 0 || Number(right.ino) === 0) return true;
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameStableFileSnapshot(left, right) {
+  return sameStableFileIdentity(left, right)
+    && left.dev === right.dev
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
 }
 
 function writeFileToStableParent(filePath, content, parentIdentity, options = {}) {
@@ -38723,6 +42147,8 @@ Usage:
   agentic-sdlc config status [--root path] [--json]
   agentic-sdlc config migrate [--root path] [--json]
       [--apply --plan-hash sha256]
+      [--confirm-legacy-bootstrap --actor-type human|ci
+       --approval-source explicit-user|ci --summary text]
   agentic-sdlc optimization status [--root path] [--proposal ASSESS-001] [--json]
   agentic-sdlc optimization capture --proposal ASSESS-001 [--phase manual] [--json]
   agentic-sdlc optimization run --root path --command-json '["npm","test"]'
@@ -38803,8 +42229,12 @@ Usage:
       [--scope-path src/file.ts] [--remote origin] [--pr-url https://github.com/owner/repo/pull/1]
       [--confirm-action --actor-type human|ci --approval-source explicit-user|ci --summary text]
       [--host-receipt-file path]
-      [--outcome passed|failed --evidence path]
+      [--outcome passed|failed --authorization-receipt AUT-ACT-id --evidence path]
       [--smoke-cwd path --smoke-test '["node","--test"]' --rollback "exact approved procedure"]
+      If exactly one matching authorization is waiting, --authorization-receipt
+      may be omitted. When several are waiting it is required. Retrying the
+      same completion returns the original receipt and repairs missing traces;
+      it never consumes another authorization.
       Local releases automatically govern rollback.verify as a checkpointed,
       non-executing verification; authorize and complete it with the same exact
       immutable --evidence before a successful release.local completion.
@@ -38921,7 +42351,8 @@ Usage:
 
 Global options:
   --root path            Target project root. Defaults to current directory.
-  --template-dir path    Template directory. Defaults to this plugin's templates.
+  --template-dir path    Local overlay directory. Requires sdlc-config.json; missing
+                         template assets fall back to this plugin's bundled templates.
   --locale en|it         Human guidance language. Unsupported values fail before writes.
   --json                 Print JSON output where supported.
   --full                 Include large derived payloads otherwise omitted from compact JSON.
