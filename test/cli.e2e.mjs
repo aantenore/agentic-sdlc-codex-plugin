@@ -14,6 +14,7 @@ import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
+const portableRtkTestCommand = Object.freeze(["node", "--test"]);
 const tempProjects = new Set();
 const meteringFixtureKeys = new Map();
 
@@ -882,11 +883,15 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
 
   const optimized = mustRun([
     "optimization", "run", "--root", project,
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ]);
-  assert.match(optimized.stdout, /fake-rtk:\["git","status","--short"\]/u);
-  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+  assert.match(optimized.stdout, /fake-rtk:/u);
+  const optimizedInvocations = readJsonLines(fakeRtk.invocationPath);
+  assert.equal(optimizedInvocations.length, 1);
+  assert.equal(optimizedInvocations[0][0], "test");
+  assert.match(path.win32.basename(optimizedInvocations[0][1]), /^node(?:\.exe)?$/iu);
+  assert.equal(optimizedInvocations[0].at(-1), "--test");
 
   const native = mustRun([
     "optimization", "run", "--root", project,
@@ -894,7 +899,7 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
     "--exact",
   ]);
   assert.match(native.stdout, /\.sdlc|fake-rtk/u);
-  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+  assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1);
 
   mustFail([
     "optimization", "run", "--root", project,
@@ -991,6 +996,8 @@ test("Windows native optimization ignores project-local executable shadows", {
     "fs.writeFileSync(process.env.GIT_SHADOW_MARKER, \"invoked\\n\", \"utf8\");",
     "",
   ].join("\n"));
+  const pathKey = Object.keys(process.env)
+    .find((key) => key.toLowerCase() === "path") || "PATH";
 
   mustRun([
     "optimization", "run", "--root", project,
@@ -999,6 +1006,7 @@ test("Windows native optimization ignores project-local executable shadows", {
   ], {
     env: {
       GIT_SHADOW_MARKER: marker,
+      [pathKey]: [".", project, process.env[pathKey]].filter(Boolean).join(path.delimiter),
     },
   });
   assert.equal(fs.existsSync(marker), false);
@@ -1215,7 +1223,7 @@ test("optimization run locks and evaluates every active governed assessment", as
   try {
     lockContendedRun = runAsync([
       "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
-      "--command-json", JSON.stringify(["git", "status", "--short"]),
+      "--command-json", JSON.stringify(portableRtkTestCommand),
       "--trust-custom-rtk-command",
     ]);
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1235,7 +1243,7 @@ test("optimization run locks and evaluates every active governed assessment", as
   assert.equal(stopped.workflow.state, "exception_pending");
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /Cost gate for ASSESS-RTK-GATE-A blocks optimization run: soft_limit/u);
   assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1, "a different proposal bypassed the active soft-limit gate");
@@ -2594,11 +2602,11 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
 
   mustFail([
     "optimization", "run", "--root", project,
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
   ], /requires --proposal.*ASSESS-E2E/u);
   const governedOptimized = mustRun([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ]);
   assert.match(governedOptimized.stdout, /fake-rtk/u);
@@ -2859,7 +2867,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
 
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /Cost gate.*blocks optimization run: soft_limit/u);
 
@@ -3231,7 +3239,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(budgetStatusAtCompletionReserve.optimization_advisory.gate_override, false);
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /completion_reserve.*cannot start new work/u);
 
