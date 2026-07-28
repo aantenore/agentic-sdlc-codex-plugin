@@ -54,8 +54,12 @@ INSTALLER = _load_installer()
 InstallError = INSTALLER.InstallError
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, *, normalize_crlf: bool = False) -> str:
     digest = hashlib.sha256()
+    if normalize_crlf:
+        payload = path.read_bytes().replace(b"\r\n", b"\n")
+        digest.update(payload)
+        return digest.hexdigest()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -67,7 +71,10 @@ def _bundled_components() -> list[dict[str, object]]:
     for component, (relative, expected_hash) in EXPECTED_BUNDLED_FILES.items():
         target = PLUGIN_ROOT / relative
         available = target.is_file() and not target.is_symlink()
-        actual_hash = _sha256(target) if available else None
+        normalize_crlf = expected_hash is not None
+        actual_hash = (
+            _sha256(target, normalize_crlf=normalize_crlf) if available else None
+        )
         verified = available and (
             expected_hash is None or actual_hash == expected_hash
         )
@@ -79,6 +86,7 @@ def _bundled_components() -> list[dict[str, object]]:
                 "available": available,
                 "verified": verified,
                 "sha256": actual_hash,
+                "hash_normalization": "crlf_to_lf" if normalize_crlf else "none",
                 "authentication_required": False,
                 "network_required": False,
             }
