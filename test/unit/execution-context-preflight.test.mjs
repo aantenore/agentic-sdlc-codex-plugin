@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildExecutionContextPreflightReceipt,
+  computeExecutionContextPreflightHash,
+  executionContextSnapshotRevalidationDecision,
   executionContextSourceEvolutionDecision,
   validateExecutionContextPreflightReceipt,
   workspaceChangeMatchesPreflight,
@@ -37,6 +39,8 @@ function receiptInput() {
       {
         path: "src/app.mjs",
         sha256: HASH_A,
+        file_type: "regular",
+        mode: 0o644,
         binding: {
           kind: "requirement",
           id: "REQ-001",
@@ -47,6 +51,8 @@ function receiptInput() {
       {
         path: "src/app.mjs",
         sha256: HASH_A,
+        file_type: "regular",
+        mode: 0o644,
         binding: {
           kind: "contract_context",
           id: "CONTRACT-001",
@@ -57,6 +63,8 @@ function receiptInput() {
       {
         path: "README.md",
         sha256: HASH_B,
+        file_type: "regular",
+        mode: 0o644,
         binding: {
           kind: "baseline",
           id: "BASELINE-INITIAL",
@@ -66,7 +74,13 @@ function receiptInput() {
       },
     ],
     workspace_changes: [
-      { path: "src/config.mjs", status: " M", content_sha256: HASH_D },
+      {
+        path: "src/config.mjs",
+        status: " M",
+        file_type: "regular",
+        mode: 0o644,
+        content_sha256: HASH_D,
+      },
     ],
     git_head_sha: "1".repeat(40),
     created_by: { id: "ci", type: "ci" },
@@ -132,16 +146,99 @@ test("pre-existing dirty state is exempt only while its exact status and bytes r
   assert.equal(workspaceChangeMatchesPreflight(receipt, {
     path: "src/config.mjs",
     status: " M",
+    file_type: "regular",
+    mode: 0o644,
     content_sha256: HASH_D,
   }), true);
   assert.equal(workspaceChangeMatchesPreflight(receipt, {
     path: "src/config.mjs",
     status: " M",
+    file_type: "regular",
+    mode: 0o644,
     content_sha256: HASH_A,
+  }), false);
+  assert.equal(workspaceChangeMatchesPreflight(receipt, {
+    path: "src/config.mjs",
+    status: " M",
+    file_type: "regular",
+    mode: 0o755,
+    content_sha256: HASH_D,
   }), false);
   assert.equal(workspaceChangeMatchesPreflight(receipt, {
     path: "src/other.mjs",
     status: "??",
+    file_type: "regular",
+    mode: 0o644,
     content_sha256: HASH_D,
   }), false);
+});
+
+test("sealing revalidation detects source, workspace identity, and Git races", () => {
+  const receipt = buildExecutionContextPreflightReceipt(receiptInput());
+  const current = {
+    git_head_sha: receipt.git_head_sha,
+    source_snapshots: receipt.source_snapshots.map((source) => ({
+      path: source.path,
+      sha256: source.sha256,
+      file_type: source.file_type,
+      mode: source.mode,
+    })),
+    workspace_changes: receipt.workspace_changes,
+  };
+  assert.equal(executionContextSnapshotRevalidationDecision(receipt, current).valid, true);
+
+  const sourceRace = structuredClone(current);
+  sourceRace.source_snapshots[0].sha256 = HASH_C;
+  assert.deepEqual(
+    executionContextSnapshotRevalidationDecision(receipt, sourceRace).errors,
+    ["execution context source changed while sealing: README.md"],
+  );
+
+  const workspaceRace = structuredClone(current);
+  workspaceRace.workspace_changes[0].mode = 0o755;
+  assert.deepEqual(
+    executionContextSnapshotRevalidationDecision(receipt, workspaceRace).errors,
+    ["workspace status or file identity changed while sealing execution context"],
+  );
+
+  const headRace = structuredClone(current);
+  headRace.git_head_sha = "2".repeat(40);
+  assert.deepEqual(
+    executionContextSnapshotRevalidationDecision(receipt, headRace).errors,
+    ["Git HEAD changed while sealing execution context"],
+  );
+});
+
+test("legacy receipts remain readable but cannot authorize mutable-context exemptions", () => {
+  const currentReceipt = buildExecutionContextPreflightReceipt(receiptInput());
+  const legacyReceipt = structuredClone(currentReceipt);
+  for (const source of legacyReceipt.source_snapshots) {
+    delete source.file_type;
+    delete source.mode;
+  }
+  for (const change of legacyReceipt.workspace_changes) {
+    delete change.file_type;
+    delete change.mode;
+  }
+  legacyReceipt.receipt_hash = computeExecutionContextPreflightHash(legacyReceipt);
+
+  assert.equal(validateExecutionContextPreflightReceipt(legacyReceipt).valid, true);
+  assert.equal(workspaceChangeMatchesPreflight(legacyReceipt, {
+    path: "src/config.mjs",
+    status: " M",
+    file_type: "regular",
+    mode: 0o644,
+    content_sha256: HASH_D,
+  }), false);
+  const decision = executionContextSourceEvolutionDecision(legacyReceipt, {
+    story_ref: legacyReceipt.story_ref,
+    contract_ref: legacyReceipt.contract_ref,
+    delivery_profile_ref: legacyReceipt.delivery_profile_ref,
+    path: "src/app.mjs",
+    expected_sha256: HASH_A,
+    binding_kind: "requirement",
+    binding_id: "REQ-001",
+  });
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, "source_snapshot_lacks_stable_identity");
 });

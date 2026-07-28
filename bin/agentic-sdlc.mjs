@@ -178,6 +178,7 @@ import { inspectBuildIdentity } from "../lib/build-identity.mjs";
 import { computeStableHash } from "../lib/canonical.mjs";
 import {
   buildExecutionContextPreflightReceipt,
+  executionContextSnapshotRevalidationDecision,
   executionContextSourceEvolutionDecision,
   validateExecutionContextPreflightReceipt,
   workspaceChangeMatchesPreflight,
@@ -5923,9 +5924,14 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     decision.execution_context_preflight = preparedPreflight.relativePath;
   }
   let autonomyDecisionRef = null;
+  let autonomyDecisionPath = null;
+  let autonomyDecisionCreated = false;
   if (decision.autonomy_decision) {
     const decisionPath = path.join(autonomyDecisionsRoot(context), `${normalizeId(decision.autonomy_decision.id)}.json`);
+    const decisionExisted = fs.existsSync(decisionPath);
     writeJsonFile(decisionPath, decision.autonomy_decision, { force: false });
+    autonomyDecisionPath = decisionPath;
+    autonomyDecisionCreated = !decisionExisted;
     decision.autonomy_decision_path = toProjectPath(context, decisionPath);
     autonomyDecisionRef = {
       id: decision.autonomy_decision.id,
@@ -6044,12 +6050,39 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
   const receiptPath = decision.story_id
     ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
     : path.join(context.sdlcRoot, "reports", "project-task-start.json");
+  const priorTaskStartText = fs.existsSync(receiptPath)
+    ? fs.readFileSync(receiptPath, "utf8")
+    : null;
+  let taskStartWritten = false;
   try {
+    if (preparedPreflight) {
+      revalidateExecutionContextPreflightSnapshot(context, preparedPreflight.receipt);
+    }
     assertRecordSchema(receipt, "profile-task-start-receipt.schema.json", `Task start receipt ${receipt.id}`);
     writeJsonFile(receiptPath, receipt, { force: true });
+    taskStartWritten = true;
+    if (preparedPreflight) {
+      revalidateExecutionContextPreflightSnapshot(context, preparedPreflight.receipt);
+    }
   } catch (error) {
-    if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
-    if (preparedPreflight?.created) removePathGoverned(preparedPreflight.filePath, { force: true });
+    try {
+      if (taskStartWritten) {
+        if (priorTaskStartText === null) {
+          removePathGoverned(receiptPath, { force: true });
+        } else {
+          writeTextFile(receiptPath, priorTaskStartText, { force: true });
+        }
+      }
+      if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
+      if (autonomyDecisionCreated && autonomyDecisionPath) {
+        removePathGoverned(autonomyDecisionPath, { force: true });
+      }
+      if (preparedPreflight?.created) removePathGoverned(preparedPreflight.filePath, { force: true });
+    } catch {
+      // Preserve the original fail-closed reason. Any remaining orphan is
+      // integrity-bound and cannot authorize source evolution without a valid
+      // task-start receipt.
+    }
     throw error;
   }
   return toProjectPath(context, receiptPath);
@@ -6085,9 +6118,8 @@ function prepareExecutionContextPreflight(context, decision, attribution, option
       if (!expectedSha256) {
         fail(`Execution context preflight cannot bind ${kind} ${id} source ${sourcePath}: its approved hash is missing.`);
       }
-      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: true, fileOnly: true });
-      assertNotDerivedArtifact(context, resolved, "Execution context source");
-      const currentSha256 = hashFile(resolved);
+      const snapshot = stableContextSourceSnapshot(context, sourcePath, "Execution context source");
+      const currentSha256 = snapshot.sha256;
       if (currentSha256 !== expectedSha256) {
         fail(
           `Execution context changed before task start: ${sourcePath} no longer matches approved ${kind} ${id}. `
@@ -6095,8 +6127,10 @@ function prepareExecutionContextPreflight(context, decision, attribution, option
         );
       }
       sourceInputs.push({
-        path: toProjectPath(context, resolved),
+        path: snapshot.projectPath,
         sha256: currentSha256,
+        file_type: snapshot.file_type,
+        mode: snapshot.mode,
         binding: {
           kind,
           id,
@@ -6209,6 +6243,7 @@ function prepareExecutionContextPreflight(context, decision, attribution, option
   if (options.persist !== true) {
     return { receipt, filePath, relativePath, created: false };
   }
+  revalidateExecutionContextPreflightSnapshot(context, receipt);
   if (fs.existsSync(filePath)) {
     const existing = readProjectJson(context, filePath);
     const integrity = validateExecutionContextPreflightReceipt(existing, {
@@ -6228,18 +6263,16 @@ function prepareExecutionContextPreflight(context, decision, attribution, option
         + "Restore the exact preflight state or discard it through the governed recovery flow, then rerun task preflight.",
       );
     }
-    for (const source of existing.source_snapshots || []) {
-      const resolved = resolveProjectFilePath(context, source.path, { mustExist: true, fileOnly: true });
-      if (hashFile(resolved) !== source.sha256) {
-        fail(
-          `Incomplete task-start recovery refused: ${source.path} changed after an orphan preflight but before a confirmed task start. `
-          + "Restore the preflight snapshot or create and approve a new immutable revision.",
-        );
-      }
-    }
+    revalidateExecutionContextPreflightSnapshot(context, existing);
     return { receipt: existing, filePath, relativePath, created: false };
   }
   writeJsonFile(filePath, receipt, { atomicCreate: true });
+  try {
+    revalidateExecutionContextPreflightSnapshot(context, receipt);
+  } catch (error) {
+    removePathGoverned(filePath, { force: true });
+    throw error;
+  }
   return { receipt, filePath, relativePath, created: true };
 }
 
@@ -6251,38 +6284,185 @@ function normalizePreflightWritePaths(context, paths) {
 }
 
 function currentWorkspaceChanges(context) {
-  let raw = "";
+  const beforeEntries = readExactGitWorkspaceStatus(context);
+  const firstSnapshot = beforeEntries.map((entry) => stableWorkspacePathSnapshot(context, entry));
+  const afterEntries = readExactGitWorkspaceStatus(context);
+  if (stableJson(beforeEntries) !== stableJson(afterEntries)) {
+    fail("Git workspace status changed while execution context was being snapshotted; retry after filesystem activity settles.");
+  }
+  const secondSnapshot = afterEntries.map((entry) => stableWorkspacePathSnapshot(context, entry));
+  if (stableJson(firstSnapshot) !== stableJson(secondSnapshot)) {
+    fail("Git workspace file identity changed while execution context was being snapshotted; retry after filesystem activity settles.");
+  }
+  return secondSnapshot.sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ));
+}
+
+function readExactGitWorkspaceStatus(context) {
+  let raw;
   try {
     raw = childProcess.execFileSync(
       "git",
-      ["-C", context.root, "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      [
+        "-C",
+        context.root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+        "--no-renames",
+        "-z",
+      ],
+      {
+        encoding: null,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
     );
   } catch {
     fail("Execution context preflight could not inspect the current Git workspace.");
   }
-  return raw.split("\u0000").filter(Boolean).map((entry) => {
+  let decoded;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    fail("Execution context preflight cannot safely represent a non-UTF-8 Git path.");
+  }
+  return decoded.split("\u0000").filter(Boolean).map((entry) => {
+    if (entry.length < 4 || entry[2] !== " ") {
+      fail("Execution context preflight received an unsupported Git porcelain record.");
+    }
     const status = entry.slice(0, 2);
-    const projectPath = normalizeProjectPathInput(entry.slice(3));
-    return {
-      path: projectPath,
-      status,
-      content_sha256: workspacePathContentHash(context, projectPath),
-    };
+    const projectPath = exactGitProjectPath(entry.slice(3));
+    return { path: projectPath, status };
   }).filter((entry) => (
     entry.path !== SDLC_DIR && !entry.path.startsWith(`${SDLC_DIR}/`)
-  )).sort((left, right) => left.path.localeCompare(right.path));
+  )).sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ));
 }
 
-function workspacePathContentHash(context, projectPath) {
-  const filePath = resolveProjectFilePath(context, projectPath, { mustExist: false });
-  if (!fs.existsSync(filePath)) return null;
-  const stat = fs.lstatSync(filePath);
-  if (stat.isSymbolicLink()) {
-    return hashBuffer(Buffer.from(`symlink:${fs.readlinkSync(filePath)}`, "utf8"));
+function exactGitProjectPath(rawPath) {
+  const value = String(rawPath);
+  if (
+    !value
+    || value.includes("\u0000")
+    || path.posix.isAbsolute(value)
+    || /^[a-z]:[\\/]/iu.test(value)
+    || value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    fail(`Execution context preflight received an unsafe Git path: ${JSON.stringify(value)}`);
   }
-  if (!stat.isFile()) return null;
-  return hashFile(filePath);
+  return value;
+}
+
+function resolveExactGitWorkspacePath(context, projectPath) {
+  const normalized = exactGitProjectPath(projectPath);
+  const filePath = path.resolve(context.root, ...normalized.split("/"));
+  assertPathInsideRoot(context, filePath, normalized);
+  const existingParent = fs.existsSync(filePath) ? path.dirname(filePath) : nearestExistingParent(filePath);
+  const realRoot = fs.realpathSync.native(context.root);
+  const realParent = fs.realpathSync.native(existingParent);
+  if (!isInsidePath(realRoot, realParent)) {
+    fail(`Git workspace path parent resolves outside the project: ${JSON.stringify(normalized)}`);
+  }
+  return filePath;
+}
+
+function stableWorkspacePathSnapshot(context, entry) {
+  const filePath = resolveExactGitWorkspacePath(context, entry.path);
+  if (!fs.existsSync(filePath)) {
+    return {
+      path: entry.path,
+      status: entry.status,
+      file_type: "missing",
+      mode: null,
+      content_sha256: null,
+    };
+  }
+  const stat = fs.lstatSync(filePath);
+  if (stat.isFile()) {
+    const snapshot = readStableRegularFileBuffer(filePath, context.root);
+    return {
+      path: entry.path,
+      status: entry.status,
+      file_type: snapshot.file_type,
+      mode: snapshot.mode,
+      content_sha256: snapshot.sha256,
+    };
+  }
+  if (stat.isSymbolicLink()) {
+    const snapshot = readStableSymlinkSnapshot(filePath, context.root);
+    return {
+      path: entry.path,
+      status: entry.status,
+      file_type: snapshot.file_type,
+      mode: snapshot.mode,
+      content_sha256: snapshot.sha256,
+    };
+  }
+  if (stat.isDirectory()) {
+    fail(
+      `Execution context preflight cannot safely exempt dirty directory or submodule ${JSON.stringify(entry.path)}. `
+      + "Commit, clean, stash, or isolate that nested worktree before task start.",
+    );
+  }
+  fail(
+    `Execution context preflight cannot safely snapshot non-regular workspace path ${JSON.stringify(entry.path)}.`,
+  );
+}
+
+function readStableSymlinkSnapshot(filePath, boundaryRoot) {
+  assertNoSymlinkPathSegments(path.dirname(filePath), boundaryRoot);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  const before = fs.lstatSync(filePath);
+  if (!before.isSymbolicLink()) {
+    fail(`Workspace path changed type while snapshotting symlink: ${filePath}`);
+  }
+  const target = fs.readlinkSync(filePath);
+  assertDirectoryIdentity(path.dirname(filePath), parentIdentity);
+  const after = fs.lstatSync(filePath);
+  if (
+    !after.isSymbolicLink()
+    || !sameStableFileIdentity(before, after)
+    || before.mode !== after.mode
+    || before.size !== after.size
+    || before.mtimeMs !== after.mtimeMs
+    || before.ctimeMs !== after.ctimeMs
+  ) {
+    fail(`Symlink changed while creating its stable snapshot: ${filePath}`);
+  }
+  return {
+    file_type: "symlink",
+    mode: after.mode & 0o7777,
+    sha256: hashBuffer(Buffer.from(`symlink:${target}`, "utf8")),
+  };
+}
+
+function revalidateExecutionContextPreflightSnapshot(context, receipt) {
+  const sourceSnapshots = (receipt.source_snapshots || []).map((source) => {
+    const current = stableContextSourceSnapshot(context, source.path, "Execution context source");
+    return {
+      path: current.projectPath,
+      sha256: current.sha256,
+      file_type: current.file_type,
+      mode: current.mode,
+    };
+  });
+  const current = {
+    git_head_sha: execGit(context.root, ["rev-parse", "--verify", "HEAD"]),
+    source_snapshots: sourceSnapshots,
+    workspace_changes: currentWorkspaceChanges(context),
+  };
+  const decision = executionContextSnapshotRevalidationDecision(receipt, current);
+  if (!decision.valid) {
+    fail(
+      `Execution context changed while task start was being sealed: ${decision.errors.join("; ")}. `
+      + "No mutable-context authority was created; retry after restoring a stable reviewed state.",
+    );
+  }
+  return true;
 }
 
 function readStartedExecutionContextPreflight(context, {
@@ -10465,15 +10645,13 @@ function buildDomainRecord(label, factory) {
 
 function resolveRequirementSources(context, values) {
   const sourcePaths = normalizeRawListOption(values).map((source) => {
-    const resolved = resolveProjectFilePath(context, source, { mustExist: true, fileOnly: true });
-    assertNotDerivedArtifact(context, resolved, "Requirement source");
-    return toProjectPath(context, resolved);
+    return stableContextSourceSnapshot(context, source, "Requirement source").projectPath;
   });
   return {
     source_paths: sourcePaths,
     source_hashes: Object.fromEntries(sourcePaths.map((sourcePath) => {
-      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: true, fileOnly: true });
-      return [sourcePath, hashFile(resolved)];
+      const snapshot = stableContextSourceSnapshot(context, sourcePath, "Requirement source");
+      return [sourcePath, snapshot.sha256];
     })),
   };
 }
@@ -10482,15 +10660,19 @@ function validateRequirementSourceHashes(context, requirement, label, options = 
   const stale = [];
   for (const sourcePath of requirement.source_paths || []) {
     let actual = null;
+    let safeSnapshot = false;
+    let snapshotError = null;
     try {
-      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-      actual = fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? hashFile(resolved) : null;
-    } catch {
+      const snapshot = stableContextSourceSnapshot(context, sourcePath, "Requirement source");
+      actual = snapshot.sha256;
+      safeSnapshot = true;
+    } catch (error) {
       actual = null;
+      snapshotError = error.message;
     }
     const expected = requirement.source_hashes?.[sourcePath] || null;
     if (!actual || actual !== expected) {
-      const evolution = options.executionContext
+      const evolution = safeSnapshot && options.executionContext
         ? executionContextSourceEvolution(context, {
             ...options.executionContext,
             sourcePath,
@@ -10498,7 +10680,11 @@ function validateRequirementSourceHashes(context, requirement, label, options = 
             bindingKind: "requirement",
             bindingId: requirement.id,
           })
-        : { allowed: false, reason: "preflight_not_requested", errors: [] };
+        : {
+            allowed: false,
+            reason: safeSnapshot ? "preflight_not_requested" : "unsafe_context_source",
+            errors: snapshotError ? [snapshotError] : [],
+          };
       if (!evolution.allowed) {
         stale.push({
           path: sourcePath,
@@ -23985,14 +24171,18 @@ function collectContractDependencyFreshnessGaps(context, contract) {
     }
     try {
       const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-      const currentMatches = (
-        fs.existsSync(resolved)
-        && fs.statSync(resolved).isFile()
-        && source.sha256
-        && hashFile(resolved) === source.sha256
-      );
+      let currentMatches = false;
+      let safeSnapshot = false;
+      let snapshotError = null;
+      try {
+        const snapshot = stableContextSourceSnapshot(context, resolved, "Contract context source");
+        safeSnapshot = true;
+        currentMatches = Boolean(source.sha256 && snapshot.sha256 === source.sha256);
+      } catch (error) {
+        snapshotError = error.message;
+      }
       if (!currentMatches) {
-        const evolution = source.sha256 && executionContext
+        const evolution = source.sha256 && safeSnapshot && executionContext
           ? executionContextSourceEvolution(context, {
               ...executionContext,
               sourcePath,
@@ -24004,8 +24194,10 @@ function collectContractDependencyFreshnessGaps(context, contract) {
         if (!evolution.allowed) {
           addGap(
             fs.existsSync(resolved) ? "stale_context_source" : "missing_context_source",
-            `context source ${sourcePath} changed outside its approved pre-change snapshot`,
-            executionContextRecoveryMessage(sourcePath),
+            snapshotError
+              ? `context source ${sourcePath} is unsafe: ${snapshotError}`
+              : `context source ${sourcePath} changed outside its approved pre-change snapshot`,
+            snapshotError || executionContextRecoveryMessage(sourcePath),
           );
         }
       }
@@ -25309,12 +25501,13 @@ function readProjectSafe(context) {
 
 function buildContextSources(context, contextFiles) {
   return contextFiles.map((rawPath) => {
-    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
-    const content = fs.readFileSync(resolved);
+    const snapshot = stableContextSourceSnapshot(context, rawPath, "Contract context source");
+    const resolved = snapshot.filePath;
+    const content = snapshot.content;
     const text = content.toString("utf8");
     return {
-      path: toProjectPath(context, resolved),
-      sha256: crypto.createHash("sha256").update(content).digest("hex"),
+      path: snapshot.projectPath,
+      sha256: snapshot.sha256,
       size_bytes: content.length,
       excerpt: safeEvidenceExcerpt(resolved, text, 1200),
       trust: "untrusted_project_evidence",
@@ -26156,14 +26349,14 @@ function readBaselines(context) {
 }
 
 function buildBaselineDocumentEvidence(context, rawPath) {
-  const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
-  assertNotDerivedArtifact(context, resolved, "Baseline document");
-  const content = fs.readFileSync(resolved);
+  const snapshot = stableContextSourceSnapshot(context, rawPath, "Baseline document");
+  const resolved = snapshot.filePath;
+  const content = snapshot.content;
   const text = content.toString("utf8");
   return {
     type: "document",
-    path: toProjectPath(context, resolved),
-    sha256: hashBuffer(content),
+    path: snapshot.projectPath,
+    sha256: snapshot.sha256,
     size_bytes: content.length,
     title: inferTitle(resolved, text),
     headings: text
@@ -26179,7 +26372,7 @@ function buildBaselineDocumentEvidence(context, rawPath) {
 function normalizeBaselineSourcePaths(context, rawPaths) {
   for (const rawPath of rawPaths) {
     const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true });
-    assertNotDerivedArtifact(context, resolved, "Baseline source");
+    assertContextSourcePathSafe(context, resolved, "Baseline source");
   }
   const discovery = discoverBaselineSourcePaths({
     projectRoot: context.root,
@@ -26380,19 +26573,21 @@ function validateBaselineSourceHashes(context, baseline, label, options = {}) {
   const sourcePaths = new Set([...(baseline.source_paths || []), ...Object.keys(sourceHashes)]);
   for (const sourcePath of sourcePaths) {
     const expectedHash = sourceHashes[sourcePath];
-    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-    if (isDerivedArtifactPath(context, resolved)) {
-      issues.push(`${label} uses derived source ${sourcePath}`);
-    } else if (!expectedHash) {
+    if (!expectedHash) {
       issues.push(`${label} source ${sourcePath} has no recorded hash`);
     } else {
-      const currentMatches = (
-        fs.existsSync(resolved)
-        && fs.statSync(resolved).isFile()
-        && hashFile(resolved) === expectedHash
-      );
+      let currentMatches = false;
+      let safeSnapshot = false;
+      let snapshotError = null;
+      try {
+        const snapshot = stableContextSourceSnapshot(context, sourcePath, "Baseline source");
+        safeSnapshot = true;
+        currentMatches = snapshot.sha256 === expectedHash;
+      } catch (error) {
+        snapshotError = error.message;
+      }
       if (currentMatches) continue;
-      const evolution = options.executionContext
+      const evolution = safeSnapshot && options.executionContext
         ? executionContextSourceEvolution(context, {
             ...options.executionContext,
             sourcePath,
@@ -26403,8 +26598,10 @@ function validateBaselineSourceHashes(context, baseline, label, options = {}) {
         : { allowed: false };
       if (!evolution.allowed) {
         issues.push(
-          `${label} source ${sourcePath} is missing or changed outside its approved pre-change snapshot. `
-          + executionContextRecoveryMessage(sourcePath),
+          snapshotError
+            ? `${label} source ${sourcePath} is unsafe: ${snapshotError}`
+            : `${label} source ${sourcePath} is missing or changed outside its approved pre-change snapshot. `
+              + executionContextRecoveryMessage(sourcePath),
         );
       }
     }
@@ -26498,13 +26695,13 @@ function normalizeCapabilityEvidence(evidence) {
 
 function buildCapabilityEvidenceFromContextFiles(context, contextFiles) {
   return contextFiles.map((rawPath) => {
-    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
-    assertNotDerivedArtifact(context, resolved, "Capability context file");
-    const content = fs.readFileSync(resolved);
+    const snapshot = stableContextSourceSnapshot(context, rawPath, "Capability context file");
+    const resolved = snapshot.filePath;
+    const content = snapshot.content;
     return {
       type: "context_file",
-      path: toProjectPath(context, resolved),
-      sha256: hashBuffer(content),
+      path: snapshot.projectPath,
+      sha256: snapshot.sha256,
       size_bytes: content.length,
       excerpt: safeEvidenceExcerpt(resolved, content.toString("utf8"), 600),
       trust: "untrusted_project_evidence",
@@ -26518,9 +26715,8 @@ function normalizeCapabilitySourcePaths(context, rawPaths) {
     if (!rawPath) {
       continue;
     }
-    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
-    assertNotDerivedArtifact(context, resolved, "Capability source path");
-    result.push(toProjectPath(context, resolved));
+    const snapshot = stableContextSourceSnapshot(context, rawPath, "Capability source path");
+    result.push(snapshot.projectPath);
   }
   return Array.from(new Set(result)).sort();
 }
@@ -26528,10 +26724,8 @@ function normalizeCapabilitySourcePaths(context, rawPaths) {
 function buildSourceHashes(context, sourcePaths) {
   const hashes = {};
   for (const sourcePath of sourcePaths || []) {
-    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-      hashes[sourcePath] = hashFile(resolved);
-    }
+    const snapshot = stableContextSourceSnapshot(context, sourcePath, "Canonical context source");
+    hashes[sourcePath] = snapshot.sha256;
   }
   return hashes;
 }
@@ -26785,19 +26979,21 @@ function validateCapabilityRecordSourceHashes(context, record, label, options = 
   const sourcePaths = new Set([...(record.source_paths || []), ...Object.keys(sourceHashes)]);
   for (const sourcePath of sourcePaths) {
     const expectedHash = sourceHashes[sourcePath];
-    const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-    if (isDerivedArtifactPath(context, resolved)) {
-      issues.push(`${label} uses derived source ${sourcePath}`);
-    } else if (!expectedHash) {
+    if (!expectedHash) {
       issues.push(`${label} source ${sourcePath} has no recorded hash`);
     } else {
-      const currentMatches = (
-        fs.existsSync(resolved)
-        && fs.statSync(resolved).isFile()
-        && hashFile(resolved) === expectedHash
-      );
+      let currentMatches = false;
+      let safeSnapshot = false;
+      let snapshotError = null;
+      try {
+        const snapshot = stableContextSourceSnapshot(context, sourcePath, "Capability source");
+        safeSnapshot = true;
+        currentMatches = snapshot.sha256 === expectedHash;
+      } catch (error) {
+        snapshotError = error.message;
+      }
       if (currentMatches) continue;
-      const evolution = options.executionContext
+      const evolution = safeSnapshot && options.executionContext
         ? executionContextSourceEvolution(context, {
             ...options.executionContext,
             sourcePath,
@@ -26808,8 +27004,10 @@ function validateCapabilityRecordSourceHashes(context, record, label, options = 
         : { allowed: false };
       if (!evolution.allowed) {
         issues.push(
-          `${label} source ${sourcePath} changed after record creation and is missing or changed outside its approved pre-change snapshot. `
-          + executionContextRecoveryMessage(sourcePath),
+          snapshotError
+            ? `${label} source ${sourcePath} is unsafe: ${snapshotError}`
+            : `${label} source ${sourcePath} changed after record creation and is missing or changed outside its approved pre-change snapshot. `
+              + executionContextRecoveryMessage(sourcePath),
         );
       }
     }
@@ -32404,6 +32602,63 @@ function hashFile(filePath) {
   return hashBuffer(fs.readFileSync(filePath));
 }
 
+function readStableRegularFileBuffer(filePath, boundaryRoot) {
+  assertNoSymlinkPathSegments(filePath, boundaryRoot);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    const content = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (
+      !sameStableFileIdentity(before, after)
+      || before.size !== after.size
+      || before.mode !== after.mode
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || content.byteLength !== after.size
+    ) {
+      fail(`File changed while creating its stable snapshot: ${filePath}`);
+    }
+    return {
+      content,
+      file_type: "regular",
+      mode: after.mode & 0o7777,
+      size_bytes: after.size,
+      sha256: hashBuffer(content),
+    };
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
+function assertContextSourcePathSafe(context, filePath, label) {
+  assertNoSymlinkPathSegments(filePath, context.root);
+  const realRoot = fs.realpathSync.native(context.root);
+  const realPath = fs.realpathSync.native(filePath);
+  if (!isInsidePath(realRoot, realPath)) {
+    fail(`Path must stay inside the target project root: ${label}`);
+  }
+  const lexicalRealPath = path.join(context.root, path.relative(realRoot, realPath));
+  assertNotDerivedArtifact(context, filePath, label);
+  assertNotDerivedArtifact(context, lexicalRealPath, label);
+  return realPath;
+}
+
+function stableContextSourceSnapshot(context, rawPath, label = "Context source") {
+  const filePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
+  assertContextSourcePathSafe(context, filePath, label);
+  return {
+    filePath,
+    projectPath: toProjectPath(context, filePath),
+    ...readStableRegularFileBuffer(filePath, context.root),
+  };
+}
+
 function hashJsonFileValue(value) {
   return hashBuffer(Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"));
 }
@@ -35943,10 +36198,9 @@ function validateContractContextSources(context, report, contract, label) {
       report.errors.push(`${label} has a context source without path`);
       continue;
     }
-    let resolved;
+    let snapshot;
     try {
-      resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-      assertNoSymlinkPathSegments(resolved, context.root);
+      snapshot = stableContextSourceSnapshot(context, sourcePath, "Contract context source");
     } catch (error) {
       report.errors.push(`${label} context source ${sourcePath} is invalid: ${error.message}`);
       continue;
@@ -35955,11 +36209,7 @@ function validateContractContextSources(context, report, contract, label) {
       report.errors.push(`${label} context source ${sourcePath} has no recorded hash`);
       continue;
     }
-    const currentMatches = (
-      fs.existsSync(resolved)
-      && fs.statSync(resolved).isFile()
-      && hashFile(resolved) === source.sha256
-    );
+    const currentMatches = snapshot.sha256 === source.sha256;
     if (!currentMatches) {
       const evolution = executionContext
         ? executionContextSourceEvolution(context, {

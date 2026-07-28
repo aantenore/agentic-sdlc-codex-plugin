@@ -344,6 +344,8 @@ test("approved brownfield context may evolve after an exact preflight while unre
     {
       path: "src/config.mjs",
       status: " M",
+      file_type: "regular",
+      mode: fs.statSync(path.join(project, "src", "config.mjs")).mode & 0o7777,
       content_sha256: preflight.preexisting_workspace_changes.find(
         (entry) => entry.path === "src/config.mjs",
       ).content_sha256,
@@ -436,6 +438,26 @@ test("approved brownfield context may evolve after an exact preflight while unre
     false,
   );
 
+  const configPath = path.join(project, "src", "config.mjs");
+  const originalConfigMode = fs.statSync(configPath).mode & 0o7777;
+  fs.chmodSync(configPath, originalConfigMode ^ 0o100);
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-BROWNFIELD",
+    "--strict",
+    "--json",
+  ], project, /outside the approved requirement write paths: src\/config\.mjs/u);
+  fs.chmodSync(configPath, originalConfigMode);
+  assert.equal(mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-BROWNFIELD",
+    "--strict",
+  ], project).status, "passed");
+
   writeProjectFile(project, "src/config.mjs", "export const timeoutMs = 2000;\n");
   const rejectedGate = mustFail([
     "gate", "check",
@@ -466,4 +488,55 @@ test("context drift before task start remains fail-closed and writes no prefligh
   assert.equal(fs.existsSync(path.join(project, fixture.preflightPath)), false);
   assert.equal(fs.existsSync(path.join(project, fixture.taskStartPath)), false);
   assert.match(payload.recovery.join(" "), /restore|approve a new/iu);
+});
+
+test("a context symlink into derived state cannot reuse approved bytes", () => {
+  const project = temporaryProject("derived-context-symlink");
+  const fixture = establishBrownfieldGovernance(project);
+  const appPath = path.join(project, "src", "app.mjs");
+  const derivedPath = path.join(project, ".sdlc", "cache", "approved-app.mjs");
+  fs.mkdirSync(path.dirname(derivedPath), { recursive: true });
+  fs.copyFileSync(appPath, derivedPath);
+  fs.rmSync(appPath);
+  fs.symlinkSync("../.sdlc/cache/approved-app.mjs", appPath);
+
+  mustFail([
+    "task", "preflight",
+    ...taskContextArgs(project),
+    "--json",
+  ], project, /symbolic link|symlink|derived/iu);
+  assert.equal(fs.existsSync(path.join(project, fixture.preflightPath)), false);
+  assert.equal(fs.existsSync(path.join(project, fixture.taskStartPath)), false);
+});
+
+test("a dirty submodule cannot be exempted as unchanged pre-existing workspace state", () => {
+  const project = temporaryProject("dirty-submodule");
+  const fixture = establishBrownfieldGovernance(project);
+  const submoduleSource = temporaryProject("submodule-source");
+  writeProjectFile(submoduleSource, "dependency.txt", "stable dependency\n");
+  mustGit(submoduleSource, ["init"]);
+  mustGit(submoduleSource, ["config", "user.name", "Mutable Context E2E"]);
+  mustGit(submoduleSource, ["config", "user.email", "mutable-context-e2e@example.invalid"]);
+  mustGit(submoduleSource, ["add", "."]);
+  mustGit(submoduleSource, ["commit", "-m", "test: establish dependency"]);
+
+  mustGit(project, [
+    "-c", "protocol.file.allow=always",
+    "submodule", "add", submoduleSource, "vendor/local-dependency",
+  ]);
+  mustGit(project, ["add", ".gitmodules", "vendor/local-dependency"]);
+  mustGit(project, ["commit", "-m", "test: add local dependency"]);
+  writeProjectFile(
+    path.join(project, "vendor", "local-dependency"),
+    "dependency.txt",
+    "dirty dependency\n",
+  );
+
+  mustFail([
+    "task", "preflight",
+    ...taskContextArgs(project),
+    "--json",
+  ], project, /dirty directory or submodule/iu);
+  assert.equal(fs.existsSync(path.join(project, fixture.preflightPath)), false);
+  assert.equal(fs.existsSync(path.join(project, fixture.taskStartPath)), false);
 });
