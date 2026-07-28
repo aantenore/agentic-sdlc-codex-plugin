@@ -975,6 +975,35 @@ test("Windows shell-free test routing resolves launchers from the requested proj
   );
 });
 
+test("Windows native optimization ignores project-local executable shadows", {
+  skip: process.platform === "win32" ? false : "Windows PATH executable regression",
+}, () => {
+  const project = tmpProject("rtk-windows-native-path");
+  initProject(project);
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+
+  const marker = path.join(project, "project-git-shadow-invoked");
+  fs.copyFileSync(process.execPath, path.join(project, "git.exe"));
+  fs.writeFileSync(path.join(project, "status"), [
+    "\"use strict\";",
+    "const fs = require(\"node:fs\");",
+    "fs.writeFileSync(process.env.GIT_SHADOW_MARKER, \"invoked\\n\", \"utf8\");",
+    "",
+  ].join("\n"));
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--exact",
+  ], {
+    env: {
+      GIT_SHADOW_MARKER: marker,
+    },
+  });
+  assert.equal(fs.existsSync(marker), false);
+});
+
 test("standard RTK PATH lookup rejects project-local shadows and spawns the canonical host path", {
   skip: process.platform === "win32" ? "POSIX executable symlink regression" : false,
 }, () => {

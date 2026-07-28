@@ -271,6 +271,11 @@ test("explicit executable suffixes normalize to the same safe RTK routes", () =>
   assert.equal(git.mode, "rtk");
   assert.equal(git.profile, "git");
   assert.deepEqual(git.rtk_arguments, ["git", "status", "--short"]);
+
+  const rg = routeRtkCommand(["rg.com", "needle"], { platform: "linux" });
+  assert.equal(rg.mode, "rtk");
+  assert.equal(rg.profile, "rg");
+  assert.deepEqual(rg.rtk_arguments, ["rg", "--no-config", "needle"]);
 });
 
 test("Windows shell shims without an explicit shell-free adapter fail closed", () => {
@@ -287,6 +292,76 @@ test("Windows shell shims without an explicit shell-free adapter fail closed", (
       command.join(" "),
     );
   }
+});
+
+test("Windows gateway resolution is PATH-only and absolute for every supported executable", () => {
+  const commandVectors = new Map([
+    ["npm", ["npm", "test"]],
+    ["pnpm", ["pnpm", "test"]],
+    ["yarn", ["yarn", "test"]],
+    ["bun", ["bun", "test"]],
+    ["node", ["node", "--test"]],
+    ["pytest", ["pytest"]],
+    ["jest", ["jest"]],
+    ["vitest", ["vitest"]],
+    ["git", ["git", "status", "--short"]],
+    ["rg", ["rg", "needle"]],
+  ]);
+  const files = {};
+  for (const executableName of commandVectors.keys()) {
+    files[`C:\\workspace\\${executableName}.com`] = "project shadow";
+    files[`C:\\Tools\\${executableName}.exe`] = "host executable";
+  }
+  const fsModule = virtualWindowsFs(files);
+  const options = {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { PATH: "C:\\Tools" },
+    node_executable: "C:\\Node\\node.exe",
+    fs_module: fsModule,
+  };
+
+  for (const [executableName, command] of commandVectors) {
+    const route = routeRtkCommand(command, options);
+    assert.equal(
+      route.execution_command[0],
+      `C:\\Tools\\${executableName}.exe`,
+      executableName,
+    );
+    if (["git", "rg"].includes(executableName)) {
+      assert.equal(route.mode, "native", executableName);
+      assert.equal(route.reason, "windows_absolute_executable_required", executableName);
+      assert.equal(route.rtk_arguments, null, executableName);
+    } else {
+      assert.equal(route.mode, "rtk", executableName);
+      assert.equal(route.profile, "test", executableName);
+      assert.equal(route.rtk_arguments.includes(route.execution_command[0]), true, executableName);
+    }
+  }
+
+  const explicitCom = routeRtkCommand(["git.com", "status"], {
+    ...options,
+    env: { PATH: "C:\\ComTools" },
+    fs_module: virtualWindowsFs({
+      "C:\\ComTools\\git.com": "host executable",
+    }),
+  });
+  assert.deepEqual(explicitCom.execution_command, [
+    "C:\\ComTools\\git.com",
+    "status",
+  ]);
+  assert.equal(explicitCom.mode, "native");
+
+  assert.throws(
+    () => routeRtkCommand(["git", "status"], {
+      ...options,
+      env: { PATH: "" },
+      fs_module: virtualWindowsFs({
+        "C:\\workspace\\git.exe": "project shadow",
+      }),
+    }),
+    /could not be resolved to a PATH executable/u,
+  );
 });
 
 test("Windows test shims resolve to shell-free Node launchers for RTK and native fallback", () => {
