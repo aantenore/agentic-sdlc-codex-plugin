@@ -307,7 +307,7 @@ node bin/agentic-sdlc.mjs autonomy delivery propose \
   --rollback "Restore store.json byte-for-byte from store.before.json"
 ```
 
-Both data actions are checkpoints and use the normal authorize → external execution → complete sequence. `data.migrate` completion proves that the exact backup contains the pre-migration target bytes and that the target changed. `data.rollback` completion proves that the target was restored byte-for-byte from that backup. The CLI accepts no executable or shell option for either action. A final `--lifecycle-complete` gate requires a passing rollback, a later passing migration, and only then the terminal `release.local`.
+Both data actions are checkpoints and use the normal authorize → external execution → complete sequence. `data.migrate` completion proves that the exact backup contains the pre-migration target bytes and that the target changed. `data.rollback` completion proves a real transition from different target bytes back to that exact backup; a no-op is rejected. The CLI accepts no executable or shell option for either action. For a declared data migration, `rollback.verify` must bind that exact passing rollback receipt. `release.local` authorization and completion both require that bound verification plus a later passing migration, so an incomplete sequence cannot terminally close the delivery. The final `--lifecycle-complete` gate revalidates the same receipt chain.
 
 For every new local release, record the rollback rehearsal separately:
 

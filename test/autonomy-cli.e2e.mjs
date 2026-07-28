@@ -2250,6 +2250,28 @@ test("local release governs a failed data migration, verified rollback, and fina
     "--delivery-profile", "AUT-LOCAL-DATA",
   ]);
 
+  fs.writeFileSync(
+    path.join(project, "evidence", "premature-rollback.json"),
+    '{"rollback":"not-run"}\n',
+  );
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "rollback.verify",
+    "--evidence", "evidence/premature-rollback.json",
+    "--confirm-action",
+    ...humanApproval("Attempt rollback verification before a governed rollback"),
+  ], /requires a verified data\.rollback receipt first/u);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Attempt release before the reversible data sequence"),
+  ], /requires rollback rehearsal, a final migration retry, and bound rollback verification/isu);
+
   const originalPreview = fs.readFileSync(previewPath, "utf8");
   fs.writeFileSync(previewPath, `${originalPreview.trim()}\nchanged\n`, "utf8");
   mustFail([
@@ -2451,6 +2473,14 @@ test("local release governs a failed data migration, verified rollback, and fina
     rollbackVerificationAuthorization.action_receipt.id,
   );
   assert.equal(rollbackVerification.action_receipt.rollback_verification.verified, true);
+  assert.deepEqual(
+    rollbackVerification.action_receipt.rollback_verification.data_rollback_receipt_ref,
+    {
+      id: rollbackCompletion.action_receipt.id,
+      path: rollbackCompletion.action_receipt_path,
+      hash: rollbackCompletion.action_receipt.receipt_hash,
+    },
+  );
   fs.writeFileSync(rollbackEvidencePath, '{"restored":"tampered-after-receipt"}\n');
   const tamperedRollbackGate = run([
     "gate", "check",
@@ -2476,6 +2506,21 @@ test("local release governs a failed data migration, verified rollback, and fina
     "--confirm-action",
     ...humanApproval("Approve the final local release after rollback verification"),
   ]);
+  assert.deepEqual(
+    releaseAuthorization.action_receipt.action_details.data_migration_sequence
+      .data_rollback_receipt_ref,
+    rollbackVerification.action_receipt.rollback_verification.data_rollback_receipt_ref,
+  );
+  assert.equal(
+    releaseAuthorization.action_receipt.action_details.data_migration_sequence
+      .final_data_migration_receipt_ref.id,
+    finalMigration.action_receipt.id,
+  );
+  assert.equal(
+    releaseAuthorization.action_receipt.action_details.data_migration_sequence
+      .rollback_verification_receipt_ref.id,
+    rollbackVerification.action_receipt.id,
+  );
   fs.writeFileSync(path.join(project, "evidence", "release-passed.json"), '{"released":true}\n');
   const released = mustRunJson([
     "autonomy", "delivery", "action",
@@ -2492,6 +2537,10 @@ test("local release governs a failed data migration, verified rollback, and fina
   assert.equal(
     released.action_receipt.authorization_receipt_ref.id,
     releaseAuthorization.action_receipt.id,
+  );
+  assert.deepEqual(
+    released.action_receipt.local_release_verification.data_migration_sequence,
+    releaseAuthorization.action_receipt.action_details.data_migration_sequence,
   );
 
   const afterReleaseGate = run([
@@ -2834,6 +2883,11 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     rollbackVerificationCompletion.action_receipt.rollback_verification.allowed_write_paths,
     [releaseOutput],
   );
+  assert.equal(
+    rollbackVerificationCompletion.action_receipt.rollback_verification
+      .data_rollback_receipt_ref,
+    undefined,
+  );
 
   const releaseAuthorization = mustRunJson([
     "autonomy", "delivery", "action",
@@ -2854,6 +2908,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   );
   assert.deepEqual(releaseAuthorization.action_receipt.action_details.allowed_write_paths, [releaseOutput]);
   assert.equal(releaseAuthorization.action_receipt.action_details.smoke_cwd, releaseOutput);
+  assert.equal(
+    releaseAuthorization.action_receipt.action_details.data_migration_sequence,
+    undefined,
+  );
   const localCheckpointPolicy = releaseAuthorization.action_receipt.action_details.checkpoint_policy;
   assert.equal(localCheckpointPolicy.local_boundary_source.schema_version, "delivery-local-boundary-source:v1");
   assert.equal(localCheckpointPolicy.local_boundary_source.target_outside_workspace, false);

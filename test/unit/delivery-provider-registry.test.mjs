@@ -601,6 +601,17 @@ test("local-filesystem rejects a stale backup and an unproven rollback", (t) => 
     operation("LOCAL-DATA-NOT-RESTORED", "data.rollback", subject, TIME.completed),
     rollbackPrecondition,
   ), "provider_completion_unproven");
+
+  fs.copyFileSync(backupPath, dataPath);
+  const noOpRollbackPrecondition = registry.observePrecondition(
+    "local-filesystem",
+    operation("LOCAL-DATA-NOOP-ROLLBACK", "data.rollback", subject),
+  );
+  assertProviderError(() => registry.verifyCompletion(
+    "local-filesystem",
+    operation("LOCAL-DATA-NOOP-ROLLBACK", "data.rollback", subject, TIME.completed),
+    noOpRollbackPrecondition,
+  ), "provider_completion_unproven");
 });
 
 test("local-filesystem fails closed on traversal", (t) => {

@@ -295,17 +295,20 @@ The dedicated assessment journey remains the exception described above: it packa
    `data.migrate` and `data.rollback` are always separate checkpoints. The CLI
    never accepts migration shell text or performs the mutation. Authorize the
    exact action, execute it externally, then complete it with immutable
-   evidence. The local observer proves target and backup hashes. Final
-   lifecycle completion requires a verified rollback, a later passing
-   migration, and then the terminal local release.
+   evidence. The local observer proves target and backup hashes and rejects a
+   no-op rollback whose target already matched the backup. For a declared data
+   migration, `rollback.verify` binds that exact passing rollback receipt.
+   `release.local` cannot even be authorized until the bound rollback
+   verification and a later passing migration exist.
 
    Every new local release also includes `rollback.verify`, even when no data
    migration is declared. Authorize it with immutable rollback-rehearsal
    `--evidence`, then complete it with the exact same evidence. The provider
    binds the local root, write paths, rollback procedure, and evidence hashes
    but executes no command. A passing receipt must exist before
-   `release.local`; missing or changed evidence blocks release and the final
-   lifecycle gate.
+   `release.local`; for data migrations it must bind the exact passing
+   `data.rollback` receipt. Missing, changed, or out-of-order evidence blocks
+   release before terminal close and also blocks the final lifecycle gate.
 
    Approve and inspect the exact profile:
 

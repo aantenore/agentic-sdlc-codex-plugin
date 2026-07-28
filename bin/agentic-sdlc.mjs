@@ -11867,11 +11867,22 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
         rollback_procedure: profile.local_release_target.rollback.procedure,
         evidence_root: context.root,
         evidence: verificationEvidence,
+        ...(profile.local_release_target.data_migration
+          ? {
+              data_rollback_receipt_ref: requireLatestPassingDataRollback(
+                context,
+                profile,
+              ),
+            }
+          : {}),
       };
     }
     if (["data.migrate", "data.rollback"].includes(action)) {
       assertDataMigrationPreviewEvidenceCurrent(context, profile.local_release_target.data_migration);
       details.data_migration = structuredClone(profile.local_release_target.data_migration);
+    }
+    if (action === "release.local" && profile.local_release_target.data_migration) {
+      details.data_migration_sequence = requireReversibleDataReleaseSequence(context, profile);
     }
     return details;
   }
@@ -14276,6 +14287,189 @@ function compareDeliveryAuthorizationOrder(left, right) {
     || String(left.id).localeCompare(String(right.id));
 }
 
+function dataOperationReceiptErrors(context, profile, receipt, actions) {
+  const errors = [];
+  if (
+    !["data.migrate", "data.rollback"].includes(receipt?.action)
+    || receipt?.status !== "completed"
+    || receipt?.outcome !== "passed"
+  ) {
+    return ["receipt is not a completed passing reversible data action"];
+  }
+  const authorization = actions.find((candidate) =>
+    candidate.id === receipt.authorization_receipt_ref?.id
+    && candidate.receipt_hash === receipt.authorization_receipt_ref?.hash
+    && candidate.action === receipt.action
+    && candidate.status === "authorized");
+  if (!authorization) {
+    return [`receipt lacks its exact ${receipt.action} authorization`];
+  }
+  if (
+    receipt.profile_ref?.id !== profile.id
+    || receipt.profile_ref?.hash !== profile.profile_hash
+    || receipt.delivery?.id !== profile.delivery_id
+    || receipt.delivery?.kind !== profile.delivery_kind
+    || receipt.effective_level !== authorization.effective_level
+    || compareDeliveryAuthorizationOrder(authorization, receipt) >= 0
+  ) {
+    errors.push("reversible data receipt is bound to a different delivery or invalid execution order");
+  }
+  const checkpointSnapshot = authorization.action_details?.checkpoint_policy;
+  const checkpointValidation = checkpointSnapshot
+    ? validateDeliveryActionCheckpointPolicySnapshot(
+        context,
+        checkpointSnapshot,
+        profile,
+        authorization.effective_level,
+        authorization.action,
+      )
+    : { valid: false, required: null, errors: ["checkpoint policy snapshot is missing"] };
+  if (
+    !checkpointValidation.valid
+    || checkpointValidation.required !== true
+    || authorization.checkpoint_required !== true
+  ) {
+    errors.push(
+      `reversible data authorization lacks its required immutable checkpoint: ${checkpointValidation.errors.join("; ")}`,
+    );
+  }
+  const approvalReport = { strict: true, errors: [], warnings: [], checked: [] };
+  validateFormalApprovalRecord(
+    context,
+    approvalReport,
+    authorization.approval,
+    `${authorization.action} authorization approval`,
+    authorization.approval?.approved_by,
+    { subject_id: profile.id },
+  );
+  const approvalSubject = {
+    profile_id: profile.id,
+    profile_hash: profile.profile_hash,
+    delivery_id: profile.delivery_id,
+    action: authorization.action,
+    runtime_target: authorization.runtime_target,
+    action_details: authorization.action_details,
+  };
+  if (
+    authorization.approval?.status !== "approved"
+    || authorization.approval?.approved_content_hash !== hashApprovalSubject(approvalSubject)
+  ) {
+    approvalReport.errors.push("reversible data authorization approval is missing or bound to another action");
+  }
+  try {
+    validateApprovalEvidenceIntegrity(
+      context,
+      authorization.approval,
+      `${authorization.action} authorization approval`,
+    );
+    validateDeliveryActionHostAuthority(context, profile, authorization);
+  } catch (error) {
+    approvalReport.errors.push(`reversible data authorization approval is invalid: ${error.message}`);
+  }
+  errors.push(...approvalReport.errors);
+
+  const providerReport = { errors: [] };
+  validateCompletedProviderActionReceipt(
+    context,
+    providerReport,
+    profile,
+    receipt,
+    authorization,
+    `${receipt.action} receipt ${receipt.id}`,
+  );
+  errors.push(...providerReport.errors);
+
+  const migration = profile.local_release_target?.data_migration;
+  const verification = receipt.data_operation_verification;
+  const proof = receipt.action_details?.provider_operation?.completion_receipt?.proof;
+  const expectedTransition = receipt.action === "data.migrate" ? "migrated" : "rolled_back";
+  if (
+    !migration
+    || verification?.action !== receipt.action
+    || verification?.transition !== expectedTransition
+    || verification?.target_path !== migration.target_path
+    || verification?.backup_path !== migration.backup.path
+    || stableJson(verification?.scopes) !== stableJson(migration.scopes)
+    || stableJson(verification?.preview_evidence) !== stableJson(migration.preview_evidence)
+    || verification?.before_target_sha256 !== proof?.before_target_sha256
+    || verification?.after_target_sha256 !== proof?.after_target_sha256
+    || verification?.backup_sha256 !== proof?.backup_sha256
+    || verification?.rollback_procedure !== profile.local_release_target.rollback.procedure
+    || verification?.rollback_verified !== (receipt.action === "data.rollback")
+  ) {
+    errors.push("reversible data receipt lacks its exact typed operation verification");
+  }
+  if (
+    receipt.action === "data.rollback"
+    && (
+      proof?.before_target_sha256 === proof?.backup_sha256
+      || proof?.after_target_sha256 === proof?.before_target_sha256
+    )
+  ) {
+    errors.push("data.rollback receipt does not prove a real target transition to its backup");
+  }
+  const evidenceReport = { errors: [], warnings: [] };
+  for (const evidence of receipt.evidence || []) {
+    validateDeliveryActionEvidence(
+      context,
+      evidenceReport,
+      receipt,
+      `${receipt.action} receipt ${receipt.id}`,
+      evidence,
+      "evidence changed after recording",
+    );
+  }
+  errors.push(...evidenceReport.errors);
+  return errors;
+}
+
+function passingDataOperationCandidates(context, profile, action, beforeReceipt = null) {
+  const actions = deliveryActionReceipts(context, profile.id);
+  return {
+    actions,
+    candidates: actions
+      .filter((receipt) =>
+        receipt.action === action
+        && receipt.status === "completed"
+        && receipt.outcome === "passed"
+        && (!beforeReceipt || compareDeliveryAuthorizationOrder(receipt, beforeReceipt) < 0))
+      .sort(compareDeliveryAuthorizationOrder),
+  };
+}
+
+function latestPassingDataOperation(context, profile, action, beforeReceipt = null) {
+  const { actions, candidates } = passingDataOperationCandidates(
+    context,
+    profile,
+    action,
+    beforeReceipt,
+  );
+  const latest = candidates.at(-1) || null;
+  const errors = latest
+    ? dataOperationReceiptErrors(context, profile, latest, actions)
+    : [`no completed passing ${action} receipt exists`];
+  return {
+    receipt: errors.length === 0 ? latest : null,
+    errors,
+  };
+}
+
+function requireLatestPassingDataRollback(context, profile, beforeReceipt = null) {
+  const result = latestPassingDataOperation(
+    context,
+    profile,
+    "data.rollback",
+    beforeReceipt,
+  );
+  if (!result.receipt) {
+    fail(
+      "rollback.verify for a declared data migration requires a verified data.rollback receipt first: "
+      + `${result.errors.join("; ")}.`,
+    );
+  }
+  return deliveryActionReceiptRef(context, result.receipt);
+}
+
 function rollbackVerificationReceiptErrors(context, profile, receipt, actions) {
   const errors = [];
   if (
@@ -14295,6 +14489,7 @@ function rollbackVerificationReceiptErrors(context, profile, receipt, actions) {
   }
   const verification = receipt.rollback_verification;
   const approved = authorization.action_details?.rollback_verification;
+  const dataRollbackRef = verification?.data_rollback_receipt_ref || null;
   if (
     verification?.action !== "rollback.verify"
     || verification?.verification !== "evidence_verified"
@@ -14312,9 +14507,39 @@ function rollbackVerificationReceiptErrors(context, profile, receipt, actions) {
       rollback_procedure: verification?.rollback_procedure,
       evidence_root: verification?.evidence_root,
       evidence: verification?.evidence,
+      ...(dataRollbackRef ? { data_rollback_receipt_ref: dataRollbackRef } : {}),
     })
   ) {
     errors.push("typed rollback verification differs from the exact local target, procedure, or evidence");
+  }
+  if (profile.local_release_target?.data_migration) {
+    const dataRollbackReceipt = actions.find((candidate) =>
+      candidate.id === dataRollbackRef?.id
+      && candidate.receipt_hash === dataRollbackRef?.hash
+      && candidate.action === "data.rollback"
+      && candidate.status === "completed"
+      && candidate.outcome === "passed");
+    if (!dataRollbackReceipt) {
+      errors.push("rollback verification does not bind its exact passing data.rollback receipt");
+    } else {
+      if (
+        stableJson(dataRollbackRef)
+        !== stableJson(deliveryActionReceiptRef(context, dataRollbackReceipt))
+      ) {
+        errors.push("rollback verification data.rollback reference is non-canonical");
+      }
+      errors.push(...dataOperationReceiptErrors(
+        context,
+        profile,
+        dataRollbackReceipt,
+        actions,
+      ).map((error) => `bound data.rollback is invalid: ${error}`));
+      if (compareDeliveryAuthorizationOrder(dataRollbackReceipt, authorization) >= 0) {
+        errors.push("rollback verification was authorized before its bound data.rollback completed");
+      }
+    }
+  } else if (dataRollbackRef) {
+    errors.push("standard local rollback verification unexpectedly binds a data.rollback receipt");
   }
   for (const evidence of verification?.evidence || []) {
     try {
@@ -14341,6 +14566,108 @@ function rollbackVerificationReceiptErrors(context, profile, receipt, actions) {
   );
   errors.push(...providerReport.errors);
   return errors;
+}
+
+function reversibleDataReleaseSequence(context, profile, beforeReceipt = null) {
+  if (!profile.local_release_target?.data_migration) {
+    return { sequence: null, errors: [] };
+  }
+  const rollback = latestPassingDataOperation(
+    context,
+    profile,
+    "data.rollback",
+    beforeReceipt,
+  );
+  if (!rollback.receipt) {
+    return {
+      sequence: null,
+      errors: [
+        "a passing verified data.rollback is required",
+        ...rollback.errors,
+      ],
+    };
+  }
+  const { actions, candidates: migrationCandidates } = passingDataOperationCandidates(
+    context,
+    profile,
+    "data.migrate",
+    beforeReceipt,
+  );
+  const finalMigrationCandidate = migrationCandidates
+    .filter((receipt) => compareDeliveryAuthorizationOrder(rollback.receipt, receipt) < 0)
+    .at(-1) || null;
+  const finalMigrationErrors = finalMigrationCandidate
+    ? dataOperationReceiptErrors(
+        context,
+        profile,
+        finalMigrationCandidate,
+        actions,
+      )
+    : ["no passing data.migrate exists after the verified data.rollback"];
+  if (!finalMigrationCandidate || finalMigrationErrors.length > 0) {
+    return {
+      sequence: null,
+      errors: [
+        "a passing data.migrate after the verified data.rollback is required",
+        ...finalMigrationErrors,
+      ],
+    };
+  }
+  const rollbackVerificationCandidates = actions
+    .filter((receipt) =>
+      receipt.action === "rollback.verify"
+      && receipt.status === "completed"
+      && receipt.outcome === "passed"
+      && (!beforeReceipt || compareDeliveryAuthorizationOrder(receipt, beforeReceipt) < 0))
+    .sort(compareDeliveryAuthorizationOrder);
+  const rollbackRef = deliveryActionReceiptRef(context, rollback.receipt);
+  const rollbackVerificationCandidate = rollbackVerificationCandidates
+    .filter((receipt) =>
+      stableJson(receipt.rollback_verification?.data_rollback_receipt_ref)
+        === stableJson(rollbackRef))
+    .at(-1) || null;
+  const rollbackVerificationErrors = rollbackVerificationCandidate
+    ? rollbackVerificationReceiptErrors(
+        context,
+        profile,
+        rollbackVerificationCandidate,
+        actions,
+      )
+    : ["no rollback.verify receipt is bound to the latest verified data.rollback"];
+  if (!rollbackVerificationCandidate || rollbackVerificationErrors.length > 0) {
+    return {
+      sequence: null,
+      errors: [
+        "a passing rollback.verify bound to the latest verified data.rollback is required",
+        ...rollbackVerificationErrors,
+      ],
+    };
+  }
+  return {
+    errors: [],
+    sequence: {
+      data_rollback_receipt_ref: rollbackRef,
+      final_data_migration_receipt_ref: deliveryActionReceiptRef(
+        context,
+        finalMigrationCandidate,
+      ),
+      rollback_verification_receipt_ref: deliveryActionReceiptRef(
+        context,
+        rollbackVerificationCandidate,
+      ),
+    },
+  };
+}
+
+function requireReversibleDataReleaseSequence(context, profile, beforeReceipt = null) {
+  const result = reversibleDataReleaseSequence(context, profile, beforeReceipt);
+  if (!result.sequence) {
+    fail(
+      "release.local for a declared data migration requires rollback rehearsal, "
+      + `a final migration retry, and bound rollback verification before authorization: ${result.errors.join("; ")}.`,
+    );
+  }
+  return result.sequence;
 }
 
 function latestPassingRollbackVerification(context, profile, beforeReceipt = null) {
@@ -15436,6 +15763,19 @@ function evaluateDeliveryAction(context, options) {
     }
     let localReleaseVerification = null;
     if (action === "release.local" && completingAction) {
+      const dataMigrationSequence = profile.local_release_target?.data_migration
+        ? requireReversibleDataReleaseSequence(context, profile, priorAuthorization)
+        : null;
+      if (
+        dataMigrationSequence
+        && stableJson(dataMigrationSequence)
+          !== stableJson(priorAuthorization.action_details?.data_migration_sequence)
+      ) {
+        fail(
+          "release.local reversible data sequence changed after authorization; "
+          + "request a fresh release checkpoint.",
+        );
+      }
       const smokeTests = normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort();
       const approvedSmokeTests = [...(profile.local_release_target?.smoke_tests || [])].sort();
       const approvedSmokeCwd = governedLocalSmokeCwd(profile).smokeCwd;
@@ -15489,6 +15829,9 @@ function evaluateDeliveryAction(context, options) {
               ),
             }
           : {}),
+        ...(dataMigrationSequence
+          ? { data_migration_sequence: dataMigrationSequence }
+          : {}),
       };
     }
     let rollbackVerification = null;
@@ -15522,6 +15865,9 @@ function evaluateDeliveryAction(context, options) {
         rollback_procedure: verification.rollback_procedure,
         evidence_root: verification.evidence_root,
         evidence: verification.evidence,
+        ...(verification.data_rollback_receipt_ref
+          ? { data_rollback_receipt_ref: verification.data_rollback_receipt_ref }
+          : {}),
         verification: "evidence_verified",
         verified: true,
       };
@@ -34600,11 +34946,14 @@ function validateCompletedProviderActionReceipt(context, report, profile, receip
       completion.proof?.transition !== "rolled_back"
       || completion.proof?.target?.path !== precondition.subject.target_path
       || completion.proof?.backup?.path !== precondition.subject.backup_path
+      || completion.proof?.before_target_sha256 !== precondition.proof?.target?.sha256
       || completion.proof?.backup_sha256 !== precondition.proof?.backup?.sha256
       || completion.proof?.after_target_sha256 !== completion.proof?.backup_sha256
       || completion.proof?.after_target_sha256 !== completion.proof?.target?.sha256
+      || completion.proof?.before_target_sha256 === completion.proof?.backup_sha256
+      || completion.proof?.after_target_sha256 === completion.proof?.before_target_sha256
     )) {
-      throw new Error("filesystem provider proof does not show restoration from the exact approved backup");
+      throw new Error("filesystem provider proof does not show a real target transition to the exact approved backup");
     }
     const stripCompletion = (details) => {
       const copy = structuredClone(details || {});
@@ -35081,6 +35430,25 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
           }
           report.errors.push(...rollbackErrors.map((error) =>
             `${actionLabel} lacks its required rollback verification: ${error}`));
+        }
+        if (profile.local_release_target?.data_migration) {
+          const sequenceResult = authorization
+            ? reversibleDataReleaseSequence(context, profile, authorization)
+            : { sequence: null, errors: ["release.local authorization is missing"] };
+          if (
+            !sequenceResult.sequence
+            || stableJson(verification?.data_migration_sequence)
+              !== stableJson(sequenceResult.sequence)
+            || stableJson(authorization?.action_details?.data_migration_sequence)
+              !== stableJson(sequenceResult.sequence)
+          ) {
+            report.errors.push(
+              `${actionLabel} lacks its exact reversible data release sequence: `
+              + `${sequenceResult.errors.join("; ") || "receipt references differ from the verified sequence"}`,
+            );
+          }
+        } else if (verification?.data_migration_sequence) {
+          report.errors.push(`${actionLabel} unexpectedly records a reversible data sequence`);
         }
       }
       if (receipt.action === "rollback.verify" && receipt.outcome === "passed") {
@@ -36632,6 +37000,16 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
           && receipt.action === "release.local"
           && receipt.status === "completed"
           && receipt.outcome === "passed");
+        const releaseAuthorization = releaseCompletion
+          ? actions.find((receipt) =>
+              receipt.id === releaseCompletion.authorization_receipt_ref?.id
+              && receipt.receipt_hash === releaseCompletion.authorization_receipt_ref?.hash
+              && receipt.action === "release.local"
+              && receipt.status === "authorized")
+          : null;
+        const sequenceResult = releaseAuthorization
+          ? reversibleDataReleaseSequence(context, profile, releaseAuthorization)
+          : { sequence: null, errors: ["release.local authorization is missing"] };
         if (!latestRollback?.data_operation_verification?.rollback_verified) {
           report.errors.push(
             `Story ${storyId} lifecycle completion requires a passing verified data.rollback for its declared migration`,
@@ -36647,6 +37025,18 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
         ) {
           report.errors.push(
             `Story ${storyId} lifecycle completion requires release.local after the final verified data.migrate`,
+          );
+        }
+        if (
+          !sequenceResult.sequence
+          || stableJson(releaseCompletion?.local_release_verification?.data_migration_sequence)
+            !== stableJson(sequenceResult.sequence)
+          || stableJson(releaseAuthorization?.action_details?.data_migration_sequence)
+            !== stableJson(sequenceResult.sequence)
+        ) {
+          report.errors.push(
+            `Story ${storyId} lifecycle completion requires an exact reversible data release sequence: `
+            + `${sequenceResult.errors.join("; ") || "release receipt references differ"}`,
           );
         }
         report.checked.push(`story ${storyId} reversible data migration and rollback verification`);

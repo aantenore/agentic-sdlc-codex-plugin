@@ -124,7 +124,8 @@
               },
               "additionalProperties": false
             },
-            "rollback_verification_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" }
+            "rollback_verification_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
+            "data_migration_sequence": { "$ref": "#/$defs/data_migration_sequence" }
           },
           "additionalProperties": false
         }
@@ -365,6 +366,7 @@
         },
         "rollback_procedure": { "type": "string", "minLength": 1 },
         "evidence_root": { "type": "string", "minLength": 1 },
+        "data_rollback_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
         "evidence": {
           "type": "array",
           "minItems": 1,
@@ -373,6 +375,20 @@
         },
         "verification": { "const": "evidence_verified" },
         "verified": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "data_migration_sequence": {
+      "type": "object",
+      "required": [
+        "data_rollback_receipt_ref",
+        "final_data_migration_receipt_ref",
+        "rollback_verification_receipt_ref"
+      ],
+      "properties": {
+        "data_rollback_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
+        "final_data_migration_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
+        "rollback_verification_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" }
       },
       "additionalProperties": false
     },
