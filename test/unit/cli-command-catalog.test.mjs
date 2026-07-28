@@ -173,6 +173,7 @@ test("focused lifecycle help mirrors the runtime inputs needed to create and sta
   assert.equal(storyClaim.get("--id")?.required, true);
   assert.equal(storyClaim.get("--agent")?.required, true);
   assert.equal(storyClaim.has("--branch"), true);
+  assert.match(storyClaim.get("--authorization")?.required_when?.en, /story\.claim/u);
 
   const outputResolve = describe("output resolve");
   assert.equal(outputResolve.get("--story")?.required, true);

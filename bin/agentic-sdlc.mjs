@@ -20281,6 +20281,166 @@ function requireAutomationAuthorization(context, options, action, settings = {})
   return use.authorization;
 }
 
+function storyActionCheckpointPolicy(context, storyId, action) {
+  const story = readStory(context, storyId);
+  if (!story?.contract_id) {
+    return { required: false, story, contract: null, profile: null, profile_ref: null };
+  }
+  const contract = readContractById(context, story.contract_id, { missingOk: true });
+  if (!contract?.delivery_execution_profile_id) {
+    return { required: false, story, contract, profile: null, profile_ref: null };
+  }
+  const profile = readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id);
+  if (!(profile.story_refs || []).some((reference) => reference?.id === storyId)) {
+    fail(`Delivery autonomy profile ${profile.id} is not bound to story ${storyId}.`);
+  }
+  const profileRef = {
+    id: profile.id,
+    path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+    hash: profile.profile_hash,
+  };
+  return {
+    required: (profile.checkpoints || []).includes(action),
+    story,
+    contract,
+    profile,
+    profile_ref: profileRef,
+  };
+}
+
+function storyActionAuthorizationSettings(policy, storyId, artifactTypes = []) {
+  return {
+    subject_id: storyId,
+    artifact_types: authorizationArtifactTypes({ artifact_types: artifactTypes }),
+    proposal_ref: policy.story?.proposal_ref
+      ? { id: policy.story.proposal_ref.id, hash: policy.story.proposal_ref.hash }
+      : null,
+  };
+}
+
+function consumeStoryActionCheckpoint(context, storyId, action, options, settings = {}) {
+  const policy = storyActionCheckpointPolicy(context, storyId, action);
+  if (!policy.required) {
+    return null;
+  }
+  const artifactTypes = authorizationArtifactTypes({
+    artifact_types: settings.artifact_types || [],
+  });
+  const artifactGrantArgs = artifactTypes
+    .map((artifactType) => ` --allow-artifact-type ${artifactType}`)
+    .join("");
+  const authorizationId = getOptionString(options, "authorization");
+  if (!authorizationId) {
+    fail([
+      `${action} is a required checkpoint in exact delivery profile ${policy.profile.id}.`,
+      `Grant a human- or CI-approved authorization for action ${action} and subject ${storyId}, then retry with --authorization <id>.`,
+      `Example grant: agentic-sdlc authorization grant --id AUTH-${storyId}-${action.replaceAll(".", "-")} --scope "Approve ${action} for ${storyId}" --summary "Approve this exact checkpoint" --allow-use ${action}=${storyId}${artifactGrantArgs} --actor-type human --approval-source explicit-user.`,
+      `Effect: only ${action} for ${storyId} is recorded as approved; the delivery profile and all other protected actions remain unchanged.`,
+    ].join("\n"));
+  }
+  const authorization = readAuthorization(context, normalizeId(authorizationId));
+  const authorizationSettings = storyActionAuthorizationSettings(
+    policy,
+    storyId,
+    artifactTypes,
+  );
+  const errors = authorizationUseErrors(authorization, action, authorizationSettings);
+  if (errors.length > 0) {
+    fail(errors[0]);
+  }
+  const use = recordOrReuseAuthorizationUse(
+    context,
+    authorization,
+    action,
+    authorizationSettings,
+  );
+  return {
+    authorization_ref: authorization.id,
+    authorization_use_ref: use.path,
+    authorization_action: action,
+    checkpoint_profile_ref: policy.profile_ref,
+  };
+}
+
+function validateStoryActionCheckpoint(
+  context,
+  storyId,
+  action,
+  record,
+  report,
+  label,
+  settings = {},
+) {
+  if (!storyId) {
+    return;
+  }
+  let policy;
+  try {
+    policy = storyActionCheckpointPolicy(context, storyId, action);
+  } catch (error) {
+    report.errors.push(`${label} checkpoint policy cannot be verified: ${error.message}`);
+    return;
+  }
+  if (!policy.required) {
+    return;
+  }
+  if (
+    record.checkpoint_profile_ref?.id !== policy.profile_ref.id
+    || record.checkpoint_profile_ref?.path !== policy.profile_ref.path
+    || record.checkpoint_profile_ref?.hash !== policy.profile_ref.hash
+  ) {
+    report.errors.push(
+      `${label} has no exact checkpoint profile reference for ${action} in ${policy.profile.id}`,
+    );
+  }
+  if (
+    !record.authorization_ref
+    || !record.authorization_use_ref
+    || record.authorization_action !== action
+  ) {
+    report.errors.push(
+      `${label} has no exact ${action} authorization receipt required by delivery profile ${policy.profile.id}`,
+    );
+    return;
+  }
+  const authorization = readAuthorization(context, record.authorization_ref, { missingOk: true });
+  if (!authorization) {
+    report.errors.push(`${label} references missing authorization ${record.authorization_ref}`);
+    return;
+  }
+  const useReceipt = readAuthorizationUseReceipt(context, record.authorization_use_ref, { missingOk: true });
+  if (!useReceipt) {
+    report.errors.push(`${label} references missing authorization use receipt ${record.authorization_use_ref}`);
+    return;
+  }
+  const authorizationSettings = storyActionAuthorizationSettings(
+    policy,
+    storyId,
+    settings.artifact_types || [],
+  );
+  for (const error of validateAuthorizationUseReceipt(useReceipt, {
+    authorization_id: authorization.id,
+    action,
+    ...authorizationSettings,
+  })) {
+    report.errors.push(`${label}: ${error}`);
+  }
+  if (useReceipt.authorization_hash !== authorizationRecordHash(authorization)) {
+    report.errors.push(`${label} authorization use receipt does not match the granted content hash`);
+  }
+  if (!authorizationAllowsAction(authorization, action)) {
+    report.errors.push(`${label}: Authorization ${authorization.id} does not allow action ${action}.`);
+  }
+  if (!authorizationAllowsSubject(authorization, storyId)) {
+    report.errors.push(`${label}: Authorization ${authorization.id} does not allow subject ${storyId}.`);
+  }
+  for (const artifactType of authorizationSettings.artifact_types) {
+    if (!authorizationAllowsArtifactType(authorization, artifactType)) {
+      report.errors.push(`${label}: Authorization ${authorization.id} does not allow artifact type ${artifactType}.`);
+    }
+  }
+}
+
 function showApprovalRequests(context, options) {
   ensureInitialized(context);
   const storyId = options.story ? normalizeId(String(options.story)) : null;
@@ -25572,6 +25732,12 @@ function claimStory(context, options) {
         requireCoordinationOverrideActor(attribution, `Force-claiming active story ${id}`);
       }
     }
+    const checkpoint = consumeStoryActionCheckpoint(
+      context,
+      id,
+      "story.claim",
+      options,
+    );
     claim = {
       story_id: id,
       agent: String(agent),
@@ -25580,6 +25746,7 @@ function claimStory(context, options) {
       claimed_at: claimedAt,
       expires_at: expiresAt,
       notes: options.notes ? String(options.notes) : null,
+      ...(checkpoint || {}),
       audit: {
         claimed_by: attribution.actor,
         git: attribution.git,
@@ -25595,7 +25762,11 @@ function claimStory(context, options) {
     summary: `Story ${id} claimed by ${agent}`,
     action: "story.claim",
     actor: attribution.actor,
-    evidence: [toProjectPath(context, claimPath)],
+    evidence: [
+      toProjectPath(context, claimPath),
+      claim.authorization_use_ref,
+      claim.checkpoint_profile_ref?.path,
+    ].filter(Boolean),
     related: [id],
     git: attribution.git,
     run: attribution.run,
@@ -25751,6 +25922,13 @@ function completeStoryStep(context, options) {
     }
   }
 
+  const checkpoint = consumeStoryActionCheckpoint(
+    context,
+    storyId,
+    "story.complete-step",
+    options,
+    { artifact_types: outputTypes },
+  );
   const attribution = buildAttribution(context, options, "story.complete-step");
   const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
   const stepPath = path.join(stepDir, `${step}.json`);
@@ -25778,6 +25956,7 @@ function completeStoryStep(context, options) {
       ? normalizeStoryStep(context, options["next-step"])
       : defaultNextStoryStep(context, step),
     completed_at: now(),
+    ...(checkpoint || {}),
     audit: {
       completed_by: attribution.actor,
       git: attribution.git,
@@ -25796,7 +25975,9 @@ function completeStoryStep(context, options) {
       ...record.artifacts.map((item) => item.path),
       ...record.evidence.map((item) => item.path),
       ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
-    ])),
+      record.authorization_use_ref,
+      record.checkpoint_profile_ref?.path,
+    ].filter(Boolean))),
     related: [storyId, step, ...record.output_links.map((item) => item.id)],
     git: attribution.git,
     run: attribution.run,
@@ -26915,6 +27096,24 @@ function linkOutputArtifact(context, options) {
     link.authorization_action = "output.link";
     link.source_paths = Array.from(new Set([...link.source_paths, authorizationUse.path]));
   }
+  const checkpoint = consumeStoryActionCheckpoint(
+    context,
+    storyId,
+    "output.link",
+    options,
+    { artifact_types: [artifactType] },
+  );
+  if (checkpoint) {
+    link.authorization_ref = checkpoint.authorization_ref;
+    link.authorization_use_ref = checkpoint.authorization_use_ref;
+    link.authorization_action = checkpoint.authorization_action;
+    link.checkpoint_profile_ref = checkpoint.checkpoint_profile_ref;
+    link.source_paths = Array.from(new Set([
+      ...link.source_paths,
+      checkpoint.authorization_use_ref,
+      checkpoint.checkpoint_profile_ref.path,
+    ]));
+  }
 
   ensureDir(path.dirname(verificationFile));
   if (fs.existsSync(verificationFile)) {
@@ -26940,7 +27139,12 @@ function linkOutputArtifact(context, options) {
     summary: `Linked ${artifactType} output ${relativeArtifactPath} as ${mode}`,
     action: "output.link",
     actor: attribution.actor,
-    evidence: [relativeArtifactPath, toProjectPath(context, outputRegistryPath(context))],
+    evidence: [
+      relativeArtifactPath,
+      toProjectPath(context, outputRegistryPath(context)),
+      link.authorization_use_ref,
+      link.checkpoint_profile_ref?.path,
+    ].filter(Boolean),
     related: [storyId, artifactType, templateId, id],
     git: attribution.git,
     run: attribution.run,
@@ -32832,6 +33036,15 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
       `${label} creates a new ${link.artifact_type} for requirements already covered by ${related}; use reuse/delta or record an approved decision`,
     );
   }
+  validateStoryActionCheckpoint(
+    context,
+    link.story_id,
+    "output.link",
+    link,
+    report,
+    label,
+    { artifact_types: link.artifact_type ? [link.artifact_type] : [] },
+  );
 }
 
 function validateCapabilityDiscovery(context, report, storyId = null) {
@@ -35018,6 +35231,15 @@ function validateStoryStepRecords(context, storyId, report) {
         report.errors.push(`${label} has no ${requiredTraceType} trace with outcome ${acceptableOutcomes.join(" or ")}`);
       }
     }
+    validateStoryActionCheckpoint(
+      context,
+      storyId,
+      "story.complete-step",
+      record,
+      report,
+      label,
+      { artifact_types: Array.isArray(record.output_types) ? record.output_types : [] },
+    );
     report.checked.push(label);
   }
 }
@@ -35103,6 +35325,14 @@ function validateClaim(context, storyId, claim, report, options = {}) {
   if (!actor || !actor.id) {
     report.warnings.push(`Story ${storyId} claim has no audit.claimed_by actor`);
   }
+  validateStoryActionCheckpoint(
+    context,
+    storyId,
+    "story.claim",
+    claim,
+    report,
+    `Story ${storyId} claim`,
+  );
 }
 
 function storyBranchPatterns(context, storyId) {
@@ -36458,11 +36688,11 @@ Usage:
       --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc story create --id ST-001 --title title --requirement REQ-001
       [--acceptance text]
-  agentic-sdlc story claim --id ST-001 --agent name [--branch branch]
+  agentic-sdlc story claim --id ST-001 --agent name [--branch branch] [--authorization authorization-id]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story complete-step --id ST-001 --step functional-analysis
       [--type artifact-type] [--artifact path] [--evidence path] [--release-claim]
-      [--allow-unapproved-contract-output]
+      [--authorization authorization-id] [--allow-unapproved-contract-output]
   agentic-sdlc story prepare-handoff --id ST-001 --to-agent name
       [--artifact path] [--open-item text] [--release-claim]
   agentic-sdlc story handoff --id ST-001 --to-agent name [--artifact path]

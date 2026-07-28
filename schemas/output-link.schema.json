@@ -110,7 +110,7 @@
       "$ref": "#/$defs/hashed_ref"
     },
     "authorization_ref": {
-      "description": "Content authorization consumed for a proposal-bound output link.",
+      "description": "Content authorization consumed for a proposal-bound or delivery-checkpoint output link.",
       "type": ["string", "null"]
     },
     "authorization_use_ref": {
@@ -120,6 +120,10 @@
     "authorization_action": {
       "description": "Exact action consumed by authorization_use_ref.",
       "enum": ["output.link", null]
+    },
+    "checkpoint_profile_ref": {
+      "description": "Immutable delivery profile that required the output.link checkpoint.",
+      "$ref": "#/$defs/hashed_ref"
     },
     "legacy_verification_receipt": {
       "description": "Read-only compatibility payload for output links created before canonical verification-receipt:v1. New writers must use verification_receipt and verification_receipt_ref.",

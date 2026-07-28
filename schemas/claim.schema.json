@@ -49,10 +49,72 @@
         "null"
       ]
     },
+    "authorization_ref": {
+      "description": "Exact authorization consumed when story.claim is a configured delivery checkpoint.",
+      "type": "string"
+    },
+    "authorization_use_ref": {
+      "description": "Historical-at-use receipt proving authority for this exact story.claim action.",
+      "type": "string"
+    },
+    "authorization_action": {
+      "const": "story.claim"
+    },
+    "checkpoint_profile_ref": {
+      "description": "Immutable delivery profile that required the story.claim checkpoint.",
+      "$ref": "#/$defs/hashed_ref"
+    },
     "audit": {
       "type": "object",
       "additionalProperties": true
     }
+  },
+  "$defs": {
+    "hashed_ref": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "hash"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "dependentRequired": {
+    "authorization_ref": [
+      "authorization_use_ref",
+      "authorization_action",
+      "checkpoint_profile_ref"
+    ],
+    "authorization_use_ref": [
+      "authorization_ref",
+      "authorization_action",
+      "checkpoint_profile_ref"
+    ],
+    "authorization_action": [
+      "authorization_ref",
+      "authorization_use_ref",
+      "checkpoint_profile_ref"
+    ],
+    "checkpoint_profile_ref": [
+      "authorization_ref",
+      "authorization_use_ref",
+      "authorization_action"
+    ]
   },
   "additionalProperties": true
 }

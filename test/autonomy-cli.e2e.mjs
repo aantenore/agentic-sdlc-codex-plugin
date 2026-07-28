@@ -2939,3 +2939,163 @@ test("delivery revocation is hash-bound, single-record, and repairs a missing te
     "--id", "AUT-REVOKE-1",
   ], /revocation hash is stale/u);
 });
+
+test("configured story lifecycle checkpoints require exact historical authorization receipts", () => {
+  const project = tmpProject("story-action-checkpoints");
+  initializeAutonomyProject(project);
+
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.autonomy_policy.presets.checkpointed.checkpoints = [
+    ...new Set([
+      ...config.autonomy_policy.presets.checkpointed.checkpoints,
+      "story.claim",
+      "output.link",
+      "story.complete-step",
+    ]),
+  ].sort();
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const migration = mustRunJson(["config", "migrate", "--root", project]);
+  mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", migration.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+
+  createApprovedImplementationContract(project, {
+    storyId: "ST-CHECKPOINTS",
+    contractId: "CONTRACT-CHECKPOINTS",
+    profileId: "AUT-CHECKPOINTS",
+  });
+  const releaseRoot = path.join(project, "local-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-CHECKPOINTS",
+    "--delivery", "LOCAL-CHECKPOINTS",
+    "--kind", "local_release",
+    "--story", "ST-CHECKPOINTS",
+    "--contract", "CONTRACT-CHECKPOINTS",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore the previous local release snapshot.",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-CHECKPOINTS",
+    "--phase", "implementation",
+    ...humanApproval("Approve the exact lifecycle checkpoint profile"),
+  ]);
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-CHECKPOINTS"),
+    "--delivery-profile", "AUT-CHECKPOINTS",
+  ]);
+
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-CHECKPOINTS",
+    "--agent", "codex",
+  ], /story\.claim is a required checkpoint.*--authorization/isu);
+
+  const authorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-CHECKPOINTS",
+    "--scope", "Approve the three exact lifecycle checkpoints for ST-CHECKPOINTS.",
+    "--allow-use", "story.claim=ST-CHECKPOINTS",
+    "--allow-use", "output.link=ST-CHECKPOINTS",
+    "--allow-use", "story.complete-step=ST-CHECKPOINTS",
+    "--allow-artifact-type", "implementation-summary",
+    "--max-uses", "3",
+    ...humanApproval("Approve the exact story lifecycle checkpoints"),
+  ]).authorization;
+  assert.equal(authorization.id, "AUTH-ST-CHECKPOINTS");
+
+  mustRunJson([
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-CHECKPOINTS",
+    "--agent", "codex",
+    "--authorization", authorization.id,
+  ]);
+
+  const artifactPath = path.join(project, "src", "checkpoint-summary.md");
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(
+    artifactPath,
+    "# Checkpoint summary\n\nThe exact implementation checkpoint has reviewable evidence.\n",
+    "utf8",
+  );
+  const outputArgs = [
+    "output", "link",
+    "--root", project,
+    "--story", "ST-CHECKPOINTS",
+    "--type", "implementation-summary",
+    "--artifact", "src/checkpoint-summary.md",
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", "REQ-AUTONOMY",
+  ];
+  mustFail(outputArgs, /output\.link is a required checkpoint.*--authorization/isu);
+  mustRunJson([...outputArgs, "--authorization", authorization.id]);
+
+  const completionArgs = [
+    "story", "complete-step",
+    "--root", project,
+    "--id", "ST-CHECKPOINTS",
+    "--step", "implementation",
+    "--type", "implementation-summary",
+    "--summary", "Implemented and linked the exact reviewed artifact.",
+  ];
+  mustFail(completionArgs, /story\.complete-step is a required checkpoint.*--authorization/isu);
+  mustRunJson([...completionArgs, "--authorization", authorization.id]);
+
+  const claim = JSON.parse(fs.readFileSync(
+    path.join(project, ".sdlc", "stories", "ST-CHECKPOINTS", "claim.json"),
+    "utf8",
+  ));
+  const stepPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CHECKPOINTS",
+    "steps",
+    "implementation.json",
+  );
+  const step = JSON.parse(fs.readFileSync(stepPath, "utf8"));
+  const registry = JSON.parse(fs.readFileSync(
+    path.join(project, ".sdlc", "output-contracts", "registry.json"),
+    "utf8",
+  ));
+  const link = registry.links.find((item) => item.story_id === "ST-CHECKPOINTS");
+  for (const [record, action] of [
+    [claim, "story.claim"],
+    [link, "output.link"],
+    [step, "story.complete-step"],
+  ]) {
+    assert.equal(record.authorization_ref, authorization.id);
+    assert.equal(record.authorization_action, action);
+    assert.match(record.authorization_use_ref, /^\.sdlc\/authorization-uses\//u);
+    assert.equal(record.checkpoint_profile_ref.id, "AUT-CHECKPOINTS");
+  }
+
+  delete step.authorization_use_ref;
+  fs.writeFileSync(stepPath, `${JSON.stringify(step, null, 2)}\n`, "utf8");
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-CHECKPOINTS",
+    "--strict",
+  ], /story step ST-CHECKPOINTS\/implementation has no exact story\.complete-step authorization receipt/u);
+});

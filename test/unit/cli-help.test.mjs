@@ -188,6 +188,7 @@ test("first-project lifecycle help exposes the exact assessment, evidence, and g
   for (const flag of ["--type", "--artifact", "--evidence", "--next-step", "--release-claim", "--allow-unapproved-contract-output"]) {
     assert.equal(complete.has(flag), true, `story complete-step should expose ${flag}`);
   }
+  assert.match(complete.get("--authorization")?.required_when, /story\.complete-step/u);
 
   const taskStart = flags("task start");
   for (const flag of ["--actor", "--actor-type", "--actor-name", "--actor-email"]) {
