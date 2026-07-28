@@ -20,7 +20,12 @@
   ],
   "properties": {
     "kind": { "const": "workflow_strict_gate_receipt" },
-    "schema_version": { "const": "workflow-strict-gate-receipt:v1" },
+    "schema_version": {
+      "enum": [
+        "workflow-strict-gate-receipt:v1",
+        "workflow-strict-gate-receipt:v2"
+      ]
+    },
     "status": { "const": "passed" },
     "strict": { "const": true },
     "scope": { "const": "story" },
@@ -36,10 +41,112 @@
       "type": "string",
       "pattern": "^\\.sdlc/gates/[A-Za-z0-9._-]+-strict\\.json$"
     },
+    "workflow_scope": {
+      "$ref": "#/$defs/workflow_scope"
+    },
     "hash_algorithm": { "const": "sha256:stable-json:v1" },
     "receipt_hash": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "workflow-strict-gate-receipt:v2"
+          }
+        },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "required": ["workflow_scope"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "workflow-strict-gate-receipt:v1"
+          }
+        },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "not": {
+          "required": ["workflow_scope"]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "workflow_scope": {
+      "type": "object",
+      "required": [
+        "instance_id",
+        "instance_hash",
+        "effective_hash",
+        "story_id",
+        "current_phase",
+        "phase_order",
+        "checkpoint_ref"
+      ],
+      "properties": {
+        "instance_id": { "type": "string", "minLength": 1 },
+        "instance_hash": { "$ref": "#/$defs/sha256" },
+        "effective_hash": { "$ref": "#/$defs/sha256" },
+        "story_id": { "type": "string", "minLength": 1 },
+        "current_phase": { "type": "string", "minLength": 1 },
+        "phase_order": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "checkpoint_ref": {
+          "type": "object",
+          "required": [
+            "checkpoint_hash",
+            "sequence",
+            "last_event_hash",
+            "trace_chain_hash",
+            "updated_at"
+          ],
+          "properties": {
+            "checkpoint_hash": { "$ref": "#/$defs/sha256" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "last_event_hash": {
+              "oneOf": [
+                { "$ref": "#/$defs/sha256" },
+                { "type": "null" }
+              ]
+            },
+            "trace_chain_hash": { "$ref": "#/$defs/sha256" },
+            "updated_at": { "type": "string", "format": "date-time" }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "sequence": { "const": 0 } },
+                "required": ["sequence"]
+              },
+              "then": {
+                "properties": { "last_event_hash": { "type": "null" } }
+              },
+              "else": {
+                "properties": { "last_event_hash": { "$ref": "#/$defs/sha256" } }
+              }
+            }
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true

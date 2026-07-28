@@ -7,10 +7,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { computeStableHash } from "../lib/canonical.mjs";
+import { computeGovernedApprovalSubjectHash } from "../lib/workflow-canonical-evidence.mjs";
 import { buildEffectiveConfigLock } from "../lib/effective-config.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
+import { computeProposalHash, createAssessmentWorkflow } from "../lib/assessment-workflow.mjs";
 import { validateAgainstSchema } from "../lib/json-schema-validator.mjs";
 import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
@@ -436,6 +438,68 @@ function ensureTrustedMeteringFixture(project, {
   writeJson(configPath, config);
   pinProjectConfig(project);
   return { ...keyPair, keyId: trustedKey.key_id };
+}
+
+function prepareAssessmentApplyFixture(project, id) {
+  fs.writeFileSync(
+    path.join(project, "README.md"),
+    "# Assessment fixture\n\nLocal repository evidence for capability-readiness regression tests.\n",
+  );
+  const baselineId = `BASELINE-${id}`;
+  mustRun([
+    "baseline",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    baselineId,
+    "--source",
+    "README.md",
+    "--summary",
+    "Approved local repository boundary",
+  ]);
+  mustRun([
+    "baseline",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    baselineId,
+    ...humanApproval("Approve the local assessment baseline"),
+  ]);
+  const proposal = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "prepare",
+    "--root",
+    project,
+    "--id",
+    id,
+    "--baseline",
+    baselineId,
+    "--story",
+    `ST-${id}`,
+    "--requirement",
+    `REQ-${id}`,
+    "--scope-title",
+    "Capability readiness regression",
+    "--scope-summary",
+    "Verify fail-safe local assessment materialization.",
+    "--format",
+    "Markdown",
+    "--delivery",
+    "artifact",
+    "--artifact",
+    `.sdlc/stories/ST-${id}/outputs/technical-assessment.md`,
+    "--budget-json",
+    JSON.stringify({
+      limits: {
+        tokens: { unit: "tokens", metering: "estimated", soft: 10_000 },
+      },
+    }),
+    "--json",
+  ]).stdout).proposal;
+  return proposal;
 }
 
 function writeTrustedUsageReceipt(project, {
@@ -2524,6 +2588,199 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
   assert.deepEqual(status.links[0].verification_receipt, linked.link.verification_receipt);
 });
 
+test("assessment apply preflights an incomplete contract before any canonical mutation or authorization use", () => {
+  const project = tmpProject("assessment-contract-preflight");
+  initProject(project);
+  const id = "ASSESS-CONTRACT-PREFLIGHT";
+  const proposal = prepareAssessmentApplyFixture(project, id);
+  proposal.contract_draft.capability_policy = {
+    ...proposal.contract_draft.capability_policy,
+    tools: { required: ["node"], allowed: [], forbidden: [] },
+  };
+  proposal.contract_draft.capability_bindings = [];
+  proposal.proposal_hash = computeProposalHash(proposal);
+  writeJson(
+    path.join(project, ".sdlc", "assessments", "proposals", `${id}.json`),
+    proposal,
+  );
+  writeJson(
+    path.join(project, ".sdlc", "assessments", "workflows", `${id}.json`),
+    createAssessmentWorkflow({
+      proposal,
+      created_at: proposal.created_at,
+      metadata: { workflow_kind: "project-assessment" },
+    }),
+  );
+  const approved = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    id,
+    ...humanApproval("Approve the exact incomplete-contract regression fixture"),
+    "--json",
+  ]).stdout);
+  const beforeApply = snapshotFilesystemTree(project);
+  mustFail([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    id,
+    "--actor-type",
+    "agent",
+  ], /required tools capability 'node' has no concrete binding/);
+  assert.deepEqual(
+    snapshotFilesystemTree(project),
+    beforeApply,
+    "contract preflight must run before canonical writes, traces, locks, or authorization-use receipts",
+  );
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "authorization-uses", approved.authorization.id)),
+    false,
+  );
+});
+
+test("assessment apply rejects a reused incomplete contract before task start", () => {
+  const project = tmpProject("assessment-reused-contract");
+  initProject(project);
+  const id = "ASSESS-REUSED-CONTRACT";
+  const proposal = prepareAssessmentApplyFixture(project, id);
+  const approved = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    id,
+    ...humanApproval("Approve the exact reused-contract regression fixture"),
+    "--json",
+  ]).stdout);
+  const existingContract = structuredClone(proposal.contract_draft);
+  existingContract.proposal_ref = { id, hash: proposal.proposal_hash };
+  existingContract.capability_policy = {
+    ...existingContract.capability_policy,
+    tools: { required: ["node"], allowed: [], forbidden: [] },
+  };
+  existingContract.capability_bindings = [];
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    `${proposal.contract_draft.id}.json`,
+  );
+  writeJson(contractPath, existingContract);
+  const beforeApply = snapshotFilesystemTree(project);
+  mustFail([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    id,
+    "--actor-type",
+    "agent",
+    "--trust-custom-rtk-command",
+  ], /required tools capability 'node' has no concrete binding/);
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "stories", `ST-${id}`, "task-start.json")),
+    false,
+    "an incomplete reused contract must never reach task-start materialization",
+  );
+  const useRoot = path.join(project, ".sdlc", "authorization-uses", approved.authorization.id);
+  assert.equal(
+    fs.existsSync(useRoot),
+    false,
+    "reused-contract preflight must run before any authorization use",
+  );
+  assert.deepEqual(
+    snapshotFilesystemTree(project),
+    beforeApply,
+    "reused-contract preflight must not create requirement, story, template, trace, lock, or authorization records",
+  );
+});
+
+test("assessment apply rejects a ready reused contract whose current content is not the approved proposal draft", () => {
+  const project = tmpProject("assessment-reused-contract-content");
+  initProject(project);
+  const id = "ASSESS-REUSED-CONTENT";
+  const proposal = prepareAssessmentApplyFixture(project, id);
+  const approved = JSON.parse(mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    id,
+    ...humanApproval("Approve the exact reused-content regression fixture"),
+    "--json",
+  ]).stdout);
+  const existingContract = structuredClone(proposal.contract_draft);
+  existingContract.proposal_ref = { id, hash: proposal.proposal_hash };
+  existingContract.status = "draft";
+  existingContract.approvals = [];
+  const approvedContentHash = computeGovernedApprovalSubjectHash(existingContract);
+  existingContract.approvals.push({
+    id: `APR-${existingContract.id}-fixture`,
+    contract_id: existingContract.id,
+    status: "approved",
+    summary: "Fixture approval for exact proposal draft",
+    scope: {
+      subject_id: existingContract.id,
+      delegated_approval: true,
+      proposal_ref: { id, hash: proposal.proposal_hash },
+      artifact_types: [proposal.deliverable.artifact_type],
+      authorization_ref: approved.authorization.id,
+    },
+    evidence: [],
+    approval_source: "automation",
+    authorization_ref: approved.authorization.id,
+    authorization_use_ref: ".sdlc/authorization-uses/missing-fixture.json",
+    authorization_action: "contract.approve",
+    explicit_user_confirmation: false,
+    provisional: false,
+    approved_content_hash: approvedContentHash,
+    hash_algorithm: "sha256:stable-json:v1",
+    approved_by: { type: "agent", id: "fixture-agent" },
+    created_at: new Date().toISOString(),
+  });
+  existingContract.status = "approved";
+  existingContract.contextualization.summary =
+    `${existingContract.contextualization.summary} Unapproved current mutation.`;
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    `${proposal.contract_draft.id}.json`,
+  );
+  writeJson(contractPath, existingContract);
+  const beforeApply = snapshotFilesystemTree(project);
+  mustFail([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    id,
+    "--actor-type",
+    "agent",
+    "--trust-custom-rtk-command",
+  ], /current governed content differs from the approved proposal draft|approval is stale/);
+  assert.deepEqual(
+    snapshotFilesystemTree(project),
+    beforeApply,
+    "stale reused contract content must fail before every canonical or authorization mutation",
+  );
+});
+
 test("assessment tranche runs from precise checkpoints through budgeted release-manifest gate", async () => {
   const project = tmpProject("assessment-tranche");
   initProject(project);
@@ -4366,7 +4623,7 @@ test("onboard rejects removing both the manifest and its marker from a new proje
     project,
     "--project-name",
     "Bootstrap Downgrade",
-  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.1.*require the completed bootstrap record.*No files were changed/s);
+  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.2.*require the completed bootstrap record.*No files were changed/s);
 
   assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
   assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
@@ -5616,7 +5873,14 @@ test("strict gates use the latest test outcome while retaining failed attempts",
   appendOutcome("failed");
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /latest test trace outcome must be passed/);
   appendOutcome("passed");
-  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  const legacyStrictReceipt = JSON.parse(mustRun([
+    "gate", "check", "--root", project, "--story", "ST-001", "--strict", "--json",
+  ]).stdout);
+  assert.equal(
+    legacyStrictReceipt.schema_version,
+    "workflow-strict-gate-receipt:v1",
+  );
+  assert.equal(Object.hasOwn(legacyStrictReceipt, "workflow_scope"), false);
   appendOutcome("failed");
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /latest test trace outcome must be passed/);
 });
@@ -5777,7 +6041,7 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     target: { root_path: path.join(path.dirname(project), "approved-external-repo") },
     permissions: ["read"],
   });
-  mustRun([
+  const unboundContractArgs = [
     "contract",
     "create",
     "--root",
@@ -5797,9 +6061,75 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     "--capability-policy-json",
     policy,
     "--force",
+  ];
+  mustFail(unboundContractArgs, /required mcp capability 'repo' has no concrete binding/);
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "contracts", "contract-ST-001-implementation.json")),
+    false,
+  );
+  mustRun([...unboundContractArgs, "--allow-incomplete-contract"]);
+  const incompleteContractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-001-implementation.json",
+  );
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-001-implementation",
+    "--status",
+    "changes_requested",
+    ...humanApproval("Add the missing concrete capability binding"),
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
-  mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /requires mcp capability 'repo'/);
+  const approvalCountBeforeRejectedApproval = readJson(incompleteContractPath).approvals.length;
+  mustFail(
+    ["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")],
+    /cannot be approved because its work brief is incomplete/,
+  );
+  assert.equal(
+    readJson(incompleteContractPath).approvals.length,
+    approvalCountBeforeRejectedApproval,
+    "a rejected approval attempt must not append a partial approval record",
+  );
+  const incompleteStart = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--json",
+    "--contract-id",
+    "contract-ST-001-implementation",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+    "--actor-type",
+    "human",
+  ]).stdout);
+  assert.equal(incompleteStart.execution_allowed, false);
+  assert.ok(incompleteStart.blocking_reasons.includes("contract_incomplete"));
+  assert.ok(incompleteStart.questions.some((question) => question.includes("'repo'")));
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "stories", "ST-001", "task-start.json")),
+    false,
+  );
+  const emptyTargetBinding = JSON.stringify({
+    type: "mcp",
+    name: "repo",
+    binding_id: "repo-empty",
+    target: {},
+  });
+  mustFail(
+    [...unboundContractArgs, "--capability-binding-json", emptyTargetBinding],
+    /missing a concrete target object/,
+  );
   mustRun([
     "contract",
     "create",
@@ -5825,6 +6155,92 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
   ]);
   mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
   mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
+  const historicalApprovedContract = readJson(incompleteContractPath);
+  historicalApprovedContract.capability_bindings = [];
+  historicalApprovedContract.approvals.at(-1).approved_content_hash =
+    computeGovernedApprovalSubjectHash(historicalApprovedContract);
+  writeJson(incompleteContractPath, historicalApprovedContract);
+  const historicalStart = JSON.parse(mustRun([
+    "task",
+    "start",
+    "--root",
+    project,
+    "--json",
+    "--contract-id",
+    "contract-ST-001-implementation",
+    "--intent-json",
+    routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+    "--actor-type",
+    "human",
+  ]).stdout);
+  assert.equal(historicalStart.execution_allowed, false);
+  assert.ok(historicalStart.blocking_reasons.includes("contract_incomplete"));
+  assert.ok(historicalStart.questions.some((question) => question.includes("'repo'")));
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "stories", "ST-001", "task-start.json")),
+    false,
+  );
+
+  const skillsOnlyPolicy = JSON.stringify({
+    skills: { required: ["agentic-sdlc"], allowed: [], forbidden: [] },
+    mcp: { required: [], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: ["node"], forbidden: [] },
+    approval_required_for: [],
+  });
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-skills-only",
+    "--context-summary",
+    "Skills and optional tools do not require concrete bindings.",
+    "--qa",
+    "Which capability scope applies?|Skills required and tools optional",
+    "--capability-policy-json",
+    skillsOnlyPolicy,
+  ]);
+
+  const openQuestionPolicy = JSON.stringify({
+    skills: { required: [], allowed: [], forbidden: [] },
+    mcp: { required: [], allowed: [], forbidden: [] },
+    tools: { required: ["node"], allowed: [], forbidden: [] },
+    approval_required_for: [],
+  });
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-open-capability-question",
+    "--context-summary",
+    "Persist an explicit capability clarification draft.",
+    "--question",
+    "Which concrete tools target and permissions should node use?",
+    "--capability-policy-json",
+    openQuestionPolicy,
+    "--allow-incomplete-contract",
+  ]);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-open-capability-question",
+    ...humanApproval("Premature approval"),
+  ], /open question.*must be answered|work brief is incomplete/su);
   const overlap = JSON.stringify({
     skills: { required: [], allowed: ["agentic-sdlc"], forbidden: ["agentic-sdlc"] },
     mcp: { required: [], allowed: [], forbidden: [] },
@@ -5832,6 +6248,682 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     approval_required_for: [],
   });
   mustFail(["contract", "create", "--root", project, "--phase", "analysis", "--capability-policy-json", overlap], /cannot be both allowed and forbidden/);
+});
+
+test("contract readiness rejects malformed optional bindings and derived required targets before mutation", () => {
+  const project = tmpProject("capability-readiness-targets");
+  initProject(project);
+  const optionalBindingPolicy = JSON.stringify({
+    skills: { required: [], allowed: [], forbidden: [] },
+    mcp: { required: [], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: ["node"], forbidden: [] },
+    approval_required_for: [],
+  });
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-optional-malformed-binding",
+    "--context-summary",
+    "Optional bindings remain structurally governed.",
+    "--qa",
+    "Which optional runtime applies?|Node when available",
+    "--capability-policy-json",
+    optionalBindingPolicy,
+    "--capability-binding-json",
+    JSON.stringify({
+      type: "tool",
+      name: "node",
+      binding_id: "node-optional",
+      target: { command: "node" },
+    }),
+  ]);
+  const optionalBindingPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-optional-malformed-binding.json",
+  );
+  const optionalBindingContract = readJson(optionalBindingPath);
+  optionalBindingContract.capability_bindings[0].target = {};
+  writeJson(optionalBindingPath, optionalBindingContract);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-optional-malformed-binding",
+    ...humanApproval("Reject malformed optional binding"),
+  ], /capability binding 1 is missing a concrete target object/);
+  assert.equal(
+    readJson(optionalBindingPath).approvals.length,
+    0,
+    "a malformed optional binding must fail before approval mutation",
+  );
+
+  const requiredPolicy = JSON.stringify({
+    skills: { required: [], allowed: [], forbidden: [] },
+    mcp: { required: ["repo"], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: [], forbidden: [] },
+    approval_required_for: [],
+  });
+  const unsafeTargetContractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-unsafe-required-target.json",
+  );
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-unsafe-required-target",
+    "--context-summary",
+    "Required repository capability must use canonical evidence.",
+    "--qa",
+    "Which repository target applies?|The canonical local source tree",
+    "--capability-policy-json",
+    requiredPolicy,
+    "--capability-binding-json",
+    JSON.stringify({
+      type: "mcp",
+      name: "repo",
+      binding_id: "repo-derived-cache",
+      target: { root_path: ".sdlc/cache/repository-index" },
+      permissions: ["read"],
+    }),
+  ], /target\.root_path points to derived cache\/index path/);
+  assert.equal(
+    fs.existsSync(unsafeTargetContractPath),
+    false,
+    "an unsafe required target must fail before contract creation",
+  );
+});
+
+test("contract readiness validates malformed capability policies deterministically before approval", () => {
+  const project = tmpProject("capability-readiness-policy");
+  initProject(project);
+  const contractId = "contract-invalid-policy";
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    `${contractId}.json`,
+  );
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    contractId,
+    "--context-summary",
+    "Capability policy must remain structurally valid after creation.",
+    "--qa",
+    "Which runtime is governed?|The local Node runtime",
+    "--capability-policy-json",
+    JSON.stringify({
+      skills: { required: [], allowed: [], forbidden: [] },
+      mcp: { required: [], allowed: [], forbidden: [] },
+      tools: { required: ["node"], allowed: [], forbidden: [] },
+      approval_required_for: [],
+    }),
+    "--capability-binding-json",
+    JSON.stringify({
+      type: "tool",
+      name: "node",
+      binding_id: "node-local",
+      target: { command: "node" },
+    }),
+  ]);
+
+  const malformed = readJson(contractPath);
+  malformed.capability_policy.tools.required = { capability: "node" };
+  writeJson(contractPath, malformed);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    contractId,
+    ...humanApproval("Malformed policies are not approvable"),
+  ], /capability_policy\.tools\.required must be an array/);
+  assert.equal(readJson(contractPath).approvals.length, 0);
+
+  const contradictory = readJson(contractPath);
+  contradictory.capability_policy.tools.required = ["node"];
+  contradictory.capability_policy.tools.forbidden = ["node"];
+  writeJson(contractPath, contradictory);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    contractId,
+    ...humanApproval("Contradictory policies are not approvable"),
+  ], /capability 'node' cannot be both required and forbidden/);
+  assert.equal(
+    readJson(contractPath).approvals.length,
+    0,
+    "invalid policy readiness must fail without appending an approval",
+  );
+});
+
+test("required capability targets need concrete recursive values and reject derived paths through semantic keys", () => {
+  const project = tmpProject("capability-readiness-recursive-target");
+  initProject(project);
+  const requiredPolicy = JSON.stringify({
+    skills: { required: [], allowed: [], forbidden: [] },
+    mcp: { required: ["repo"], allowed: [], forbidden: [] },
+    tools: { required: [], allowed: [], forbidden: [] },
+    approval_required_for: [],
+  });
+  const contractArgs = (id, target) => [
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    id,
+    "--context-summary",
+    "Required repository targets must use canonical project evidence.",
+    "--qa",
+    "Which repository target applies?|The canonical local source tree",
+    "--capability-policy-json",
+    requiredPolicy,
+    "--capability-binding-json",
+    JSON.stringify({
+      type: "mcp",
+      name: "repo",
+      binding_id: `repo-${id}`,
+      target,
+      permissions: ["read"],
+    }),
+  ];
+
+  mustFail(
+    contractArgs("contract-empty-recursive-target", {
+      workspace: null,
+      command: "",
+      metadata: { values: [] },
+    }),
+    /target has no concrete recursive value/,
+  );
+  mustFail(
+    contractArgs("contract-derived-workspace-target", {
+      workspace: ".sdlc/cache/repository-index",
+    }),
+    /target\.workspace points to derived cache\/index path/,
+  );
+  mustFail(
+    contractArgs("contract-derived-nested-target", {
+      connection: {
+        workspace: {
+          root: ".sdlc/cache/repository-index",
+        },
+      },
+    }),
+    /target\.connection\.workspace\.root points to derived cache\/index path/,
+  );
+  for (const id of [
+    "contract-empty-recursive-target",
+    "contract-derived-workspace-target",
+    "contract-derived-nested-target",
+  ]) {
+    assert.equal(
+      fs.existsSync(path.join(project, ".sdlc", "contracts", `${id}.json`)),
+      false,
+      `${id} must fail before contract mutation`,
+    );
+  }
+
+  mustRun(contractArgs("contract-canonical-workspace-target", {
+    workspace: "src",
+    adapter: { command: "repo-reader" },
+  }));
+});
+
+test("phase-scoped output refs parse compatibly and bind completion to the exact phase", () => {
+  const project = tmpProject("phase-scoped-output-ref");
+  initProject(project);
+  story(project, "ST-PHASED");
+  createApprovedTemplate(project, "implementation-summary");
+  createApprovedTemplate(project, "validation-report");
+
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--context-summary",
+    "Reject output phases outside the configured lifecycle.",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new:not-configured",
+  ], /Output ref phase 'not-configured' is not configured/);
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-PHASED",
+    "--id",
+    "contract-ST-PHASED-lifecycle",
+    "--context-summary",
+    "Each durable output belongs to its exact governed lifecycle phase.",
+    "--qa",
+    "Which lifecycle applies?|The configured software lifecycle",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new:implementation",
+    "--output-ref",
+    "validation-report:validation-report-v1:new:validation",
+  ]);
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-PHASED-lifecycle.json",
+  );
+  const contract = readJson(contractPath);
+  assert.deepEqual(
+    contract.output_contract_refs.map((ref) => ref.phase),
+    ["implementation", "validation"],
+  );
+  const approvalRequests = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-PHASED",
+    "--json",
+  ]).stdout);
+  const contractApproval = approvalRequests.requests.find(
+    (request) =>
+      request.type === "contract_approval"
+      && request.subject_id === "contract-ST-PHASED-lifecycle",
+  );
+  assert.ok(contractApproval, "phase-scoped contract approval request missing");
+  assert.match(
+    contractApproval.review_items.join("\n"),
+    /implementation-summary:implementation-summary-v1:new \(phase: implementation\)/u,
+  );
+  assert.match(
+    contractApproval.review_items.join("\n"),
+    /validation-report:validation-report-v1:new \(phase: validation\)/u,
+  );
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-PHASED-lifecycle",
+    ...humanApproval("Approve phase-scoped lifecycle outputs"),
+  ]);
+
+  mustFail([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-PHASED",
+    "--step",
+    "implementation",
+    "--type",
+    "validation-report",
+    "--summary",
+    "Do not attach validation output to implementation",
+  ], /output validation-report.*is not covered by approved contract output refs/);
+
+  const implementationArtifact = writeArtifact(
+    project,
+    "docs/ST-PHASED-implementation-summary.md",
+  );
+  mustRun([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-PHASED",
+    "--type",
+    "implementation-summary",
+    "--artifact",
+    implementationArtifact,
+    "--template",
+    "implementation-summary-v1",
+    "--mode",
+    "new",
+  ]);
+  mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-PHASED",
+    "--step",
+    "implementation",
+    "--type",
+    "implementation-summary",
+    "--summary",
+    "Implementation output completed in its assigned phase",
+  ]);
+  mustFail([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-PHASED",
+    "--step",
+    "validation",
+    "--summary",
+    "Validation summary cannot omit its assigned output",
+  ], /validation step requires --type validation-report/);
+
+  const legacyProjectContract = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--id",
+    "contract-analysis-legacy-output-ref",
+    "--context-summary",
+    "Three-part output refs remain backward compatible and all-due.",
+    "--qa",
+    "Which compatibility applies?|Legacy strict all-due semantics",
+    "--output-ref",
+    "implementation-summary:implementation-summary-v1:new",
+    "--json",
+  ]).stdout).contract;
+  assert.equal(Object.hasOwn(legacyProjectContract.output_contract_refs[0], "phase"), false);
+});
+
+test("story contract readiness rejects future-only and restored invalid output phases before approval", () => {
+  const project = tmpProject("phase-output-readiness");
+  initProject(project);
+  story(project, "ST-FUTURE-OUTPUT");
+  createApprovedTemplate(project, "implementation-summary");
+  createApprovedTemplate(project, "validation-report");
+
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-FUTURE-OUTPUT-implementation.json",
+  );
+  mustFail([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-FUTURE-OUTPUT",
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    "--context-summary",
+    "Implementation must declare an output due now.",
+    "--qa",
+    "When is the validation report due?|During validation",
+    "--output-ref",
+    "validation-report:validation-report-v1:new:validation",
+  ], /phase 'implementation' has no output due in that phase|future-only/iu);
+  assert.equal(fs.existsSync(contractPath), false);
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "implementation",
+    "--story",
+    "ST-FUTURE-OUTPUT",
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    "--context-summary",
+    "Persist an explicit future-only clarification draft.",
+    "--qa",
+    "When is the validation report due?|During validation",
+    "--output-ref",
+    "validation-report:validation-report-v1:new:validation",
+    "--allow-incomplete-contract",
+  ]);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    ...humanApproval("Do not approve a future-only brief"),
+  ], /phase 'implementation' has no output due in that phase/iu);
+  assert.equal(readJson(contractPath).approvals.length, 0);
+
+  const unknownPhase = readJson(contractPath);
+  unknownPhase.output_contract_refs[0].phase = "not-configured";
+  writeJson(contractPath, unknownPhase);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    ...humanApproval("Reject an unknown phase"),
+  ], /unknown phase 'not-configured'/iu);
+
+  const duplicated = readJson(contractPath);
+  duplicated.output_contract_refs[0].phase = "implementation";
+  duplicated.output_contract_refs.push({
+    ...duplicated.output_contract_refs[0],
+    phase: "validation",
+  });
+  writeJson(contractPath, duplicated);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    ...humanApproval("Reject duplicate output identity"),
+  ], /duplicated.*one canonical link/iu);
+
+  const invalidContractPhase = readJson(contractPath);
+  invalidContractPhase.output_contract_refs = [
+    invalidContractPhase.output_contract_refs[0],
+  ];
+  invalidContractPhase.phase = "not-configured";
+  writeJson(contractPath, invalidContractPhase);
+  mustFail([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-FUTURE-OUTPUT-implementation",
+    ...humanApproval("Reject an unknown contract phase"),
+  ], /contract phase 'not-configured' is not configured/iu);
+  assert.equal(readJson(contractPath).approvals.length, 0);
+});
+
+test("output-link requests defer future refs and carry a collision-safe phase identity", () => {
+  const project = tmpProject("phase-output-link-requests");
+  initProject(project);
+  story(project, "ST-DUE-OUTPUT");
+  createApprovedTemplate(project, "discovery-note");
+  createApprovedTemplate(project, "release-note");
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "discovery",
+    "--story",
+    "ST-DUE-OUTPUT",
+    "--id",
+    "contract-ST-DUE-OUTPUT-discovery",
+    "--context-summary",
+    "Request only outputs due at the trusted workflow phase.",
+    "--qa",
+    "Which workflow applies?|The current story-bound software workflow",
+    "--output-ref",
+    "discovery-note:discovery-note-v1:new:discovery",
+    "--output-ref",
+    "release-note:release-note-v1:new:release",
+  ]);
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-DUE-OUTPUT-discovery",
+    ...humanApproval("Approve phased discovery and release outputs"),
+  ]);
+  mustRun([
+    "workflow",
+    "instance",
+    "start",
+    "--root",
+    project,
+    "--id",
+    "DELIVERY-ST-DUE-OUTPUT",
+    "--definition",
+    "software-project",
+    "--definition-version",
+    "3",
+    "--story",
+    "ST-DUE-OUTPUT",
+  ]);
+  writeArtifact(
+    project,
+    ".sdlc/stories/ST-DUE-OUTPUT/outputs/proposed-discovery-note.md",
+  );
+
+  const requests = JSON.parse(mustRun([
+    "approval",
+    "requests",
+    "--root",
+    project,
+    "--story",
+    "ST-DUE-OUTPUT",
+    "--json",
+  ]).stdout).requests.filter((request) => request.type === "output_link_required");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].artifact_type, "discovery-note");
+  assert.equal(requests[0].phase, "discovery");
+  assert.match(
+    requests[0].id,
+    /ST-DUE-OUTPUT-discovery-note-discovery-note-v1-new-discovery$/u,
+  );
+  assert.equal(
+    requests.some((request) => request.artifact_type === "release-note"),
+    false,
+  );
+});
+
+test("strict output validation does not read workflow phase scope when coverage is disabled", () => {
+  const project = tmpProject("phase-output-coverage-disabled");
+  initProject(project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.gate_policy.strict_mode.requires_output_contract_coverage = false;
+  writeJson(configPath, config);
+  pinProjectConfig(project);
+  story(project, "ST-NO-OUTPUT-COVERAGE");
+
+  mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    "analysis",
+    "--story",
+    "ST-NO-OUTPUT-COVERAGE",
+    "--id",
+    "contract-ST-NO-OUTPUT-COVERAGE-analysis",
+    "--context-summary",
+    "This project explicitly disables strict output coverage.",
+    "--qa",
+    "Is an output contract required?|No, the strict policy disables it",
+  ]);
+  mustRun([
+    "contract",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "contract-ST-NO-OUTPUT-COVERAGE-analysis",
+    ...humanApproval("Approve the no-output-coverage brief"),
+  ]);
+  const brokenInstancePath = path.join(
+    project,
+    ".sdlc",
+    "workflows",
+    "instances",
+    "BROKEN-PHASE-SCOPE",
+    "instance.json",
+  );
+  fs.mkdirSync(path.dirname(brokenInstancePath), { recursive: true });
+  fs.writeFileSync(brokenInstancePath, "{not-json\n");
+  const storyPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-NO-OUTPUT-COVERAGE",
+    "story.json",
+  );
+  const validationStory = readJson(storyPath);
+  validationStory.phase = "validation";
+  validationStory.status = "validation";
+  writeJson(storyPath, validationStory);
+
+  const gate = mustFail([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--strict",
+    "--story",
+    "ST-NO-OUTPUT-COVERAGE",
+    "--json",
+  ], /failed|blocking|requires/iu);
+  assert.doesNotMatch(
+    `${gate.stdout}\n${gate.stderr}`,
+    /cannot select its current workflow while instance BROKEN-PHASE-SCOPE/iu,
+  );
 });
 
 test("capability binding files cannot come from derived cache directories", () => {

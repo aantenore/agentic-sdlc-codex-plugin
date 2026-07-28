@@ -33,7 +33,11 @@
         "properties": {
           "guard_id": { "type": "string", "minLength": 1 },
           "allowed": { "type": "boolean" },
-          "reason": { "type": ["string", "null"] }
+          "reason": { "type": ["string", "null"] },
+          "issues": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
         },
         "additionalProperties": false
       }

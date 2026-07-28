@@ -34,6 +34,7 @@ import {
   validateWorkflowDefinition,
   validateWorkflowCheckpoint,
   validateWorkflowOverlay,
+  workflowCanonicalEvidenceSchema,
 } from "../lib/workflow-engine.mjs";
 import {
   SOFTWARE_PROJECT_PHASES,
@@ -43,9 +44,13 @@ import {
 } from "../lib/workflow-presets.mjs";
 import {
   CANONICAL_WORKFLOW_GUARD_CHECKS,
+  WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  buildLegacyWorkflowCanonicalEvidence,
   buildWorkflowCanonicalEvidence,
   buildWorkflowFinalGateReceipt,
   buildWorkflowStrictGateReceipt,
+  selectRequiredOutputRefsForPhase,
 } from "../lib/workflow-canonical-evidence.mjs";
 import {
   applyBudgetAmendment,
@@ -177,7 +182,7 @@ import {
 } from "../lib/identity-migration.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { inspectBuildIdentity } from "../lib/build-identity.mjs";
-import { computeStableHash } from "../lib/canonical.mjs";
+import { DomainValidationError, computeStableHash } from "../lib/canonical.mjs";
 import {
   buildExecutionContextPreflightReceipt,
   executionContextSnapshotRevalidationDecision,
@@ -1334,15 +1339,37 @@ function sealWorkflowFinalGateReceipt(context, report) {
 
 function sealWorkflowStrictGateReceipt(context, report) {
   const filePath = workflowStrictGateReceiptPath(context, report.story_id);
-  const receipt = buildWorkflowStrictGateReceipt(report, {
-    strict_receipt_path: toProjectPath(context, filePath),
-  });
+  const strictReceiptPath = toProjectPath(context, filePath);
+  const receipt = report.workflow_scope
+    ? buildWorkflowStrictGateReceipt(report, {
+        strict_receipt_path: strictReceiptPath,
+      })
+    : buildLegacyWorkflowStrictGateReceipt(report, strictReceiptPath);
   assertRecordSchema(
     receipt,
     "workflow-strict-gate-receipt.schema.json",
     `Intermediate workflow gate receipt ${report.story_id}`,
   );
   return receipt;
+}
+
+function buildLegacyWorkflowStrictGateReceipt(report, strictReceiptPath) {
+  const receipt = {
+    ...report,
+    kind: "workflow_strict_gate_receipt",
+    schema_version: "workflow-strict-gate-receipt:v1",
+    strict_receipt_path: strictReceiptPath,
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  const {
+    hash_algorithm: ignoredHashAlgorithm,
+    receipt_hash: ignoredReceiptHash,
+    ...subject
+  } = receipt;
+  return {
+    ...receipt,
+    receipt_hash: computeStableHash(subject),
+  };
 }
 
 function normalizeWorkflowVersion(value, optionName) {
@@ -1540,7 +1567,29 @@ function callWorkflowDomain(label, callback) {
     return callback();
   } catch (error) {
     if (error instanceof UserError) throw error;
-    fail(`${label}: ${error.message}`);
+    const issues = error instanceof DomainValidationError && Array.isArray(error.issues)
+      ? error.issues
+          .filter((issue) => issue?.allowed !== true)
+          .flatMap((issue) => {
+            if (typeof issue === "string") return [issue];
+            if (issue?.guard_id) {
+              const guardIssues = Array.isArray(issue.issues)
+                ? issue.issues.map((item) => String(item || "").trim()).filter(Boolean)
+                : [];
+              return guardIssues.length > 0
+                ? guardIssues.map((item) => `${issue.guard_id}: ${item}`)
+                : [`${issue.guard_id}: ${issue.reason || "guard denied"}`];
+            }
+            return [issue?.message || issue?.reason || null].filter(Boolean);
+          })
+          .filter(Boolean)
+      : [];
+    fail(
+      [
+        `${label}: ${error.message}`,
+        ...issues.map((issue) => `- ${issue}`),
+      ].join("\n"),
+    );
   }
 }
 
@@ -1671,11 +1720,11 @@ function describeWorkflowGuard(guard, italian) {
       ? "l’incarico di lavoro collegato deve risultare approvato e ancora invariato"
       : "the linked work contract must be approved and still unchanged",
     "required-output-linked": italian
-      ? "ogni risultato richiesto deve essere collegato e verificato"
-      : "every required output must be linked and verified",
+      ? "ogni risultato dovuto entro la fase corrente deve essere collegato e verificato"
+      : "every output due through the current phase must be linked and verified",
     "strict-gate-passed": italian
-      ? "il controllo finale rigoroso della story deve essere superato"
-      : "the story’s strict final check must have passed",
+      ? "il controllo rigoroso intermedio, legato alla fase corrente della story, deve essere superato"
+      : "the story’s phase-bound intermediate strict check must have passed",
     "delivery-terminal": italian
       ? "la consegna esatta deve essere terminata con successo"
       : "the exact delivery must have completed successfully",
@@ -4362,7 +4411,35 @@ function workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentSta
     Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id));
 }
 
-function buildCanonicalEvidenceForWorkflowInstance(context, instance) {
+function workflowScopeFromRuntime(instance, effectiveDefinition, integrity, currentPhase) {
+  const checkpoint = integrity?.checkpoint;
+  if (!checkpoint) {
+    fail(`Workflow instance ${instance?.id || "unknown"} has no durable integrity checkpoint.`);
+  }
+  return {
+    instance_id: instance.id,
+    instance_hash: instance.instance_hash,
+    effective_hash: effectiveDefinition.effective_hash,
+    story_id: instance.metadata?.governance_binding?.story_id,
+    current_phase: currentPhase,
+    phase_order: effectiveDefinition.phase_order,
+    checkpoint_ref: {
+      checkpoint_hash: checkpoint.checkpoint_hash,
+      sequence: checkpoint.sequence,
+      last_event_hash: checkpoint.last_event_hash,
+      trace_chain_hash: checkpoint.trace_chain_hash,
+      updated_at: checkpoint.updated_at,
+    },
+  };
+}
+
+function buildCanonicalEvidenceForWorkflowInstance(
+  context,
+  instance,
+  canonicalEvidenceSchema,
+  outputScope = null,
+  workflowScope = null,
+) {
   const binding = instance?.metadata?.governance_binding;
   if (!binding?.story_id || !binding?.final_gate_receipt_path) {
     fail(
@@ -4422,14 +4499,20 @@ function buildCanonicalEvidenceForWorkflowInstance(context, instance) {
         : `Intermediate workflow gate receipt ${toProjectPath(context, strictGatePath)}`,
     );
   }
+  const evidenceBuilder =
+    canonicalEvidenceSchema === WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA
+      ? buildLegacyWorkflowCanonicalEvidence
+      : buildWorkflowCanonicalEvidence;
   return buildDomainRecord(
     `Cannot build canonical workflow evidence for ${instance.id}`,
-    () => buildWorkflowCanonicalEvidence({
+    () => evidenceBuilder({
       instance,
       story,
       requirements,
       contract,
       output_registry: outputRegistry,
+      output_scope: outputScope,
+      workflow_scope: workflowScope,
       gate_report: gateReport,
       delivery_profile: deliveryProfile,
       delivery_close_receipt: deliveryCloseReceipt,
@@ -4471,9 +4554,32 @@ function transitionWorkflowInstance(context, options) {
         attribution = buildAttribution(context, options, "workflow.instance.transition");
         const currentState = workflowCurrentState(integrity.replay, instance, effectiveDefinition);
         const idempotentReplay = events.some((event) => event.idempotency_key === idempotencyKey);
-        const canonicalEvidence = !idempotentReplay
-          && workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, to)
-          ? buildCanonicalEvidenceForWorkflowInstance(context, instance)
+        const usesCanonicalEvidence = !idempotentReplay
+          && workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, to);
+        const canonicalEvidenceSchema = usesCanonicalEvidence
+          ? workflowCanonicalEvidenceSchema(effectiveDefinition)
+          : null;
+        const canonicalEvidence = usesCanonicalEvidence
+          ? buildCanonicalEvidenceForWorkflowInstance(
+              context,
+              instance,
+              canonicalEvidenceSchema,
+              canonicalEvidenceSchema === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+                ? {
+                    current_phase: currentState,
+                    phase_order: effectiveDefinition.phase_order,
+                    require_all: false,
+                  }
+                : null,
+              canonicalEvidenceSchema === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+                ? workflowScopeFromRuntime(
+                    instance,
+                    effectiveDefinition,
+                    integrity,
+                    currentState,
+                  )
+                : null,
+            )
           : null;
         result = callWorkflowDomain("Unable to move workflow instance", () => createWorkflowTransition({
           instance,
@@ -4596,8 +4702,30 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   const canonicalOutgoing = outgoingTransitions.filter((transition) =>
     (transition.guards || []).some((guard) =>
       Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id)));
+  const canonicalEvidenceSchema = canonicalOutgoing.length > 0
+    ? workflowCanonicalEvidenceSchema(effectiveDefinition)
+    : null;
   const canonicalEvidence = canonicalOutgoing.length > 0
-    ? buildCanonicalEvidenceForWorkflowInstance(context, instance)
+    ? buildCanonicalEvidenceForWorkflowInstance(
+        context,
+        instance,
+        canonicalEvidenceSchema,
+        canonicalEvidenceSchema === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+          ? {
+              current_phase: currentState,
+              phase_order: effectiveDefinition.phase_order,
+              require_all: false,
+            }
+          : null,
+        canonicalEvidenceSchema === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+          ? workflowScopeFromRuntime(
+              instance,
+              effectiveDefinition,
+              integrity,
+              currentState,
+            )
+          : null,
+      )
     : null;
   const nextTransitionChecks = outgoingTransitions.map((transition) => {
     if (!canonicalOutgoing.includes(transition)) {
@@ -7636,6 +7764,7 @@ function isTaskContractApproved(context, contract) {
     contract.status === "approved" &&
     hasFreshApprovedContractApproval(contract) &&
     contractApprovalGovernanceErrors(context, contract).length === 0 &&
+    collectContractReadinessGaps(context, contract).length === 0 &&
     collectContractDependencyFreshnessGaps(context, contract).length === 0
   );
 }
@@ -8767,6 +8896,27 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
     return finalizeConcreteRoute(decision, policy, { confirmation_key: "create_contract" }, confidenceOutcome);
   }
 
+  const readinessGaps = collectContractReadinessGaps(context, contractState.contract);
+  if (readinessGaps.length > 0) {
+    addRouteCheck(
+      decision,
+      "story_contract_ready",
+      "failed",
+      readinessGaps.map((gap) => gap.summary).join("; "),
+    );
+    return finalizeAskRoute(decision, {
+      status: "blocked",
+      blocking_reasons: ["contract_incomplete"],
+      questions: readinessGaps.map((gap) => gap.question).filter(Boolean),
+      next_commands: contractNegotiationCommands(
+        contractState.contract.phase || story.phase || "implementation",
+        storyId,
+        contractState.contract.id,
+        { force: true },
+      ),
+    });
+  }
+
   addRouteCheck(
     decision,
     "story_contract_approved",
@@ -9059,7 +9209,8 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
       (ref) =>
         ref.artifact_type === expectation.artifact_type &&
         (!expectation.template_id || ref.template_id === expectation.template_id) &&
-        (!expectation.mode || ref.mode === expectation.mode),
+        (!expectation.mode || ref.mode === expectation.mode) &&
+        (!expectation.phase || !ref.phase || ref.phase === expectation.phase),
     );
     if (!matchingRef) {
       const expected = [
@@ -20237,12 +20388,20 @@ function assertProposalBaselineStillValid(context, proposal) {
 
 async function applyAssessmentProposal(context, options) {
   ensureInitialized(context);
-  ensureAssessmentDirectories(context);
   const id = normalizeId(requireOption(options, "id"));
   const proposal = readAssessmentProposal(context, id);
+  assertProposalContractReady(context, proposal, proposal.contract_draft);
   const workflow = readAssessmentWorkflow(context, id);
   const approval = readAssessmentApproval(context, id);
   const priorApplication = readAssessmentApplication(context, id, { missingOk: true });
+  const requestedAuthorizationId =
+    getOptionString(options, "authorization") || approval.authorization_ref;
+  assertProposalExistingContractReusable(
+    context,
+    proposal,
+    requestedAuthorizationId,
+  );
+  ensureAssessmentDirectories(context);
   if (priorApplication?.status === "applied" && priorApplication.proposal_hash === proposal.proposal_hash) {
     const existingApplyObservation = readContextOptimizationObservations(context, id)
       .find((item) => item.observation.phase === "apply") || null;
@@ -20290,7 +20449,7 @@ async function applyAssessmentProposal(context, options) {
     fail(`Checkpoint-2 approval does not match proposal ${id} content.`);
   }
   assertProposalBaselineStillValid(context, proposal);
-  const authorizationId = getOptionString(options, "authorization") || approval.authorization_ref;
+  const authorizationId = requestedAuthorizationId;
   const authorization = readAuthorization(context, authorizationId);
   const storedAuthority = validateStoredAssessmentApprovalAuthority(context, proposal, approval);
   validateAssessmentAuthorizationScope(
@@ -20323,6 +20482,14 @@ async function applyAssessmentProposal(context, options) {
   const attribution = buildAttribution(context, options, "assessment.proposal.apply");
   const releaseLock = acquireFileLock(`${assessmentProposalPath(context, id)}.lock`);
   try {
+    // Re-read immediately before the first durable authorization/canonical
+    // write so an existing contract can never fail only after partial
+    // proposal materialization.
+    assertProposalExistingContractReusable(
+      context,
+      proposal,
+      authorizationId,
+    );
     const useReceipts = [];
     useReceipts.push(recordOrReuseAuthorizationUse(context, authorization, "assessment.proposal.apply", {
       ...baseSettings,
@@ -20538,13 +20705,23 @@ function proposalContractSemanticErrors(context, proposal, authorizationId, reco
   expectedDraft.status = "draft";
   expectedDraft.approvals = [];
   const expectedContentHash = hashApprovalSubject(expectedDraft);
-  const approval = latestContractApproval(record);
+  const currentContentHash = record ? hashApprovalSubject(record) : null;
+  const approval = latestContractApproval(record || {});
   const errors = [];
   if (!record || record.id !== expectedDraft.id || record.story_id !== expectedDraft.story_id || record.proposal_ref?.id !== proposal.id || record.proposal_ref?.hash !== proposal.proposal_hash) {
     errors.push(`contract ${expectedDraft.id} identity/lineage differs from the approved proposal`);
   }
+  if (record?.status !== "approved") {
+    errors.push(`contract ${expectedDraft.id} is not approved for reuse`);
+  }
+  if (currentContentHash !== expectedContentHash) {
+    errors.push(`contract ${expectedDraft.id} current governed content differs from the approved proposal draft`);
+  }
   if (!approval || approval.status !== "approved" || approval.approved_content_hash !== expectedContentHash) {
     errors.push(`contract ${expectedDraft.id} approved content differs from the proposal draft`);
+  }
+  if (record && !hasFreshApprovedContractApproval(record)) {
+    errors.push(`contract ${expectedDraft.id} approval is stale for its current governed content`);
   }
   if (
     approval?.approval_source !== "automation" ||
@@ -20838,6 +21015,55 @@ function applyProposalTemplate(context, proposal, attribution, authorization, ba
   });
 }
 
+function assertProposalContractReady(context, proposal, contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
+    fail(`Proposal ${proposal.id} has no valid contract draft to apply.`);
+  }
+  const readinessGaps = collectContractReadinessGaps(context, contract);
+  if (readinessGaps.length === 0) {
+    return;
+  }
+  fail(
+    [
+      `Proposal ${proposal.id} cannot apply incomplete contract ${contract.id || "draft"}.`,
+      ...readinessGaps.map((gap) => `- ${gap.summary}`),
+      "Prepare and approve a corrected proposal before applying it.",
+    ].join("\n"),
+  );
+}
+
+function assertProposalExistingContractReusable(
+  context,
+  proposal,
+  authorizationId,
+) {
+  const contractId = proposal.contract_draft?.id;
+  if (!contractId) {
+    fail(`Proposal ${proposal.id} contract draft has no id.`);
+  }
+  const existing = readContractById(context, contractId, { missingOk: true });
+  if (!existing) {
+    return null;
+  }
+  assertProposalContractReady(context, proposal, existing);
+  const semanticErrors = proposalContractSemanticErrors(
+    context,
+    proposal,
+    authorizationId,
+    existing,
+  );
+  if (semanticErrors.length > 0) {
+    fail(
+      [
+        `Proposal ${proposal.id} cannot reuse contract ${contractId}.`,
+        ...semanticErrors.map((error) => `- ${error}`),
+        "Restore the exact approved proposal contract or prepare a new proposal id before applying.",
+      ].join("\n"),
+    );
+  }
+  return existing;
+}
+
 function applyProposalContract(context, proposal, attribution, authorization, baseSettings, useReceipts) {
   const draft = structuredClone(proposal.contract_draft);
   const contractPath = path.join(context.sdlcRoot, "contracts", `${draft.id}.json`);
@@ -20846,8 +21072,19 @@ function applyProposalContract(context, proposal, attribution, authorization, ba
     if (existing.proposal_ref?.id !== proposal.id || existing.proposal_ref?.hash !== proposal.proposal_hash) {
       fail(`Contract ${draft.id} already exists outside proposal ${proposal.id}.`);
     }
+    assertProposalContractReady(context, proposal, existing);
+    const semanticErrors = proposalContractSemanticErrors(
+      context,
+      proposal,
+      authorization.id,
+      existing,
+    );
+    if (semanticErrors.length > 0) {
+      fail(`Contract ${draft.id} cannot be reused: ${semanticErrors.join("; ")}`);
+    }
     return { kind: "contract", id: draft.id, status: "reused", path: toProjectPath(context, contractPath), sha256: hashFile(contractPath), contract: existing };
   }
+  assertProposalContractReady(context, proposal, draft);
   const use = recordOrReuseAuthorizationUse(context, authorization, "contract.approve", {
     ...baseSettings,
     subject_id: draft.id,
@@ -25668,7 +25905,37 @@ function collectOutputLinkActionRequests(context, scope = {}) {
     if (candidates.length === 0) {
       continue;
     }
-    for (const ref of contract.output_contract_refs || []) {
+    const workflowScopeReport = { errors: [] };
+    const workflow = contract.story_id
+      ? deriveCurrentStoryWorkflowScope(
+          context,
+          contract.story_id,
+          workflowScopeReport,
+        )
+      : null;
+    if (workflowScopeReport.errors.length > 0) {
+      // A request generated from an untrusted phase position could expose a
+      // future obligation too early. The workflow integrity diagnostics remain
+      // available through status and gate checks.
+      continue;
+    }
+    const outputScope = workflow
+      && workflowCanonicalEvidenceSchema(workflow.effective_definition)
+        === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+      ? {
+          current_phase: workflow.scope.current_phase,
+          phase_order: workflow.scope.phase_order,
+          require_all: false,
+        }
+      : null;
+    const selection = selectRequiredOutputRefsForPhase(
+      contract.output_contract_refs || [],
+      outputScope,
+    );
+    if (!selection.valid) {
+      continue;
+    }
+    for (const { ref } of selection.required_refs) {
       if (!ref.artifact_type || !ref.template_id || !ref.mode || !contract.story_id) {
         continue;
       }
@@ -25680,16 +25947,30 @@ function collectOutputLinkActionRequests(context, scope = {}) {
           link.mode === ref.mode,
       );
       if (!matchingLink) {
+        const phaseLabel = Object.hasOwn(ref, "phase")
+          ? ref.phase
+          : "legacy-all-due";
+        const requestIdentity = [
+          contract.story_id,
+          ref.artifact_type,
+          ref.template_id,
+          ref.mode,
+          phaseLabel,
+        ].map((part) => String(part).replace(/[^A-Za-z0-9._-]+/gu, "-")).join("-");
         requests.push({
-          id: `link-output-${contract.story_id}-${ref.artifact_type}`,
+          id: `link-output-${requestIdentity}`,
           type: "output_link_required",
           status: "needs_canonical_output_link",
-          summary: `Link the ${ref.artifact_type} artifact for ${contract.story_id} after the user has agreed the output and it exists.`,
+          summary:
+            `Link the ${ref.artifact_type} artifact for ${contract.story_id} `
+            + `when its ${phaseLabel} obligation is due and the agreed output exists.`,
           subject_id: contract.id,
           story_id: contract.story_id,
           artifact_type: ref.artifact_type,
           template_id: ref.template_id,
           mode: ref.mode,
+          phase: Object.hasOwn(ref, "phase") ? ref.phase : null,
+          due_phase_label: phaseLabel,
           sources: [contract.__relative_path],
           ...humanApprovalFields({
             title: `Canonical ${ref.artifact_type} output for ${contract.story_id}`,
@@ -25699,6 +25980,7 @@ function collectOutputLinkActionRequests(context, scope = {}) {
               `Output type: ${ref.artifact_type}`,
               `Required template: ${ref.template_id}`,
               `Mode: ${ref.mode}`,
+              `Due phase: ${phaseLabel}`,
               `Contract: ${contract.id}`,
               `Available unlinked result files: ${formatLimitedList(candidates, 8)}`,
             ],
@@ -26238,9 +26520,15 @@ function describeContractForHuman(context, contract) {
   const registry = readOutputRegistry(context, { missingOk: true });
   const outputRefs = Array.isArray(contract.output_contract_refs)
     ? contract.output_contract_refs.map((ref) => {
+        if (!ref || typeof ref !== "object" || Array.isArray(ref)) {
+          return "invalid output ref (must be corrected before approval)";
+        }
         const template = (registry?.templates || []).find((item) => item.id === ref.template_id);
         const delivery = template ? effectiveOutputDelivery(template) : null;
-        return `${ref.artifact_type}:${ref.template_id}:${ref.mode}${delivery ? ` -> ${delivery.label} ${delivery.extension}, ${delivery.mode}` : ""}`;
+        const duePhase = Object.hasOwn(ref, "phase")
+          ? `phase: ${ref.phase}`
+          : "phase: legacy all-due";
+        return `${ref.artifact_type}:${ref.template_id}:${ref.mode} (${duePhase})${delivery ? ` -> ${delivery.label} ${delivery.extension}, ${delivery.mode}` : ""}`;
       })
     : [];
   const sourceEvidence = contextSources
@@ -26679,7 +26967,6 @@ function collectContractReadinessGaps(context, contract) {
   const openQuestions = questions.filter((question) => question.status !== "answered");
   const answeredQuestions = questions.filter((question) => question.status === "answered");
   const contextSources = Array.isArray(contextualization.context_sources) ? contextualization.context_sources : [];
-  const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
   const capabilityRefs = Array.isArray(contract.capability_recommendation_refs) ? contract.capability_recommendation_refs : [];
   const hasContextAnchor =
     Boolean(String(contextualization.summary || "").trim()) ||
@@ -26703,17 +26990,209 @@ function collectContractReadinessGaps(context, contract) {
       open_questions: explainedQuestions,
     });
   }
-  const template = context.config.phases[contract.phase] || {};
-  const phaseHasOutputs = Array.isArray(template.outputs) && template.outputs.length > 0;
-  const requiresOutputCoverage = context.config.gate_policy?.strict_mode?.requires_output_contract_coverage !== false;
-  if (contract.story_id && phaseHasOutputs && requiresOutputCoverage && refs.length === 0) {
+  gaps.push(...collectCapabilityPolicyReadinessGaps(contract));
+  const capabilityReadiness = collectCapabilityBindingReadinessGaps(context, contract);
+  gaps.push(...capabilityReadiness.gaps);
+  for (const missing of collectMissingRequiredCapabilityBindings(contract, {
+    bindings: capabilityReadiness.bindings,
+  })) {
     gaps.push({
-      code: "missing_output_ref",
-      summary: "missing agreed output format for this story",
-      question: "What output should this work produce, and should it be a new document or an update to an existing one?",
+      code: "missing_capability_binding",
+      summary: `required ${missing.type} capability '${missing.name}' has no concrete binding`,
+      question:
+        `Which concrete target and permissions should '${missing.name}' use? `
+        + `Recreate the work brief with --capability-binding-json for the required ${missing.type} capability, `
+        + `or record an explicit open contract question that names both '${missing.type}' and '${missing.name}' before approval.`,
+      capability_type: missing.type,
+      capability_name: missing.name,
     });
   }
+  gaps.push(...collectOutputContractRefReadinessGaps(context, contract));
   return gaps;
+}
+
+function collectCapabilityPolicyReadinessGaps(contract) {
+  const label = `contract ${contract.id || contract.phase || "work brief"}`;
+  const policy = contract.capability_policy ?? buildCapabilityPolicy(null);
+  const report = { errors: [] };
+  validateCapabilityPolicy(policy, `${label} capability_policy`, report);
+  return report.errors.map((error) => ({
+    code: "invalid_capability_policy",
+    summary: error,
+    question:
+      "Replace capability_policy with valid skills, mcp, and tools groups "
+      + "whose required, allowed, and forbidden lists do not conflict.",
+  }));
+}
+
+function collectOutputContractRefReadinessGaps(context, contract) {
+  const gaps = [];
+  const rawRefs = contract.output_contract_refs;
+  if (rawRefs !== undefined && !Array.isArray(rawRefs)) {
+    gaps.push({
+      code: "invalid_output_refs",
+      summary: "output_contract_refs must be an array",
+      question: "Replace output_contract_refs with the agreed list of canonical output obligations.",
+    });
+    return gaps;
+  }
+  const refs = rawRefs || [];
+  const phaseOrder = configuredPhaseOrder(context);
+  if (
+    typeof contract.phase !== "string"
+    || !phaseOrder.includes(contract.phase)
+  ) {
+    gaps.push({
+      code: "invalid_contract_phase",
+      summary:
+        `contract phase '${String(contract.phase || "unknown")}' is not configured`,
+      question: `Choose one configured contract phase: ${phaseOrder.join(", ")}.`,
+    });
+  }
+  const identities = new Set();
+  for (const [index, ref] of refs.entries()) {
+    if (!ref || typeof ref !== "object" || Array.isArray(ref)) {
+      gaps.push({
+        code: "invalid_output_ref",
+        summary: `output ref ${index + 1} must be an object`,
+        question: "Replace the malformed output ref with artifact_type, template_id, mode, and an optional configured phase.",
+      });
+      continue;
+    }
+    const artifactType = String(ref.artifact_type || "").trim();
+    const templateId = String(ref.template_id || "").trim();
+    const mode = String(ref.mode || "").trim();
+    if (!artifactType || !templateId || !mode || !OUTPUT_LINK_MODES.has(mode)) {
+      gaps.push({
+        code: "invalid_output_ref",
+        summary:
+          `output ref ${index + 1} must declare artifact_type, template_id, `
+          + "and mode reuse, delta, or new",
+        question: "Correct the malformed output reference before approving this work brief.",
+      });
+    } else {
+      const identity = [artifactType, templateId, mode].join("\u0000");
+      if (identities.has(identity)) {
+        gaps.push({
+          code: "duplicate_output_ref",
+          summary:
+            `output ref ${artifactType}:${templateId}:${mode} is duplicated; `
+            + "one canonical link cannot satisfy multiple phase obligations",
+          question: "Keep only one phase obligation for this exact artifact, template, and mode.",
+        });
+      }
+      identities.add(identity);
+    }
+    if (Object.hasOwn(ref, "phase")) {
+      const phase = typeof ref.phase === "string" ? ref.phase.trim() : "";
+      if (!phase || !phaseOrder.includes(phase)) {
+        gaps.push({
+          code: "invalid_output_ref_phase",
+          summary:
+            `output ref ${artifactType || index + 1} has unknown phase `
+            + `'${phase || String(ref.phase ?? "") || "empty"}'`,
+          question: `Use one configured phase: ${phaseOrder.join(", ")}; omit phase only for an intentional legacy all-due obligation.`,
+        });
+      }
+    }
+  }
+
+  const phaseTemplate = context.config.phases[contract.phase] || {};
+  const phaseHasOutputs =
+    Array.isArray(phaseTemplate.outputs)
+    && phaseTemplate.outputs.length > 0;
+  const requiresOutputCoverage =
+    context.config.gate_policy?.strict_mode?.requires_output_contract_coverage !== false;
+  if (contract.story_id && phaseHasOutputs && requiresOutputCoverage) {
+    if (refs.length === 0) {
+      gaps.push({
+        code: "missing_output_ref",
+        summary: "missing agreed output format for this story",
+        question: "What output should this work produce, and should it be a new document or an update to an existing one?",
+      });
+    } else if (!refs.some((ref) =>
+      ref
+      && typeof ref === "object"
+      && !Array.isArray(ref)
+      && (
+        !Object.hasOwn(ref, "phase")
+        || ref.phase === contract.phase
+      ))) {
+      gaps.push({
+        code: "missing_phase_output_ref",
+        summary:
+          `story contract phase '${contract.phase}' has no output due in that phase; `
+          + "all declared outputs are assigned elsewhere",
+        question:
+          `Which canonical output is due in '${contract.phase}'? `
+          + "Assign at least one output ref to that exact phase, or intentionally use a legacy unphased all-due ref.",
+      });
+    }
+  }
+  return gaps;
+}
+
+function collectCapabilityBindingReadinessGaps(context, contract) {
+  const label = `contract ${contract.id || contract.phase || "work brief"}`;
+  const gaps = [];
+  const rawBindings = contract.capability_bindings;
+  if (rawBindings !== undefined && !Array.isArray(rawBindings)) {
+    gaps.push({
+      code: "invalid_capability_binding",
+      summary: `${label} capability_bindings must be an array`,
+      question: "Replace capability_bindings with an array of concrete, structurally valid capability bindings.",
+    });
+    return { bindings: [], gaps };
+  }
+  const bindings = [];
+  for (const [index, binding] of (rawBindings || []).entries()) {
+    try {
+      bindings.push(normalizeCapabilityBinding(binding, index));
+    } catch (error) {
+      gaps.push({
+        code: "invalid_capability_binding",
+        summary: `${label} ${error.message}`,
+        question: `Replace capability binding ${index + 1} with a concrete type, name, non-empty target object, and valid binding id.`,
+        binding_index: index,
+      });
+    }
+  }
+  const targetReport = { errors: [] };
+  validateCapabilityBindingTargets(context, bindings, label, targetReport);
+  for (const error of targetReport.errors) {
+    gaps.push({
+      code: "invalid_capability_binding_target",
+      summary: error,
+      question: "Move this capability target to canonical project evidence or an explicit external target; derived cache and index paths cannot govern work.",
+    });
+  }
+  return { bindings, gaps };
+}
+
+function collectMissingRequiredCapabilityBindings(contract, options = {}) {
+  const policy = contract.capability_policy || buildCapabilityPolicy(null);
+  const rawBindings = Array.isArray(contract.capability_bindings) ? contract.capability_bindings : [];
+  const bindings = Array.isArray(options.bindings)
+    ? options.bindings
+    : rawBindings.map((binding, index) => normalizeCapabilityBinding(binding, index));
+  const missing = [];
+  for (const type of ["mcp", "tools"]) {
+    const required = Array.isArray(policy?.[type]?.required)
+      ? policy[type].required
+          .filter((name) => typeof name === "string")
+          .map((name) => name.trim())
+          .filter(Boolean)
+      : [];
+    for (const name of required) {
+      if (
+        !capabilityHasBinding(bindings, type, name)
+        && !contractHasCapabilityOpenQuestion(contract, type, name)
+      ) {
+        missing.push({ type, name });
+      }
+    }
+  }
+  return missing;
 }
 
 function explainOpenQuestion(context, rawQuestion) {
@@ -26852,7 +27331,7 @@ function validateContractOutputRefsForCreate(context, rawRefs, options = {}) {
   if (rawRefs.length === 0 || options["allow-unapproved-output-ref"]) {
     return;
   }
-  const refs = buildOutputContractRefs(rawRefs);
+  const refs = buildOutputContractRefs(rawRefs, configuredPhaseOrder(context));
   const registry = readOutputRegistry(context, { missingOk: true });
   const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
   const errors = [];
@@ -26944,6 +27423,23 @@ function approveContract(context, options) {
   const releaseLock = acquireFileLock(`${contractPath}.lock`);
   try {
     contract = readProjectJson(context, contractPath);
+    if (approvalStatus === "approved") {
+      const readinessGaps = collectContractReadinessGaps(context, contract);
+      if (readinessGaps.length > 0) {
+        fail(
+          [
+            `Contract ${id} cannot be approved because its work brief is incomplete.`,
+            ...readinessGaps.flatMap((gap) => [
+              `- ${gap.summary}`,
+              gap.question ? `  Exact clarification needed: ${gap.question}` : null,
+            ]),
+            "Revise or recreate the contract with the missing agreed boundaries, then approve the new exact content.",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }
+    }
     validateContractAutonomyBinding(context, contract, { requireDelivery: false });
     if (contract.human_gate === true) {
       requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
@@ -27028,7 +27524,10 @@ function buildContract(context, phase, overrides = {}) {
     owner_agent: String(overrides.owner_agent || template.owner_agent),
     inputs: mergeList(template.inputs, overrides.inputs),
     outputs: mergeList(template.outputs, overrides.outputs),
-    output_contract_refs: buildOutputContractRefs(overrides.output_refs || []),
+    output_contract_refs: buildOutputContractRefs(
+      overrides.output_refs || [],
+      configuredPhaseOrder(context),
+    ),
     validation: mergeList(template.validation, overrides.validation),
     allowed_tools: mergeList(template.allowed_tools, overrides.allowed_tools),
     kb_writes: mergeList(template.kb_writes, overrides.kb_writes),
@@ -27196,11 +27695,35 @@ function validateCapabilityPolicy(policy, label, report = null) {
       for (const key of CAPABILITY_GROUPS) {
         if (!Array.isArray(group[key])) {
           errors.push(`${label}.${type}.${key} must be an array`);
+          continue;
+        }
+        for (const [index, value] of group[key].entries()) {
+          if (typeof value !== "string" || !value.trim()) {
+            errors.push(`${label}.${type}.${key}[${index}] must be a non-empty string`);
+          }
         }
       }
-      const required = new Set(group.required || []);
-      const allowed = new Set(group.allowed || []);
-      const forbidden = new Set(group.forbidden || []);
+      const required = new Set(
+        Array.isArray(group.required)
+          ? group.required
+              .filter((value) => typeof value === "string" && value.trim())
+              .map((value) => value.trim())
+          : [],
+      );
+      const allowed = new Set(
+        Array.isArray(group.allowed)
+          ? group.allowed
+              .filter((value) => typeof value === "string" && value.trim())
+              .map((value) => value.trim())
+          : [],
+      );
+      const forbidden = new Set(
+        Array.isArray(group.forbidden)
+          ? group.forbidden
+              .filter((value) => typeof value === "string" && value.trim())
+              .map((value) => value.trim())
+          : [],
+      );
       for (const value of required) {
         if (forbidden.has(value)) {
           errors.push(`${label}.${type} capability '${value}' cannot be both required and forbidden`);
@@ -27263,8 +27786,8 @@ function normalizeCapabilityBinding(binding, index = 0) {
     fail(`capability binding ${index + 1} is missing name`);
   }
   const target = binding.target && typeof binding.target === "object" && !Array.isArray(binding.target) ? binding.target : null;
-  if (!target) {
-    fail(`capability binding ${index + 1} is missing target object`);
+  if (!target || Object.keys(target).length === 0) {
+    fail(`capability binding ${index + 1} is missing a concrete target object`);
   }
   return {
     type,
@@ -27296,17 +27819,12 @@ function validateCapabilityBindings(context, contract, label, report) {
   if (!report.strict) {
     return;
   }
-  for (const type of ["mcp", "tools"]) {
-    const required = policy[type]?.required || [];
-    for (const name of required) {
-      if (capabilityHasBinding(normalizedBindings, type, name)) {
-        continue;
-      }
-      if (contractHasCapabilityOpenQuestion(contract, type, name)) {
-        continue;
-      }
-      report.errors.push(`${label} requires ${type} capability '${name}' but has no binding or open contract question`);
-    }
+  for (const missing of collectMissingRequiredCapabilityBindings(contract, {
+    bindings: normalizedBindings,
+  })) {
+    report.errors.push(
+      `${label} requires ${missing.type} capability '${missing.name}' but has no binding or open contract question`,
+    );
   }
   validateCapabilityBindingTargets(context, normalizedBindings, label, report);
 }
@@ -27324,22 +27842,205 @@ function contractHasCapabilityOpenQuestion(contract, type, name) {
   });
 }
 
+function capabilityTargetValueIsConcrete(value, seen = new WeakSet()) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      return false;
+    }
+    return !(
+      /<[^<>]+>/u.test(text)
+      || /\$\{[^{}]+\}/u.test(text)
+      || /\{\{[^{}]+\}\}/u.test(text)
+    );
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+  const values = Array.isArray(value) ? value : Object.values(value);
+  return values.some((item) => capabilityTargetValueIsConcrete(item, seen));
+}
+
+function capabilityTargetKeyIsPathLike(key) {
+  const tokens = String(key || "")
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter(Boolean);
+  const pathTokens = new Set([
+    "path",
+    "root",
+    "workspace",
+    "directory",
+    "dir",
+    "folder",
+    "file",
+    "cwd",
+    "repository",
+    "repo",
+    "location",
+  ]);
+  return tokens.some((token) => {
+    if (pathTokens.has(token)) {
+      return true;
+    }
+    if (token.endsWith("s") && pathTokens.has(token.slice(0, -1))) {
+      return true;
+    }
+    if (token.endsWith("ies") && pathTokens.has(`${token.slice(0, -3)}y`)) {
+      return true;
+    }
+    return false;
+  });
+}
+
+function capabilityTargetValueLooksLikePath(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return false;
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(text)) {
+    return text.toLowerCase().startsWith("file://");
+  }
+  return (
+    path.isAbsolute(text)
+    || path.win32.isAbsolute(text)
+    || text.startsWith("./")
+    || text.startsWith("../")
+    || text.includes("/")
+    || text.includes("\\")
+  );
+}
+
+function visitCapabilityTargetValues(
+  value,
+  visitor,
+  settings = {},
+  seen = new WeakSet(),
+) {
+  const trail = settings.trail || [];
+  const pathLike = settings.pathLike === true;
+  if (!value || typeof value !== "object") {
+    visitor(value, { trail, pathLike });
+    return;
+  }
+  if (seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      visitCapabilityTargetValues(
+        item,
+        visitor,
+        { trail: [...trail, String(index)], pathLike },
+        seen,
+      );
+    });
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    visitCapabilityTargetValues(
+      item,
+      visitor,
+      {
+        trail: [...trail, key],
+        pathLike: pathLike || capabilityTargetKeyIsPathLike(key),
+      },
+      seen,
+    );
+  }
+}
+
+function capabilityTargetFilesystemPath(value, pathLike) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+  const uri = text.match(/^([a-z][a-z0-9+.-]*):\/\//iu);
+  if (uri && uri[1].toLowerCase() !== "file") {
+    return null;
+  }
+  if (!pathLike && !capabilityTargetValueLooksLikePath(text)) {
+    return null;
+  }
+  if (uri?.[1].toLowerCase() === "file") {
+    return decodeURIComponent(new URL(text).pathname);
+  }
+  return text;
+}
+
 function validateCapabilityBindingTargets(context, bindings, label, report) {
   for (const binding of bindings) {
     const target = binding.target || {};
-    for (const [key, value] of Object.entries(target)) {
-      if (!String(key).toLowerCase().includes("path") || typeof value !== "string") {
-        continue;
-      }
-      const candidate = path.isAbsolute(value) ? path.resolve(value) : path.resolve(context.root, value);
-      if (!isInsidePath(context.root, candidate)) {
-        continue;
-      }
-      const resolved = resolveProjectFilePath(context, value, { mustExist: false });
-      if (isDerivedArtifactPath(context, resolved)) {
-        report.errors.push(`${label} capability binding ${binding.binding_id} target.${key} points to derived cache/index path ${value}`);
-      }
+    if (!capabilityTargetValueIsConcrete(target)) {
+      report.errors.push(
+        `${label} capability binding ${binding.binding_id} target has no concrete recursive value`,
+      );
+      continue;
     }
+    visitCapabilityTargetValues(target, (value, location) => {
+      let targetPath;
+      try {
+        targetPath = capabilityTargetFilesystemPath(value, location.pathLike);
+      } catch (error) {
+        report.errors.push(
+          `${label} capability binding ${binding.binding_id} target.${location.trail.join(".")} `
+          + `has an invalid filesystem target: ${error.message}`,
+        );
+        return;
+      }
+      if (!targetPath) {
+        return;
+      }
+      if (path.win32.isAbsolute(targetPath) && !path.isAbsolute(targetPath)) {
+        // A Windows absolute target is external to this non-Windows project
+        // runtime. It is still explicit, but cannot be classified against the
+        // current project's derived directories here.
+        return;
+      }
+      let candidate;
+      try {
+        candidate = path.isAbsolute(targetPath)
+          ? path.resolve(targetPath)
+          : path.resolve(context.root, targetPath);
+      } catch (error) {
+        report.errors.push(
+          `${label} capability binding ${binding.binding_id} target.${location.trail.join(".")} `
+          + `has an invalid filesystem target: ${error.message}`,
+        );
+        return;
+      }
+      if (!isInsidePath(context.root, candidate)) {
+        return;
+      }
+      try {
+        const resolved = resolveProjectFilePath(context, targetPath, {
+          mustExist: false,
+        });
+        if (isDerivedArtifactPath(context, resolved)) {
+          report.errors.push(
+            `${label} capability binding ${binding.binding_id} `
+            + `target.${location.trail.join(".")} points to derived cache/index path ${value}`,
+          );
+        }
+      } catch (error) {
+        report.errors.push(
+          `${label} capability binding ${binding.binding_id} target.${location.trail.join(".")} `
+          + `is not a safe project path: ${error.message}`,
+        );
+      }
+    });
   }
 }
 
@@ -28134,19 +28835,41 @@ function buildQuestionRecords(questions, qaItems) {
   return records.filter((record) => record.question);
 }
 
-function buildOutputContractRefs(rawRefs) {
-  return rawRefs.map((rawRef) => {
+function buildOutputContractRefs(rawRefs, phaseOrder = []) {
+  const refs = rawRefs.map((rawRef) => {
     const parts = String(rawRef).split(":").map((part) => part.trim());
-    if (parts.length !== 3 || parts.some((part) => !part)) {
-      fail("Output refs must use --output-ref artifact-type:template-id:reuse|delta|new");
+    if (![3, 4].includes(parts.length) || parts.some((part) => !part)) {
+      fail(
+        "Output refs must use --output-ref "
+        + "artifact-type:template-id:reuse|delta|new[:phase]",
+      );
     }
-    const [artifactType, templateId, mode] = parts;
+    const [artifactType, templateId, mode, phase] = parts;
+    if (phase && !phaseOrder.includes(phase)) {
+      fail(
+        `Output ref phase '${phase}' is not configured. Valid phases: `
+        + `${phaseOrder.join(", ") || "(none)"}`,
+      );
+    }
     return {
       artifact_type: normalizeArtifactType(artifactType),
       template_id: normalizeId(templateId),
       mode: normalizeOutputMode(mode),
+      ...(phase ? { phase } : {}),
     };
   });
+  const identities = new Set();
+  for (const ref of refs) {
+    const identity = [ref.artifact_type, ref.template_id, ref.mode].join("\u0000");
+    if (identities.has(identity)) {
+      fail(
+        `Output ref ${ref.artifact_type}:${ref.template_id}:${ref.mode} is duplicated; `
+        + "one canonical output link cannot satisfy multiple phase obligations.",
+      );
+    }
+    identities.add(identity);
+  }
+  return refs;
 }
 
 function mergeList(base, additions = []) {
@@ -30263,15 +30986,29 @@ function completeStoryStep(context, options) {
   try {
     assertReleaseClaimPrecondition(context, storyId, options);
     const step = normalizeStoryStep(context, requireOption(options, "step"));
+    const stepPhase = storyStepPhase(context, step);
     const summary = getOptionString(options, "summary") || null;
     const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
-    validateApprovedStoryContractForPhaseOutput(
+    const contract = validateApprovedStoryContractForPhaseOutput(
       context,
       story,
       "story.complete-step",
-      outputTypes.map((artifactType) => ({ artifact_type: artifactType })),
+      outputTypes.map((artifactType) => ({
+        artifact_type: artifactType,
+        phase: stepPhase,
+      })),
       options,
     );
+    const phaseOutputRefs = (contract?.output_contract_refs || [])
+      .filter((ref) => ref.phase === stepPhase);
+    for (const ref of phaseOutputRefs) {
+      if (!outputTypes.includes(ref.artifact_type)) {
+        fail(
+          `Story ${storyId} ${stepPhase} step requires --type ${ref.artifact_type} `
+          + `because approved contract ${contract.id} assigns that output to this phase.`,
+        );
+      }
+    }
     const artifactEvidence = buildCanonicalEvidence(context, normalizeListOption(options.artifact), "Story step artifact");
     const extraEvidence = buildCanonicalEvidence(context, normalizeListOption(options.evidence), "Story step evidence");
     if (!summary && outputTypes.length === 0 && artifactEvidence.length === 0 && extraEvidence.length === 0) {
@@ -30279,7 +31016,18 @@ function completeStoryStep(context, options) {
     }
 
     const registry = readOutputRegistry(context, { missingOk: true });
-    const outputLinks = collectStoryOutputLinksForStep(context, registry, storyId, outputTypes);
+    const outputLinks = collectStoryOutputLinksForStep(
+      context,
+      registry,
+      storyId,
+      outputTypes,
+    ).filter((link) =>
+      !contract
+      || (contract.output_contract_refs || []).some((ref) =>
+        ref.artifact_type === link.artifact_type
+        && ref.template_id === link.template_id
+        && ref.mode === link.mode
+        && (!ref.phase || ref.phase === stepPhase)));
     if (outputTypes.length > 0) {
       const linkedTypes = new Set(outputLinks.map((link) => link.artifact_type));
       for (const artifactType of outputTypes) {
@@ -30288,6 +31036,18 @@ function completeStoryStep(context, options) {
             `Story ${storyId} has no linked ${artifactType} output. Run output resolve/link before completing this step.`,
           );
         }
+      }
+    }
+    for (const ref of phaseOutputRefs) {
+      const exactLinks = outputLinks.filter((link) =>
+        link.artifact_type === ref.artifact_type
+        && link.template_id === ref.template_id
+        && link.mode === ref.mode);
+      if (exactLinks.length !== 1) {
+        fail(
+          `Story ${storyId} ${stepPhase} step requires one exact linked output `
+          + `${ref.artifact_type}:${ref.template_id}:${ref.mode}; found ${exactLinks.length}.`,
+        );
       }
     }
     if (["validation", "release"].includes(step)) {
@@ -30321,7 +31081,7 @@ function completeStoryStep(context, options) {
       story_id: storyId,
       step,
       status: "completed",
-      phase: storyStepPhase(context, step),
+      phase: stepPhase,
       summary,
       output_types: outputTypes,
       output_links: outputLinks.map((link) => ({
@@ -36017,6 +36777,36 @@ function gateCheck(context, options) {
   report.assistant_message = renderApprovalRequestsAssistantMessage(report.approval_requests);
   attachAssistantMessagePresentation(report);
 
+  if (
+    report.errors.length === 0
+    && report.strict === true
+    && scope === "story"
+    && options["lifecycle-complete"] !== true
+  ) {
+    const workflowScopeReport = { errors: [] };
+    const workflow = deriveCurrentStoryWorkflowScope(
+      context,
+      storyId,
+      workflowScopeReport,
+    );
+    if (workflowScopeReport.errors.length > 0) {
+      report.errors.push(...workflowScopeReport.errors);
+    } else if (
+      workflow
+      && workflowCanonicalEvidenceSchema(workflow.effective_definition)
+        === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
+    ) {
+      report.workflow_scope = workflow.scope;
+      report.checked.push(
+        `workflow scope ${workflow.scope.instance_id}@${workflow.scope.current_phase}`,
+      );
+    } else if (workflow) {
+      report.checked.push(
+        `legacy workflow evidence ${workflow.scope.instance_id}@${workflow.scope.current_phase}`,
+      );
+    }
+  }
+
   if (report.errors.length > 0) {
     report.status = "failed";
     process.exitCode = 1;
@@ -39305,6 +40095,33 @@ function validateContractOutputRefs(context, report, contract, label) {
   const registry = readOutputRegistry(context, { missingOk: true });
   const templates = new Map((registry?.templates || []).map((template) => [template.id, template]));
   const links = registry?.links || [];
+  const configuredPhases = configuredPhaseOrder(context);
+  const identities = new Set();
+  for (const ref of refs) {
+    const identity = [ref?.artifact_type, ref?.template_id, ref?.mode].join("\u0000");
+    if (identities.has(identity)) {
+      report.errors.push(
+        `${label} output ref ${ref?.artifact_type || "unknown"} duplicates the same template and mode; `
+        + "one canonical link cannot satisfy multiple phase obligations",
+      );
+    }
+    identities.add(identity);
+    if (ref?.phase && !configuredPhases.includes(ref.phase)) {
+      report.errors.push(
+        `${label} output ref ${ref.artifact_type || "unknown"} has unconfigured phase '${ref.phase}'`,
+      );
+    }
+  }
+  const coverageScope = report.strict && requiresCoverage && contract.story_id
+    ? storyOutputCoverageScope(context, report, contract.story_id)
+    : null;
+  const coverageSelection = selectRequiredOutputRefsForPhase(refs, coverageScope);
+  for (const issue of coverageSelection.issues) {
+    report.errors.push(`${label} ${issue}`);
+  }
+  const requiredCoverageIndexes = new Set(
+    coverageSelection.required_refs.map((item) => item.index),
+  );
   const requiresStartReceipt = refs.some((ref) => templates.get(ref.template_id)?.preset === "technical-assessment");
   const taskStartReceiptPath = contract.story_id
     ? path.join(context.sdlcRoot, "stories", contract.story_id, "task-start.json")
@@ -39314,7 +40131,7 @@ function validateContractOutputRefs(context, report, contract, label) {
       report.errors.push(`${label} ${issue}`);
     }
   }
-  for (const ref of refs) {
+  for (const [refIndex, ref] of refs.entries()) {
     const refLabel = `${label} output ref ${ref.artifact_type || "unknown"}`;
     if (!ref.artifact_type || !ref.template_id || !ref.mode) {
       report.errors.push(`${refLabel} is missing artifact_type, template_id, or mode`);
@@ -39336,7 +40153,12 @@ function validateContractOutputRefs(context, report, contract, label) {
         report.errors.push(`${refLabel} template ${ref.template_id} structure or delivery approval is stale`);
       }
     }
-    if (report.strict && requiresCoverage && contract.story_id) {
+    if (
+      report.strict
+      && requiresCoverage
+      && contract.story_id
+      && requiredCoverageIndexes.has(refIndex)
+    ) {
       const matchingLink = links.find(
         (link) =>
           link.story_id === contract.story_id &&
@@ -39350,6 +40172,109 @@ function validateContractOutputRefs(context, report, contract, label) {
         );
       }
     }
+  }
+}
+
+function storyOutputCoverageScope(context, report, storyId) {
+  if (report.lifecycle_complete === true) {
+    return {
+      current_phase: configuredPhaseOrder(context).at(-1) || null,
+      phase_order: configuredPhaseOrder(context),
+      require_all: true,
+    };
+  }
+  const workflow = deriveCurrentStoryWorkflowScope(context, storyId, report);
+  if (!workflow) {
+    // Legacy stories have no trustworthy phase cutoff. Keep every output due.
+    return null;
+  }
+  if (
+    workflowCanonicalEvidenceSchema(workflow.effective_definition)
+    === WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA
+  ) {
+    // Definitions pinned to canonical evidence v1 preserve their original
+    // all-due output semantics when resumed.
+    return null;
+  }
+  return {
+    current_phase: workflow.scope.current_phase,
+    phase_order: workflow.scope.phase_order,
+    require_all: false,
+  };
+}
+
+function deriveCurrentStoryWorkflowScope(context, storyId, report) {
+  const initialErrorCount = report.errors.length;
+  const selected = currentStoryBoundWorkflowInstance(context, storyId, report);
+  if (!selected || report.errors.length > initialErrorCount) {
+    return null;
+  }
+  const instanceId = selected.entry;
+  try {
+    const { instance } = readCompletedWorkflowInstance(context, instanceId);
+    if (
+      instance.id !== instanceId
+      || instance.metadata?.governance_binding?.story_id !== storyId
+    ) {
+      report.errors.push(
+        `Story ${storyId} workflow scope cannot use instance ${instanceId}: `
+        + "the immutable instance id or story binding does not match",
+      );
+      return null;
+    }
+    const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+    const phaseDifference = workflowPhaseOrderDifference(context, effectiveDefinition);
+    if (!phaseDifference.exact) {
+      report.errors.push(
+        `Story ${storyId} workflow scope cannot use workflow ${instanceId}: `
+        + `configured [${phaseDifference.configured.join(", ")}], `
+        + `pinned [${phaseDifference.selected.join(", ")}]`,
+      );
+      return null;
+    }
+    const eventsPath = workflowEventsPath(context, instanceId);
+    const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+    let integrity;
+    try {
+      const events = readWorkflowEvents(context, instanceId);
+      integrity = inspectWorkflowRuntimeIntegrity(
+        context,
+        instanceId,
+        instance,
+        effectiveDefinition,
+        events,
+      );
+    } finally {
+      releaseLock();
+    }
+    if (!integrity.valid) {
+      report.errors.push(
+        `Story ${storyId} workflow scope cannot verify workflow ${instanceId}: `
+        + `${(integrity.errors || []).join("; ") || "invalid workflow history"}`,
+      );
+      return null;
+    }
+    const currentPhase = workflowCurrentState(
+      integrity.replay,
+      instance,
+      effectiveDefinition,
+    );
+    return {
+      instance,
+      effective_definition: effectiveDefinition,
+      integrity,
+      scope: workflowScopeFromRuntime(
+        instance,
+        effectiveDefinition,
+        integrity,
+        currentPhase,
+      ),
+    };
+  } catch (error) {
+    report.errors.push(
+      `Story ${storyId} workflow scope cannot read workflow ${instanceId}: ${error.message}`,
+    );
+    return null;
   }
 }
 

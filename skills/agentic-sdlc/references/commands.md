@@ -391,8 +391,10 @@ node bin/agentic-sdlc.mjs contract create \
   --qa "Who approves this phase?|Product owner" \
   --qa "Which external provider is authoritative for MVP?|Provider selected by the approved requirement" \
   --constraint "Provider-specific logic must stay behind an adapter" \
-  --output-ref functional-analysis:functional-analysis-v1:new
+  --output-ref functional-analysis:functional-analysis-v1:new:analysis
 ```
+
+`--output-ref` uses `type:template:mode[:phase]`. The optional phase must name a phase in the story-bound workflow. The legacy three-part form remains valid and all-due at every strict gate. Phase-scoped references are due cumulatively through the current workflow phase: an intermediate strict gate defers future-phase references, while `--lifecycle-complete` requires all references.
 
 Use `--allow-incomplete-contract` only to persist an explicit clarification, migration, or recovery draft. It is not approval to start phase work. Story contracts automatically update `story.contract_id`; changing a story that already references a different contract requires explicit `--replace-story-contract`.
 `output link` and `story complete-step` require an approved, fresh story contract before durable phase output is linked or completed. Use `--allow-unapproved-contract-output` only for explicit migration or recovery of pre-existing artifacts.
@@ -543,11 +545,11 @@ node bin/agentic-sdlc.mjs workflow instance start \
   --root <project> \
   --id DELIVERY-ST-001 \
   --definition software-project \
-  --definition-version 2 \
+  --definition-version 3 \
   --story ST-001
 ```
 
-The included v2 definition requires the exact stock six-phase `phase_order`.
+The included v3 definition requires the exact stock six-phase `phase_order`.
 Projects with custom phases must use an approved story-bound definition with
 the exact configured order. A workflow cannot be added retroactively; a legacy
 task without the pre-task binding is not eligible for lifecycle-complete
@@ -603,7 +605,7 @@ From a Codex plugin installation, use the `change-observatory` skill so it resol
 node bin/agentic-sdlc.mjs gate check --root <project> --story ST-001 --strict --out .sdlc/reports/ST-001-gate-report.json
 ```
 
-With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Complete the validation step first. This ordinary strict form then writes the intermediate `workflow-strict-gate-receipt:v1`; it is not final. Use that receipt to move the current story-bound workflow to its configured terminal release phase:
+With `--story`, the default scope is story-scoped, so unrelated story lanes do not block each other. Use `--scope all` for project-wide checks. Complete the validation step first. For the current `software-project` v3 definition, this ordinary strict form writes an intermediate `workflow-strict-gate-receipt:v2`. The receipt binds the exact workflow instance, effective definition, durable checkpoint, current phase, and phase order; it cannot be reused after the workflow advances. A workflow pinned to the compatibility v2 definition continues to write and accept the unscoped v1 receipt required by its pinned canonical-evidence v1 contract. A legacy story with no workflow may also retain a readable v1 receipt. Neither form is final, and every canonical guard accepts only the receipt schema pinned by its immutable effective definition. Use the current v2 receipt to move a new v3 workflow to its next guarded phase:
 
 ```bash
 node bin/agentic-sdlc.mjs workflow instance transition \

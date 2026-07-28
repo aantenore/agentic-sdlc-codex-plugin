@@ -132,7 +132,8 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "generic-governed-process",
   ]);
   const softwareProject = listed.included.find((entry) => entry.id === "software-project");
-  assert.equal(softwareProject.version, "2");
+  assert.equal(softwareProject.version, "3");
+  assert.deepEqual(softwareProject.available_versions, ["1", "2", "3"]);
   assert.match(softwareProject.description, /governed workflow preset/u);
   assert.deepEqual(softwareProject.journey, [
     "discovery", "analysis", "design", "implementation", "validation", "release",
@@ -324,6 +325,14 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     transitioned.event.canonical_evidence.checks.requirement_approved.satisfied,
     true,
   );
+  assert.equal(
+    transitioned.event.canonical_evidence.schema_version,
+    "workflow-canonical-evidence:v1",
+  );
+  assert.equal(
+    Object.hasOwn(transitioned.event.canonical_evidence, "workflow_scope"),
+    false,
+  );
 
   const retried = mustRunJson([
     "workflow", "instance", "transition",
@@ -379,6 +388,7 @@ test("preset definition approval and an event-sourced run are stable and retry-s
   ], project);
   assert.notEqual(callerBypass.status, 0);
   assert.match(callerBypass.stderr, /canonical project records|guards denied/u);
+  assert.match(callerBypass.stderr, /contract-approved:/u);
   const afterBypass = mustRunJson([
     "workflow", "instance", "status", "--root", project, "--id", "delivery-42",
   ], project);
@@ -478,7 +488,7 @@ test("a story-bound workflow must pin the exact configured custom phase order", 
     "workflow", "definition", "show",
     "--root", project,
     "--id", "software-project",
-    "--definition-version", "2",
+    "--definition-version", "3",
   ], project).definition;
   const transitions = base.transitions.flatMap((transition) => {
     if (transition.from !== "design" || transition.to !== "implementation") return [transition];
@@ -517,7 +527,10 @@ test("a story-bound workflow must pin the exact configured custom phase order", 
     transitions,
     phase_order: config.phase_order,
     normal_checkpoints: base.normal_checkpoints,
-    metadata: { governance_binding: "story" },
+    metadata: {
+      governance_binding: "story",
+      canonical_evidence_schema: "workflow-canonical-evidence:v2",
+    },
   };
   mustRunJson([
     "workflow", "definition", "propose",
@@ -560,7 +573,7 @@ test("a story-bound workflow must pin the exact configured custom phase order", 
     "--root", project,
     "--id", "WF-MISSING-CUSTOM-PHASE",
     "--definition", "software-project",
-    "--definition-version", "2",
+    "--definition-version", "3",
     "--story", "ST-CUSTOM-PHASE",
     "--json",
   ], project);

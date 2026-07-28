@@ -10,6 +10,7 @@ import {
   buildWorkflowDefinition,
   buildWorkflowOverlay,
   computeWorkflowDefinitionHash,
+  computeWorkflowEventHash,
   createWorkflowInstance,
   createWorkflowTransition,
   evaluateWorkflowGuards,
@@ -20,6 +21,7 @@ import {
 } from "../../lib/workflow-engine.mjs";
 import {
   WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
   computeWorkflowCanonicalEvidenceHash,
 } from "../../lib/workflow-canonical-evidence.mjs";
 import { STABLE_JSON_HASH_ALGORITHM } from "../../lib/canonical.mjs";
@@ -233,16 +235,35 @@ test("canonical guards ignore caller facts and accept only bound integrity-seale
     ...definitionInput(),
     states: [
       { id: "intake", label: "Intake", terminal: false, metadata: {} },
+      { id: "review", label: "Review", terminal: false, metadata: {} },
       { id: "completed", label: "Completed", terminal: true, metadata: {} },
     ],
-    transitions: [{
-      id: "complete",
-      from: "intake",
-      to: "completed",
-      label: "Complete",
-      guards: [{ id: "requirement-approved", parameters: {} }],
-      metadata: {},
-    }],
+    transitions: [
+      {
+        id: "submit",
+        from: "intake",
+        to: "review",
+        label: "Submit",
+        guards: [],
+        metadata: {},
+      },
+      {
+        id: "complete",
+        from: "review",
+        to: "completed",
+        label: "Complete",
+        guards: [
+          { id: "requirement-approved", parameters: {} },
+          { id: "required-output-linked", parameters: {} },
+        ],
+        metadata: {},
+      },
+    ],
+    phase_order: ["intake", "review", "completed"],
+    metadata: {
+      owner: "travel",
+      canonical_evidence_schema: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+    },
   });
   const definition = approveWorkflowDefinition(proposed, approvalOptions());
   const effective = applyWorkflowOverlay(definition);
@@ -257,8 +278,27 @@ test("canonical guards ignore caller facts and accept only bound integrity-seale
     instance,
     effective_definition: effective,
     events: [],
-    to: "completed",
+    to: "review",
     timestamp: "2026-07-18T08:05:00.000Z",
+    actor: ACTOR,
+    idempotency_key: "canonical-submit",
+    context: {},
+  };
+  const first = createWorkflowTransition(transition).event;
+  const historicalGuardless = structuredClone(first);
+  delete historicalGuardless.guard_results;
+  historicalGuardless.event_hash = computeWorkflowEventHash(historicalGuardless);
+  const guardlessReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [historicalGuardless],
+  });
+  assert.equal(guardlessReplay.valid, true, guardlessReplay.errors.join("\n"));
+  const guardedTransition = {
+    ...transition,
+    events: [first],
+    to: "completed",
+    timestamp: "2026-07-18T08:06:00.000Z",
     actor: ACTOR,
     idempotency_key: "canonical-complete",
     context: {
@@ -269,23 +309,58 @@ test("canonical guards ignore caller facts and accept only bound integrity-seale
     },
   };
 
-  assert.throws(() => createWorkflowTransition(transition), /guards denied/u);
+  assert.throws(() => createWorkflowTransition(guardedTransition), /guards denied/u);
 
-  const evidence = canonicalEvidence("canonical-run", "ST-42");
-  const completed = createWorkflowTransition(transition, { canonical_evidence: evidence });
+  const evidence = canonicalEvidence(instance, effective, {
+    current_phase: "review",
+    sequence: 1,
+    last_event_hash: first.event_hash,
+    updated_at: first.timestamp,
+  });
+  const completed = createWorkflowTransition(
+    guardedTransition,
+    { canonical_evidence: evidence },
+  );
   assert.equal(completed.state, "completed");
   assert.equal(completed.event.canonical_evidence_hash, evidence.evidence_hash);
   assert.equal(completed.event.guard_results[0].allowed, true);
 
-  const substituted = canonicalEvidence("another-run", "ST-42");
+  const incompleteOutputs = structuredClone(evidence);
+  incompleteOutputs.checks.required_output_linked = {
+    satisfied: false,
+    issues: [
+      "required output implementation-summary is not linked",
+      "required output validation-report is not linked",
+    ],
+  };
+  incompleteOutputs.evidence_hash =
+    computeWorkflowCanonicalEvidenceHash(incompleteOutputs);
+  let outputDenial = null;
+  try {
+    createWorkflowTransition(
+      { ...guardedTransition, idempotency_key: "canonical-missing-outputs" },
+      { canonical_evidence: incompleteOutputs },
+    );
+  } catch (error) {
+    outputDenial = error;
+  }
+  assert.ok(outputDenial);
+  const outputGuardIssue = outputDenial.issues.find((issue) =>
+    issue?.guard_id === "required-output-linked");
+  assert.deepEqual(outputGuardIssue.issues, [
+    "required output implementation-summary is not linked",
+    "required output validation-report is not linked",
+  ]);
+
+  const substituted = canonicalEvidence({ ...instance, id: "another-run" }, effective);
   assert.throws(
-    () => createWorkflowTransition(transition, { canonical_evidence: substituted }),
+    () => createWorkflowTransition(guardedTransition, { canonical_evidence: substituted }),
     /different workflow instance|binding validation/u,
   );
   const tampered = structuredClone(evidence);
   tampered.checks.requirement_approved.satisfied = false;
   assert.throws(
-    () => createWorkflowTransition(transition, { canonical_evidence: tampered }),
+    () => createWorkflowTransition(guardedTransition, { canonical_evidence: tampered }),
     /integrity or binding validation/u,
   );
   assert.throws(
@@ -307,6 +382,266 @@ test("canonical guards ignore caller facts and accept only bound integrity-seale
       created_at: "2026-07-18T08:06:00.000Z",
     }, { definition }),
     /unsupported fields/u,
+  );
+
+  const priorPhase = canonicalEvidence(instance, effective, {
+    current_phase: "intake",
+    sequence: 1,
+    last_event_hash: first.event_hash,
+    updated_at: first.timestamp,
+  });
+  assert.throws(
+    () => createWorkflowTransition(
+      guardedTransition,
+      { canonical_evidence: priorPhase },
+    ),
+    /integrity or binding validation/u,
+  );
+  const reordered = canonicalEvidence(instance, effective, {
+    current_phase: "review",
+    phase_order: ["review", "intake", "completed"],
+    sequence: 1,
+    last_event_hash: first.event_hash,
+    updated_at: first.timestamp,
+  });
+  assert.throws(
+    () => createWorkflowTransition(
+      guardedTransition,
+      { canonical_evidence: reordered },
+    ),
+    /integrity or binding validation/u,
+  );
+
+  for (const mutateScope of [
+    (snapshot) => {
+      snapshot.output_scope.current_phase = "intake";
+      snapshot.workflow_scope.current_phase = "intake";
+    },
+    (snapshot) => {
+      const order = ["review", "intake", "completed"];
+      snapshot.output_scope.phase_order = order;
+      snapshot.workflow_scope.phase_order = order;
+    },
+  ]) {
+    const spoofedEvent = structuredClone(completed.event);
+    mutateScope(spoofedEvent.canonical_evidence);
+    spoofedEvent.canonical_evidence.evidence_hash =
+      computeWorkflowCanonicalEvidenceHash(spoofedEvent.canonical_evidence);
+    spoofedEvent.canonical_evidence_hash =
+      spoofedEvent.canonical_evidence.evidence_hash;
+    spoofedEvent.event_hash = computeWorkflowEventHash(spoofedEvent);
+    const replay = replayWorkflowEvents({
+      instance,
+      effective_definition: effective,
+      events: [first, spoofedEvent],
+    });
+    assert.equal(replay.valid, false);
+    assert.match(
+      replay.errors.join("\n"),
+      /current_phase|phase_order|replay state|effective workflow/u,
+    );
+  }
+
+  const strippedGuards = structuredClone(completed.event);
+  strippedGuards.guard_results = [];
+  delete strippedGuards.canonical_evidence;
+  delete strippedGuards.canonical_evidence_hash;
+  strippedGuards.event_hash = computeWorkflowEventHash(strippedGuards);
+  const strippedReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, strippedGuards],
+  });
+  assert.equal(strippedReplay.valid, false);
+  assert.match(
+    strippedReplay.errors.join("\n"),
+    /guard_results must cover exactly|canonical evidence is invalid/u,
+  );
+
+  for (const mutateResults of [
+    (results) => results.reverse(),
+    (results) => [results[0], results[0]],
+  ]) {
+    const forged = structuredClone(completed.event);
+    forged.guard_results = mutateResults(forged.guard_results);
+    forged.event_hash = computeWorkflowEventHash(forged);
+    const forgedReplay = replayWorkflowEvents({
+      instance,
+      effective_definition: effective,
+      events: [first, forged],
+    });
+    assert.equal(forgedReplay.valid, false);
+    assert.match(
+      forgedReplay.errors.join("\n"),
+      /must cover pinned guard|duplicates guard/u,
+    );
+  }
+
+  const strippedEvidence = structuredClone(completed.event);
+  delete strippedEvidence.canonical_evidence;
+  delete strippedEvidence.canonical_evidence_hash;
+  strippedEvidence.event_hash = computeWorkflowEventHash(strippedEvidence);
+  const strippedEvidenceReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, strippedEvidence],
+  });
+  assert.equal(strippedEvidenceReplay.valid, false);
+  assert.match(strippedEvidenceReplay.errors.join("\n"), /canonical evidence is invalid/u);
+
+  const historicalV1 = structuredClone(completed.event);
+  historicalV1.canonical_evidence.schema_version =
+    WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA;
+  delete historicalV1.canonical_evidence.output_scope;
+  delete historicalV1.canonical_evidence.workflow_scope;
+  historicalV1.canonical_evidence.evidence_hash =
+    computeWorkflowCanonicalEvidenceHash(historicalV1.canonical_evidence);
+  historicalV1.canonical_evidence_hash =
+    historicalV1.canonical_evidence.evidence_hash;
+  historicalV1.event_hash = computeWorkflowEventHash(historicalV1);
+  const historicalReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, historicalV1],
+  });
+  assert.equal(historicalReplay.valid, false);
+  assert.match(
+    historicalReplay.errors.join("\n"),
+    /schema must be 'workflow-canonical-evidence:v2'/u,
+  );
+
+  const ambiguousV1 = structuredClone(completed.event);
+  ambiguousV1.canonical_evidence.schema_version =
+    WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA;
+  ambiguousV1.canonical_evidence.evidence_hash =
+    computeWorkflowCanonicalEvidenceHash(ambiguousV1.canonical_evidence);
+  ambiguousV1.canonical_evidence_hash =
+    ambiguousV1.canonical_evidence.evidence_hash;
+  ambiguousV1.event_hash = computeWorkflowEventHash(ambiguousV1);
+  const ambiguousReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, ambiguousV1],
+  });
+  assert.equal(ambiguousReplay.valid, false);
+  assert.match(
+    ambiguousReplay.errors.join("\n"),
+    /schema must be 'workflow-canonical-evidence:v2'/u,
+  );
+  assert.throws(
+    () => createWorkflowTransition(
+      { ...guardedTransition, idempotency_key: "canonical-v1-new-transition" },
+      { canonical_evidence: historicalV1.canonical_evidence },
+    ),
+    /schema must be 'workflow-canonical-evidence:v2'|integrity or binding validation/u,
+  );
+
+  const futureEvidence = canonicalEvidence(instance, effective, {
+    current_phase: "review",
+    sequence: 1,
+    last_event_hash: first.event_hash,
+    updated_at: first.timestamp,
+    observed_at: "2026-07-18T08:07:00.000Z",
+  });
+  assert.throws(
+    () => createWorkflowTransition(
+      { ...guardedTransition, idempotency_key: "canonical-future-observation" },
+      { canonical_evidence: futureEvidence },
+    ),
+    /postdates its transition event|integrity or binding validation/u,
+  );
+  const futureEvent = structuredClone(completed.event);
+  futureEvent.canonical_evidence.observed_at = "2026-07-18T08:07:00.000Z";
+  futureEvent.canonical_evidence.evidence_hash =
+    computeWorkflowCanonicalEvidenceHash(futureEvent.canonical_evidence);
+  futureEvent.canonical_evidence_hash =
+    futureEvent.canonical_evidence.evidence_hash;
+  futureEvent.event_hash = computeWorkflowEventHash(futureEvent);
+  const futureReplay = replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, futureEvent],
+  });
+  assert.equal(futureReplay.valid, false);
+  assert.match(
+    futureReplay.errors.join("\n"),
+    /observation postdates its transition event/u,
+  );
+});
+
+test("a legacy v2 definition resumes with only its pinned v1 evidence contract", () => {
+  const input = definitionInput({
+    phase_order: ["intake", "review", "completed"],
+    metadata: {
+      owner: "travel",
+      canonical_evidence_schema: WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+    },
+  });
+  input.transitions[1].guards = [
+    { id: "requirement-approved", parameters: {} },
+  ];
+  const definition = approveWorkflowDefinition(
+    buildWorkflowDefinition(input),
+    approvalOptions(),
+  );
+  const effective = applyWorkflowOverlay(definition);
+  const instance = createWorkflowInstance({
+    id: "legacy-canonical-run",
+    effective_definition: effective,
+    created_at: "2026-07-18T08:04:00.000Z",
+    actor: ACTOR,
+    metadata: { governance_binding: { story_id: "ST-LEGACY-42" } },
+  });
+  const first = createWorkflowTransition({
+    instance,
+    effective_definition: effective,
+    events: [],
+    to: "review",
+    timestamp: "2026-07-18T08:05:00.000Z",
+    actor: ACTOR,
+    idempotency_key: "legacy-submit",
+    context: { ticket: "TRAVEL-42" },
+  }).event;
+  const transition = {
+    instance,
+    effective_definition: effective,
+    events: [first],
+    to: "completed",
+    timestamp: "2026-07-18T08:06:00.000Z",
+    actor: ACTOR,
+    idempotency_key: "legacy-complete",
+    context: {},
+  };
+  const evidence = legacyCanonicalEvidence(instance, {
+    observed_at: "2026-07-18T08:05:30.000Z",
+  });
+  const completed = createWorkflowTransition(
+    transition,
+    { canonical_evidence: evidence },
+  );
+
+  assert.equal(
+    completed.event.canonical_evidence.schema_version,
+    WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  );
+  assert.equal(replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [first, completed.event],
+  }).valid, true);
+
+  const upgraded = canonicalEvidence(instance, effective, {
+    current_phase: "review",
+    sequence: 1,
+    last_event_hash: first.event_hash,
+    updated_at: first.timestamp,
+  });
+  assert.throws(
+    () => createWorkflowTransition(
+      { ...transition, idempotency_key: "legacy-v2-evidence" },
+      { canonical_evidence: upgraded },
+    ),
+    /schema must be 'workflow-canonical-evidence:v1'|integrity or binding validation/u,
   );
 });
 
@@ -502,13 +837,60 @@ test("status and explanation expose exact pinned configuration without executabl
   assert.deepEqual(explanation.guard_ids, ["context-equals", "context-present"]);
 });
 
-function canonicalEvidence(instanceId, storyId) {
+function canonicalEvidence(instance, effective, overrides = {}) {
+  const currentPhase = overrides.current_phase ?? instance.initial_state;
+  const phaseOrder = overrides.phase_order ?? effective.phase_order;
+  const storyId = instance.metadata.governance_binding.story_id;
   const evidence = {
     kind: "workflow_canonical_evidence",
     schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
-    instance_id: instanceId,
+    instance_id: instance.id,
     story_id: storyId,
-    observed_at: "2026-07-18T08:04:30.000Z",
+    observed_at: overrides.observed_at
+      ?? overrides.updated_at
+      ?? instance.created_at,
+    output_scope: {
+      current_phase: currentPhase,
+      phase_order: phaseOrder,
+      require_all: overrides.require_all ?? false,
+    },
+    workflow_scope: {
+      instance_id: instance.id,
+      instance_hash: instance.instance_hash,
+      effective_hash: effective.effective_hash,
+      story_id: storyId,
+      current_phase: currentPhase,
+      phase_order: phaseOrder,
+      checkpoint_ref: {
+        checkpoint_hash: overrides.checkpoint_hash ?? null,
+        sequence: overrides.sequence ?? 0,
+        last_event_hash: overrides.last_event_hash ?? null,
+        trace_chain_hash: overrides.trace_chain_hash ?? null,
+        updated_at: overrides.updated_at ?? instance.created_at,
+      },
+    },
+    checks: Object.fromEntries([
+      "requirement_approved",
+      "contract_approved",
+      "required_output_linked",
+      "strict_gate_passed",
+      "delivery_terminal",
+    ].map((id) => [id, { satisfied: true, issues: [] }])),
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  return {
+    ...evidence,
+    evidence_hash: computeWorkflowCanonicalEvidenceHash(evidence),
+  };
+}
+
+function legacyCanonicalEvidence(instance, overrides = {}) {
+  const evidence = {
+    kind: "workflow_canonical_evidence",
+    schema_version: WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+    instance_id: instance.id,
+    story_id: instance.metadata.governance_binding.story_id,
+    observed_at: overrides.observed_at ?? instance.created_at,
     checks: Object.fromEntries([
       "requirement_approved",
       "contract_approved",

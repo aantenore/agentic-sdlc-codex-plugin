@@ -153,7 +153,7 @@ function customGovernedWorkflowDefinition(customPhase) {
     normal_checkpoints: [],
     metadata: {
       governance_binding: "story",
-      canonical_evidence_schema: "workflow-canonical-evidence:v1",
+      canonical_evidence_schema: "workflow-canonical-evidence:v2",
     },
   };
 }
@@ -212,6 +212,8 @@ function createGovernedDeliveryStory(project, {
   suffix,
   allowedWritePaths,
   outputType = "implementation-summary",
+  outputPhase = null,
+  additionalOutputRefs = [],
   configureProject = null,
   deliveryKind = "pull_request",
   storyActionUses = 1,
@@ -241,18 +243,22 @@ function createGovernedDeliveryStory(project, {
     ...humanApproval(`Approve ${requirementId}`),
   ], project);
 
-  if (outputType) {
+  const outputRefs = [
+    ...(outputType ? [{ type: outputType, phase: outputPhase }] : []),
+    ...additionalOutputRefs,
+  ];
+  for (const outputRef of outputRefs) {
     mustRun([
       "output", "template", "propose",
       "--root", project,
-      "--type", outputType,
-      "--summary", `Canonical ${outputType} format`,
+      "--type", outputRef.type,
+      "--summary", `Canonical ${outputRef.type} format`,
     ], project);
     mustRun([
       "output", "template", "approve",
       "--root", project,
-      "--id", `${outputType}-v1`,
-      ...humanApproval(`Approve ${outputType} output format`),
+      "--id", `${outputRef.type}-v1`,
+      ...humanApproval(`Approve ${outputRef.type} output format`),
     ], project);
   }
 
@@ -278,7 +284,10 @@ function createGovernedDeliveryStory(project, {
     "--context-summary", `Implement ${storyId} inside the approved requirement boundary.`,
     "--qa", "Who confirms the exact delivery?|The human reviewer",
     "--tool", "node",
-    ...(outputType ? ["--output-ref", `${outputType}:${outputType}-v1:new`] : []),
+    ...outputRefs.flatMap((outputRef) => [
+      "--output-ref",
+      `${outputRef.type}:${outputRef.type}-v1:new${outputRef.phase ? `:${outputRef.phase}` : ""}`,
+    ]),
   ], project);
   mustRun([
     "contract", "approve",
@@ -363,7 +372,7 @@ function createGovernedDeliveryStory(project, {
     "--allow-use", `story.claim=${storyId}`,
     "--allow-use", `output.link=${storyId}`,
     "--allow-use", `story.complete-step=${storyId}`,
-    ...(outputType ? ["--allow-artifact-type", outputType] : []),
+    ...outputRefs.flatMap((outputRef) => ["--allow-artifact-type", outputRef.type]),
     "--max-uses", String(storyActionUses),
     ...humanApproval(`Approve the exact governed story actions for ${storyId}`),
   ], project);
@@ -584,9 +593,11 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     suffix: "FINAL",
     allowedWritePaths: ["docs"],
     outputType: "implementation-summary",
+    outputPhase: "implementation",
+    additionalOutputRefs: [{ type: "release-notes", phase: "release" }],
     configureProject: (target) => configureCustomPhase(target, customPhase),
     deliveryKind: "local_release",
-    storyActionUses: 9,
+    storyActionUses: 10,
     beforeTaskStart: ({ storyId }) => {
       mustRun([
         "workflow", "definition", "propose",
@@ -711,9 +722,22 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     "--story", fixture.storyId,
   ], project);
   assert.equal(strictReport.kind, "workflow_strict_gate_receipt");
-  assert.equal(strictReport.schema_version, "workflow-strict-gate-receipt:v1");
+  assert.equal(strictReport.schema_version, "workflow-strict-gate-receipt:v2");
   assert.equal(strictReport.lifecycle_complete, false);
   assert.equal(strictReport.strict_receipt_path, strictReceiptPath);
+  assert.equal(strictReport.workflow_scope.instance_id, workflowInstanceId);
+  assert.equal(strictReport.workflow_scope.story_id, fixture.storyId);
+  assert.equal(strictReport.workflow_scope.current_phase, "validation");
+  assert.deepEqual(strictReport.workflow_scope.phase_order, [
+    "discovery",
+    "analysis",
+    "design",
+    customPhase,
+    "implementation",
+    "validation",
+    "release",
+  ]);
+  assert.match(strictReport.workflow_scope.checkpoint_ref.checkpoint_hash, /^[a-f0-9]{64}$/u);
   assert.equal(fs.existsSync(path.join(project, strictReceiptPath)), true);
   assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
 
@@ -736,23 +760,48 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     ["terminal successful delivery", "passing release trace", "completed release step"],
   );
 
-  mustFail([
+  const missingReleaseOutputGate = mustFail([
     "gate", "check",
     "--root", project,
     "--strict",
     "--story", fixture.storyId,
     "--lifecycle-complete",
     "--json",
-  ], project, /requires completed phases: release|latest release trace to pass|requires terminal local_release delivery; found started/u);
+  ], project, /requires completed phases: release|latest release trace to pass|requires terminal local_release delivery; found started|release-notes/u);
+  const missingReleaseOutputReport = JSON.parse(missingReleaseOutputGate.stdout);
+  assert.ok(
+    missingReleaseOutputReport.errors.some((error) =>
+      error.includes("output ref release-notes is not satisfied")),
+    `final lifecycle gate did not require the deferred release output: ${
+      missingReleaseOutputReport.errors.join("; ")
+    }`,
+  );
   assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
 
   const releaseEvidence = writeProjectFile(project, ".sdlc/tests/ST-FINAL-release.json", "{\"ready\":true}\n");
   appendTrace(project, fixture.storyId, "release", "passed", releaseEvidence);
+  const releaseNotes = writeProjectFile(
+    project,
+    "docs/release-notes.md",
+    "# Release notes\n\nThe governed local release is ready.\n",
+  );
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", "release-notes",
+    "--artifact", releaseNotes,
+    "--template", "release-notes-v1",
+    "--mode", "new",
+    "--requirement", fixture.requirementId,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
   mustRun([
     "story", "complete-step",
     "--root", project,
     "--id", fixture.storyId,
     "--step", "release",
+    "--type", "release-notes",
     "--summary", "Release evidence completed",
     "--evidence", releaseEvidence,
     "--authorization", fixture.storyActionAuthorizationId,

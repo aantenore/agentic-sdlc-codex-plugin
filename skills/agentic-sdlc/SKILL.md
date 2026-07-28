@@ -332,14 +332,14 @@ The dedicated assessment journey remains the exception described above: it packa
 
    Only after the optional technical-details divider, explain that `audit_only` narrows requested `bounded-autonomous` to effective `checkpointed`. Explain the practical effect and how to enable verification: a trusted external host or CI issues an Ed25519-signed receipt for the exact delivery-profile approval subject; configure `authority_policy.mode: host_verified` and the matching public key in `authority_policy.trusted_host_keys`, then pass it with `autonomy delivery approve --host-receipt-file <path.json>`. The CLI validates external authority and never mints trusted authority for itself.
 
-   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Before `task start` and before completing any story step, start exactly one current story-bound workflow. The included `software-project` v2 definition is valid only when the project uses its exact six-phase order. If `phase_order` contains, removes, or reorders a phase, propose and approve a story-bound definition with that exact order first; do not force the included preset across a custom configuration:
+   Verify that the approved profile ID equals the planned `delivery_execution_profile_id` in the already approved contract. Before `task start` and before completing any story step, start exactly one current story-bound workflow. The included `software-project` v3 definition is valid only when the project uses its exact six-phase order. If `phase_order` contains, removes, or reorders a phase, propose and approve a story-bound definition with that exact order first; do not force the included preset across a custom configuration:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs workflow instance start \
      --root <target-project> \
      --id DELIVERY-ST-001 \
      --definition software-project \
-     --definition-version 2 \
+     --definition-version 3 \
      --story ST-001
    ```
 

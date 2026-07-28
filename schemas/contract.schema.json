@@ -112,6 +112,10 @@
               "delta",
               "new"
             ]
+          },
+          "phase": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "additionalProperties": true
@@ -280,6 +284,7 @@
           },
           "target": {
             "type": "object",
+            "minProperties": 1,
             "additionalProperties": true
           },
           "permissions": {

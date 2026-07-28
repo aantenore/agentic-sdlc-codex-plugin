@@ -23,8 +23,8 @@ test("catalog exposes exactly the four governed presets", () => {
     listed.find(({ id }) => id === "software-project"),
     {
       id: "software-project",
-      version: "2",
-      available_versions: ["1", "2"],
+      version: "3",
+      available_versions: ["1", "2", "3"],
       status: "included",
       label: "Software project",
       description: "Software project governed workflow preset.",
@@ -40,7 +40,7 @@ test("catalog exposes exactly the four governed presets", () => {
       metadata: {
         compatibility: { phase_order: SOFTWARE_PROJECT_PHASES },
         governance_binding: "story",
-        canonical_evidence_schema: "workflow-canonical-evidence:v1",
+        canonical_evidence_schema: "workflow-canonical-evidence:v2",
       },
     },
   );
@@ -58,7 +58,7 @@ test("software-project preserves the exact six existing SDLC phases and order", 
 });
 
 test("software-project phase changes are bound to canonical lifecycle evidence", () => {
-  const preset = getWorkflowPreset("software-project", 2);
+  const preset = getWorkflowPreset("software-project", 3);
   const guardsByRoute = Object.fromEntries(preset.transitions.map((transition) => [
     `${transition.from}->${transition.to}`,
     transition.guards.map((guard) => guard.id),
@@ -72,26 +72,40 @@ test("software-project phase changes are bound to canonical lifecycle evidence",
     "validation->release": ["strict-gate-passed"],
   });
   assert.equal(preset.metadata.governance_binding, "story");
-  assert.equal(preset.metadata.canonical_evidence_schema, "workflow-canonical-evidence:v1");
+  assert.equal(preset.metadata.canonical_evidence_schema, "workflow-canonical-evidence:v2");
 });
 
-test("software-project v1 remains byte-stable in behavior while v2 adds canonical governance", () => {
+test("software-project preserves legacy v1/v2 hashes while v3 pins phase-bound evidence", () => {
   const legacy = buildWorkflowPreset("software-project", { version: 1 });
-  const governed = buildWorkflowPreset("software-project", { version: 2 });
+  const legacyGoverned = buildWorkflowPreset("software-project", { version: 2 });
+  const governed = buildWorkflowPreset("software-project", { version: 3 });
 
   assert.equal(legacy.version, "1");
   assert.equal(
     legacy.definition_hash,
     "f7a8282e726fdb6c4082ceab3aba65c2cd930f07d9865899d802a65d13e7c3aa",
   );
-  assert.equal(governed.version, "2");
+  assert.equal(legacyGoverned.version, "2");
+  assert.equal(
+    legacyGoverned.definition_hash,
+    "c0b9c69e123b39a609fa85452daa84fe72099207ff763f31e8f9c848d7c73a84",
+  );
+  assert.equal(
+    legacyGoverned.metadata.canonical_evidence_schema,
+    "workflow-canonical-evidence:v1",
+  );
+  assert.equal(governed.version, "3");
+  assert.equal(
+    governed.metadata.canonical_evidence_schema,
+    "workflow-canonical-evidence:v2",
+  );
   assert.equal(legacy.transitions.every((transition) => transition.guards.length === 0), true);
   assert.equal(legacy.metadata.governance_binding, undefined);
   assert.equal(governed.metadata.governance_binding, "story");
-  assert.notEqual(legacy.definition_hash, governed.definition_hash);
+  assert.notEqual(legacyGoverned.definition_hash, governed.definition_hash);
   assert.throws(
-    () => buildWorkflowPreset("software-project", { version: 3 }),
-    /available versions: 1, 2/u,
+    () => buildWorkflowPreset("software-project", { version: 4 }),
+    /available versions: 1, 2, 3/u,
   );
 });
 

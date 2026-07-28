@@ -3,13 +3,18 @@ import test from "node:test";
 
 import { STABLE_JSON_HASH_ALGORITHM, computeStableHash } from "../../lib/canonical.mjs";
 import {
+  WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
   WORKFLOW_FINAL_GATE_RECEIPT_SCHEMA,
+  WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  WORKFLOW_LEGACY_STRICT_GATE_RECEIPT_SCHEMA,
   WORKFLOW_STRICT_GATE_RECEIPT_SCHEMA,
+  buildLegacyWorkflowCanonicalEvidence,
   buildWorkflowCanonicalEvidence,
   buildWorkflowFinalGateReceipt,
   buildWorkflowStrictGateReceipt,
   canonicalWorkflowGuardResult,
   computeGovernedApprovalSubjectHash,
+  selectRequiredOutputRefsForPhase,
   validateWorkflowCanonicalEvidence,
 } from "../../lib/workflow-canonical-evidence.mjs";
 
@@ -19,11 +24,19 @@ test("canonical evidence binds one workflow instance to fresh lifecycle records"
   const bundle = canonicalBundle();
   const evidence = buildWorkflowCanonicalEvidence(bundle);
 
+  assert.equal(evidence.schema_version, WORKFLOW_CANONICAL_EVIDENCE_SCHEMA);
+  assert.equal(evidence.schema_version, "workflow-canonical-evidence:v2");
   assert.equal(validateWorkflowCanonicalEvidence(evidence, {
     instance_id: "delivery-42",
     story_id: "ST-42",
   }).valid, true);
   assert.equal(Object.isFrozen(evidence), true);
+  assert.deepEqual(evidence.output_scope, {
+    current_phase: "validation",
+    phase_order: SOFTWARE_PHASES,
+    require_all: false,
+  });
+  assert.equal(evidence.workflow_scope.current_phase, "validation");
   assert.deepEqual(
     Object.fromEntries(Object.entries(evidence.checks).map(([id, check]) => [id, check.satisfied])),
     {
@@ -53,6 +66,29 @@ test("canonical evidence binds one workflow instance to fresh lifecycle records"
   );
 });
 
+test("legacy evidence remains an explicit all-due compatibility contract", () => {
+  const bundle = canonicalBundle();
+  bundle.gate_report.schema_version = WORKFLOW_LEGACY_STRICT_GATE_RECEIPT_SCHEMA;
+  delete bundle.gate_report.workflow_scope;
+  resealReceipt(bundle.gate_report);
+  const evidence = buildLegacyWorkflowCanonicalEvidence(bundle);
+
+  assert.equal(
+    evidence.schema_version,
+    WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  );
+  assert.equal(Object.hasOwn(evidence, "output_scope"), false);
+  assert.equal(Object.hasOwn(evidence, "workflow_scope"), false);
+  assert.equal(validateWorkflowCanonicalEvidence(evidence, {
+    instance_id: "delivery-42",
+    story_id: "ST-42",
+    expected_schema_version: WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  }).valid, true);
+  assert.equal(validateWorkflowCanonicalEvidence(evidence).valid, false);
+  assert.equal(evidence.checks.required_output_linked.required_count, 1);
+  assert.equal(evidence.checks.strict_gate_passed.satisfied, true);
+});
+
 test("canonical checks fail closed for stale, missing, or unsuccessful records", () => {
   const cases = [
     ["requirement_approved", (bundle) => { bundle.requirements[0].status = "draft"; }],
@@ -75,6 +111,177 @@ test("canonical checks fail closed for stale, missing, or unsuccessful records",
     assert.equal(evidence.checks[checkId].satisfied, false, checkId);
     assert.ok(evidence.checks[checkId].issues.length > 0, checkId);
   }
+});
+
+test("phase-scoped output evidence requires only outputs due through the current workflow phase", () => {
+  const bundle = canonicalBundle();
+  bundle.contract.output_contract_refs[0].phase = "implementation";
+  bundle.contract.output_contract_refs.push(
+    {
+      artifact_type: "validation-report",
+      template_id: "validation-report-v1",
+      mode: "new",
+      phase: "validation",
+    },
+    {
+      artifact_type: "release-notes",
+      template_id: "release-notes-v1",
+      mode: "new",
+      phase: "release",
+    },
+  );
+  bundle.contract.approvals.at(-1).approved_content_hash =
+    computeGovernedApprovalSubjectHash(bundle.contract);
+  bundle.delivery_profile.contract_refs[0].hash =
+    computeGovernedApprovalSubjectHash(bundle.contract);
+  bundle.output_scope = {
+    current_phase: "implementation",
+    phase_order: ["discovery", "analysis", "design", "implementation", "validation", "release"],
+    require_all: false,
+  };
+
+  const evidence = buildWorkflowCanonicalEvidence(bundle);
+
+  assert.equal(evidence.checks.required_output_linked.satisfied, true);
+  assert.equal(evidence.checks.required_output_linked.total_required_count, 3);
+  assert.equal(evidence.checks.required_output_linked.required_count, 1);
+  assert.equal(evidence.checks.required_output_linked.deferred_count, 2);
+  assert.deepEqual(
+    evidence.checks.required_output_linked.deferred_refs.map((ref) => ref.phase),
+    ["validation", "release"],
+  );
+
+  bundle.output_scope.current_phase = "validation";
+  const validationEvidence = buildWorkflowCanonicalEvidence(bundle);
+  assert.equal(validationEvidence.checks.required_output_linked.satisfied, false);
+  assert.equal(validationEvidence.checks.strict_gate_passed.satisfied, false);
+  assert.match(
+    validationEvidence.checks.required_output_linked.issues.join("\n"),
+    /required output validation-report is not linked/u,
+  );
+  assert.match(
+    validationEvidence.checks.strict_gate_passed.issues.join("\n"),
+    /required output validation-report is not linked/u,
+  );
+});
+
+test("an early-phase strict receipt cannot be reused at a later guarded phase", () => {
+  const bundle = canonicalBundle();
+  bundle.gate_report = structuredClone(buildWorkflowStrictGateReceipt({
+    status: "passed",
+    strict: true,
+    scope: "story",
+    lifecycle_complete: false,
+    certification_level: "strict_intermediate",
+    story_id: "ST-42",
+    checked_at: "2026-07-28T10:09:00.000Z",
+    errors: [],
+    workflow_scope: workflowScope({
+      current_phase: "implementation",
+      checkpoint_ref: {
+        checkpoint_hash: "6".repeat(64),
+        sequence: 3,
+        last_event_hash: "7".repeat(64),
+        trace_chain_hash: "8".repeat(64),
+        updated_at: "2026-07-28T10:06:30.000Z",
+      },
+    }),
+  }, {
+    strict_receipt_path: ".sdlc/gates/ST-42-strict.json",
+  }));
+
+  const evidence = buildWorkflowCanonicalEvidence(bundle);
+
+  assert.equal(evidence.output_scope.current_phase, "validation");
+  assert.equal(evidence.checks.strict_gate_passed.satisfied, false);
+  assert.match(
+    evidence.checks.strict_gate_passed.issues.join("\n"),
+    /different workflow stream position|does not match the canonical output phase scope/u,
+  );
+});
+
+test("a legacy unscoped strict receipt remains readable but cannot satisfy the guard", () => {
+  const bundle = canonicalBundle();
+  bundle.gate_report.schema_version = WORKFLOW_LEGACY_STRICT_GATE_RECEIPT_SCHEMA;
+  delete bundle.gate_report.workflow_scope;
+  resealReceipt(bundle.gate_report);
+
+  const evidence = buildWorkflowCanonicalEvidence(bundle);
+
+  assert.equal(evidence.checks.strict_gate_passed.satisfied, false);
+  assert.match(
+    evidence.checks.strict_gate_passed.issues.join("\n"),
+    /legacy intermediate strict gate receipt is not bound/u,
+  );
+});
+
+test("canonical guard denial exposes every missing output issue", () => {
+  const bundle = canonicalBundle();
+  bundle.contract.output_contract_refs.push({
+    artifact_type: "validation-report",
+    template_id: "validation-report-v1",
+    mode: "new",
+  });
+  bundle.contract.approvals.at(-1).approved_content_hash =
+    computeGovernedApprovalSubjectHash(bundle.contract);
+  bundle.delivery_profile.contract_refs[0].hash =
+    computeGovernedApprovalSubjectHash(bundle.contract);
+  bundle.output_registry.links = [];
+
+  const evidence = buildWorkflowCanonicalEvidence(bundle);
+  const result = canonicalWorkflowGuardResult("required-output-linked", evidence);
+
+  assert.equal(result.allowed, false);
+  assert.deepEqual(result.issues, [
+    "required output implementation-summary is not linked",
+    "required output validation-report is not linked",
+  ]);
+  assert.equal(result.reason, result.issues[0]);
+  assert.equal(evidence.checks.strict_gate_passed.satisfied, false);
+  assert.deepEqual(
+    evidence.checks.strict_gate_passed.issues.filter((issue) =>
+      issue.startsWith("required output")),
+    result.issues,
+  );
+});
+
+test("legacy unphased and unknown-phase output refs remain fail-closed", () => {
+  const phaseOrder = ["discovery", "analysis", "design", "implementation", "validation", "release"];
+  const legacy = selectRequiredOutputRefsForPhase([
+    {
+      artifact_type: "legacy-output",
+      template_id: "legacy-output-v1",
+      mode: "new",
+    },
+    {
+      artifact_type: "release-notes",
+      template_id: "release-notes-v1",
+      mode: "new",
+      phase: "release",
+    },
+  ], {
+    current_phase: "implementation",
+    phase_order: phaseOrder,
+    require_all: false,
+  });
+  assert.deepEqual(legacy.required_refs.map((item) => item.index), [0]);
+  assert.deepEqual(legacy.deferred_refs.map((item) => item.index), [1]);
+
+  const invalid = selectRequiredOutputRefsForPhase([
+    {
+      artifact_type: "mystery",
+      template_id: "mystery-v1",
+      mode: "new",
+      phase: "not-configured",
+    },
+  ], {
+    current_phase: "implementation",
+    phase_order: phaseOrder,
+    require_all: false,
+  });
+  assert.equal(invalid.valid, false);
+  assert.deepEqual(invalid.required_refs.map((item) => item.index), [0]);
+  assert.match(invalid.issues.join("\n"), /unknown phase 'not-configured'/u);
 });
 
 test("a formally closed pull request is terminal but not a successful delivery", () => {
@@ -114,6 +321,21 @@ test("evidence integrity and instance/story pins reject substitution", () => {
   const valid = buildWorkflowCanonicalEvidence(canonicalBundle());
   assert.equal(validateWorkflowCanonicalEvidence(valid, { instance_id: "other" }).valid, false);
   assert.equal(validateWorkflowCanonicalEvidence(valid, { story_id: "ST-other" }).valid, false);
+  assert.equal(validateWorkflowCanonicalEvidence(valid, {
+    current_phase: "implementation",
+    phase_order: SOFTWARE_PHASES,
+  }).valid, false);
+  assert.equal(validateWorkflowCanonicalEvidence(valid, {
+    current_phase: "validation",
+    phase_order: [...SOFTWARE_PHASES].reverse(),
+  }).valid, false);
+
+  const scopeTamper = structuredClone(valid);
+  scopeTamper.output_scope.current_phase = "implementation";
+  assert.match(
+    validateWorkflowCanonicalEvidence(scopeTamper).errors.join("\n"),
+    /evidence_hash does not match|does not match its output_scope/u,
+  );
 });
 
 test("only one passing strict lifecycle gate can become the governed final receipt", () => {
@@ -197,7 +419,7 @@ test("only one passing strict lifecycle gate can become the governed final recei
 });
 
 test("intermediate and final workflow gate receipts have distinct identities and cannot be exchanged", () => {
-  const strictReceipt = buildWorkflowStrictGateReceipt({
+  const strictReport = {
     status: "passed",
     strict: true,
     scope: "story",
@@ -206,7 +428,9 @@ test("intermediate and final workflow gate receipts have distinct identities and
     story_id: "ST-42",
     checked_at: "2026-07-28T10:09:00.000Z",
     errors: [],
-  }, {
+    workflow_scope: workflowScope(),
+  };
+  const strictReceipt = buildWorkflowStrictGateReceipt(strictReport, {
     strict_receipt_path: ".sdlc/gates/ST-42-strict.json",
   });
   assert.equal(strictReceipt.kind, "workflow_strict_gate_receipt");
@@ -227,6 +451,50 @@ test("intermediate and final workflow gate receipts have distinct identities and
       strict_receipt_path: ".sdlc/gates/ST-42-strict.json",
     }),
     /non-final strict story gate/u,
+  );
+  assert.throws(
+    () => buildWorkflowStrictGateReceipt(
+      { ...strictReport, lifecycle_complete: undefined },
+      { strict_receipt_path: ".sdlc/gates/ST-42-strict.json" },
+    ),
+    /non-final strict story gate/u,
+  );
+  assert.throws(
+    () => buildWorkflowStrictGateReceipt(
+      {
+        ...strictReport,
+        workflow_scope: workflowScope({ phase_order: [] }),
+      },
+      { strict_receipt_path: ".sdlc/gates/ST-42-strict.json" },
+    ),
+    /phase_order must contain at least one phase/u,
+  );
+  assert.throws(
+    () => buildWorkflowStrictGateReceipt(
+      { ...strictReport, checked_at: "2026-07-28T10:08:00.000Z" },
+      { strict_receipt_path: ".sdlc/gates/ST-42-strict.json" },
+    ),
+    /cannot predate its bound workflow checkpoint/u,
+  );
+});
+
+test("strict gate chronology is bounded by its workflow checkpoint and evidence observation", () => {
+  const futureGate = canonicalBundle();
+  futureGate.gate_report.checked_at = "2026-07-28T10:11:00.000Z";
+  resealReceipt(futureGate.gate_report);
+
+  const futureEvidence = buildWorkflowCanonicalEvidence(futureGate);
+  assert.equal(futureEvidence.checks.strict_gate_passed.satisfied, false);
+  assert.match(
+    futureEvidence.checks.strict_gate_passed.issues.join("\n"),
+    /postdates the canonical evidence observation/u,
+  );
+
+  const staleObservation = canonicalBundle();
+  staleObservation.observed_at = "2026-07-28T10:08:00.000Z";
+  assert.throws(
+    () => buildWorkflowCanonicalEvidence(staleObservation),
+    /cannot predate its bound workflow checkpoint/u,
   );
 });
 
@@ -331,12 +599,15 @@ function canonicalBundle() {
     story_id: story.id,
     checked_at: "2026-07-28T10:09:00.000Z",
     errors: [],
+    workflow_scope: workflowScope(),
   }, {
     strict_receipt_path: `.sdlc/gates/${story.id}-strict.json`,
   });
   return {
     instance: {
       id: "delivery-42",
+      instance_hash: "1".repeat(64),
+      effective_hash: "2".repeat(64),
       metadata: { governance_binding: { story_id: story.id } },
     },
     story,
@@ -358,11 +629,58 @@ function canonicalBundle() {
         },
       }],
     },
+    output_scope: {
+      current_phase: "validation",
+      phase_order: SOFTWARE_PHASES,
+      require_all: false,
+    },
+    workflow_scope: workflowScope(),
     gate_report: structuredClone(gateReport),
     delivery_profile: profile,
     delivery_close_receipt: close,
     observed_at: OBSERVED_AT,
   };
+}
+
+const SOFTWARE_PHASES = Object.freeze([
+  "discovery",
+  "analysis",
+  "design",
+  "implementation",
+  "validation",
+  "release",
+]);
+
+function workflowScope(overrides = {}) {
+  const scope = {
+    instance_id: "delivery-42",
+    instance_hash: "1".repeat(64),
+    effective_hash: "2".repeat(64),
+    story_id: "ST-42",
+    current_phase: "validation",
+    phase_order: SOFTWARE_PHASES,
+    checkpoint_ref: {
+      checkpoint_hash: null,
+      sequence: 4,
+      last_event_hash: "4".repeat(64),
+      trace_chain_hash: "5".repeat(64),
+      updated_at: "2026-07-28T10:08:30.000Z",
+    },
+    ...overrides,
+  };
+  scope.checkpoint_ref.checkpoint_hash = computeStableHash({
+    kind: "workflow_checkpoint",
+    schema_version: "workflow-checkpoint:v1",
+    instance_id: scope.instance_id,
+    instance_hash: scope.instance_hash,
+    effective_hash: scope.effective_hash,
+    sequence: scope.checkpoint_ref.sequence,
+    last_event_hash: scope.checkpoint_ref.last_event_hash,
+    current_state: scope.current_phase,
+    updated_at: scope.checkpoint_ref.updated_at,
+    trace_chain_hash: scope.checkpoint_ref.trace_chain_hash,
+  });
+  return scope;
 }
 
 function lifecycleWorkflowEvidence(storyId) {

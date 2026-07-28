@@ -13,7 +13,7 @@ Contracts are project-bound. The templates are generic, but generated contracts 
 - `owner_agent`: Default agent role responsible for the phase.
 - `inputs`: Required source material.
 - `outputs`: Required artifacts.
-- `output_contract_refs`: Story output coverage references to approved output templates and reuse mode. In strict mode, story contracts must have matching output links.
+- `output_contract_refs`: Story output coverage references to approved output templates and reuse mode. Each reference may add an optional `phase` that says when the output becomes due in the bound workflow. A story contract for an output-producing phase must include at least one legacy unphased reference or one reference assigned to that exact contract phase; future-only output lists are incomplete and cannot be approved.
 - `validation`: Gate criteria.
 - `allowed_tools`: Tool classes allowed for the phase.
 - `kb_writes`: Knowledge base sections that must be updated.
@@ -66,9 +66,14 @@ Output contracts define the project-approved artifact structure for a specific o
 - approved `template_id`;
 - story and requirement links;
 - `mode`: `reuse`, `delta`, or `new`;
+- optional `phase`: the configured workflow phase by which the artifact must be linked;
 - optional base artifact for deltas.
 
+Approval prompts display every reference with its due phase. An omitted phase is shown as `legacy all-due`: it remains required at every intermediate strict gate. Phased references become due cumulatively through the trusted current story workflow position; future references are not requested or enforced until that phase is reached, while lifecycle-complete certification requires all of them.
+
 Do not duplicate template structure inside every phase contract. Let the phase contract say which artifact must be produced, and let the output registry say how that artifact is structured and whether an existing artifact should be reused.
+
+The CLI accepts output references as `type:template:mode[:phase]`. The original three-part form remains valid and preserves the legacy all-due behavior: an unphased reference is required at every strict gate. Phase-scoped references become due cumulatively in the bound workflow order. An intermediate strict gate requires references assigned to the current or an earlier phase and defers references assigned to future phases. A lifecycle-complete strict gate requires every output reference, including those assigned to later phases.
 
 Approved contracts, approved templates, and linked artifacts carry hashes. If the approved content changes after approval or linking, strict gates fail until the contract, template, or artifact link is refreshed through the CLI.
 

@@ -21,7 +21,8 @@
     {
       "artifact_type": "functional-analysis",
       "template_id": "<approved-template-id>",
-      "mode": "new"
+      "mode": "new",
+      "phase": "analysis"
     }
   ],
   "validation": [

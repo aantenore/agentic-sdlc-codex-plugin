@@ -9,45 +9,62 @@ Once work starts, later edits to the general process do not change that run. A p
 ## Built-in processes
 
 Four preset identifiers are shipped with the plugin. `software-project` has
-two included definition versions so existing work can remain reproducible
+three included definition versions so existing work can remain reproducible
 while new work uses stronger lifecycle governance:
 
 | Preset | Version | Intended use | Stable journey |
 | --- | --- | --- | --- |
-| Software project | v2, current | New feature delivery governed by canonical story evidence | `discovery`, `analysis`, `design`, `implementation`, `validation`, `release` |
-| Software project | v1, legacy | Replay or resume an instance already pinned to the original sequential definition | The same six phases, without v2 canonical transition guards |
+| Software project | v3, current | New feature delivery governed by phase-bound canonical story evidence | `discovery`, `analysis`, `design`, `implementation`, `validation`, `release` |
+| Software project | v2, compatibility | Replay or resume a governed instance pinned to canonical evidence v1 | The same six phases and canonical guards, with legacy all-due outputs and unscoped evidence |
+| Software project | v1, legacy | Replay or resume an instance already pinned to the original sequential definition | The same six phases, without canonical transition guards |
 | Change request | v1 | A bounded change with review and verification | Intake, impact review, approval, implementation, validation, closure |
 | Technical assessment | v1 | The existing guided assessment | Project context, complete proposal, execution, verification, completion; exactly two normal user checkpoints |
 | Generic governed process | v1 | A reusable approval-and-execution skeleton | Draft, review, approval, execution, verification, completion |
 
-`software-project` v1 is intentionally preserved with its original definition
-hash and behavior. An instance pinned to v1 is never silently upgraded. Use it
-only when compatibility with an existing stored instance requires that exact
-definition; choose v2 for new software delivery.
+`software-project` v1 and v2 are intentionally preserved with their original
+definition hashes and behavior. A pinned instance is never silently upgraded:
+v1 remains guardless, while v2 continues to produce and accept only
+`workflow-canonical-evidence:v1`. Use them only when compatibility with an
+existing stored instance requires that exact definition; choose v3 for new
+software delivery.
 
-Version 2 keeps the same phase identifiers and order but binds the instance to
-one story and derives its guard decisions from canonical project records:
+Version 3 keeps the same phase identifiers and order, binds the instance to one
+story, and derives its guard decisions from phase-bound canonical project
+records:
 
 | Transition | Canonical evidence required |
 | --- | --- |
 | `discovery` → `analysis` | The story's referenced requirement is currently approved with matching content |
 | `analysis` → `design` | No additional transition guard |
 | `design` → `implementation` | The story's implementation contract is currently approved and matches the story |
-| `implementation` → `validation` | Every output required by that contract is linked with valid current verification |
+| `implementation` → `validation` | Every output due through the current workflow phase is linked with valid current verification; later-phase outputs remain deferred |
 | `validation` → `release` | The story has passing intermediate strict-gate evidence |
 
 The runtime loads requirement, contract, output, strict-gate, delivery-profile,
 and delivery-close records through the governed project reader, then seals one
-`workflow-canonical-evidence:v1` snapshot. A caller cannot bypass a v2 guard by
-claiming success in `--guard-input-json`; missing, stale, mismatched, modified,
-or unsuccessful canonical evidence fails closed. The final discovery-to-release
-certificate remains the story gate.
+snapshot using the evidence schema pinned by the immutable effective
+definition. A v2 workflow produces and accepts only canonical evidence v1,
+including when it resumes and appends a new transition. A v3 workflow produces
+and accepts only phase-bound canonical evidence v2; rewriting or presenting a
+v3 event as v1 is rejected. Canonical evidence cannot predate its bound
+checkpoint or postdate the transition event that records it. A caller cannot
+bypass a canonical guard by claiming success in `--guard-input-json`; missing,
+stale, mismatched, modified, unsuccessful, or wrong-version evidence fails
+closed. The final discovery-to-release certificate remains the story gate.
 
 The two gate receipts are deliberately different. A passing ordinary strict
 story gate writes `.sdlc/gates/<story-id>-strict.json` as
-`workflow-strict-gate-receipt:v1`; it proves that current validation evidence
-is ready for the guarded transition into `release`, but it is not a final
-lifecycle certificate. After that transition, complete the exact delivery,
+`workflow-strict-gate-receipt:v2` for a current v3 story-bound workflow.
+Version 2 binds the receipt to the exact instance, effective definition,
+durable checkpoint, and current phase, so advancing the workflow makes an
+earlier receipt unusable by a later canonical guard. A workflow pinned to the
+compatibility v2 definition continues to write the unscoped v1 receipt required
+by its evidence-v1 contract; a legacy story with no workflow may also receive a
+readable v1 receipt. An unscoped receipt cannot satisfy a v3 canonical
+transition guard. The intermediate receipt proves that current validation
+evidence is ready for its guarded transition, but it is not a final lifecycle
+certificate.
+After that transition, complete the exact delivery,
 append its passing release trace, and complete the release step. The lifecycle-complete
 gate replays the selected workflow instance, verifies its immutable header,
 event hashes, durable checkpoint, and matching audit-trace chain, and requires
@@ -76,7 +93,7 @@ If a story retains more than one immutable story-bound workflow run, the
 current run is selected deterministically as the newest `created_at` value,
 with the immutable instance ID as a stable tie-breaker. Older runs remain
 historical evidence. The selected run must pin the exact current project phase
-order; this rule applies equally to the included v1/v2 processes and approved
+order; this rule applies equally to the included v1/v2/v3 processes and approved
 custom definitions. Start the selected story-bound instance before `task
 start` and before the first completed step. The runtime rejects a post-hoc
 instance, and final certification requires the exact instance reference stored
@@ -144,6 +161,7 @@ Use focused help for the exact options supported by the installed version:
 agentic-sdlc workflow definition list
 agentic-sdlc workflow definition show --id software-project --definition-version 1
 agentic-sdlc workflow definition show --id software-project --definition-version 2
+agentic-sdlc workflow definition show --id software-project --definition-version 3
 agentic-sdlc workflow definition propose --id my-process --definition-version 1 --definition-file workflow.json
 agentic-sdlc workflow definition approve --id my-process --definition-version 1 --actor-type human --approval-source explicit-user --summary "I confirm these steps and checks"
 
@@ -157,13 +175,13 @@ agentic-sdlc workflow instance status --id change-184
 agentic-sdlc workflow instance explain --id change-184
 ```
 
-For a new governed software project, pin v2 and its story explicitly:
+For a new governed software project, pin v3 and its story explicitly:
 
 ```bash
 agentic-sdlc workflow instance start \
   --id DELIVERY-TRIP-POLICY-001 \
   --definition software-project \
-  --definition-version 2 \
+  --definition-version 3 \
   --story ST-TRIP-POLICY-001
 ```
 

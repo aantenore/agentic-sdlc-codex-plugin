@@ -9,8 +9,11 @@ import {
   applyWorkflowOverlay,
   approveWorkflowOverlay,
   buildWorkflowOverlay,
+  computeWorkflowEventHash,
+  createWorkflowCheckpoint,
   createWorkflowInstance,
   createWorkflowTransition,
+  replayWorkflowEvents,
 } from "../../lib/workflow-engine.mjs";
 import {
   WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
@@ -58,12 +61,39 @@ test("workflow domain records conform to their published JSON schemas", () => {
     actor: ACTOR,
     metadata: { governance_binding: { story_id: "ST-SCHEMA" } },
   });
+  const durableCheckpoint = createWorkflowCheckpoint({
+    instance,
+    effective_definition: effective,
+    events: [],
+    trace_chain_hash: "3".repeat(64),
+  });
+  const workflowScope = {
+    instance_id: instance.id,
+    instance_hash: instance.instance_hash,
+    effective_hash: effective.effective_hash,
+    story_id: "ST-SCHEMA",
+    current_phase: "discovery",
+    phase_order: effective.phase_order,
+    checkpoint_ref: {
+      checkpoint_hash: durableCheckpoint.checkpoint_hash,
+      sequence: durableCheckpoint.sequence,
+      last_event_hash: durableCheckpoint.last_event_hash,
+      trace_chain_hash: durableCheckpoint.trace_chain_hash,
+      updated_at: durableCheckpoint.updated_at,
+    },
+  };
   const evidenceSubject = {
     kind: "workflow_canonical_evidence",
     schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
     instance_id: instance.id,
     story_id: "ST-SCHEMA",
     observed_at: AT,
+    output_scope: {
+      current_phase: "discovery",
+      phase_order: effective.phase_order,
+      require_all: false,
+    },
+    workflow_scope: workflowScope,
     checks: Object.fromEntries([
       "requirement_approved",
       "contract_approved",
@@ -143,6 +173,7 @@ test("workflow domain records conform to their published JSON schemas", () => {
     story_id: "ST-SCHEMA",
     checked_at: AT,
     errors: [],
+    workflow_scope: workflowScope,
   }, {
     strict_receipt_path: ".sdlc/gates/ST-SCHEMA-strict.json",
   });
@@ -154,6 +185,7 @@ test("workflow domain records conform to their published JSON schemas", () => {
     timestamp: AT,
     actor: ACTOR,
     idempotency_key: "schema-transition-1",
+    checkpoint: durableCheckpoint,
   }, { canonical_evidence: canonicalEvidence });
   const checkpoint = {
     sequence: transition.event.sequence,
@@ -175,6 +207,84 @@ test("workflow domain records conform to their published JSON schemas", () => {
     const result = validate(schema, value);
     assert.equal(result.valid, true, `${schema}: ${JSON.stringify(result.errors)}`);
   }
+
+  const transitionWithIssues = structuredClone(transition.event);
+  transitionWithIssues.guard_results[0].issues = [
+    "non-blocking evidence detail",
+  ];
+  transitionWithIssues.event_hash =
+    computeWorkflowEventHash(transitionWithIssues);
+  assert.equal(
+    validate(
+      "workflow-transition-event.schema.json",
+      transitionWithIssues,
+    ).valid,
+    true,
+  );
+  assert.equal(replayWorkflowEvents({
+    instance,
+    effective_definition: effective,
+    events: [transitionWithIssues],
+  }).valid, true);
+
+  const {
+    output_scope: ignoredLegacyOutputScope,
+    workflow_scope: ignoredLegacyWorkflowScope,
+    ...legacyEvidenceSubject
+  } = evidenceSubject;
+  legacyEvidenceSubject.schema_version = "workflow-canonical-evidence:v1";
+  const legacyCanonicalEvidence = {
+    ...legacyEvidenceSubject,
+    evidence_hash: computeWorkflowCanonicalEvidenceHash(legacyEvidenceSubject),
+  };
+  assert.equal(
+    validate("workflow-canonical-evidence.schema.json", legacyCanonicalEvidence).valid,
+    true,
+  );
+  assert.equal(
+    validate("workflow-canonical-evidence.schema.json", {
+      ...legacyCanonicalEvidence,
+      output_scope: evidenceSubject.output_scope,
+    }).valid,
+    false,
+  );
+  assert.equal(
+    validate("workflow-canonical-evidence.schema.json", {
+      ...canonicalEvidence,
+      workflow_scope: null,
+    }).valid,
+    false,
+  );
+  const impossibleInitialScope = structuredClone(canonicalEvidence);
+  impossibleInitialScope.workflow_scope.checkpoint_ref.sequence = 0;
+  impossibleInitialScope.workflow_scope.checkpoint_ref.last_event_hash =
+    "2".repeat(64);
+  assert.equal(
+    validate(
+      "workflow-canonical-evidence.schema.json",
+      impossibleInitialScope,
+    ).valid,
+    false,
+  );
+
+  const legacyStrictGateReceipt = {
+    ...strictGateReceipt,
+    schema_version: "workflow-strict-gate-receipt:v1",
+    receipt_hash: "5".repeat(64),
+  };
+  delete legacyStrictGateReceipt.workflow_scope;
+  assert.equal(
+    validate("workflow-strict-gate-receipt.schema.json", legacyStrictGateReceipt).valid,
+    true,
+  );
+  const unscopedV2StrictGateReceipt = {
+    ...strictGateReceipt,
+  };
+  delete unscopedV2StrictGateReceipt.workflow_scope;
+  assert.equal(
+    validate("workflow-strict-gate-receipt.schema.json", unscopedV2StrictGateReceipt).valid,
+    false,
+  );
 
   const legacyFinalGateReceipt = {
     kind: "workflow_final_gate_receipt",

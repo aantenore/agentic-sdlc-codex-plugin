@@ -300,7 +300,7 @@ test("delivery matrix binds local, new PR, and existing PR targets without widen
   });
 });
 
-test("workflow matrix preserves v1, governs v2 canonically, and keeps presets and overlays deterministic", async (t) => {
+test("workflow matrix preserves v1/v2 and governs v3 with phase-bound evidence", async (t) => {
   const listed = listWorkflowPresets();
   assert.deepEqual(listed.map(({ id }) => id), [
     "software-project",
@@ -310,17 +310,26 @@ test("workflow matrix preserves v1, governs v2 canonically, and keeps presets an
   ]);
   assert.deepEqual(
     listed.find(({ id }) => id === "software-project").available_versions,
-    ["1", "2"],
+    ["1", "2", "3"],
   );
 
-  await t.test("software-project v1 remains legacy while v2 uses canonical evidence", () => {
+  await t.test("software-project v1 remains guardless, v2 stays legacy, and v3 uses v2 evidence", () => {
     const legacy = buildWorkflowPreset("software-project", { version: 1 });
-    const governed = buildWorkflowPreset("software-project", { version: 2 });
+    const legacyGoverned = buildWorkflowPreset("software-project", { version: 2 });
+    const governed = buildWorkflowPreset("software-project", { version: 3 });
 
     assert.deepEqual(legacy.states.map(({ id }) => id), SOFTWARE_PROJECT_PHASES);
     assert.equal(legacy.transitions.every(({ guards }) => guards.length === 0), true);
+    assert.equal(
+      legacyGoverned.metadata.canonical_evidence_schema,
+      "workflow-canonical-evidence:v1",
+    );
     assert.deepEqual(governed.states.map(({ id }) => id), SOFTWARE_PROJECT_PHASES);
     assert.equal(governed.metadata.governance_binding, "story");
+    assert.equal(
+      governed.metadata.canonical_evidence_schema,
+      "workflow-canonical-evidence:v2",
+    );
     assert.deepEqual(
       governed.transitions.flatMap(({ guards }) => guards.map(({ id }) => id)),
       [
@@ -737,12 +746,33 @@ function autonomyDecision(requirement, delivery, hostAuthority) {
 }
 
 function canonicalEvidence(instanceId, storyId) {
+  const phaseOrder = ["discovery"];
   const evidence = {
     kind: "workflow_canonical_evidence",
     schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
     instance_id: instanceId,
     story_id: storyId,
     observed_at: FIXED_TIME,
+    output_scope: {
+      current_phase: "discovery",
+      phase_order: phaseOrder,
+      require_all: false,
+    },
+    workflow_scope: {
+      instance_id: instanceId,
+      instance_hash: "1".repeat(64),
+      effective_hash: "2".repeat(64),
+      story_id: storyId,
+      current_phase: "discovery",
+      phase_order: phaseOrder,
+      checkpoint_ref: {
+        checkpoint_hash: null,
+        sequence: 0,
+        last_event_hash: null,
+        trace_chain_hash: null,
+        updated_at: FIXED_TIME,
+      },
+    },
     checks: Object.fromEntries([
       "requirement_approved",
       "contract_approved",

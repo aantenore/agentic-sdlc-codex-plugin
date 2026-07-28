@@ -41,12 +41,37 @@ function runtime(id = "checkpoint-instance") {
 }
 
 function createWorkflowTransition(input, options = {}) {
+  const priorEvent = input.events?.at(-1) ?? null;
+  const currentPhase = priorEvent?.to ?? input.instance.initial_state;
+  const durableCheckpoint = input.checkpoint?.kind === "workflow_checkpoint"
+    ? input.checkpoint
+    : null;
   const evidence = {
     kind: "workflow_canonical_evidence",
     schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
     instance_id: input.instance.id,
     story_id: input.instance.metadata.governance_binding.story_id,
-    observed_at: CREATED_AT,
+    observed_at: priorEvent?.timestamp ?? input.instance.created_at,
+    output_scope: {
+      current_phase: currentPhase,
+      phase_order: input.effective_definition.phase_order,
+      require_all: false,
+    },
+    workflow_scope: {
+      instance_id: input.instance.id,
+      instance_hash: input.instance.instance_hash,
+      effective_hash: input.effective_definition.effective_hash,
+      story_id: input.instance.metadata.governance_binding.story_id,
+      current_phase: currentPhase,
+      phase_order: input.effective_definition.phase_order,
+      checkpoint_ref: {
+        checkpoint_hash: durableCheckpoint?.checkpoint_hash ?? null,
+        sequence: input.events?.length ?? 0,
+        last_event_hash: priorEvent?.event_hash ?? null,
+        trace_chain_hash: durableCheckpoint?.trace_chain_hash ?? null,
+        updated_at: priorEvent?.timestamp ?? input.instance.created_at,
+      },
+    },
     checks: Object.fromEntries([
       "requirement_approved",
       "contract_approved",

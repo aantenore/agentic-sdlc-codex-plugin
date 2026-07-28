@@ -18,7 +18,7 @@
 
 ## Technical summary
 
-Agentic SDLC 0.13.1 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.13.2 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -145,7 +145,7 @@ stages:
 3. **Contract** — agree the configurable source and test paths, local
    destination, smoke test, rollback, tools, and write boundary.
 4. **Story and workflow** — create the story and bind a
-   `software-project` v2 workflow to it, preserving the ordered
+   `software-project` v3 workflow to it, preserving the ordered
    discovery-to-release journey. Start that workflow before `task start` and
    before the first completed story step. A custom `phase_order` requires an
    approved story-bound definition with the exact same order.
