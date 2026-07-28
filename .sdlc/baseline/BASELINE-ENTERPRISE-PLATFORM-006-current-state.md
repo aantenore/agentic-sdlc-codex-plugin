@@ -4,7 +4,7 @@ Status: approved
 Kind: existing-project
 
 ## Summary
-Refreshed the same agreed project evidence set after synchronizing with origin/main 2d9ade8; the upstream hash-normalization change was verified and does not overlap this story.
+Refreshed the same agreed evidence set after the PR review fix: Windows commands now resolve to absolute PATH executables and transient test-fixture cleanup retries remain bounded.
 
 ## Product Signal
 Codex plugin for contract-driven delivery, verified assessments, and visual project lineage.

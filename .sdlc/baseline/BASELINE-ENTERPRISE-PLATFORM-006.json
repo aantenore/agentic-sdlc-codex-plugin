@@ -4,13 +4,13 @@
   "sdlc_version": "0.13.0",
   "kind": "existing-project",
   "status": "approved",
-  "summary": "Refreshed the same agreed project evidence set after synchronizing with origin/main 2d9ade8; the upstream hash-normalization change was verified and does not overlap this story.",
+  "summary": "Refreshed the same agreed evidence set after the PR review fix: Windows commands now resolve to absolute PATH executables and transient test-fixture cleanup retries remain bounded.",
   "repository_snapshot": {
     "root_name": "worktree",
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-PORTABLE-WORKFLOW-HARDENING",
-      "head_sha": "2d9ade8e597035343fef5bb2ce5ce1162a30f731",
+      "head_sha": "fb38242c046daebf2bb446cdd0abe759019edb6e",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
@@ -996,7 +996,7 @@
     "lib/release/tar-reader.mjs": "b905bdeb0bf130f21f0ee2eeb10e3a083bba0b96620dde51f2a7cd0d78125d44",
     "lib/release/workflow-guard.mjs": "f02767240a93e7ee3f6c47e12128d336a6e720faf00ecd1138afc2c0be327b7a",
     "lib/requirement-lifecycle.mjs": "1ac4d7a5bcb51fb246e629d725ee69d22672f1bbac25ba343726eef553c44c68",
-    "lib/rtk-optimization-adapter.mjs": "988a733484f3174fe5e2628c1a28b7784e61dd9ddd1712d2557123af5bd9b16e",
+    "lib/rtk-optimization-adapter.mjs": "f08537bf2a3e915e0d39a7111d753f6c3ca40d4ca80d82b0445e9e421a32b6c1",
     "lib/trace-integrity.mjs": "91cad16f09c32eafd2d102ff324830d82c29e1abcb626c96a59313a3be2a4b0d",
     "lib/trace-narrative.mjs": "6b17c41781891fc32146f018dd707e78430a91488d0f6600691e3d17089eaa2d",
     "lib/verification-levels.mjs": "19e84c12b5cf0244db17518edcdaceec23063215f76296626c6e4e6311712c24",
@@ -1017,7 +1017,7 @@
     "skills/change-observatory/agents/openai.yaml": "09571903c21cdb995796aa33de225332fb370825befcd96c2624862cc0cbd279",
     "test/autonomy-cli.e2e.mjs": "471d646c0c52229d817ec0d1e361cf10a01c5d13d28f05bb2753a661543ac3b4",
     "test/cli-self-service.e2e.mjs": "d8341c816ee159c66fe216a7b2195bf0e6a6e7bc3e1bfa09cc617574a83e60ab",
-    "test/cli.e2e.mjs": "bf4dc0d15e4a9602d9c8ff1d20f9fdb041922c65ad953d3db041fa89aa1ffdbf",
+    "test/cli.e2e.mjs": "944b99dcad43f563b029e84c56876c5e60c342d230c86bb21393aeede0ee85b9",
     "test/fixtures/change-observatory-wrapper.mjs": "2a86a4642dea39c2a91d0161743da605ebcfceb656942e44b43f5b26d4a13b44",
     "test/fixtures/change-observatory/view-model.json": "112d49fbfe4ad9ea501d57d0f1c393715f261c411f759a0604c82b3c48380485",
     "test/fixtures/codeburn/report-v0.9.15.json": "f0b6df15fffae48604bad2caf9889e9d38a8b594aeb3872c5c8db8fe431e58f5",
@@ -1072,7 +1072,7 @@
     "test/unit/cli-observability.test.mjs": "56e2437abe2c3ffcb0f424c5f313dafbdb7f568c7e2b833bc3de4d2c4750cf20",
     "test/unit/cli-presets.test.mjs": "5a61054dfd68d224b7291435aa07d72ff3b89c1c8543af0397b8aa6e4bd865ca",
     "test/unit/codeburn-metering-adapter.test.mjs": "b091e91d98ffc4f922993b9f6488062e5eea14504c9c95a467fff071c6c2fd9b",
-    "test/unit/codex-session-metering-adapter.test.mjs": "7ead61c5bce08be81d0ead768866e68f593df2c34f0be7e1fb61a9f2cd2d660a",
+    "test/unit/codex-session-metering-adapter.test.mjs": "bc34a5c165ab9d52a8663441ef792dbc05e7605719bb7013592ee433d7957fda",
     "test/unit/context-optimization.test.mjs": "c002f6c85c9dfcb092d25554a37085090d46df73f5062258c9e1d317c8938ace",
     "test/unit/delivery-profile-v2.test.mjs": "ac7579ca4a1e9f926e41ea9376297065b24904e36e347597bac96ff4a0b45889",
     "test/unit/delivery-provider-registry.test.mjs": "b153d78bc247fc69120c75417a58659e5a15e30f9c2f17e9bd05466a1b4ed8e8",
@@ -1100,7 +1100,7 @@
     "test/unit/release-workflow-guard.test.mjs": "728683e076e31490c01d25a1343f38b490c7c24cf28b813a81ffa1f74fb85262",
     "test/unit/release-workflow.test.mjs": "9e9e134419b2593af03ff37aea9638557d04e4bd3cf701675b522676305c82b9",
     "test/unit/requirement-lifecycle.test.mjs": "b77c1a5a0edc73785550422bce6015bdaaed08b97a89c2d951fc081c8ca64f40",
-    "test/unit/rtk-optimization-adapter.test.mjs": "5dfe202ac90922ea9fba54416de9b82a85a3895a17a496430f35e8213b35505b",
+    "test/unit/rtk-optimization-adapter.test.mjs": "d63f3160bc6b6b24fa160478f2073fb4515002c1b64169df74c5e4eb281d78d7",
     "test/unit/source-syntax-check.test.mjs": "75259f5d8b449c35047903aafc388823cc84929737adb7a455585d0a7860f42d",
     "test/unit/trace-evidence-manifest.test.mjs": "4a049bed56b22415ee22658e56bff6c7c9b0e94a663d3067d3b2450bc2c3cf45",
     "test/unit/trace-integrity.test.mjs": "66cd4234eb9c99861ac006114e2bbcaef37b59daa02a40faaa6f46ab8fea6f52",
@@ -1117,10 +1117,10 @@
   },
   "approvals": [
     {
-      "id": "APR-20260728100757-492c20",
+      "id": "APR-20260728102954-1b638a",
       "baseline_id": "BASELINE-ENTERPRISE-PLATFORM-006",
       "status": "approved",
-      "summary": "Approved the unchanged evidence boundary after refreshing hashes against origin/main 2d9ade8; the scope remains exactly the agreed portable workflow hardening PR.",
+      "summary": "Approved the unchanged evidence boundary after the reviewed Windows fix and bounded CI-cleanup retry passed the complete local validation bundle.",
       "scope": {
         "principle": "An automation approval is valid only under an explicit delegated approval level or configured automation policy recorded in the summary or evidence.",
         "subject_id": "BASELINE-ENTERPRISE-PLATFORM-006",
@@ -1131,21 +1131,21 @@
         "requires_summary_or_evidence_of_delegation": true,
         "does_not_expand_to_installs_deploys_secrets_external_access_or_destructive_actions": true,
         "ask_user_if_scope_changes": true,
-        "authorization_ref": "AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-002",
-        "approval_level": "Approve only the refreshed BASELINE-ENTERPRISE-PLATFORM-006 for ST-PORTABLE-WORKFLOW-HARDENING after synchronization to origin/main 2d9ade8; no requirement, delivery target, write boundary, install, secret, release, deployment, destructive action, or unrelated scope expansion.",
+        "authorization_ref": "AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-003",
+        "approval_level": "Approve only the refreshed BASELINE-ENTERPRISE-PLATFORM-006 for the post-review fix in ST-PORTABLE-WORKFLOW-HARDENING; no requirement, delivery target, write boundary, install, secret, release, deployment, destructive action, or unrelated scope expansion.",
         "allowed_actions": [
           "baseline.approve"
         ],
-        "subject_scope": "Approve only the refreshed BASELINE-ENTERPRISE-PLATFORM-006 for ST-PORTABLE-WORKFLOW-HARDENING after synchronization to origin/main 2d9ade8; no requirement, delivery target, write boundary, install, secret, release, deployment, destructive action, or unrelated scope expansion."
+        "subject_scope": "Approve only the refreshed BASELINE-ENTERPRISE-PLATFORM-006 for the post-review fix in ST-PORTABLE-WORKFLOW-HARDENING; no requirement, delivery target, write boundary, install, secret, release, deployment, destructive action, or unrelated scope expansion."
       },
       "evidence": [],
       "approval_source": "automation",
-      "authorization_ref": "AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-002",
-      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-002/AUSE-AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-002-20260728100757984-b45041.json",
+      "authorization_ref": "AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-003",
+      "authorization_use_ref": ".sdlc/authorization-uses/AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-003/AUSE-AUTH-PORTABLE-WORKFLOW-HARDENING-BASELINE-003-20260728102954322-cd1b0f.json",
       "authorization_action": "baseline.approve",
       "explicit_user_confirmation": false,
       "provisional": false,
-      "approved_content_hash": "825a62a4c5801b18423b1afde9561f2a537348b0f6ed0829a216665ea58a734c",
+      "approved_content_hash": "980e22d6a78fe3474818ea6dc929dde68303933d8e5f5e23c1b004392f75aead",
       "hash_algorithm": "sha256:stable-json:v1",
       "approved_by": {
         "id": "codex",
@@ -1157,7 +1157,7 @@
       "git": {
         "is_git_repo": true,
         "branch": "codex/ST-PORTABLE-WORKFLOW-HARDENING",
-        "head_sha": "2d9ade8e597035343fef5bb2ce5ce1162a30f731",
+        "head_sha": "fb38242c046daebf2bb446cdd0abe759019edb6e",
         "is_dirty": true,
         "user": {
           "name": "Antonio Antenore",
@@ -1174,11 +1174,11 @@
         "tool": "agentic-sdlc-cli",
         "version": "0.13.0"
       },
-      "created_at": "2026-07-28T10:07:57.986Z"
+      "created_at": "2026-07-28T10:29:54.323Z"
     }
   ],
-  "created_at": "2026-07-28T10:07:49.081Z",
-  "updated_at": "2026-07-28T10:07:57.986Z",
+  "created_at": "2026-07-28T10:29:53.823Z",
+  "updated_at": "2026-07-28T10:29:54.323Z",
   "audit": {
     "proposed_by": {
       "id": "codex",
@@ -1190,7 +1190,7 @@
     "git": {
       "is_git_repo": true,
       "branch": "codex/ST-PORTABLE-WORKFLOW-HARDENING",
-      "head_sha": "2d9ade8e597035343fef5bb2ce5ce1162a30f731",
+      "head_sha": "fb38242c046daebf2bb446cdd0abe759019edb6e",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
