@@ -342,7 +342,8 @@ test("approval, authorization, routing, and contract help expose governed runtim
   assert.match(buildHelpModel(["route", "decide"]).examples[0], /"requested_action":"implement_story"/u);
 
   const contract = describe("contract create");
-  assert.equal(contract.get("--phase")?.value, "discovery|analysis|design|implementation|validation|release");
+  assert.equal(contract.get("--phase")?.value, "configured-phase");
+  assert.match(contract.get("--phase")?.description || "", /project's phase_order/u);
   assert.equal(contract.get("--reasoning")?.value, "inherit|minimal|low|medium|high");
   assert.equal(contract.has("--force"), true);
   assert.equal(describe("contract approve").get("--status")?.value, "approved|changes_requested|rejected");

@@ -752,11 +752,12 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   assert.match(proposalResponse.human_guidance.required_decision, /2\. Autonomy with checks: I proceed independently/u);
   assert.match(proposalResponse.human_guidance.required_decision, /3\. Full autonomy within these limits: I complete this pull request/u);
   assert.match(proposalResponse.human_guidance.required_decision, /applies only to this pull request and will not be reused/u);
-  assert.match(proposalResponse.human_guidance.required_decision, /before anything is deployed outside the local machine and before the pull request is merged/u);
+  assert.doesNotMatch(proposalResponse.human_guidance.required_decision, /deployed outside the local machine/u);
+  assert.match(proposalResponse.human_guidance.required_decision, /before the pull request is merged/u);
   assert.match(proposalResponse.human_guidance.required_decision, /no separate calendar deadline.*ends when the pull request is merged, closed, or cancelled/u);
   assert.equal(proposalResponse.human_guidance.details.project_name, "Autonomy E2E");
   assert.deepEqual(proposalResponse.human_guidance.details.allowed_write_paths, ["src"]);
-  assert.deepEqual(proposalResponse.human_guidance.details.review_moments, ["deploy.remote", "pull_request.merge"]);
+  assert.deepEqual(proposalResponse.human_guidance.details.review_moments, ["pull_request.merge"]);
   assert.equal(proposalResponse.human_guidance.details.expires_at, null);
 
   const activated = mustRunJson([
@@ -2716,6 +2717,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.match(proposalResponse.human_guidance.required_decision, /Full autonomy within these limits: I complete this local release/u);
   assert.match(proposalResponse.human_guidance.required_decision, /applies only to this local release and will not be reused/u);
   assert.doesNotMatch(proposalResponse.human_guidance.required_decision, /pull request or local release/u);
+  assert.equal(proposalResponse.human_guidance.details.review_moments.includes("data.migrate"), false);
+  assert.equal(proposalResponse.human_guidance.details.review_moments.includes("data.rollback"), false);
+  assert.equal(proposalResponse.human_guidance.details.review_moments.includes("pull_request.merge"), false);
+  assert.equal(proposalResponse.human_guidance.details.review_moments.includes("deploy.remote"), false);
 
   const missingLocalSelection = mustRun([
     "task", "start",

@@ -13251,11 +13251,25 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     ? "checkpointed"
     : requestedLevel;
   const effectivePreset = context.config.autonomy_policy?.presets?.[effectiveProposalLevel] || {};
-  const relevantCheckpoints = (effectivePreset.checkpoints || profile.checkpoints || []).filter((checkpoint) => (
-    kind === "local_release"
-      ? !["deploy.remote", "pull_request.merge", "sync.pr", "sync.push"].includes(checkpoint)
-      : !["deploy.remote", "release.local"].includes(checkpoint)
-  ));
+  const targetActions = new Set(deliveryTargetAllowedActions(profile));
+  const deliveryCheckpointActions = new Map([
+    ["build.local", "build.local"],
+    ["release.local", "release.local"],
+    ["data.migrate", "data.migrate"],
+    ["data.rollback", "data.rollback"],
+    ["rollback.verify", "rollback.verify"],
+    ["sync.commit", "git.commit"],
+    ["sync.push", "git.push"],
+    ["sync.pr", "pull_request.update"],
+    ["pull_request.merge", "pull_request.merge"],
+    ["deploy.remote", "deploy.remote"],
+  ]);
+  const relevantCheckpoints = (effectivePreset.checkpoints || profile.checkpoints || []).filter((checkpoint) => {
+    const targetAction = deliveryCheckpointActions.get(checkpoint);
+    if (!targetAction) return true;
+    if (targetActions.has(targetAction)) return true;
+    return kind === "pull_request" && checkpoint === "pull_request.merge";
+  });
   const review = {
     profile_id: profileId,
     delivery: { id: deliveryId, kind },
@@ -13292,7 +13306,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     target_root: profile.local_release_target?.root_path,
     smoke_cwd: profile.local_release_target?.smoke_cwd || null,
     allowed_write_paths: review.allowed_write_paths,
-    review_moments: profile.checkpoints,
+    review_moments: review.checkpoints,
     expires_at: profile.expires_at,
     requested_level: requestedLevel,
     effective_level: effectiveProposalLevel,
