@@ -25,9 +25,9 @@ This page is the documentation map. Start with the goal that matches what you wa
 | Understand the normal user journey | [How it works](how-it-works.md) | What happens at each checkpoint and which records are created |
 | Run or explain an assessment | [Assessment interactions](agent-interactions.md) | What Codex asks, what the user must answer, and concrete examples |
 | Choose autonomy for a requirement, pull request, or local release | [Limits and metering](limits-and-metering.md) | Requirement ceiling, per-delivery selection, local rollback, exception boundaries, and resource limits |
-| Measure local Codex usage with CodeBurn | [Limits and metering](limits-and-metering.md#codeburn-advisory-metering) | The complete `start` and `record` workflow, option meanings, and metric mappings |
-| Integrate the CodeBurn library adapter | [CodeBurn adapter reference](codeburn-metering.md) | Snapshot and delta contracts, integrity rules, and library APIs |
-| Reduce token-heavy tool output | [Token efficiency](token-efficiency.md) | Compact JSON defaults, RTK setup, bypass rules, and measurement |
+| Measure the exact local Codex task | [Native Codex session meter](codex-session-metering.md) | Authentication-free local counters, task binding, deltas, and limit semantics |
+| Keep a legacy CodeBurn project working | [CodeBurn adapter reference](codeburn-metering.md) | Disabled-by-default compatibility, snapshot/delta contracts, and library APIs |
+| Reduce command and response tokens | [Token efficiency](token-efficiency.md) | Compact JSON, RTK, Caveman, autoconfiguration, and measured net usage |
 | Keep behavior stable across plugin updates | [Configuration safety](configuration-safety.md) | Config locks, safe previews, drift recovery, and exact plan application |
 | Select or customize a governed process | [Configurable workflows](configurable-workflows.md) | Built-in presets, safe overlays, pinned instances, append-only events, and CLI examples |
 | Understand the architecture and trust model | [Architecture](architecture.md) | Components, canonical records, validation, and release evidence |
@@ -58,7 +58,8 @@ This page is the documentation map. Start with the goal that matches what you wa
 2. [Architecture](architecture.md)
 3. [Knowledge-base structure](kb-structure.md)
 4. [Configurable workflows](configurable-workflows.md)
-5. [CodeBurn adapter reference](codeburn-metering.md)
+5. [Native Codex session meter](codex-session-metering.md)
+6. [CodeBurn adapter reference](codeburn-metering.md), only for legacy configurations
 
 ### Maintainer changing the plugin
 

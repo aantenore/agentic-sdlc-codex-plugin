@@ -38,6 +38,12 @@
     "decimal": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
     "counter": { "type": "integer", "minimum": 0 },
     "adapter": {
+      "oneOf": [
+        { "$ref": "#/$defs/codeburn_adapter" },
+        { "$ref": "#/$defs/codex_session_adapter" }
+      ]
+    },
+    "codeburn_adapter": {
       "type": "object",
       "required": ["id", "version", "report_contract"],
       "properties": {
@@ -47,7 +53,23 @@
       },
       "additionalProperties": false
     },
+    "codex_session_adapter": {
+      "type": "object",
+      "required": ["id", "version", "report_contract"],
+      "properties": {
+        "id": { "const": "codex-session" },
+        "version": { "const": "1.0.0" },
+        "report_contract": { "const": "codex-session-token-count:v1" }
+      },
+      "additionalProperties": false
+    },
     "scope": {
+      "oneOf": [
+        { "$ref": "#/$defs/codeburn_scope" },
+        { "$ref": "#/$defs/codex_session_scope" }
+      ]
+    },
+    "codeburn_scope": {
       "type": "object",
       "required": ["provider", "project", "from", "to"],
       "properties": {
@@ -58,7 +80,24 @@
       },
       "additionalProperties": false
     },
+    "codex_session_scope": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "tokens": {
+      "oneOf": [
+        { "$ref": "#/$defs/codeburn_tokens" },
+        { "$ref": "#/$defs/codex_session_tokens" }
+      ]
+    },
+    "codeburn_tokens": {
       "type": "object",
       "required": ["input", "output", "cache_read", "cache_write"],
       "properties": {
@@ -66,6 +105,26 @@
         "output": { "$ref": "#/$defs/counter" },
         "cache_read": { "$ref": "#/$defs/counter" },
         "cache_write": { "$ref": "#/$defs/counter" }
+      },
+      "additionalProperties": false
+    },
+    "codex_session_tokens": {
+      "type": "object",
+      "required": [
+        "total",
+        "input",
+        "output",
+        "cache_read",
+        "cache_write",
+        "reasoning_output"
+      ],
+      "properties": {
+        "total": { "$ref": "#/$defs/counter" },
+        "input": { "$ref": "#/$defs/counter" },
+        "output": { "$ref": "#/$defs/counter" },
+        "cache_read": { "$ref": "#/$defs/counter" },
+        "cache_write": { "$ref": "#/$defs/counter" },
+        "reasoning_output": { "$ref": "#/$defs/counter" }
       },
       "additionalProperties": false
     },
@@ -95,7 +154,7 @@
       "properties": {
         "tokens": { "const": "estimated" },
         "calls": { "const": "estimated" },
-        "cost": { "const": "estimated" }
+        "cost": { "enum": ["estimated", "unavailable"] }
       },
       "additionalProperties": false
     },
@@ -127,6 +186,12 @@
       "additionalProperties": false
     },
     "source": {
+      "oneOf": [
+        { "$ref": "#/$defs/codeburn_source" },
+        { "$ref": "#/$defs/codex_session_source" }
+      ]
+    },
+    "codeburn_source": {
       "type": "object",
       "required": ["argv", "report_hash", "report_generated_at", "report_period", "matched_projects"],
       "properties": {
@@ -143,6 +208,106 @@
           "type": "array",
           "items": { "$ref": "#/$defs/project_match" }
         }
+      },
+      "additionalProperties": false
+    },
+    "codex_session_source": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "session_identity_hash",
+        "project_scope_hash",
+        "relative_path",
+        "file_size_bytes",
+        "event_timestamp",
+        "event_hash",
+        "rate_limits",
+        "shell",
+        "authentication_required"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "session_identity_hash": { "$ref": "#/$defs/sha256" },
+        "project_scope_hash": { "$ref": "#/$defs/sha256" },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "not": { "pattern": "^(?:/|\\.\\./)" }
+        },
+        "file_size_bytes": { "$ref": "#/$defs/counter" },
+        "event_timestamp": { "type": "string", "format": "date-time" },
+        "event_hash": { "$ref": "#/$defs/sha256" },
+        "rate_limits": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/codex_rate_limits" }
+          ]
+        },
+        "shell": { "const": false },
+        "authentication_required": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "codex_rate_limit_window": {
+      "type": "object",
+      "required": ["used_percent", "window_minutes", "resets_at"],
+      "properties": {
+        "used_percent": { "type": ["number", "null"] },
+        "window_minutes": {
+          "oneOf": [
+            { "$ref": "#/$defs/counter" },
+            { "type": "null" }
+          ]
+        },
+        "resets_at": { "type": ["number", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "codex_rate_limits": {
+      "type": "object",
+      "required": [
+        "limit_id",
+        "primary",
+        "secondary",
+        "credits",
+        "spend_control_reached",
+        "rate_limit_reached_type"
+      ],
+      "properties": {
+        "limit_id": { "type": ["string", "null"] },
+        "primary": {
+          "oneOf": [
+            { "$ref": "#/$defs/codex_rate_limit_window" },
+            { "type": "null" }
+          ]
+        },
+        "secondary": {
+          "oneOf": [
+            { "$ref": "#/$defs/codex_rate_limit_window" },
+            { "type": "null" }
+          ]
+        },
+        "credits": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["has_credits", "unlimited", "balance"],
+              "properties": {
+                "has_credits": { "type": ["boolean", "null"] },
+                "unlimited": { "type": ["boolean", "null"] },
+                "balance": { "type": ["number", "null"] }
+              },
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        },
+        "spend_control_reached": { "type": ["boolean", "null"] },
+        "rate_limit_reached_type": { "type": ["string", "null"] }
       },
       "additionalProperties": false
     }

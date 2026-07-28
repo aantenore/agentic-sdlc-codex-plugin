@@ -1,5 +1,10 @@
 # CodeBurn advisory metering adapter
 
+This is a legacy compatibility adapter. New projects use the bundled
+`codex-session` adapter, and token-efficiency autoconfiguration never installs,
+enables, or invokes CodeBurn. Keep this adapter only when an existing project
+explicitly depends on CodeBurn aggregation or estimated cost.
+
 The CodeBurn adapter converts a local CodeBurn 0.9.x JSON report into a provider-neutral, immutable metering snapshot. It is intentionally an observation source, not an authority source: token, call, and cost measurements are always `estimated`, the assurance classification is always `advisory_observed`, and `trusted_exact` is always `false`.
 
 The CLI integration requires CodeBurn 0.9.x to be installed separately; it never installs or upgrades CodeBurn. Use `budget meter start --proposal ASSESS-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14` after approval and before execution, then `budget meter record --proposal ASSESS-001 --adapter codeburn [--baseline id]`. The stored query is reused exactly, deltas advance from the last recorded snapshot, and identical observations replay idempotently. Multi-day work should declare its full stable date window at start.

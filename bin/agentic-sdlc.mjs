@@ -70,12 +70,19 @@ import {
   validateMeteringAttestationForReceipt,
 } from "../lib/metering-attestations.mjs";
 import {
-  buildCodeBurnMeteringSnapshot,
   calculateMeteringDelta,
-  executeCodeBurnReport,
+  collectCodeBurnMeteringSnapshot,
   validateMeteringDeltaIntegrity,
   validateMeteringSnapshotIntegrity,
 } from "../lib/codeburn-metering-adapter.mjs";
+import {
+  CODEX_SESSION_ADAPTER_ID,
+  calculateCodexSessionMeteringDelta,
+  collectCodexSessionMeteringSnapshot,
+  mapCodexSessionUsage,
+  validateCodexSessionMeteringDelta,
+  validateCodexSessionMeteringSnapshot,
+} from "../lib/codex-session-metering-adapter.mjs";
 import {
   RTK_ADAPTER_ID,
   collectRtkOptimizationTelemetry,
@@ -219,12 +226,56 @@ const LEGACY_CONFIG_PROFILE_ID = "sdlc-config-v1@0.11.0";
 const INTERNAL_LOCK_WAIT_MS = 5000;
 const INTERNAL_LOCK_STALE_MS = 30000;
 const INTERNAL_LOCK_REMOTE_STALE_MS = 300000;
+const DEFAULT_CODEX_SESSION_METERING_CONFIG = Object.freeze({
+  enabled: true,
+  metric_mapping: Object.freeze({
+    tokens: "tokens.total",
+    input_tokens: "tokens.input",
+    output_tokens: "tokens.output",
+    cache_read_tokens: "tokens.cache_read",
+    cache_write_tokens: "tokens.cache_write",
+    model_calls: "calls",
+  }),
+});
 const BUILT_IN_BUDGET_METER_ADAPTERS = Object.freeze({
   codeburn: Object.freeze({
     id: "codeburn",
-    execute: executeCodeBurnReport,
-    buildSnapshot: buildCodeBurnMeteringSnapshot,
+    label: "CodeBurn",
+    supported_sources: Object.freeze([
+      "tokens.total",
+      "tokens.input",
+      "tokens.output",
+      "tokens.cache_read",
+      "tokens.cache_write",
+      "calls",
+      "cost",
+    ]),
+    buildQuery: codeBurnQuery,
+    collect: collectCodeBurnBudgetMeterSnapshot,
     calculateDelta: calculateMeteringDelta,
+    validateSnapshot: validateMeteringSnapshotIntegrity,
+    validateDelta: validateMeteringDeltaIntegrity,
+    mapUsage: mappedCodeBurnUsage,
+    assurance: "estimated/advisory_observed",
+  }),
+  [CODEX_SESSION_ADAPTER_ID]: Object.freeze({
+    id: CODEX_SESSION_ADAPTER_ID,
+    label: "Codex session",
+    supported_sources: Object.freeze([
+      "tokens.total",
+      "tokens.input",
+      "tokens.output",
+      "tokens.cache_read",
+      "tokens.cache_write",
+      "calls",
+    ]),
+    buildQuery: codexSessionQuery,
+    collect: collectCodexSessionBudgetMeterSnapshot,
+    calculateDelta: calculateCodexSessionMeteringDelta,
+    validateSnapshot: validateCodexSessionMeteringSnapshot,
+    validateDelta: validateCodexSessionMeteringDelta,
+    mapUsage: mapCodexSessionUsage,
+    assurance: "local/advisory_observed",
   }),
 });
 const NO_FOLLOW_FLAG = fs.constants.O_NOFOLLOW || 0;
@@ -514,6 +565,7 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "scope-title",
   "section",
   "session-id",
+  "session-file",
   "since",
   "source",
   "status",
@@ -8214,6 +8266,10 @@ async function runDoctor(context, options) {
     ["assessment-agent-card", "skills/agentic-sdlc-assessment/agents/openai.yaml"],
     ["assessment-preset", "templates/technical-assessment.md"],
     ["rtk-optimization-adapter", "lib/rtk-optimization-adapter.mjs"],
+    ["caveman-response-skill", "skills/caveman/SKILL.md"],
+    ["caveman-agent-card", "skills/caveman/agents/openai.yaml"],
+    ["codex-session-metering-adapter", "lib/codex-session-metering-adapter.mjs"],
+    ["token-efficiency-autoconfiguration", "scripts/autoconfigure-token-efficiency.py"],
     ["context-optimization-domain", "lib/context-optimization.mjs"],
     ["context-optimization-schema", "schemas/context-optimization-observation.schema.json"],
     ["observatory-entry-point", "lib/change-observatory/index.mjs"],
@@ -8229,6 +8285,21 @@ async function runDoctor(context, options) {
   }
 
   const optimizationPolicy = readContextOptimizationPolicy(context);
+  add(
+    "caveman-response-provider",
+    optimizationPolicy.response_provider.mode === "disabled"
+      ? "not_applicable"
+      : (
+          optimizationPolicy.response_provider.id === "caveman"
+          && optimizationPolicy.response_provider.version === "1.9.1"
+          && optimizationPolicy.response_provider.usage_accounting === "measured_net_usage_only"
+        )
+        ? "passed"
+        : "failed",
+    optimizationPolicy.response_provider.mode === "disabled"
+      ? "Response compression is disabled by policy."
+      : `Caveman ${optimizationPolicy.response_provider.version} ${optimizationPolicy.response_provider.mode}; budget limits use measured net usage only`,
+  );
   if (!optimizationPolicy.enabled || optimizationPolicy.mode === "disabled") {
     add("rtk-optimization-provider", "not_applicable", "Context optimization is disabled by policy.");
   } else {
@@ -8310,6 +8381,15 @@ function readContextOptimizationPolicy(context) {
         executable: command.executable || "rtk",
         arguments: Array.isArray(command.arguments) ? command.arguments : [],
       },
+    },
+    response_provider: {
+      id: configured.response_provider?.id || "caveman",
+      version: configured.response_provider?.version || "1.9.1",
+      skill: configured.response_provider?.skill || "../caveman/SKILL.md",
+      mode: configured.response_provider?.mode || "adaptive",
+      default_intensity: configured.response_provider?.default_intensity || "full",
+      auto_clarity: configured.response_provider?.auto_clarity !== false,
+      usage_accounting: configured.response_provider?.usage_accounting || "measured_net_usage_only",
     },
     telemetry: {
       enabled: configured.telemetry?.enabled !== false,
@@ -16097,8 +16177,8 @@ function inspectExactMeteringSource(context, receipt, budget, metrics = exactMet
   }
   const errors = [...exactMeteringPolicyTrustErrors(context, budget)];
   const adapter = String(receipt.source?.adapter || "").trim();
-  if (adapter === "codeburn") {
-    errors.push("CodeBurn is permanently advisory_observed and cannot be trusted as exact metering");
+  if (["codeburn", CODEX_SESSION_ADAPTER_ID].includes(adapter)) {
+    errors.push(`${adapter} is advisory_observed and cannot be trusted as exact metering`);
   }
   const configured = context.config.budget_policy?.exact_metering;
   const matchingSources = configured?.default_trust === "deny" && Array.isArray(configured.trusted_sources)
@@ -16381,24 +16461,28 @@ function budgetMeterBaselinePath(context, proposalId, adapterId, baselineId) {
 }
 
 function budgetMeterAdapter(context, options) {
-  const adapterId = String(requireOption(options, "adapter")).trim().toLowerCase();
+  const configuredDefault = context.config.budget_policy?.default_metering_adapter;
+  const adapterId = String(
+    getOptionString(options, "adapter") || configuredDefault || CODEX_SESSION_ADAPTER_ID,
+  ).trim().toLowerCase();
   const adapter = BUILT_IN_BUDGET_METER_ADAPTERS[adapterId];
   if (!adapter) {
     fail(`Unsupported budget meter adapter '${adapterId}'. Built-in allowlist: ${Object.keys(BUILT_IN_BUDGET_METER_ADAPTERS).join(", ")}.`);
   }
-  const config = context.config.budget_policy?.metering_adapters?.[adapterId];
+  const config = context.config.budget_policy?.metering_adapters?.[adapterId]
+    || (adapterId === CODEX_SESSION_ADAPTER_ID
+      ? DEFAULT_CODEX_SESSION_METERING_CONFIG
+      : null);
   if (!config || config.enabled !== true) {
     fail(`Budget meter adapter '${adapterId}' is disabled or missing from budget_policy.metering_adapters.`);
   }
   return { adapter, config };
 }
 
-function resolveBudgetMeterMapping(budget, config) {
-  const allowedSources = new Set([
-    "tokens.total", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write", "calls", "cost",
-  ]);
+function resolveBudgetMeterMapping(budget, config, adapter) {
+  const allowedSources = new Set(adapter.supported_sources);
   if (!config.metric_mapping || typeof config.metric_mapping !== "object" || Array.isArray(config.metric_mapping)) {
-    fail("CodeBurn metric_mapping must be a configuration object.");
+    fail(`${adapter.label} metric_mapping must be a configuration object.`);
   }
   const mapping = {};
   for (const [metric, source] of Object.entries(config.metric_mapping)) {
@@ -16406,19 +16490,19 @@ function resolveBudgetMeterMapping(budget, config) {
       continue;
     }
     if (!allowedSources.has(source)) {
-      fail(`CodeBurn metric_mapping.${metric} uses unsupported source '${source}'.`);
+      fail(`${adapter.label} metric_mapping.${metric} uses unsupported source '${source}'.`);
     }
     const spec = budget.limits[metric];
     if (source === "cost" && !spec.currency) {
-      fail(`CodeBurn cost mapping requires budget metric '${metric}' to declare currency.`);
+      fail(`${adapter.label} cost mapping requires budget metric '${metric}' to declare currency.`);
     }
     if (source.startsWith("tokens.") && spec.unit !== "tokens") {
-      fail(`CodeBurn token source '${source}' requires budget metric '${metric}' to use unit 'tokens'.`);
+      fail(`${adapter.label} token source '${source}' requires budget metric '${metric}' to use unit 'tokens'.`);
     }
     mapping[metric] = source;
   }
   if (Object.keys(mapping).length === 0) {
-    fail(`CodeBurn has no configured mapping for this budget. Budget metrics: ${Object.keys(budget.limits).join(", ")}.`);
+    fail(`${adapter.label} has no configured mapping for this budget. Budget metrics: ${Object.keys(budget.limits).join(", ")}.`);
   }
   return Object.fromEntries(Object.entries(mapping).sort(([left], [right]) => left.localeCompare(right)));
 }
@@ -16436,6 +16520,17 @@ function codeBurnQuery(context, options, config, stored = null) {
   };
 }
 
+function codexSessionQuery(_context, options, _config, stored = null) {
+  if (stored) return stored;
+  const threadId = getOptionString(options, "thread-id") || process.env.CODEX_THREAD_ID;
+  if (!threadId) {
+    fail(
+      "Codex session metering requires CODEX_THREAD_ID from the host or an explicit --thread-id.",
+    );
+  }
+  return { thread_id: threadId };
+}
+
 function budgetMeterExecutionOptions(context, config) {
   const command = config.command;
   return {
@@ -16447,21 +16542,54 @@ function budgetMeterExecutionOptions(context, config) {
   };
 }
 
-async function collectBudgetMeterSnapshot(context, proposalId, adapter, config, query, idPrefix) {
-  let execution;
+async function collectCodeBurnBudgetMeterSnapshot(context, _proposalId, config, query, idPrefix) {
   try {
-    execution = await adapter.execute(query, budgetMeterExecutionOptions(context, config));
+    return await collectCodeBurnMeteringSnapshot(
+      {
+        id: normalizeId(`${idPrefix}-SNAPSHOT`),
+        query,
+      },
+      budgetMeterExecutionOptions(context, config),
+    );
   } catch (error) {
     fail(`CodeBurn collection failed: ${error.message}${error.stderr ? `; ${error.stderr}` : ""}`);
   }
-  const reportHash = shortHashFull(stableJson(execution.report));
-  return adapter.buildSnapshot({
-    id: normalizeId(`${idPrefix}-${reportHash.slice(0, 12)}`),
-    report: execution.report,
-    query: execution.query,
-    tool_version: execution.tool_version,
-    argv: execution.argv,
-  });
+}
+
+async function collectCodexSessionBudgetMeterSnapshot(
+  context,
+  _proposalId,
+  _config,
+  query,
+  idPrefix,
+  options,
+) {
+  try {
+    return await collectCodexSessionMeteringSnapshot(
+      {
+        id: normalizeId(`${idPrefix}-SNAPSHOT`),
+        query,
+      },
+      {
+        project_root: context.root,
+        session_file: getOptionString(options, "session-file") || undefined,
+      },
+    );
+  } catch (error) {
+    fail(`Codex session collection failed: ${error.message}`);
+  }
+}
+
+async function collectBudgetMeterSnapshot(
+  context,
+  proposalId,
+  adapter,
+  config,
+  query,
+  idPrefix,
+  options,
+) {
+  return adapter.collect(context, proposalId, config, query, idPrefix, options);
 }
 
 function buildBudgetMeterBaseline(context, proposal, budget, adapterId, baselineId, mapping, snapshot) {
@@ -16479,19 +16607,19 @@ function buildBudgetMeterBaseline(context, proposal, budget, adapterId, baseline
   return { ...body, baseline_hash: shortHashFull(stableJson(body)), hash_algorithm: "sha256:stable-json:v1" };
 }
 
-function validateBudgetMeterBaseline(baseline, proposal, budget, adapterId, mapping) {
+function validateBudgetMeterBaseline(baseline, proposal, budget, adapter, mapping) {
   const { baseline_hash: hash, hash_algorithm: algorithm, ...body } = baseline || {};
   if (algorithm !== "sha256:stable-json:v1" || hash !== shortHashFull(stableJson(body))) {
     fail("Budget meter baseline failed immutable content validation.");
   }
   if (baseline.proposal_ref?.id !== proposal.id || baseline.proposal_ref?.hash !== proposal.proposal_hash ||
-      baseline.budget_ref?.id !== budget.id || baseline.budget_ref?.hash !== budget.budget_hash || baseline.adapter !== adapterId) {
+      baseline.budget_ref?.id !== budget.id || baseline.budget_ref?.hash !== budget.budget_hash || baseline.adapter !== adapter.id) {
     fail("Budget meter baseline is not bound to the current proposal, effective budget, and adapter.");
   }
   if (stableJson(baseline.metric_mapping) !== stableJson(mapping)) {
-    fail("CodeBurn metric mapping changed after baseline capture; create a new named baseline before recording usage.");
+    fail(`${adapter.label} metric mapping changed after baseline capture; create a new named baseline before recording usage.`);
   }
-  const integrity = validateMeteringSnapshotIntegrity(baseline.snapshot);
+  const integrity = adapter.validateSnapshot(baseline.snapshot);
   if (!integrity.valid) {
     fail(`Budget meter baseline snapshot is invalid: ${integrity.errors.join("; ")}`);
   }
@@ -16522,16 +16650,16 @@ async function startBudgetMeter(context, options) {
   const budget = effectiveAssessmentBudget(context, proposalId);
   const { adapter, config } = budgetMeterAdapter(context, options);
   const baselineId = normalizeId(options.id || `METER-${proposalId}-${adapter.id}`);
-  const mapping = resolveBudgetMeterMapping(budget, config);
+  const mapping = resolveBudgetMeterMapping(budget, config, adapter);
   const baselinePath = budgetMeterBaselinePath(context, proposalId, adapter.id, baselineId);
   if (fs.existsSync(baselinePath)) {
-    const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+    const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter, mapping);
     output(options, { status: "idempotent_replay", idempotent: true, baseline: existing, baseline_path: toProjectPath(context, baselinePath) }, [
-      `CodeBurn baseline ${baselineId} already exists with the same immutable content.`,
+      `${adapter.label} baseline ${baselineId} already exists with the same immutable content.`,
     ]);
     return;
   }
-  const query = codeBurnQuery(context, options, config);
+  const query = adapter.buildQuery(context, options, config);
   const snapshot = await collectBudgetMeterSnapshot(
     context,
     proposalId,
@@ -16539,21 +16667,22 @@ async function startBudgetMeter(context, options) {
     config,
     query,
     `${baselineId}-SNAPSHOT`,
+    options,
   );
   const baseline = buildBudgetMeterBaseline(context, proposal, budget, adapter.id, baselineId, mapping, snapshot);
   const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
   try {
     if (fs.existsSync(baselinePath)) {
-      const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+      const existing = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter, mapping);
       output(options, { status: "idempotent_replay", idempotent: true, baseline: existing, baseline_path: toProjectPath(context, baselinePath) }, [
-        `Concurrent start already created immutable CodeBurn baseline ${baselineId}; reused it.`,
+        `Concurrent start already created immutable ${adapter.label} baseline ${baselineId}; reused it.`,
       ]);
       return;
     }
-    const created = writeImmutableMeterRecord(context, baselinePath, baseline, "baseline_hash", `CodeBurn baseline ${baselineId}`);
+    const created = writeImmutableMeterRecord(context, baselinePath, baseline, "baseline_hash", `${adapter.label} baseline ${baselineId}`);
     output(options, { status: created ? "created" : "idempotent_replay", idempotent: !created, baseline, baseline_path: toProjectPath(context, baselinePath) }, [
-      `${created ? "Created" : "Reused"} immutable CodeBurn baseline ${baselineId}.`,
-      "Assurance: estimated/advisory_observed; this baseline is not an exact or signed attestation.",
+      `${created ? "Created" : "Reused"} immutable ${adapter.label} baseline ${baselineId}.`,
+      `Assurance: ${adapter.assurance}; this baseline is not an exact or signed attestation.`,
     ]);
   } finally {
     releaseLock();
@@ -16590,19 +16719,19 @@ function mappedCodeBurnUsage(delta, budget, mapping) {
   return usage;
 }
 
-function readCodeBurnSnapshotReference(context, proposalId, reference) {
+function readBudgetMeterSnapshotReference(context, proposalId, adapter, reference) {
   if (!reference?.path || !reference?.hash) {
-    fail("CodeBurn usage history has a missing current snapshot reference.");
+    fail(`${adapter.label} usage history has a missing current snapshot reference.`);
   }
   const filePath = resolveProjectFilePath(context, reference.path, { mustExist: true, fileOnly: true });
-  const expectedRoot = path.join(budgetMeterRoot(context, proposalId, "codeburn"), "snapshots");
+  const expectedRoot = path.join(budgetMeterRoot(context, proposalId, adapter.id), "snapshots");
   if (!isInsidePath(expectedRoot, filePath)) {
-    fail("CodeBurn current snapshot reference escapes its project-local metering directory.");
+    fail(`${adapter.label} current snapshot reference escapes its project-local metering directory.`);
   }
   const snapshot = readProjectJson(context, filePath);
-  const integrity = validateMeteringSnapshotIntegrity(snapshot);
+  const integrity = adapter.validateSnapshot(snapshot);
   if (!integrity.valid || snapshot.snapshot_hash !== reference.hash) {
-    fail(`CodeBurn current snapshot ${reference.path} failed integrity validation.`);
+    fail(`${adapter.label} current snapshot ${reference.path} failed integrity validation.`);
   }
   return snapshot;
 }
@@ -16613,37 +16742,42 @@ async function recordBudgetMeter(context, options) {
   const proposal = readAssessmentProposal(context, proposalId);
   const workflow = readAssessmentWorkflow(context, proposalId);
   if (!["running", "verifying", "exception_pending"].includes(workflow.state)) {
-    fail(`CodeBurn usage can be recorded only while running, verifying, or exception_pending; ${proposalId} is ${workflow.state}.`);
+    fail(`Budget meter usage can be recorded only while running, verifying, or exception_pending; ${proposalId} is ${workflow.state}.`);
   }
   const budget = effectiveAssessmentBudget(context, proposalId);
   const { adapter, config } = budgetMeterAdapter(context, options);
   const baselineId = normalizeId(options.baseline || `METER-${proposalId}-${adapter.id}`);
   const baselinePath = budgetMeterBaselinePath(context, proposalId, adapter.id, baselineId);
   if (!fs.existsSync(baselinePath)) {
-    fail(`CodeBurn baseline ${baselineId} does not exist. Run budget meter start first.`);
+    fail(`${adapter.label} baseline ${baselineId} does not exist. Run budget meter start first.`);
   }
-  const mapping = resolveBudgetMeterMapping(budget, config);
-  const baseline = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter.id, mapping);
+  const mapping = resolveBudgetMeterMapping(budget, config, adapter);
+  const baseline = validateBudgetMeterBaseline(readProjectJson(context, baselinePath), proposal, budget, adapter, mapping);
   const current = await collectBudgetMeterSnapshot(
     context,
     proposalId,
     adapter,
     config,
-    codeBurnQuery(context, options, config, baseline.snapshot.scope),
+    adapter.buildQuery(context, options, config, baseline.snapshot.scope),
     `METER-${proposalId}-${adapter.id}-CURRENT`,
+    options,
   );
   const releaseLock = acquireFileLock(assessmentBudgetMutationLockPath(context, proposalId));
   try {
     const lockedBudget = effectiveAssessmentBudget(context, proposalId);
     const lockedBaseline = validateBudgetMeterBaseline(
-      readProjectJson(context, baselinePath), proposal, lockedBudget, adapter.id, resolveBudgetMeterMapping(lockedBudget, config),
+      readProjectJson(context, baselinePath),
+      proposal,
+      lockedBudget,
+      adapter,
+      resolveBudgetMeterMapping(lockedBudget, config, adapter),
     );
     const priorReceipts = readAssessmentUsageReceipts(context, proposalId)
       .filter((receipt) => receipt.source?.adapter === adapter.id && receipt.source?.baseline_ref?.hash === lockedBaseline.baseline_hash)
       .sort((left, right) => String(left.ended_at).localeCompare(String(right.ended_at)));
     const latest = priorReceipts.at(-1) || null;
     const previous = latest
-      ? readCodeBurnSnapshotReference(context, proposalId, latest.source.current_snapshot_ref)
+      ? readBudgetMeterSnapshotReference(context, proposalId, adapter, latest.source.current_snapshot_ref)
       : lockedBaseline.snapshot;
     if (current.snapshot_hash === previous.snapshot_hash && latest) {
       recordBudgetUsageLocked(context, options, proposalId, latest, {
@@ -16658,21 +16792,23 @@ async function recordBudgetMeter(context, options) {
         id: normalizeId(`DELTA-${proposalId}-${previous.snapshot_hash.slice(0, 8)}-${current.snapshot_hash.slice(0, 8)}`),
       });
     } catch (error) {
-      fail(`CodeBurn counters are not a monotonic continuation of the recorded cursor: ${error.message}`);
+      fail(`${adapter.label} counters are not a monotonic continuation of the recorded cursor: ${error.message}`);
     }
-    const deltaIntegrity = validateMeteringDeltaIntegrity(delta);
+    const deltaIntegrity = adapter.validateDelta(delta);
     if (!deltaIntegrity.valid) {
-      fail(`CodeBurn delta failed integrity validation: ${deltaIntegrity.errors.join("; ")}`);
+      fail(`${adapter.label} delta failed integrity validation: ${deltaIntegrity.errors.join("; ")}`);
     }
     const meterRoot = budgetMeterRoot(context, proposalId, adapter.id);
     const currentPath = path.join(meterRoot, "snapshots", `${current.snapshot_hash}.json`);
     const deltaPath = path.join(meterRoot, "deltas", `${delta.delta_hash}.json`);
-    writeImmutableMeterRecord(context, currentPath, current, "snapshot_hash", `CodeBurn snapshot ${current.id}`);
-    writeImmutableMeterRecord(context, deltaPath, delta, "delta_hash", `CodeBurn delta ${delta.id}`);
-    const usage = mappedCodeBurnUsage(delta, lockedBudget, lockedBaseline.metric_mapping);
+    writeImmutableMeterRecord(context, currentPath, current, "snapshot_hash", `${adapter.label} snapshot ${current.id}`);
+    writeImmutableMeterRecord(context, deltaPath, delta, "delta_hash", `${adapter.label} delta ${delta.id}`);
+    const usage = adapter.mapUsage(delta, lockedBudget, lockedBaseline.metric_mapping);
     const metering = Object.fromEntries(Object.keys(usage).map((metric) => [metric, "estimated"]));
     const receipt = buildExecutionUsageReceipt({
-      id: options.id ? normalizeId(options.id) : normalizeId(`USAGE-${proposalId}-CODEBURN-${delta.delta_hash.slice(0, 12)}`),
+      id: options.id
+        ? normalizeId(options.id)
+        : normalizeId(`USAGE-${proposalId}-${adapter.id}-${delta.delta_hash.slice(0, 12)}`),
       execution_id: proposalId,
       budget: lockedBudget,
       usage,
@@ -16691,7 +16827,7 @@ async function recordBudgetMeter(context, options) {
         metric_mapping: lockedBaseline.metric_mapping,
         trusted_exact: false,
       },
-      pricing_ref: Object.hasOwn(usage, "cost") ? {
+      pricing_ref: adapter.id === "codeburn" && Object.hasOwn(usage, "cost") ? {
         estimator: adapter.id,
         classification: "estimated",
         authoritative: false,
@@ -35192,11 +35328,10 @@ Usage:
       [--input-tokens n] [--output-tokens n] [--cost-amount decimal --currency EUR]
       [--metering-accuracy estimated|unavailable] [--metering-source id]
       [--subagent id] [--receipt-json json | --receipt-file path]
-  agentic-sdlc budget meter start --proposal ASSESS-001 --adapter codeburn
-      [--id METER-ASSESS-001-CODEBURN] [--provider codex] [--project ProjectName]
-      [--from YYYY-MM-DD --to YYYY-MM-DD]
-  agentic-sdlc budget meter record --proposal ASSESS-001 --adapter codeburn
-      [--baseline METER-ASSESS-001-CODEBURN] [--id USAGE-ID]
+  agentic-sdlc budget meter start --proposal ASSESS-001
+      [--id METER-ASSESS-001-CODEX-SESSION] [--thread-id CODEX-THREAD-ID]
+  agentic-sdlc budget meter record --proposal ASSESS-001
+      [--baseline METER-ASSESS-001-CODEX-SESSION] [--id USAGE-ID]
   agentic-sdlc budget status --proposal ASSESS-001
   agentic-sdlc budget amend --proposal ASSESS-001 --budget-json json --reason text
       --actor-type human|ci --approval-source explicit-user|ci [--host-receipt-file path]

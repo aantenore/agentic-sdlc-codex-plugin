@@ -137,6 +137,7 @@ function createFakeCodeBurn(project, report) {
   ].join("\n"));
   const configPath = path.join(project, ".sdlc", "config.json");
   const config = readJson(configPath);
+  config.budget_policy.metering_adapters.codeburn.enabled = true;
   config.budget_policy.metering_adapters.codeburn.command = {
     executable: process.execPath,
     arguments: [runnerPath],
@@ -2287,6 +2288,47 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   const codeBurnReport = readJson(path.join(repoRoot, "test", "fixtures", "codeburn", "report-v0.9.15.json"));
   const fakeCodeBurn = createFakeCodeBurn(project, codeBurnReport);
   const fakeRtk = createFakeRtk(project);
+  const fakeCodexHome = path.join(project, "fake-codex-home");
+  const fakeCodexThread = "019fa7f0-d150-7fb1-aad8-d10a2243521a";
+  const fakeCodexSessionRoot = path.join(fakeCodexHome, "sessions", "2026", "07", "28");
+  const fakeCodexSession = path.join(
+    fakeCodexSessionRoot,
+    `rollout-2026-07-28-${fakeCodexThread}.jsonl`,
+  );
+  fs.mkdirSync(fakeCodexSessionRoot, { recursive: true });
+  const codexSessionMeta = {
+    timestamp: "2026-07-28T08:00:00.000Z",
+    type: "session_meta",
+    payload: { id: fakeCodexThread, cwd: project, source: "codex_desktop" },
+  };
+  const codexTokenCount = (timestamp, input, output, cacheRead) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: input,
+          cached_input_tokens: cacheRead,
+          cache_write_input_tokens: 0,
+          output_tokens: output,
+          reasoning_output_tokens: 0,
+          total_tokens: input + output,
+        },
+      },
+      rate_limits: null,
+    },
+  });
+  const initialCodexCount = codexTokenCount(
+    "2026-07-28T08:01:00.000Z",
+    100,
+    20,
+    60,
+  );
+  fs.writeFileSync(
+    fakeCodexSession,
+    `${JSON.stringify(codexSessionMeta)}\n${JSON.stringify(initialCodexCount)}\n`,
+  );
   fs.writeFileSync(
     path.join(project, "README.md"),
     "# Travel Operations\n\nA modular travel workflow with replaceable providers and contract-driven delivery.\n",
@@ -2441,6 +2483,16 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   ]).stdout);
   assert.equal(meterStart.status, "created");
   assert.equal(meterStart.baseline.snapshot.assurance.classification, "advisory_observed");
+  const nativeMeterStart = JSON.parse(mustRun([
+    "budget", "meter", "start", "--root", project,
+    "--proposal", "ASSESS-E2E", "--id", "METER-ASSESS-E2E-CODEX-SESSION",
+    "--thread-id", fakeCodexThread, "--session-file", fakeCodexSession, "--json",
+  ], {
+    env: { CODEX_HOME: fakeCodexHome, CODEX_THREAD_ID: fakeCodexThread },
+  }).stdout);
+  assert.equal(nativeMeterStart.status, "created");
+  assert.equal(nativeMeterStart.baseline.adapter, "codex-session");
+  assert.equal(nativeMeterStart.baseline.snapshot.source.authentication_required, false);
 
   const applied = JSON.parse(mustRun([
     "assessment",
@@ -2491,6 +2543,26 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   codeBurnReport.projects[0].calls += 2;
   codeBurnReport.projects[0].cost += 0.01;
   writeJson(fakeCodeBurn.reportPath, codeBurnReport);
+  fs.appendFileSync(
+    fakeCodexSession,
+    `${JSON.stringify(codexTokenCount(
+      "2026-07-28T08:02:00.000Z",
+      160,
+      30,
+      80,
+    ))}\n`,
+  );
+  const nativeMetered = JSON.parse(mustRun([
+    "budget", "meter", "record", "--root", project,
+    "--proposal", "ASSESS-E2E", "--baseline", "METER-ASSESS-E2E-CODEX-SESSION",
+    "--thread-id", fakeCodexThread, "--session-file", fakeCodexSession,
+    "--trust-custom-rtk-command", "--json",
+  ], {
+    env: { CODEX_HOME: fakeCodexHome, CODEX_THREAD_ID: fakeCodexThread },
+  }).stdout);
+  assert.equal(nativeMetered.registration_status, "created");
+  assert.equal(nativeMetered.receipt.source.adapter, "codex-session");
+  assert.equal(nativeMetered.receipt.usage.tokens, 70);
   const metered = JSON.parse(mustRun([
     "budget", "meter", "record", "--root", project,
     "--proposal", "ASSESS-E2E", "--adapter", "codeburn", "--trust-custom-rtk-command", "--json",
@@ -2610,7 +2682,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(replayedUsage.registration_status, "idempotent_replay");
   assert.equal(replayedUsage.aggregate.usage.active_time_seconds, 120);
   const usageReceiptNames = fs.readdirSync(path.dirname(usageFile)).filter((name) => name.endsWith(".json"));
-  assert.equal(usageReceiptNames.length, 2);
+  assert.equal(usageReceiptNames.length, 3);
   assert.equal(usageReceiptNames.filter((name) => name === "USAGE-ASSESS-E2E.json").length, 1);
 
   const conflictingUsageFixture = writeTrustedUsageReceipt(project, {
@@ -7533,9 +7605,15 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   assert.ok(files.includes(".codex-plugin/plugin.json"));
   assert.ok(files.includes("bin/agentic-sdlc.mjs"));
   assert.ok(files.includes("lib/rtk-optimization-adapter.mjs"));
+  assert.ok(files.includes("lib/codex-session-metering-adapter.mjs"));
   assert.ok(files.includes("lib/context-optimization.mjs"));
   assert.ok(files.includes("schemas/context-optimization-observation.schema.json"));
   assert.ok(files.includes("skills/agentic-sdlc/SKILL.md"));
+  assert.ok(files.includes("skills/caveman/SKILL.md"));
+  assert.ok(files.includes("skills/caveman/agents/openai.yaml"));
+  assert.ok(files.includes("skills/caveman/LICENSE"));
+  assert.ok(files.includes("skills/caveman/NOTICE.md"));
+  assert.ok(files.includes("scripts/autoconfigure-token-efficiency.py"));
   assert.ok(files.includes("lib/change-observatory/cli.mjs"));
   assert.ok(files.includes("lib/change-observatory/runtime.mjs"));
   assert.ok(files.includes("lib/change-observatory/intentabi-adapter.mjs"));
@@ -7569,9 +7647,13 @@ test("npm package installs as a complete reusable plugin", async (t) => {
   );
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "templates", "sdlc-config.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "rtk-optimization-adapter.mjs")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "codex-session-metering-adapter.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "context-optimization.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "schemas", "context-optimization-observation.schema.json")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "agentic-sdlc-assessment", "SKILL.md")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "caveman", "SKILL.md")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "skills", "caveman", "agents", "openai.yaml")), true);
+  assert.equal(fs.existsSync(path.join(installedPluginRoot, "scripts", "autoconfigure-token-efficiency.py")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "cli.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "lib", "change-observatory", "intentabi-adapter.mjs")), true);
   assert.equal(fs.existsSync(path.join(installedPluginRoot, "ui", "change-observatory", "index.html")), true);

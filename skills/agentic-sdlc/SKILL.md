@@ -429,6 +429,14 @@ The dedicated assessment journey remains the exception described above: it packa
    gate permits new work. A custom provider command requires the invocation-local
    `--trust-custom-rtk-command` switch after its exact argv has been reviewed.
 
+   When `context_optimization_policy.response_provider` selects `caveman`, load
+   `../caveman/SKILL.md` for user-facing explanations and status updates. Use
+   its configured intensity, but preserve normal wording for approvals,
+   irreversible actions, security warnings, exact commands, contracts, and
+   durable artifacts. Response compression never creates usage credit:
+   thresholds and limits use only usage measured by the selected budget-meter
+   adapter after RTK and Caveman have affected the real session.
+
    In an assessment execution, let the lifecycle capture optimization evidence
    automatically at apply, budget checkpoints, and completion. Use manual
    capture only for an explicit diagnostic:

@@ -105,6 +105,7 @@ python3 scripts/install-personal-marketplace-v2.py plan --locale it --json
 python3 scripts/install-personal-marketplace-v2.py apply --locale it --plan-hash <plan_hash-from-plan> --json
 python3 scripts/install-personal-marketplace-v2.py validate --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
 python3 scripts/install-personal-marketplace-v2.py confirm --locale it --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 V2 is the canonical local installer. `check` and `plan` never write. With no
@@ -116,18 +117,12 @@ command restores the byte-exact previous state. Unexpected data stops recovery
 without being overwritten. Use `--home /absolute/path` to inspect or manage
 another explicit destination.
 
-V2 never changes global settings. RTK remains a separate, explicit V1
-compatibility operation and must run only after the V2 transaction has been
-confirmed or restored:
-
-```bash
-python3 scripts/install-personal-marketplace.py plan --with-rtk --json
-python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
-```
-
-The compatibility installer verifies an existing RTK binary; it does not
-download or upgrade one. Apply executes a private copy whose bytes match the
-reviewed plan. This step changes the current user's global Codex instructions
-for every project; it is intentionally outside V2's retained-backup boundary.
+V2 never changes global settings. After it is confirmed, the separate
+token-efficiency command verifies bundled Caveman and native-meter files, then
+configures an existing RTK binary through a private copy whose bytes match the
+verified executable. It does not download/upgrade RTK, configure CodeBurn, use
+the network, or authenticate. This step changes the current user's global Codex
+instructions for every project; it is intentionally outside V2's
+retained-backup boundary.
 See [Portable install](portable-install.md) for supported environments, trust
 boundaries, removal, and recovery.

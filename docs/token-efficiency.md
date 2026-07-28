@@ -1,7 +1,8 @@
 # Token Efficiency
 
-Agentic SDLC reduces model context at two boundaries while leaving canonical
-project evidence unchanged.
+Agentic SDLC reduces context at the command and response boundaries, then
+measures the real resulting task usage without changing canonical project
+evidence.
 
 ## Savings map
 
@@ -12,12 +13,29 @@ project evidence unchanged.
 | Test output | RTK test summary only for fixed, known-safe test vectors | `optimization run --exact` for the same allowlisted vector |
 | Git status/diff/log/show | RTK read-only profile; machine formats stay native and mutations are rejected | `optimization run --exact` |
 | `rg` search output | RTK search profile; JSON/NUL output stays native and external preprocessors are rejected | `optimization run --exact` |
-| Budget correlation | Store small immutable counter observations and deltas, never command output | Read the referenced observation or raw RTK report separately |
+| User-facing explanations | Bundled Caveman `v1.9.1` adaptive compression | Normal wording automatically returns for safety, approvals, exact commands, and ambiguity |
+| Budget correlation | Native exact-task Codex `token_count` snapshots and deltas | Explicit `--thread-id` outside the Codex host |
 
 The routing rule is deliberately conservative: optimize output that is noisy
 and reconstructible, but preserve complete bytes for canonical evidence,
 machine contracts, mutations, failures that still need diagnosis, and any
 explicit exact request.
+
+## Automatic setup after install or update
+
+The plugin package includes Caveman and the native Codex-session meter. After
+Installer V2 is confirmed, run its returned
+`post_confirm_autoconfigure_command`, or from the source checkout:
+
+```bash
+python3 scripts/autoconfigure-token-efficiency.py apply --json
+```
+
+The command verifies the bundled files and an existing RTK 0.43+ executable,
+then configures RTK's Codex guidance through a byte-bound private copy. It
+performs no network request, needs no authentication, and never installs or
+configures CodeBurn. If RTK is unavailable, it reports native fallback; the
+bundled Caveman and meter remain usable.
 
 ## Compact derived JSON
 
@@ -42,7 +60,7 @@ canonical `.sdlc` files. Search limits are validated and bounded to 1-100.
 ## RTK command gateway
 
 [RTK](https://github.com/rtk-ai/rtk) filters noisy command output before it
-enters model context. Agentic SDLC 0.12.0 integrates RTK 0.43+ behind a
+enters model context. Agentic SDLC 0.13.0 integrates RTK 0.43+ behind a
 configurable, shell-free gateway; RTK remains an optional, separately installed
 binary.
 
@@ -134,6 +152,21 @@ Operators should use only `phase=manual`; lifecycle phase labels are reserved
 for the automatic hooks. When provider telemetry is unavailable and fallback is
 native, no synthetic savings observation is persisted.
 
+## Caveman response compression
+
+Caveman `v1.9.1` is vendored as `skills/caveman/`, including its agent card,
+assets, MIT license, and upstream provenance. The default project policy selects
+adaptive mode at `full` intensity. Agentic SDLC loads it for user-facing
+explanations and status updates, while its auto-clarity boundary restores normal
+wording for security warnings, irreversible actions, approvals, multi-step
+sequences that could be misread, exact commands, contracts, and durable
+artifacts.
+
+Caveman changes prose, not governance. It cannot shorten or alter canonical
+JSON, hashes, approval content, verification evidence, error strings, or CLI
+argv. A project can set `context_optimization_policy.response_provider.mode` to
+`disabled` when uncompressed responses are required.
+
 ## Project cumulative versus proposal delta
 
 RTK's `gain --project` contract reports counters accumulated for the project
@@ -168,11 +201,18 @@ only from append-only usage receipts. The recommendation cannot start work when
 override a hard limit, or cure a metering violation. In other words, optimization
 adapts to the cost gate; the cost gate does not adapt to claimed savings.
 
+The default `codex-session` meter observes the next real cumulative task total
+after RTK and Caveman have affected context. That naturally reflects actual
+reductions in soft-limit consumption. The plugin never subtracts RTK
+`estimated_tokens_avoided` or assigns a synthetic Caveman percentage, preventing
+double counting. See [Native Codex session metering](codex-session-metering.md).
+
 At completion, valid observation references may be included in the release
 manifest and an optional `context_optimization` gate check. That check proves
 their integrity, lineage, proposal binding, and zero-credit semantics. It does
 not change `budget_decision` or replace `execution_budget` evidence.
 
-RTK operates only on command output. Contracts, approvals, hashes, usage
+RTK operates only on command output, and Caveman only on response style.
+Contracts, approvals, hashes, usage
 receipts, verification receipts, gate receipts, manifests, and other canonical
 records remain unfiltered and authoritative.

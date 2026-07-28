@@ -166,12 +166,12 @@ At least one of `soft` or `hard` is required for every metric. When both exist, 
 | `tokens` | Aggregate token use | The default is estimated and soft-only |
 | `input_tokens` / `output_tokens` | Token components | Useful when separate thresholds matter |
 | `cache_read_tokens` / `cache_write_tokens` | Cache token components | Keep separate unless the budget explicitly chooses a total formula |
-| `model_calls` | Model requests | CodeBurn maps this from its `calls` counter |
-| `tool_calls` | Tool invocations | CodeBurn does not currently expose a built-in mapping for this metric |
+| `model_calls` | Model requests | Native Codex-session metering estimates this from cumulative-token advances |
+| `tool_calls` | Tool invocations | Neither native Codex-session nor CodeBurn exposes a built-in mapping for this metric |
 | `cost` | Decimal monetary amount | Currency must match every receipt and estimate |
 | `quality_checks` | Example custom counter | The evaluator is generic, but an adapter or manual observation must emit the same metric name |
 
-Custom metric names may use letters, numbers, `.`, `_`, and `-`, starting with a letter. The core budget evaluator needs no custom branch, but measurement still matters: CodeBurn can map only its allowlisted token, call, and cost sources. A different metric needs a different adapter or a manual advisory observation.
+Custom metric names may use letters, numbers, `.`, `_`, and `-`, starting with a letter. The core budget evaluator needs no custom branch, but measurement still matters: the native adapter maps only token and estimated-call sources; legacy CodeBurn can also map estimated cost. A different metric needs a different adapter or a manual advisory observation.
 
 ### Complete budget input example
 
@@ -319,7 +319,7 @@ Warning percentages and the completion reserve are calculated only for metrics w
 | Level | Meaning | Can support a hard limit? |
 |---|---|---|
 | `exact` | Cumulative measurement from an approved adapter, cryptographically attested and bound to this execution and budget | Yes |
-| `estimated` | Useful observation with known uncertainty, such as CodeBurn local-log counters and catalog pricing | No |
+| `estimated` | Useful observation with known uncertainty, such as native local-task counters or legacy CodeBurn catalog pricing | No |
 | `unavailable` | No meaningful observation is currently available | No |
 
 Typing `"exact"` into JSON does not make a measurement exact. Manual CLI input is restricted to `estimated` or `unavailable`. An exact receipt must be imported from a trusted runtime adapter.
@@ -460,14 +460,66 @@ change `budget_decision`. Valid RTK observations may be referenced by the
 release manifest and an optional context-optimization evidence check, but the
 mandatory `execution_budget` check remains separate and sovereign.
 
-This is different from CodeBurn. RTK estimates output avoided and influences
-how an allowed command should run; CodeBurn estimates tokens, calls, and cost
-from local logs and writes incremental usage receipts. Neither source can
-satisfy a hard metric without trusted exact metering.
+RTK estimates command output avoided and influences how an allowed command
+should run. Caveman compresses non-critical response prose. The native
+Codex-session meter then records the real cumulative token change from the
+exact task. No estimated saving is subtracted, so budget usage cannot be
+double-counted or artificially reduced. None of these local sources can satisfy
+a hard metric without trusted exact metering.
 
-## CodeBurn advisory metering
+## Native Codex-session advisory metering
 
-CodeBurn is useful for local visibility into tokens, calls, and estimated cost. It reads local session logs, so it is **not** a provider-signed source and never becomes `exact` in this plugin.
+`codex-session` is bundled, enabled, and selected by default, including for
+existing 0.12 project configurations that do not yet declare it. It reads only
+`session_meta` and `token_count` events from the exact local task selected by
+the host's `CODEX_THREAD_ID` or explicit `--thread-id`. It does not read prompt
+or response bodies, execute a shell, scrape a page, call a web API, or require
+authentication.
+
+### Metric mapping
+
+| Budget metric | Native source | Formula or value |
+|---|---|---|
+| `tokens` | `tokens.total` | Codex `total_tokens`, already defined as input plus output |
+| `input_tokens` | `tokens.input` | Input minus cache-read and cache-write input |
+| `output_tokens` | `tokens.output` | Output tokens |
+| `cache_read_tokens` | `tokens.cache_read` | Cached input read |
+| `cache_write_tokens` | `tokens.cache_write` | Cached input written |
+| `model_calls` | `calls` | Estimated count of cumulative-token advances |
+
+Reasoning output is retained in snapshot evidence but not added to
+`tokens.total`. Sanitized local rate-limit fields are contextual evidence only;
+the approved project budget remains sovereign.
+
+Capture after approval and before apply:
+
+```bash
+node bin/agentic-sdlc.mjs budget meter start \
+  --root /path/to/project \
+  --proposal ASSESS-001
+```
+
+Record during `running`, `verifying`, or `exception_pending`:
+
+```bash
+node bin/agentic-sdlc.mjs budget meter record \
+  --root /path/to/project \
+  --proposal ASSESS-001
+```
+
+The adapter binds task identity, project `cwd`, source-event hash, snapshot,
+and monotonic cursor. File truncation, symlink traversal, project drift,
+identity drift, malformed target events, counter reset, or tampering fails
+closed. Evidence stays `estimated`/`advisory_observed`, cost is unavailable,
+and mapped hard metrics still produce `metering_violation`. See
+[Native Codex session metering](codex-session-metering.md).
+
+## Optional legacy CodeBurn advisory metering
+
+CodeBurn is disabled by default and excluded from autoconfiguration. It remains
+available only for explicit legacy configurations that need its aggregation or
+estimated cost. It reads local session logs, so it is **not** a provider-signed
+source and never becomes `exact` in this plugin.
 
 The integration accepts CodeBurn `0.9.x`, which must be installed separately. The plugin does not install or upgrade it.
 
@@ -510,7 +562,7 @@ node bin/agentic-sdlc.mjs budget meter start \
 | `budget meter start` | Capture the immutable cumulative starting snapshot |
 | `--root` | Run against this project and store evidence under its `.sdlc/` directory |
 | `--proposal` | Bind the baseline to this exact proposal and effective budget |
-| `--adapter` | Select a built-in allowlisted adapter; currently `codeburn` |
+| `--adapter` | Select an allowlisted adapter; `codex-session` is default and `codeburn` must be explicitly enabled |
 | `--id` | Name the baseline; the default is `METER-<proposal>-CODEBURN` |
 | `--provider` | Filter CodeBurn’s local log source, for example `codex`; this is not a billing account ID |
 | `--project` | Filter CodeBurn’s project aggregation; choose the narrowest stable project name |
@@ -667,7 +719,14 @@ Use delivery kind `local_release` and record the exact local target root, canoni
 
 Use `active_time_seconds` hard `3600` and `steps` hard `60`, both `exact`, plus a trusted runtime adapter that signs cumulative measurements. With a 15% reserve, new work stops at 3,060 seconds or 51 steps so the remaining capacity is protected for completion. The absolute hard stops remain 3,600 seconds and 60 steps.
 
-### Tokens and cost observed with CodeBurn
+### Tokens observed from the exact local task
+
+Use an estimated soft threshold such as `tokens: 200000`, capture the native
+Codex-session baseline before execution, and record deltas during the run. RTK
+and Caveman reductions appear only through lower real measured deltas; no
+synthetic credit is applied.
+
+### Legacy tokens and cost observed with CodeBurn
 
 Use estimated soft thresholds such as `tokens: 200000` and `cost: 5.00 USD`, capture a CodeBurn baseline before execution, and record deltas during the run. This gives useful checkpoints but not hard enforcement.
 
@@ -703,7 +762,7 @@ Before approving a requirement profile, delivery profile, or combined proposal, 
 - Which metrics are exact, estimated, or unavailable?
 - For every hard metric, which trusted adapter, Ed25519 key, cumulative coverage, and enforcement point make it real?
 - What happens at `exception_pending`: amendment, partial delivery, or stop?
-- Is RTK telemetry clearly zero-credit and subordinate to the budget decision?
+- Are RTK and Caveman clearly zero-credit while the native meter records only real net usage?
 - Is cost an estimate, provider-reported Costs data, or final invoice truth?
 
 If any answer is unclear, revise the proposal before approval. Approval binds the requirement and delivery hashes; a material revision creates different hashes and needs a new decision. History may support a recommendation, but the number of previous successful deliveries never increases authority.

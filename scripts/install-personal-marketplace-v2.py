@@ -1560,6 +1560,21 @@ def _shell_command(parts: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in parts)
 
 
+def _autoconfiguration_command(home: Path, json_output: bool) -> str:
+    parts = [
+        sys.executable,
+        str(
+            _destination_path(home)
+            / "scripts"
+            / "autoconfigure-token-efficiency.py"
+        ),
+        "apply",
+    ]
+    if json_output:
+        parts.append("--json")
+    return _shell_command(parts)
+
+
 def _base_command(home: Path, locale: str, json_output: bool) -> list[str]:
     command = [
         sys.executable,
@@ -1908,6 +1923,9 @@ def main(argv: list[str] | None = None) -> int:
                         "restore_command": _transaction_command(
                             "restore", receipt, home, arguments.locale, arguments.json
                         ),
+                        "post_confirm_autoconfigure_command": _autoconfiguration_command(
+                            home, arguments.json
+                        ),
                     }
                 )
             _emit_result(
@@ -1957,6 +1975,11 @@ def main(argv: list[str] | None = None) -> int:
                         "restore", receipt, home, arguments.locale, arguments.json
                     )
                     if state == "validation_pending"
+                    else None
+                ),
+                "post_confirm_autoconfigure_command": (
+                    _autoconfiguration_command(home, arguments.json)
+                    if state in {"validation_pending", "confirmed"}
                     else None
                 ),
             },

@@ -1,4 +1,4 @@
-# How Agentic SDLC 0.12.0 Works
+# How Agentic SDLC 0.13.0 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
@@ -35,7 +35,7 @@ The installed command is `agentic-sdlc`. From a source checkout, the equivalent 
 node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
 ```
 
-All examples below use commands exposed by the `Agentic SDLC 0.12.0` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.13.0` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project
@@ -332,27 +332,27 @@ agentic-sdlc budget usage record \
   --receipt-file .sdlc/receipts/runtime/USAGE-001.json
 ```
 
-CodeBurn can provide a local advisory baseline and incremental observations. It is always estimated/advisory and cannot, by itself, prove a financial or token hard limit:
+The bundled Codex-session meter provides a local advisory baseline and
+incremental observations for the exact task. It is always estimated/advisory
+and cannot, by itself, prove a financial or token hard limit:
 
 ```bash
 agentic-sdlc budget meter start \
   --proposal ASSESS-001 \
-  --adapter codeburn \
-  --id METER-ASSESS-001-CODEBURN \
-  --provider codex \
-  --project "Example Service" \
-  --from 2026-07-15 \
-  --to 2026-07-15
+  --id METER-ASSESS-001-CODEX-SESSION
 
 agentic-sdlc budget meter record \
   --proposal ASSESS-001 \
-  --adapter codeburn \
-  --baseline METER-ASSESS-001-CODEBURN
+  --baseline METER-ASSESS-001-CODEX-SESSION
 
 agentic-sdlc budget status --proposal ASSESS-001
 ```
 
-Capture the CodeBurn baseline after checkpoint 2 approval and before `apply`. See [Limits and Metering](limits-and-metering.md) for exact-versus-advisory rules and cost attribution.
+Capture the baseline after checkpoint 2 approval and before `apply`. The Codex
+host supplies `CODEX_THREAD_ID`; manual recovery may pass `--thread-id`.
+Collection reads no prompt bodies, page, web API, or authenticated service. See
+[Native Codex Session Metering](codex-session-metering.md) and
+[Limits and Metering](limits-and-metering.md).
 
 RTK is a separate context-optimization gateway, not another usage meter. Inspect
 its provider and project-cumulative counters, route a supported noisy command,
@@ -624,4 +624,4 @@ With `--apply --plan-hash <preview-plan-hash>`, the CLI first rejects preview/ap
 12. Release checks bind the proposal, requirement/profile, delivery/profile, materialized records, usage, authorization, artifact, source revision, and rollback into one manifest; protected-branch merge and remote/production deploy remain explicit exceptions.
 13. Replays repair only exact missing state; ambiguity, stale evidence, cross-delivery reuse, or wider authority fails closed.
 
-For conversational examples, continue with [Agent Interactions](agent-interactions.md). For the full component model, use [Architecture](architecture.md). For time, steps, tokens, costs, CodeBurn, hard limits, and amendments, use [Limits and Metering](limits-and-metering.md).
+For conversational examples, continue with [Agent Interactions](agent-interactions.md). For the full component model, use [Architecture](architecture.md). For time, steps, native task tokens, optional legacy cost estimates, hard limits, and amendments, use [Limits and Metering](limits-and-metering.md).

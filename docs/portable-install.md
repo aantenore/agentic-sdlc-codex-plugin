@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.12.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.13.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -18,6 +18,7 @@ scripts/
 skills/agentic-sdlc/
 skills/agentic-sdlc-assessment/
 skills/change-observatory/
+skills/caveman/
 templates/
 ui/change-observatory/
 LICENSE
@@ -25,7 +26,10 @@ package.json
 README.md
 ```
 
-The assessment and Change Observatory skills each include `agents/openai.yaml`, making `Project Assessment` and `Change Observatory` visible and available for implicit invocation. The first product starter remains:
+The assessment, Change Observatory, and vendored Caveman skills include
+`agents/openai.yaml`. Caveman `v1.9.1` is bundled with its MIT license and
+provenance notice, so initial installs and updates need no separate Caveman
+download. The first product starter remains:
 
 ```text
 Contextualize this project and prepare an initial technical assessment.
@@ -57,6 +61,7 @@ python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <tr
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 V2 is the canonical local installer. `check` and `plan` do not change files,
@@ -69,40 +74,32 @@ state. Every transition is bound to the transaction ID and current receipt
 hash. Source drift, destination drift, unexpected recovery data, or an
 unproven interrupted state stops without overwriting it.
 
-V2 deliberately does not change global settings. If RTK is already installed
-and you also need the legacy installer to configure its guidance in the current
-user's **global Codex instructions**, first confirm or restore the V2
-transaction, then use the V1 compatibility path explicitly:
+After confirmation, run the exact `post_confirm_autoconfigure_command` returned
+by V2. The source-checkout form shown above performs the same checks. It:
 
-```bash
-python3 scripts/install-personal-marketplace.py plan --with-rtk --json
-python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
-codex plugin add agentic-sdlc-codex-plugin@personal
-codex plugin list --json
-```
+- verifies that Caveman and the native Codex-session meter were installed with
+  the plugin;
+- verifies an existing RTK 0.43+ executable by version, byte hash, and gain
+  contract;
+- runs a private byte-bound RTK copy to configure and verify global Codex
+  guidance;
+- reports native fallback, without failing installation, when RTK is absent;
+- never installs/configures CodeBurn and never uses network or authentication.
 
-This compatibility operation is outside V2's retained-backup boundary. The
-flag does not install or upgrade RTK. Apply runs a private staged copy whose
-bytes match the reviewed plan. Because the instruction change is global, it can
-affect Codex behavior in projects that do not use Agentic SDLC, and that global
-change is not part of the local plugin rollback. Omitting `--with-rtk` leaves
-those global instructions unchanged. The plugin's
-project-local gateway and fail-open native fallback remain available according
-to `.sdlc/config.json`. `--rtk-executable /absolute/path/to/rtk` only tells the
-installer which binary to use while configuring and verifying global guidance;
-it does not rewrite the project gateway command. For automatic runtime routing,
-put RTK on `PATH`. The gateway resolves and canonicalizes the first candidate
-before detection and executes that exact absolute path. A PATH candidate or
-symlink target inside the project root is inert by default. Alternatively,
-configure the absolute executable in the project provider command and pass
-`--trust-custom-rtk-command` on each CLI invocation that may execute it.
+Autoconfiguration is outside V2's retained-backup boundary because RTK guidance
+is user-global and can affect projects that do not use Agentic SDLC. It does
+not download or upgrade RTK. For automatic runtime routing, put an approved RTK
+binary on `PATH`; the gateway resolves and canonicalizes the first candidate
+before execution. A PATH candidate or symlink target inside the project root
+is inert by default. Alternatively, configure an absolute executable and pass
+`--trust-custom-rtk-command` on each invocation that may execute it.
 
 A successful list result contains an installed, enabled entry with:
 
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "installed": true,
   "enabled": true
 }
@@ -120,11 +117,12 @@ The apply step:
 4. replaces `~/plugins/agentic-sdlc-codex-plugin` only when the destination is managed and safe;
 5. creates or updates only this plugin's entry in `~/.agents/plugins/marketplace.json`;
 6. retains byte-exact plugin and marketplace recovery data after apply;
-7. confirms or restores only the exact transaction receipt supplied by the user.
+7. confirms or restores only the exact transaction receipt supplied by the user;
+8. exposes a separate post-confirm token-efficiency autoconfiguration step.
 
-V2 never modifies RTK's global Codex instruction profile. The V1
-`--with-rtk` compatibility path remains the only opt-in global change; it still
-does not install RTK or modify target-project evidence.
+V2 never modifies RTK's global Codex instruction profile. The separate
+autoconfiguration command is the opt-in global change; it does not install RTK
+or modify target-project evidence.
 
 The script honors `HOME`. It refuses to traverse or replace a symlink, Windows junction/reparse point, Git checkout, source checkout, or directory with unmanaged top-level content and leaves that destination untouched for inspection.
 
@@ -145,15 +143,7 @@ python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <tr
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
-```
-
-If global RTK guidance must also be refreshed, first confirm or restore the V2
-transaction, then repeat the explicit V1 compatibility operation separately:
-
-```bash
-python3 scripts/install-personal-marketplace.py plan --with-rtk --json
-python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
-codex plugin add agentic-sdlc-codex-plugin@personal
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 Re-adding is supported and refreshes the installed cache. The installer replaces the complete managed staging tree, so files removed from the package do not remain stale. Start a new Codex task afterward.
@@ -210,10 +200,10 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.12.0` | Rerun staging, add again, then open a new task |
-| `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all three skills, agent cards, Observatory launcher/UI, preset, optional RTK provider, and project KB checks as passed or not applicable | Repair a required failed item, restage, and open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.13.0` | Rerun staging, add again, then open a new task |
+| `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all four skills, Caveman/native-meter assets, Observatory launcher/UI, preset, optional RTK provider, and project KB checks as passed or not applicable | Repair a required failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
-| Package dry run | Contains manifest, all three skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
+| Package dry run | Contains manifest, all four skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |
 
 If the staging script refuses the destination, inspect the printed path. Move or rename an unmanaged destination rather than forcing deletion; rerun the script only after the generated location is safe.
 
@@ -228,6 +218,7 @@ uv run --with pyyaml python /path/to/plugin-creator/scripts/validate_plugin.py .
 uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc
 uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/agentic-sdlc-assessment
 uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/change-observatory
+uv run --with pyyaml python /path/to/skill-creator/scripts/quick_validate.py skills/caveman
 ```
 
 These are file validators, not Codex plugin subcommands. If `uv` is unavailable, use an isolated Python environment that already contains `PyYAML`; do not add it as a plugin runtime dependency.
@@ -262,6 +253,6 @@ The installed skill must launch the plugin-local CLI, open or return a token-bea
 - The plugin is reusable code and method; target-project state remains in that project's `.sdlc/` directory.
 - Cache and indexes are derived and are never accepted as canonical evidence.
 - Installer V2 changes only the current user's plugin staging and personal marketplace files; it never changes global Codex instructions.
-- Only the explicitly labeled V1 compatibility operation accepts `--with-rtk`; the flag never installs or upgrades RTK.
+- The separate post-confirm autoconfiguration may refresh verified RTK global guidance; it never installs/upgrades RTK or configures CodeBurn.
 - The plugin has no runtime npm dependencies.
 - External tools needed for a requested artifact format are selected and disclosed in the assessment proposal; missing tools require a decision before installation.

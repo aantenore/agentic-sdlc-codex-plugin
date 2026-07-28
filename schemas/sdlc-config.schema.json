@@ -449,6 +449,28 @@
           },
           "additionalProperties": false
         },
+        "response_provider": {
+          "type": "object",
+          "required": [
+            "id",
+            "version",
+            "skill",
+            "mode",
+            "default_intensity",
+            "auto_clarity",
+            "usage_accounting"
+          ],
+          "properties": {
+            "id": { "const": "caveman" },
+            "version": { "const": "1.9.1" },
+            "skill": { "const": "../caveman/SKILL.md" },
+            "mode": { "enum": ["adaptive", "disabled"] },
+            "default_intensity": { "enum": ["lite", "full", "ultra"] },
+            "auto_clarity": { "const": true },
+            "usage_accounting": { "const": "measured_net_usage_only" }
+          },
+          "additionalProperties": false
+        },
         "telemetry": {
           "type": "object",
           "required": ["enabled", "include_in_budget_status", "auto_capture"],
@@ -707,9 +729,28 @@
           },
           "additionalProperties": false
         },
+        "default_metering_adapter": {
+          "enum": ["codex-session", "codeburn"]
+        },
         "metering_adapters": {
           "type": "object",
           "properties": {
+            "codex-session": {
+              "type": "object",
+              "required": ["enabled", "metric_mapping"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "metric_mapping": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$" },
+                  "additionalProperties": {
+                    "enum": ["tokens.total", "tokens.input", "tokens.output", "tokens.cache_read", "tokens.cache_write", "calls"]
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
             "codeburn": {
               "type": "object",
               "required": ["enabled", "provider", "metric_mapping"],

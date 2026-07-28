@@ -18,7 +18,7 @@
 
 ## Technical summary
 
-Agentic SDLC 0.12.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.13.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -32,6 +32,7 @@ You talk to Codex in normal language. Codex turns that request into structured i
 - [Autonomy, Limits, and Metering](docs/limits-and-metering.md) — concrete time, step, token, cost, reserve, warning, and stop-policy examples.
 - [Configuration Safety](docs/configuration-safety.md) — why project behavior is pinned, how to preview an upgrade, and how to recover from drift without hidden policy changes.
 - [Token Efficiency](docs/token-efficiency.md) — compact derived JSON, the RTK command gateway, lifecycle observations, and budget-safe savings telemetry.
+- [Native Codex Session Metering](docs/codex-session-metering.md) — authentication-free local token/call observations, exact task binding, and limit semantics.
 - [Assessment Interactions](docs/agent-interactions.md) — the precise contract used for every user question.
 - [Portable Installation](docs/portable-install.md) — installation, update, diagnosis, and recovery on supported platforms.
 - [Self-service CLI](docs/self-service-cli.md) — focused help, one-step status, safe presentation presets, shell completion, and machine output.
@@ -52,28 +53,23 @@ python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <tr
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 Installer V2 is the canonical local installation path. `apply` retains the
 byte-exact previous plugin and marketplace state; after validation, use
 `confirm` to keep the update or the returned `restore` command to roll it back.
 
-Installer V2 intentionally leaves global settings unchanged. If RTK 0.43 or
-newer is already installed and you need the legacy one-step bootstrap for its
-global Codex guidance, first confirm or restore any V2 transaction, then use
-the V1 compatibility path explicitly:
+After confirmation, run the returned
+`post_confirm_autoconfigure_command`. The same command is shown above for a
+source checkout. It verifies the bundled Caveman skill and native Codex-session
+meter, then byte-verifies and configures RTK when RTK 0.43+ is already
+available. It never installs or configures CodeBurn, never authenticates, and
+never accesses the network. If RTK is absent, the plugin remains operational
+through its native command fallback.
 
-```bash
-python3 scripts/install-personal-marketplace.py plan --with-rtk --json
-python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
-```
-
-This compatibility path is separate from V2's retained-backup transaction.
-`--with-rtk` configures the current user's global Codex instructions. It does
-not install or upgrade the RTK binary, and omitting the flag leaves global
-instructions unchanged. `--rtk-executable` selects a binary only for that
-bootstrap step; the automatic gateway still resolves `rtk` from `PATH` unless
-the project configures and explicitly trusts a custom provider command. See
+Autoconfiguration is intentionally post-confirm because RTK's Codex guidance is
+user-global and therefore outside the reversible plugin-copy transaction. See
 [Portable Installation](docs/portable-install.md) for the user-global scope,
 runtime trust boundary, and update behavior.
 
@@ -324,14 +320,16 @@ Local smoke tests are stored as shell-free JSON argv arrays, for example `--smok
 
 A custom limit is meaningful only if a configured source can measure it. A hard limit fails closed when its required exact, trusted coverage is unavailable.
 
-## CodeBurn Versus Exact Metering
+## Native Codex Metering Versus Exact Metering
 
-CodeBurn is useful for local visibility and estimates; it is not provider-signed billing evidence and cannot by itself guarantee a real-time hard stop.
+The bundled `codex-session` adapter reads only the exact task's local
+`token_count` events. It is direct and authentication-free, but not
+provider-signed billing evidence and cannot by itself guarantee a hard stop.
 
 ```mermaid
 flowchart TD
   A["Choose a token or cost limit"] --> B{"Must it enforce a hard stop?"}
-  B -- "No: warning or forecast" --> C["CodeBurn 0.9.x<br/>estimated + advisory_observed"]
+  B -- "No: warning or forecast" --> C["Local Codex token_count<br/>estimated + advisory_observed"]
   C --> D["Store immutable baseline,<br/>incremental deltas, and receipts"]
   B -- "Yes" --> E{"Trusted signed adapter<br/>covers this exact metric?"}
   E -- "Yes" --> F["Exact cumulative receipts<br/>may satisfy the hard gate"]
@@ -340,20 +338,17 @@ flowchart TD
 
 | Source | Best use | Assurance | Can satisfy an exact hard limit? |
 | --- | --- | --- | --- |
-| **CodeBurn** | Local token/call/cost visibility, warnings, estimates, and reconciliation | `estimated` / `advisory_observed` | **No**. A mapped hard metric records the evidence but stops with `metering_violation` |
+| **Native Codex session meter** | Exact-task token/call visibility and soft-limit warnings; cost unavailable | `estimated` / `advisory_observed` | **No**. A mapped hard metric records the evidence but stops with `metering_violation` |
 | **Trusted runtime/provider adapter** | Financial or operational enforcement | Signed, identity-bound, cumulative exact receipts | **Yes**, only for the explicitly trusted metrics and approved pricing reference |
 
-To use CodeBurn, install it separately, enable its adapter in project configuration, approve the proposal, then capture the baseline **before** `apply`:
+After proposal approval, capture the exact task baseline **before** `apply`.
+`CODEX_THREAD_ID` is supplied by the Codex host; outside the host, pass
+`--thread-id` explicitly:
 
 ```bash
 node bin/agentic-sdlc.mjs budget meter start \
   --root /path/to/project \
-  --proposal ASSESSMENT-001 \
-  --adapter codeburn \
-  --provider codex \
-  --project TravelOps \
-  --from 2026-07-15 \
-  --to 2026-07-15
+  --proposal ASSESSMENT-001
 ```
 
 During execution or before completion, record the incremental usage since that baseline:
@@ -361,16 +356,25 @@ During execution or before completion, record the incremental usage since that b
 ```bash
 node bin/agentic-sdlc.mjs budget meter record \
   --root /path/to/project \
-  --proposal ASSESSMENT-001 \
-  --adapter codeburn \
-  --baseline METER-ASSESSMENT-001-CODEBURN
+  --proposal ASSESSMENT-001
 ```
 
-`--provider` selects the local session-log producer, `--project` narrows the CodeBurn aggregation, `--from/--to` fix an inclusive and reproducible date window, and `--baseline` identifies the immutable starting point. The same query is reused for every delta so filter drift, counter resets, currency changes, and tampering fail closed. The adapter command is replaceable as an executable plus prefix-argument vector, preserving `shell: false` for Windows npm installations and hermetic CI. Full setup and examples are in [Autonomy, Limits, and Metering](docs/limits-and-metering.md) and [CodeBurn Metering](docs/codeburn-metering.md).
+The adapter binds the task ID, session identity, project `cwd`, counters, and
+source event into immutable snapshots and monotonic deltas. It stores no prompt
+or response body, executes no shell, and calls no web or authenticated API.
+RTK and Caveman savings affect the next real measured total; the plugin never
+deducts synthetic savings from usage. CodeBurn remains a disabled, opt-in
+legacy adapter for existing projects. Full details are in
+[Native Codex Session Metering](docs/codex-session-metering.md) and
+[Autonomy, Limits, and Metering](docs/limits-and-metering.md).
 
 ## RTK Context Optimization
 
 RTK is integrated through a shell-free gateway rather than as a budget meter.
+The bundled Caveman response skill is the second optimization layer. RTK
+reduces command output entering model context; Caveman reduces non-critical
+user-facing prose while retaining exact technical content. Approvals, security
+warnings, commands, contracts, and durable artifacts retain normal clarity.
 Inspect availability, run a supported noisy command, or capture an explicit
 manual diagnostic with:
 
@@ -468,12 +472,14 @@ python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <tr
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
 Installer V2 is canonical. Use its returned `restore` command instead of
-`confirm` if validation or plugin registration fails. The V1 `--with-rtk`
-compatibility path remains available only when you intentionally want to
-refresh global Codex instructions for an already installed RTK binary.
+`confirm` if validation or plugin registration fails. After confirmation, the
+token-efficiency autoconfiguration verifies the bundled Caveman/native-meter
+components and configures an existing verified RTK binary. It does not use or
+install CodeBurn.
 
 On systems where Python 3 is exposed as `python` or `py -3`, use that launcher for the same script. Start a new Codex task after installation so the app reloads plugin skills and agent cards.
 
@@ -499,16 +505,12 @@ python3 scripts/install-personal-marketplace-v2.py validate --transaction-id <tr
 codex plugin add agentic-sdlc-codex-plugin@personal
 codex plugin list --json
 python3 scripts/install-personal-marketplace-v2.py confirm --transaction-id <transaction_id-from-apply> --receipt-hash <receipt_hash-from-apply>
+python3 scripts/autoconfigure-token-efficiency.py apply --json
 ```
 
-If global RTK guidance must also be refreshed, first confirm or restore the V2
-transaction, then use the explicit V1 compatibility path as a separate
-global-settings operation:
-
-```bash
-python3 scripts/install-personal-marketplace.py plan --with-rtk --json
-python3 scripts/install-personal-marketplace.py apply --with-rtk --plan-hash <plan_hash-from-plan>
-```
+The last step is the same post-confirm autoconfiguration used for a fresh
+install. It re-verifies the newly staged Caveman/native-meter files and the
+currently selected RTK executable before refreshing global RTK guidance.
 
 Do not edit the generated tree under `~/plugins` directly. Start a new Codex task after the refresh.
 
@@ -584,8 +586,8 @@ node bin/agentic-sdlc.mjs optimization capture --root /path/to/project --proposa
 node bin/agentic-sdlc.mjs status --root /path/to/project
 node bin/agentic-sdlc.mjs approval requests --root /path/to/project --json
 node bin/agentic-sdlc.mjs assessment proposal status --root /path/to/project --id ASSESSMENT-001 --json
-node bin/agentic-sdlc.mjs budget meter start --root /path/to/project --proposal ASSESSMENT-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14
-node bin/agentic-sdlc.mjs budget meter record --root /path/to/project --proposal ASSESSMENT-001 --adapter codeburn --baseline METER-ASSESSMENT-001-CODEBURN
+node bin/agentic-sdlc.mjs budget meter start --root /path/to/project --proposal ASSESSMENT-001
+node bin/agentic-sdlc.mjs budget meter record --root /path/to/project --proposal ASSESSMENT-001
 node bin/agentic-sdlc.mjs budget status --root /path/to/project --proposal ASSESSMENT-001 --json
 node bin/agentic-sdlc.mjs gate check --root /path/to/project --scope release-manifest --release-manifest RELEASE-ASSESSMENT-001 --strict --json
 node bin/agentic-sdlc.mjs migration active --root /path/to/project --release-manifest RELEASE-ASSESSMENT-001
@@ -597,7 +599,12 @@ node bin/agentic-sdlc.mjs migration identity --root /path/to/project --recover -
 
 Natural-language interpretation stays in Codex. The CLI accepts canonical structured intent and performs deterministic state, format, authorization, and evidence checks.
 
-CodeBurn 0.9.x is an optional, separately installed prerequisite for `budget meter`; the plugin never installs it. Capture the baseline after proposal approval and before `apply`. `record` reuses the exact persisted provider/project/date query and advances an incremental monotonic cursor. CodeBurn evidence is always `estimated`/`advisory_observed`, never signed or exact; a mapped hard metric is recorded but stops the workflow with `metering_violation`. For multi-day work, pass an explicit stable `--from/--to` window at `start`.
+The default budget meter is bundled. It reads cumulative `token_count` events
+from the exact local Codex task, selected by `CODEX_THREAD_ID`, and advances an
+incremental monotonic cursor. It is always
+`estimated`/`advisory_observed`, never signed or exact; cost remains
+unavailable. CodeBurn is optional legacy compatibility, disabled by default,
+and never part of autoconfiguration.
 
 RTK 0.43+ is also optional and separately installed. `optimization run` routes
 only allowlisted command profiles without a shell; `--exact` bypasses filtering
@@ -620,10 +627,13 @@ docs/agent-interactions.md                   Two-checkpoint assessment interacti
 docs/portable-install.md                     Install and recovery guide
 schemas/                                     Canonical data contracts
 lib/                                         Pure proposal, authorization, budget, and workflow primitives
+lib/codex-session-metering-adapter.mjs       Native exact-task advisory usage meter
 skills/agentic-sdlc/                         Core project workflow skill
 skills/agentic-sdlc-assessment/              Guided assessment skill
 skills/agentic-sdlc-assessment/agents/       Assessment agent card
 skills/change-observatory/                    Installed visual-lineage launcher skill
+skills/caveman/                              Vendored adaptive response-compression skill
+scripts/autoconfigure-token-efficiency.py    Post-install/update RTK+Caveman setup check
 templates/                                   Reusable artifact templates
 ui/change-observatory/                        Bundled build-free lineage application
 ```

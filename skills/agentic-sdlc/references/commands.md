@@ -607,16 +607,23 @@ recommends more aggressive RTK use. Completion may reference validated
 observation lineage in the manifest and an optional gate check; it must never
 change the manifest's `budget_decision`.
 
-## Optional CodeBurn metering
+## Default native Codex-session metering
 
-CodeBurn 0.9.x must be installed separately; never install it automatically. Capture before execution and record incremental observations with the same persisted query:
+The bundled adapter reads only local `session_meta` and `token_count` events
+for the exact `CODEX_THREAD_ID`. It executes no shell and uses no web page,
+external API, or authentication. Capture before execution and record
+incremental observations with the same persisted task identity:
 
 ```bash
-node bin/agentic-sdlc.mjs budget meter start --root <project> --proposal ASSESS-001 --adapter codeburn --from 2026-07-14 --to 2026-07-14
-node bin/agentic-sdlc.mjs budget meter record --root <project> --proposal ASSESS-001 --adapter codeburn --baseline METER-ASSESS-001-CODEBURN
+node bin/agentic-sdlc.mjs budget meter start --root <project> --proposal ASSESS-001
+node bin/agentic-sdlc.mjs budget meter record --root <project> --proposal ASSESS-001
 ```
 
-CodeBurn is always `estimated` and `advisory_observed`. It never satisfies exact/hard enforcement or emits an attestation; mapped hard metrics deliberately produce `metering_violation` after the evidence is recorded.
+Native observations are always `estimated` and `advisory_observed`, with cost
+unavailable. They never satisfy exact/hard enforcement or emit an attestation;
+mapped hard metrics deliberately produce `metering_violation` after evidence is
+recorded. CodeBurn remains disabled-by-default legacy compatibility and must
+never be installed or enabled automatically.
 
 ## Activity Reports
 

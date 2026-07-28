@@ -388,9 +388,21 @@
       "completion_freshness_seconds": 60,
       "trusted_sources": []
     },
+    "default_metering_adapter": "codex-session",
     "metering_adapters": {
-      "codeburn": {
+      "codex-session": {
         "enabled": true,
+        "metric_mapping": {
+          "tokens": "tokens.total",
+          "input_tokens": "tokens.input",
+          "output_tokens": "tokens.output",
+          "cache_read_tokens": "tokens.cache_read",
+          "cache_write_tokens": "tokens.cache_write",
+          "model_calls": "calls"
+        }
+      },
+      "codeburn": {
+        "enabled": false,
         "provider": "codex",
         "command": {
           "executable": "codeburn",
@@ -472,6 +484,15 @@
         "executable": "rtk",
         "arguments": []
       }
+    },
+    "response_provider": {
+      "id": "caveman",
+      "version": "1.9.1",
+      "skill": "../caveman/SKILL.md",
+      "mode": "adaptive",
+      "default_intensity": "full",
+      "auto_clarity": true,
+      "usage_accounting": "measured_net_usage_only"
     },
     "telemetry": {
       "enabled": true,
