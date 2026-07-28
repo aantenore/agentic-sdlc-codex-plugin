@@ -1,0 +1,23 @@
+{
+  "kind": "trace_integrity_checkpoint",
+  "schema_version": "trace-integrity-checkpoint:v1",
+  "mode": "local_tamper_evidence",
+  "authenticity_claimed": false,
+  "hash_algorithm": "sha256",
+  "trace_file": "ST-PORTABLE-WORKFLOW-HARDENING.jsonl",
+  "legacy_prefix": {
+    "line_count": 0,
+    "byte_length": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "new_writes": {
+    "count": 24,
+    "first_sequence": 1,
+    "last_sequence": 24,
+    "last_event_hash": "1a449da0e33c003978dff6846f353a92ccd5132e3461cc256617f891801faf78",
+    "rolling_hash": "2f88aac648a196258a713a0933e95e2d45a11ae3514ec8154ed5b327abf346ad"
+  },
+  "committed_offset": 55868,
+  "updated_at": "2026-07-28T10:08:38.160Z",
+  "checkpoint_hash": "d217a177108d43a0ebc3c2baf16bed85f139333051c47d5c8f121e483a719d4f"
+}
