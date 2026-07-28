@@ -27,6 +27,15 @@ function fixture() {
   return { root, codexHome, projectRoot, sessionFile };
 }
 
+function removeFixture(root) {
+  fs.rmSync(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 50,
+  });
+}
+
 function sessionMeta(projectRoot, threadId = THREAD_ID) {
   return {
     timestamp: "2026-07-28T08:00:00.000Z",
@@ -74,7 +83,7 @@ function writeJsonl(file, entries, newline = "\n") {
 
 test("exact local Codex thread counters become advisory snapshots without prompt content", async (t) => {
   const current = fixture();
-  t.after(() => fs.rmSync(current.root, { recursive: true, force: true }));
+  t.after(() => removeFixture(current.root));
   writeJsonl(current.sessionFile, [
     sessionMeta(current.projectRoot),
     { timestamp: "2026-07-28T08:00:01.000Z", type: "response_item", payload: { prompt: "secret" } },
@@ -125,7 +134,7 @@ test("exact local Codex thread counters become advisory snapshots without prompt
 
 test("Codex session deltas are monotonic, cache-safe, and map to approved budget metrics", async (t) => {
   const current = fixture();
-  t.after(() => fs.rmSync(current.root, { recursive: true, force: true }));
+  t.after(() => removeFixture(current.root));
   const first = tokenCount({
     timestamp: "2026-07-28T08:01:00.000Z",
     input: 100,
@@ -196,7 +205,7 @@ test("Codex session deltas are monotonic, cache-safe, and map to approved budget
 
 test("Codex session selection rejects project drift, linked files, and counter resets", async (t) => {
   const current = fixture();
-  t.after(() => fs.rmSync(current.root, { recursive: true, force: true }));
+  t.after(() => removeFixture(current.root));
   const first = tokenCount({
     timestamp: "2026-07-28T08:01:00.000Z",
     input: 100,
