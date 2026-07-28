@@ -171,6 +171,7 @@ function createGovernedPullRequestStory(project, {
   allowedWritePaths,
   outputType = "implementation-summary",
   configureProject = null,
+  storyActionUses = 1,
 }) {
   const requirementId = `REQ-${suffix}`;
   const storyId = `ST-${suffix}`;
@@ -283,12 +284,26 @@ function createGovernedPullRequestStory(project, {
     true,
     `task start should be executable: ${JSON.stringify(taskStart, null, 2)}`,
   );
+  const storyActionAuthorizationId = `AUTH-${suffix}-STORY-ACTIONS`;
+  mustRun([
+    "authorization", "grant",
+    "--root", project,
+    "--id", storyActionAuthorizationId,
+    "--scope", `Approve the exact governed story actions for ${storyId}.`,
+    "--allow-use", `story.claim=${storyId}`,
+    "--allow-use", `output.link=${storyId}`,
+    "--allow-use", `story.complete-step=${storyId}`,
+    ...(outputType ? ["--allow-artifact-type", outputType] : []),
+    "--max-uses", String(storyActionUses),
+    ...humanApproval(`Approve the exact governed story actions for ${storyId}`),
+  ], project);
   mustRun([
     "story", "claim",
     "--root", project,
     "--id", storyId,
     "--agent", "codex",
     "--branch", branch,
+    "--authorization", storyActionAuthorizationId,
   ], project);
 
   return {
@@ -298,6 +313,7 @@ function createGovernedPullRequestStory(project, {
     profileId,
     branch,
     taskStart,
+    storyActionAuthorizationId,
   };
 }
 
@@ -391,6 +407,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     allowedWritePaths: ["docs"],
     outputType: "implementation-summary",
     configureProject: (target) => configureCustomPhase(target, customPhase),
+    storyActionUses: 9,
   });
   const finalReceiptPath = `.sdlc/gates/${fixture.storyId}-final.json`;
 
@@ -408,6 +425,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--template", "implementation-summary-v1",
     "--mode", "new",
     "--requirement", fixture.requirementId,
+    "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
   for (const step of ["discovery", "analysis", "design", customPhase, "implementation"]) {
@@ -418,6 +436,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
       "--step", step,
       "--summary", `${step} completed against the approved boundary`,
       ...(step === "implementation" ? ["--type", "implementation-summary"] : []),
+      "--authorization", fixture.storyActionAuthorizationId,
     ], project);
   }
 
@@ -442,6 +461,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--step", "validation",
     "--summary", "Validation completed with the latest passing test",
     "--evidence", testEvidence,
+    "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
   const releaseEvidence = writeProjectFile(project, ".sdlc/tests/ST-FINAL-release.json", "{\"ready\":true}\n");
@@ -453,6 +473,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--step", "release",
     "--summary", "Release evidence completed",
     "--evidence", releaseEvidence,
+    "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
   mustFail([

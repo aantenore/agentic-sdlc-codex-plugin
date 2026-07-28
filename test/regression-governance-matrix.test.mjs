@@ -425,7 +425,29 @@ function rolloutProject(mode) {
     "--id", "implementation-summary-v1",
     ...humanApproval("Approve the regression output format"),
   ]);
+  initializeGitHead(project);
   return project;
+}
+
+function initializeGitHead(project) {
+  for (const args of [
+    ["init"],
+    ["config", "user.name", "Governance Matrix"],
+    ["config", "user.email", "governance-matrix@example.invalid"],
+    ["add", "."],
+    ["commit", "-m", "test: establish rollout matrix baseline"],
+  ]) {
+    const result = spawnSync("git", ["-C", project, ...args], {
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    assert.equal(
+      result.status,
+      0,
+      `git ${args.join(" ")}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`,
+    );
+  }
 }
 
 function createLegacyWork(project, suffix) {
