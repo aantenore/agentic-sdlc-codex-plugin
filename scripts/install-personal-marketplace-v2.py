@@ -754,6 +754,19 @@ def _read_receipt(home: Path) -> dict[str, object] | None:
     return _validate_receipt(decoded, home)
 
 
+def _read_receipt_for_apply(home: Path) -> dict[str, object] | None:
+    """Retry a transient receipt-creation window under the installer lock."""
+    try:
+        return _read_receipt(home)
+    except InstallError:
+        # A concurrent apply creates the bounded transaction directory before
+        # atomically publishing its first receipt. Waiting for its lock closes
+        # that valid window; a persistent or unsafe record still fails closed
+        # when it is read again.
+        with V1._exclusive_install_lock(_lock_path(home)):
+            return _read_receipt(home)
+
+
 def _write_receipt(home: Path, receipt: dict[str, object]) -> None:
     validated = _validate_receipt(receipt, home)
     root = _transaction_root(home)
@@ -1315,7 +1328,7 @@ def _recover_apply_phase(
 def _apply_install_plan(
     repo_root: Path, home: Path, approved_plan_hash: str
 ) -> tuple[dict[str, object], dict[str, object]]:
-    initial_receipt = _read_receipt(home)
+    initial_receipt = _read_receipt_for_apply(home)
     if initial_receipt is not None and initial_receipt["plan_hash"] == approved_plan_hash:
         if initial_receipt["phase"] == "validation_pending":
             _verify_pending_state(home, initial_receipt)

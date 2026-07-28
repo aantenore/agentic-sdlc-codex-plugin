@@ -789,6 +789,25 @@ class InstallerTransactionTests(unittest.TestCase):
         self.assertEqual(outcomes[0], outcomes[1])
         self.assertEqual(outcomes[0][2], "validation_pending")
 
+    def test_v2_apply_waits_out_the_atomic_receipt_creation_window(self) -> None:
+        missing = INSTALLER_V2.InstallError("receipt creation is still in progress")
+        with (
+            mock.patch.object(
+                INSTALLER_V2,
+                "_read_receipt",
+                side_effect=[missing, None],
+            ) as receipt_reader,
+            mock.patch.object(
+                INSTALLER_V2.V1,
+                "_exclusive_install_lock",
+                return_value=contextlib.nullcontext(),
+            ) as installer_lock,
+        ):
+            self.assertIsNone(INSTALLER_V2._read_receipt_for_apply(self.home))
+
+        self.assertEqual(receipt_reader.call_count, 2)
+        installer_lock.assert_called_once_with(INSTALLER_V2._lock_path(self.home))
+
     def test_v2_restore_is_byte_exact_and_allows_a_new_reviewed_attempt(self) -> None:
         self.apply(self.plan())
         destination = self.home / "plugins" / INSTALLER.PLUGIN_NAME
