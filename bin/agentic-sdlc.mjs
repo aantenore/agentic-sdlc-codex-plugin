@@ -176,6 +176,12 @@ import {
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { inspectBuildIdentity } from "../lib/build-identity.mjs";
 import { computeStableHash } from "../lib/canonical.mjs";
+import {
+  buildExecutionContextPreflightReceipt,
+  executionContextSourceEvolutionDecision,
+  validateExecutionContextPreflightReceipt,
+  workspaceChangeMatchesPreflight,
+} from "../lib/execution-context-preflight.mjs";
 import { openCanonicalQuerySession } from "../lib/canonical-query-session.mjs";
 import {
   ProjectPathSafetyError,
@@ -908,6 +914,7 @@ function buildCliRuntimeHandlerRegistry() {
     "authorization.grant": call(grantAuthorization),
     "authorization.status": call(showAuthorizations),
     "authorization.revoke": call(revokeAuthorization),
+    "task.preflight": call(preflightTask),
     "task.start": call(startTask),
     "handoff.close": call(closeHandoff),
     "phase.lock": call(lockPhase),
@@ -5781,6 +5788,72 @@ function decideRoute(context, options) {
   output(options, decision, formatRouteDecision(decision, options));
 }
 
+function preflightTask(context, options) {
+  const decision = buildTaskStartDecision(context, {
+    ...options,
+    "confirm-start": true,
+  });
+  if (
+    !decision.execution_allowed
+    || !decision.story_id
+    || !decision.contract_id
+    || !decision.delivery_profile_id
+  ) {
+    process.exitCode = 1;
+    output(options, {
+      status: "failed",
+      execution_allowed: false,
+      story_id: decision.story_id || null,
+      contract_id: decision.contract_id || null,
+      delivery_profile_id: decision.delivery_profile_id || null,
+      blocking_reasons: decision.blocking_reasons,
+      recovery: [
+        "Restore every approved context source to the reviewed content before task start, or create and approve a new requirement/work brief when the context changed intentionally.",
+        "No pre-change receipt was written and no source evolution is authorized by this failed preflight.",
+      ],
+      task_start: decision,
+    }, [
+      "Execution context preflight failed; no task was started and no source evolution was authorized.",
+      ...decision.questions.map((question) => `- ${question}`),
+      "Recovery: restore the reviewed pre-start context or approve a new immutable revision, then rerun task preflight.",
+    ]);
+    return;
+  }
+  const attribution = buildAttribution(context, options, "task.preflight");
+  const prepared = prepareExecutionContextPreflight(context, decision, attribution, { persist: false });
+  output(options, {
+    status: "passed",
+    execution_allowed: true,
+    story_id: decision.story_id,
+    contract_id: decision.contract_id,
+    delivery_profile_id: decision.delivery_profile_id,
+    source_count: prepared.receipt.source_snapshots.length,
+    authorized_evolution_paths: prepared.receipt.source_snapshots
+      .filter((source) => source.disposition === "authorized_evolution")
+      .map((source) => source.path),
+    immutable_context_paths: prepared.receipt.source_snapshots
+      .filter((source) => source.disposition === "immutable_context")
+      .map((source) => source.path),
+    preexisting_workspace_changes: prepared.receipt.workspace_changes,
+    receipt_will_be_written_at_start: prepared.relativePath,
+    recovery: [
+      "If a listed immutable context path changes before start, restore it or create and approve a new revision.",
+      "After start, only listed authorized_evolution_paths may differ from this snapshot; all other drift remains blocked.",
+    ],
+  }, [
+    `Execution context preflight passed for ${decision.story_id}.`,
+    `Planned mutable context: ${prepared.receipt.source_snapshots
+      .filter((source) => source.disposition === "authorized_evolution")
+      .map((source) => source.path)
+      .join(", ") || "none"}.`,
+    `Immutable context: ${prepared.receipt.source_snapshots
+      .filter((source) => source.disposition === "immutable_context")
+      .map((source) => source.path)
+      .join(", ") || "none"}.`,
+    "Task start will rerun this check and atomically seal the pre-change receipt.",
+  ]);
+}
+
 function startTask(context, options) {
   const explicitProfileId = getOptionString(options, "delivery-profile");
   const profilePath = explicitProfileId ? deliveryAutonomyPath(context, normalizeId(explicitProfileId)) : null;
@@ -5823,7 +5896,12 @@ function startTaskLocked(context, options) {
       action: "task.start.confirm",
       actor: attribution.actor,
       ...buildTraceAuthorityMetadata(context, options, attribution),
-      evidence: [decision.contract?.path, decision.delivery_profile_path, decision.autonomy_decision_path].filter(Boolean),
+      evidence: [
+        decision.contract?.path,
+        decision.delivery_profile_path,
+        decision.autonomy_decision_path,
+        decision.execution_context_preflight,
+      ].filter(Boolean),
       related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
       authorization_ref: authorization?.id || null,
       git: attribution.git,
@@ -5835,6 +5913,15 @@ function startTaskLocked(context, options) {
 }
 
 function writeTaskStartReceipt(context, decision, attribution, authorization = null) {
+  const deliveryProfile = decision.delivery_profile_id
+    ? readDeliveryAutonomyProfile(context, decision.delivery_profile_id, { missingOk: true })
+    : null;
+  const preparedPreflight = deliveryProfile && decision.story_id && decision.contract_id
+    ? prepareExecutionContextPreflight(context, decision, attribution, { persist: true })
+    : null;
+  if (preparedPreflight) {
+    decision.execution_context_preflight = preparedPreflight.relativePath;
+  }
   let autonomyDecisionRef = null;
   if (decision.autonomy_decision) {
     const decisionPath = path.join(autonomyDecisionsRoot(context), `${normalizeId(decision.autonomy_decision.id)}.json`);
@@ -5846,9 +5933,6 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
       hash: decision.autonomy_decision.decision_hash,
     };
   }
-  const deliveryProfile = decision.delivery_profile_id
-    ? readDeliveryAutonomyProfile(context, decision.delivery_profile_id, { missingOk: true })
-    : null;
   const startBasis = decision.autonomy_decision?.autonomous === true
     ? "bounded-autonomous-profile"
     : decision.autonomy?.task_start_automatic === true
@@ -5885,6 +5969,13 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
       : null,
     autonomy_decision_ref: autonomyDecisionRef,
     delivery_start_receipt_ref: null,
+    execution_context_preflight_ref: preparedPreflight
+      ? {
+          id: preparedPreflight.receipt.id,
+          path: preparedPreflight.relativePath,
+          hash: preparedPreflight.receipt.receipt_hash,
+        }
+      : null,
     autonomy_level: decision.autonomy_decision?.effective_level || "supervised",
     start_basis: startBasis,
     status: "confirmed",
@@ -5958,9 +6049,394 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     writeJsonFile(receiptPath, receipt, { force: true });
   } catch (error) {
     if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
+    if (preparedPreflight?.created) removePathGoverned(preparedPreflight.filePath, { force: true });
     throw error;
   }
   return toProjectPath(context, receiptPath);
+}
+
+function prepareExecutionContextPreflight(context, decision, attribution, options = {}) {
+  const story = readStory(context, decision.story_id);
+  const contract = readContractById(context, decision.contract_id);
+  const deliveryProfile = readDeliveryAutonomyProfile(context, decision.delivery_profile_id);
+  if (!story || contract?.story_id !== story.id) {
+    fail("Execution context preflight requires one current story and its exact approved work brief.");
+  }
+  if (
+    deliveryProfile.story_refs?.length !== 1
+    || deliveryProfile.story_refs[0].id !== story.id
+    || deliveryProfile.contract_refs?.length !== 1
+    || deliveryProfile.contract_refs[0].id !== contract.id
+  ) {
+    fail("Execution context preflight requires one delivery profile bound to the exact story and work brief.");
+  }
+  const requirementProfiles = deliveryProfile.requirement_profile_refs.map((ref) => {
+    const profile = readRequirementAutonomyProfile(context, ref.id);
+    if (profile.profile_hash !== ref.hash || profile.status !== "active") {
+      fail(`Execution context preflight found stale requirement scope ${ref.id}.`);
+    }
+    return profile;
+  });
+  const sourceInputs = [];
+  const addSources = (kind, id, recordPath, sourcePaths, sourceHashes) => {
+    for (const sourcePathRaw of sourcePaths || []) {
+      const sourcePath = normalizeProjectPathInput(sourcePathRaw);
+      const expectedSha256 = sourceHashes?.[sourcePath] || null;
+      if (!expectedSha256) {
+        fail(`Execution context preflight cannot bind ${kind} ${id} source ${sourcePath}: its approved hash is missing.`);
+      }
+      const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: true, fileOnly: true });
+      assertNotDerivedArtifact(context, resolved, "Execution context source");
+      const currentSha256 = hashFile(resolved);
+      if (currentSha256 !== expectedSha256) {
+        fail(
+          `Execution context changed before task start: ${sourcePath} no longer matches approved ${kind} ${id}. `
+          + "Restore the reviewed file, or create and approve a new immutable revision before rerunning task preflight.",
+        );
+      }
+      sourceInputs.push({
+        path: toProjectPath(context, resolved),
+        sha256: currentSha256,
+        binding: {
+          kind,
+          id,
+          record_path: toProjectPath(context, recordPath),
+          expected_sha256: expectedSha256,
+        },
+      });
+    }
+  };
+
+  for (const baseline of selectActiveBaselines(context, story.id)) {
+    addSources(
+      "baseline",
+      baseline.id,
+      baselinePathById(context, baseline.id),
+      baseline.source_paths || Object.keys(baseline.source_hashes || {}),
+      baseline.source_hashes || {},
+    );
+  }
+  for (const requirementId of story.links?.requirements || []) {
+    const requirement = readRequirement(context, requirementId);
+    addSources(
+      "requirement",
+      requirement.id,
+      requirementPath(context, requirement.id),
+      requirement.source_paths || Object.keys(requirement.source_hashes || {}),
+      requirement.source_hashes || {},
+    );
+  }
+  for (const recommendationRef of contract.capability_recommendation_refs || []) {
+    const recommendation = readProjectJson(
+      context,
+      capabilityRecommendationPath(context, recommendationRef.id),
+    );
+    addSources(
+      "capability_recommendation",
+      recommendation.id,
+      capabilityRecommendationPath(context, recommendation.id),
+      recommendation.source_paths || Object.keys(recommendation.source_hashes || {}),
+      recommendation.source_hashes || {},
+    );
+    const profile = readCapabilityProfile(context, recommendation.profile_id);
+    addSources(
+      "capability_profile",
+      profile.id,
+      capabilityProfilePath(context, profile.id),
+      profile.source_paths || Object.keys(profile.source_hashes || {}),
+      profile.source_hashes || {},
+    );
+  }
+  for (const source of contract.contextualization?.context_sources || []) {
+    const sourcePath = normalizeProjectPathInput(source?.path || source);
+    const expectedSha256 = source?.sha256 || null;
+    addSources(
+      "contract_context",
+      contract.id,
+      path.join(context.sdlcRoot, "contracts", `${contract.id}.json`),
+      [sourcePath],
+      expectedSha256 ? { [sourcePath]: expectedSha256 } : {},
+    );
+  }
+
+  const headSha = execGit(context.root, ["rev-parse", "--verify", "HEAD"]);
+  if (!headSha || !/^[a-f0-9]{40,64}$/iu.test(headSha)) {
+    fail("Execution context preflight requires a verifiable Git HEAD before task start.");
+  }
+  const receipt = buildDomainRecord("Cannot seal execution context preflight", () =>
+    buildExecutionContextPreflightReceipt({
+      id: `PREFLIGHT-${deliveryProfile.id}`,
+      story_ref: {
+        id: story.id,
+        path: path.posix.join(SDLC_DIR, "stories", story.id, "story.json"),
+        hash: hashApprovalSubject(story),
+      },
+      contract_ref: {
+        id: contract.id,
+        path: path.posix.join(SDLC_DIR, "contracts", `${contract.id}.json`),
+        hash: hashApprovalSubject(contract),
+      },
+      delivery_profile_ref: {
+        id: deliveryProfile.id,
+        path: toProjectPath(context, deliveryAutonomyPath(context, deliveryProfile.id)),
+        hash: deliveryProfile.profile_hash,
+      },
+      requirement_scopes: requirementProfiles.map((profile) => ({
+        profile_ref: {
+          id: profile.id,
+          path: toProjectPath(context, requirementAutonomyPath(context, profile.id)),
+          hash: profile.profile_hash,
+        },
+        allowed_write_paths: normalizePreflightWritePaths(
+          context,
+          profile.constraints?.allowed_write_paths || [],
+        ),
+      })),
+      sources: sourceInputs,
+      workspace_changes: currentWorkspaceChanges(context),
+      git_head_sha: headSha,
+      created_by: attribution.actor,
+      created_at: now(),
+      audit: { git: attribution.git, run: attribution.run },
+    }));
+  assertRecordSchema(
+    receipt,
+    "execution-context-preflight-receipt.schema.json",
+    `Execution context preflight ${receipt.id}`,
+  );
+  const filePath = executionContextPreflightPath(context, deliveryProfile.id);
+  const relativePath = toProjectPath(context, filePath);
+  if (options.persist !== true) {
+    return { receipt, filePath, relativePath, created: false };
+  }
+  if (fs.existsSync(filePath)) {
+    const existing = readProjectJson(context, filePath);
+    const integrity = validateExecutionContextPreflightReceipt(existing, {
+      story_ref: receipt.story_ref,
+      contract_ref: receipt.contract_ref,
+      delivery_profile_ref: receipt.delivery_profile_ref,
+    });
+    if (!integrity.valid) {
+      fail(`Existing execution context preflight ${relativePath} is invalid: ${integrity.errors.join("; ")}`);
+    }
+    if (
+      existing.git_head_sha !== receipt.git_head_sha
+      || stableJson(existing.workspace_changes) !== stableJson(receipt.workspace_changes)
+    ) {
+      fail(
+        `Incomplete task-start recovery refused: Git HEAD or the dirty workspace changed after orphan preflight ${relativePath}. `
+        + "Restore the exact preflight state or discard it through the governed recovery flow, then rerun task preflight.",
+      );
+    }
+    for (const source of existing.source_snapshots || []) {
+      const resolved = resolveProjectFilePath(context, source.path, { mustExist: true, fileOnly: true });
+      if (hashFile(resolved) !== source.sha256) {
+        fail(
+          `Incomplete task-start recovery refused: ${source.path} changed after an orphan preflight but before a confirmed task start. `
+          + "Restore the preflight snapshot or create and approve a new immutable revision.",
+        );
+      }
+    }
+    return { receipt: existing, filePath, relativePath, created: false };
+  }
+  writeJsonFile(filePath, receipt, { atomicCreate: true });
+  return { receipt, filePath, relativePath, created: true };
+}
+
+function normalizePreflightWritePaths(context, paths) {
+  return [...new Set(paths.map((rawPath) => {
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: false });
+    return toProjectPath(context, resolved);
+  }))].sort();
+}
+
+function currentWorkspaceChanges(context) {
+  let raw = "";
+  try {
+    raw = childProcess.execFileSync(
+      "git",
+      ["-C", context.root, "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    fail("Execution context preflight could not inspect the current Git workspace.");
+  }
+  return raw.split("\u0000").filter(Boolean).map((entry) => {
+    const status = entry.slice(0, 2);
+    const projectPath = normalizeProjectPathInput(entry.slice(3));
+    return {
+      path: projectPath,
+      status,
+      content_sha256: workspacePathContentHash(context, projectPath),
+    };
+  }).filter((entry) => (
+    entry.path !== SDLC_DIR && !entry.path.startsWith(`${SDLC_DIR}/`)
+  )).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function workspacePathContentHash(context, projectPath) {
+  const filePath = resolveProjectFilePath(context, projectPath, { mustExist: false });
+  if (!fs.existsSync(filePath)) return null;
+  const stat = fs.lstatSync(filePath);
+  if (stat.isSymbolicLink()) {
+    return hashBuffer(Buffer.from(`symlink:${fs.readlinkSync(filePath)}`, "utf8"));
+  }
+  if (!stat.isFile()) return null;
+  return hashFile(filePath);
+}
+
+function readStartedExecutionContextPreflight(context, {
+  storyId,
+  contractId,
+  profileId,
+} = {}) {
+  const errors = [];
+  if (!storyId || !contractId || !profileId) {
+    return { receipt: null, errors: ["execution context identity is incomplete"] };
+  }
+  const story = readStory(context, storyId);
+  const contract = readContractById(context, contractId, { missingOk: true });
+  let profile = null;
+  try {
+    profile = readDeliveryAutonomyProfile(context, profileId, { missingOk: true });
+  } catch (error) {
+    errors.push(`delivery profile cannot be verified: ${error.message}`);
+  }
+  if (!story || !contract || !profile) {
+    return { receipt: null, errors: [...errors, "story, work brief, or delivery profile is missing"] };
+  }
+  const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+  if (!fs.existsSync(taskStartPath)) {
+    return { receipt: null, errors: ["confirmed task-start receipt is missing"] };
+  }
+  const taskStart = readProjectJson(context, taskStartPath);
+  const preflightRef = taskStart.execution_context_preflight_ref;
+  if (!preflightRef?.path || !preflightRef?.hash || !preflightRef?.id) {
+    return { receipt: null, errors: ["immutable pre-change execution context receipt is missing"] };
+  }
+  const expectedPath = executionContextPreflightPath(context, profileId);
+  let preflightPath;
+  try {
+    preflightPath = resolveProjectFilePath(context, preflightRef.path, { mustExist: true, fileOnly: true });
+  } catch (error) {
+    return { receipt: null, errors: [`execution context receipt cannot be read: ${error.message}`] };
+  }
+  if (path.resolve(preflightPath) !== path.resolve(expectedPath)) {
+    errors.push("execution context receipt is outside the exact delivery execution directory");
+  }
+  const receipt = readProjectJson(context, preflightPath);
+  const expectedRefs = {
+    story_ref: {
+      id: story.id,
+      path: path.posix.join(SDLC_DIR, "stories", story.id, "story.json"),
+      hash: hashApprovalSubject(story),
+    },
+    contract_ref: {
+      id: contract.id,
+      path: path.posix.join(SDLC_DIR, "contracts", `${contract.id}.json`),
+      hash: hashApprovalSubject(contract),
+    },
+    delivery_profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+  };
+  const integrity = validateExecutionContextPreflightReceipt(receipt, expectedRefs);
+  errors.push(...integrity.errors);
+  if (preflightRef.id !== receipt.id || preflightRef.hash !== receipt.receipt_hash) {
+    errors.push("task-start receipt does not bind the exact execution context preflight");
+  }
+  if (
+    taskStart.status !== "confirmed"
+    || taskStart.story_id !== storyId
+    || taskStart.contract_id !== contractId
+    || taskStart.delivery_profile_ref?.id !== profileId
+    || taskStart.delivery_profile_ref?.hash !== profile.profile_hash
+  ) {
+    errors.push("execution context preflight is not attached to this exact confirmed task start");
+  }
+  const executionState = currentDeliveryExecutionState(context, profile);
+  if (
+    !executionState.start_receipt
+    || taskStart.delivery_start_receipt_ref?.id !== executionState.start_receipt.id
+    || taskStart.delivery_start_receipt_ref?.hash !== executionState.start_receipt.receipt_hash
+  ) {
+    errors.push("execution context preflight has no matching immutable delivery start");
+  }
+  const preflightTime = Date.parse(receipt.created_at || "");
+  const taskStartTime = Date.parse(taskStart.confirmed_at || "");
+  if (
+    !Number.isFinite(preflightTime)
+    || !Number.isFinite(taskStartTime)
+    || preflightTime > taskStartTime
+  ) {
+    errors.push("execution context preflight was not sealed before task confirmation");
+  }
+  if (
+    !taskStart.audit?.git?.head_sha
+    || receipt.git_head_sha !== taskStart.audit.git.head_sha
+  ) {
+    errors.push("execution context preflight and task start use different Git baselines");
+  }
+  const expectedRequirementScopes = profile.requirement_profile_refs.map((ref) => {
+    const current = readRequirementAutonomyProfile(context, ref.id);
+    return {
+      profile_ref: {
+        id: current.id,
+        path: toProjectPath(context, requirementAutonomyPath(context, current.id)),
+        hash: current.profile_hash,
+      },
+      allowed_write_paths: normalizePreflightWritePaths(
+        context,
+        current.constraints?.allowed_write_paths || [],
+      ),
+    };
+  }).sort((left, right) => left.profile_ref.id.localeCompare(right.profile_ref.id));
+  if (stableJson(receipt.requirement_scopes) !== stableJson(expectedRequirementScopes)) {
+    errors.push("execution context preflight no longer matches the approved requirement write scopes");
+  }
+  return { receipt: errors.length === 0 ? receipt : null, errors };
+}
+
+function executionContextSourceEvolution(context, {
+  storyId,
+  contractId,
+  profileId,
+  sourcePath,
+  expectedSha256,
+  bindingKind,
+  bindingId,
+} = {}) {
+  const started = readStartedExecutionContextPreflight(context, {
+    storyId,
+    contractId,
+    profileId,
+  });
+  if (!started.receipt) {
+    return {
+      allowed: false,
+      reason: "preflight_unavailable",
+      errors: started.errors,
+    };
+  }
+  return executionContextSourceEvolutionDecision(started.receipt, {
+    story_ref: started.receipt.story_ref,
+    contract_ref: started.receipt.contract_ref,
+    delivery_profile_ref: started.receipt.delivery_profile_ref,
+    path: normalizeProjectPathInput(sourcePath),
+    expected_sha256: expectedSha256,
+    binding_kind: bindingKind,
+    binding_id: bindingId,
+  });
+}
+
+function executionContextRecoveryMessage(sourcePath) {
+  return (
+    `${sourcePath} changed outside a valid pre-change execution snapshot. `
+    + "If the change happened before task start, restore the reviewed content or approve a new requirement/work brief. "
+    + "If task start was interrupted, restore the immutable preflight snapshot and rerun task preflight; do not bypass freshness."
+  );
 }
 
 function buildTaskStartDecision(context, options) {
@@ -8138,6 +8614,18 @@ function validateTaskStartReceipt(context, storyId, contract) {
         issues.push(`task-start receipt delivery autonomy is invalid: ${error.message}`);
       }
     }
+    if (receipt.execution_context_preflight_ref) {
+      const preflight = readStartedExecutionContextPreflight(context, {
+        storyId,
+        contractId: contract.id,
+        profileId: profile?.id,
+      });
+      if (!preflight.receipt) {
+        issues.push(
+          `task-start execution context preflight is invalid: ${preflight.errors.join("; ")}`,
+        );
+      }
+    }
     const decisionRef = receipt.autonomy_decision_ref;
     if (!decisionRef?.path || !decisionRef?.hash) {
       issues.push("task-start receipt has no immutable autonomy decision reference");
@@ -9912,6 +10400,10 @@ function deliveryCloseReceiptPath(context, profileId) {
   return path.join(deliveryExecutionRoot(context, profileId), "close.json");
 }
 
+function executionContextPreflightPath(context, profileId) {
+  return path.join(deliveryExecutionRoot(context, profileId), "context-preflight.json");
+}
+
 function requirementLifecycleRoot(context) {
   return path.join(requirementsRoot(context), "lifecycle");
 }
@@ -9998,11 +10490,32 @@ function validateRequirementSourceHashes(context, requirement, label, options = 
     }
     const expected = requirement.source_hashes?.[sourcePath] || null;
     if (!actual || actual !== expected) {
-      stale.push({ path: sourcePath, expected, actual });
+      const evolution = options.executionContext
+        ? executionContextSourceEvolution(context, {
+            ...options.executionContext,
+            sourcePath,
+            expectedSha256: expected,
+            bindingKind: "requirement",
+            bindingId: requirement.id,
+          })
+        : { allowed: false, reason: "preflight_not_requested", errors: [] };
+      if (!evolution.allowed) {
+        stale.push({
+          path: sourcePath,
+          expected,
+          actual,
+          recovery: executionContextRecoveryMessage(sourcePath),
+          preflight_reason: evolution.reason,
+          preflight_errors: evolution.errors || [],
+        });
+      }
     }
   }
   if (stale.length > 0 && options.failOnStale) {
-    fail(`${label} has stale source evidence: ${stale.map((item) => item.path).join(", ")}. Create a new immutable revision.`);
+    fail(
+      `${label} has stale source evidence: ${stale.map((item) => item.path).join(", ")}. `
+      + stale.map((item) => item.recovery).join(" "),
+    );
   }
   return stale;
 }
@@ -10549,7 +11062,10 @@ function assertRequirementReadyForDownstream(
       fail(`${label} is not the single approved head of logical requirement ${requirement.logical_id}; complete the explicit supersession first.`);
     }
   }
-  validateRequirementSourceHashes(context, requirement, label, { failOnStale: true });
+  validateRequirementSourceHashes(context, requirement, label, {
+    failOnStale: true,
+    executionContext: options.executionContext || null,
+  });
   const profile = readRequirementAutonomyProfile(context, requirement.autonomy_profile_id);
   if (profile.status !== "active" || profile.requirement_ref.hash !== requirementContentHash(requirement)) {
     fail(`${label} has no active, current requirement autonomy profile.`);
@@ -12947,6 +13463,26 @@ function currentDeliveryExecutionState(context, profile) {
 }
 
 function currentDeliveryAutonomyInputs(context, profile, options = {}) {
+  const storyRef = profile.story_refs[0];
+  const story = readStory(context, storyRef.id);
+  if (!story) fail(`Delivery profile ${profile.id} references missing story ${storyRef.id}.`);
+  const contractRef = profile.contract_refs[0];
+  const contract = readContractById(context, contractRef.id);
+  if (contract.delivery_execution_profile_id !== profile.id) {
+    fail(`Contract ${contract.id} is not bound to delivery profile ${profile.id}.`);
+  }
+  const contractFreshnessGaps = collectContractDependencyFreshnessGaps(context, contract);
+  if (contractFreshnessGaps.length > 0) {
+    fail(
+      `Contract ${contract.id} execution context is not current: `
+      + contractFreshnessGaps.map((gap) => gap.summary).join("; "),
+    );
+  }
+  const executionContext = {
+    storyId: story.id,
+    contractId: contract.id,
+    profileId: profile.id,
+  };
   const requirementProfiles = profile.requirement_profile_refs.map((ref) => {
     const current = readRequirementAutonomyProfile(context, ref.id);
     if (current.profile_hash !== ref.hash) {
@@ -12957,7 +13493,12 @@ function currentDeliveryAutonomyInputs(context, profile, options = {}) {
   });
   const currentRequirements = requirementProfiles.map((requirementProfile) => {
     const requirement = requirementByAutonomyProfileId(context, requirementProfile.id);
-    assertRequirementReadyForDownstream(context, requirement, `Requirement for profile ${requirementProfile.id}`);
+    assertRequirementReadyForDownstream(
+      context,
+      requirement,
+      `Requirement for profile ${requirementProfile.id}`,
+      { executionContext },
+    );
     return {
       id: requirement.id,
       version: requirement.revision,
@@ -12970,14 +13511,6 @@ function currentDeliveryAutonomyInputs(context, profile, options = {}) {
       }),
     };
   });
-  const storyRef = profile.story_refs[0];
-  const story = readStory(context, storyRef.id);
-  if (!story) fail(`Delivery profile ${profile.id} references missing story ${storyRef.id}.`);
-  const contractRef = profile.contract_refs[0];
-  const contract = readContractById(context, contractRef.id);
-  if (contract.delivery_execution_profile_id !== profile.id) {
-    fail(`Contract ${contract.id} is not bound to delivery profile ${profile.id}.`);
-  }
   const target = {
     pull_request_target: profile.pull_request_target,
     local_release_target: profile.local_release_target,
@@ -13082,12 +13615,14 @@ function deliveryCapabilityBoundary(context, contract, requestedLevel) {
       status: "not_verified",
     };
   }
+  const executionContext = contractExecutionContext(contract);
   for (const ref of refs) {
     const recommendation = readProjectJson(context, capabilityRecommendationPath(context, ref.id));
     validateApprovedCapabilityRecommendationForUse(
       context,
       recommendation,
       `capability recommendation ${ref.id}`,
+      { executionContext },
     );
     const approvedHash = latestApprovedRecordApproval(recommendation)?.approved_content_hash || null;
     if (ref.approved_content_hash && ref.approved_content_hash !== approvedHash) {
@@ -21306,20 +21841,15 @@ function attachAssistantMessagePresentation(payload) {
 }
 
 function collectBaselineApprovalRequests(context, storyId = null) {
+  const executionContext = storyId ? executionContextForStory(context, storyId) : null;
   return selectActiveBaselines(context, storyId)
     .filter((baseline) => {
       const approved = String(baseline.status || "").toLowerCase() === "approved";
-      const confirmedPreChangeSnapshot = Boolean(
-        approved
-        && storyId
-        && baselineWasBoundToConfirmedStoryStart(context, storyId, baseline)
-        && isApprovedRecordFresh(baseline),
-      );
-      if (confirmedPreChangeSnapshot) {
-        return false;
-      }
       const stale =
-        validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, { collectOnly: true }).length > 0 ||
+        validateBaselineSourceHashes(context, baseline, `baseline ${baseline.id}`, {
+          collectOnly: true,
+          executionContext,
+        }).length > 0 ||
         (approved && !isApprovedRecordFresh(baseline));
       return !approved || stale;
     })
@@ -21374,20 +21904,34 @@ function baselineIdsReferencedByAllContracts(context) {
 }
 
 function collectCapabilityProfileApprovalRequests(context, storyId = null) {
+  const executionContext = storyId ? executionContextForStory(context, storyId) : null;
   return readCapabilityProfiles(context)
     .filter(
       (profile) =>
         profile.status !== "approved" ||
         !isApprovedRecordFresh(profile) ||
-        validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true }).length > 0,
+        validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, {
+          collectOnly: true,
+          executionContext,
+          bindingKind: "capability_profile",
+        }).length > 0,
     )
     .filter((profile) => capabilityRecordMatchesStory(context, profile, storyId))
-    .map((profile) => buildCapabilityProfileApprovalRequest(context, profile));
+    .map((profile) => buildCapabilityProfileApprovalRequest(context, profile, { executionContext }));
 }
 
-function buildCapabilityProfileApprovalRequest(context, profile) {
+function buildCapabilityProfileApprovalRequest(context, profile, options = {}) {
   const profilePath = toProjectPath(context, capabilityProfilePath(context, profile.id));
-  const staleSources = validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true });
+  const staleSources = validateCapabilityRecordSourceHashes(
+    context,
+    profile,
+    `capability profile ${profile.id}`,
+    {
+      collectOnly: true,
+      executionContext: options.executionContext,
+      bindingKind: "capability_profile",
+    },
+  );
   if (profile.status === "approved" && (!isApprovedRecordFresh(profile) || staleSources.length > 0)) {
     return {
       id: `refresh-capability-profile-${profile.id}`,
@@ -21446,22 +21990,45 @@ function buildCapabilityProfileApprovalRequest(context, profile) {
 }
 
 function collectCapabilityRecommendationApprovalRequests(context, storyId = null) {
+  const executionContext = storyId ? executionContextForStory(context, storyId) : null;
   return readCapabilityRecommendations(context)
     .filter(
       (recommendation) =>
         recommendation.status !== "approved" ||
         !isApprovedRecordFresh(recommendation) ||
-        validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${recommendation.id}`, { collectOnly: true }).length > 0 ||
+        validateCapabilityRecordSourceHashes(
+          context,
+          recommendation,
+          `capability recommendation ${recommendation.id}`,
+          {
+            collectOnly: true,
+            executionContext,
+            bindingKind: "capability_recommendation",
+          },
+        ).length > 0 ||
         capabilityRecommendationNeedsInstallApproval(recommendation),
     )
     .filter((recommendation) => capabilityRecommendationMatchesStory(context, recommendation, storyId))
-    .map((recommendation) => buildCapabilityRecommendationApprovalRequest(context, recommendation));
+    .map((recommendation) => buildCapabilityRecommendationApprovalRequest(
+      context,
+      recommendation,
+      { executionContext },
+    ));
 }
 
-function buildCapabilityRecommendationApprovalRequest(context, recommendation) {
+function buildCapabilityRecommendationApprovalRequest(context, recommendation, options = {}) {
   const recommendationPath = toProjectPath(context, capabilityRecommendationPath(context, recommendation.id));
   const needsInstallApproval = capabilityRecommendationNeedsInstallApproval(recommendation);
-  const staleSources = validateCapabilityRecordSourceHashes(context, recommendation, `capability recommendation ${recommendation.id}`, { collectOnly: true });
+  const staleSources = validateCapabilityRecordSourceHashes(
+    context,
+    recommendation,
+    `capability recommendation ${recommendation.id}`,
+    {
+      collectOnly: true,
+      executionContext: options.executionContext,
+      bindingKind: "capability_recommendation",
+    },
+  );
   if (
     recommendation.status === "approved" &&
     !needsInstallApproval &&
@@ -23043,6 +23610,7 @@ function formatExplainedOpenQuestion(explanation, index = null) {
 
 function collectContractDependencyFreshnessGaps(context, contract) {
   const gaps = [];
+  const executionContext = contractExecutionContext(contract);
   const addGap = (code, summary, question) => {
     if (!gaps.some((gap) => gap.code === code && gap.summary === summary)) {
       gaps.push({ code, summary, question });
@@ -23057,10 +23625,29 @@ function collectContractDependencyFreshnessGaps(context, contract) {
     }
     try {
       const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
-      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-        addGap("missing_context_source", `context source ${sourcePath} is missing`, `Refresh the work brief after choosing a current replacement for ${sourcePath}.`);
-      } else if (!source.sha256 || hashFile(resolved) !== source.sha256) {
-        addGap("stale_context_source", `context source ${sourcePath} changed`, `Refresh the work brief from the current contents of ${sourcePath}; do not reuse its old approval.`);
+      const currentMatches = (
+        fs.existsSync(resolved)
+        && fs.statSync(resolved).isFile()
+        && source.sha256
+        && hashFile(resolved) === source.sha256
+      );
+      if (!currentMatches) {
+        const evolution = source.sha256 && executionContext
+          ? executionContextSourceEvolution(context, {
+              ...executionContext,
+              sourcePath,
+              expectedSha256: source.sha256,
+              bindingKind: "contract_context",
+              bindingId: contract.id,
+            })
+          : { allowed: false };
+        if (!evolution.allowed) {
+          addGap(
+            fs.existsSync(resolved) ? "stale_context_source" : "missing_context_source",
+            `context source ${sourcePath} changed outside its approved pre-change snapshot`,
+            executionContextRecoveryMessage(sourcePath),
+          );
+        }
       }
     } catch (error) {
       addGap("invalid_context_source", `context source ${sourcePath} is invalid`, `Refresh the work brief after correcting context source ${sourcePath}: ${error.message}`);
@@ -23089,6 +23676,16 @@ function collectContractDependencyFreshnessGaps(context, contract) {
   }
 
   return gaps;
+}
+
+function contractExecutionContext(contract) {
+  return contract?.story_id && contract?.id && contract?.delivery_execution_profile_id
+    ? {
+        storyId: contract.story_id,
+        contractId: contract.id,
+        profileId: contract.delivery_execution_profile_id,
+      }
+    : null;
 }
 
 function storyOutputResolveHint(contract) {
@@ -23595,6 +24192,7 @@ function validateCapabilityBindingTargets(context, bindings, label, report) {
 
 function validateContractCapabilityRecommendations(context, report, contract, label) {
   const refs = Array.isArray(contract.capability_recommendation_refs) ? contract.capability_recommendation_refs : [];
+  const executionContext = contractExecutionContext(contract);
   if (refs.length === 0) {
     return;
   }
@@ -23624,7 +24222,11 @@ function validateContractCapabilityRecommendations(context, report, contract, la
     if (ref.approved_content_hash && latestApproval?.approved_content_hash !== ref.approved_content_hash) {
       report[recommendationSeverity].push(`${label} references ${recommendationLabel} with an outdated approved_content_hash`);
     }
-    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, recommendationLabel, { collectOnly: true })) {
+    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, recommendationLabel, {
+      collectOnly: true,
+      executionContext,
+      bindingKind: "capability_recommendation",
+    })) {
       const severity = approvedRecordIssueSeverity(context, report, recommendation);
       report[severity].push(issue);
     }
@@ -23638,7 +24240,11 @@ function validateContractCapabilityRecommendations(context, report, contract, la
       } else if (!isApprovedRecordFresh(profile)) {
         report[approvedRecordIssueSeverity(context, report, profile)].push(`${label} ${recommendationLabel} profile ${profile.id} is not approved or is stale`);
       }
-      for (const issue of validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, { collectOnly: true })) {
+      for (const issue of validateCapabilityRecordSourceHashes(context, profile, `capability profile ${profile.id}`, {
+        collectOnly: true,
+        executionContext,
+        bindingKind: "capability_profile",
+      })) {
         const severity = approvedRecordIssueSeverity(context, report, profile);
         report[severity].push(issue);
       }
@@ -25095,10 +25701,26 @@ function showCapabilityStatus(context, options) {
     }
     return !storyId || profileIds.has(recommendation.profile_id);
   });
+  const scopedStoryId = storyId || (
+    profiles.length === 1 ? profiles[0].subject?.story_id || null : null
+  );
+  const executionContext = scopedStoryId
+    ? executionContextForStory(context, scopedStoryId)
+    : null;
   const status = {
-    profiles: profiles.map((profile) => capabilityRecordStatus(context, profile, `capability profile ${profile.id}`)),
+    profiles: profiles.map((profile) => capabilityRecordStatus(
+      context,
+      profile,
+      `capability profile ${profile.id}`,
+      { executionContext, bindingKind: "capability_profile" },
+    )),
     recommendations: recommendations.map((recommendation) =>
-      capabilityRecordStatus(context, recommendation, `capability recommendation ${recommendation.id}`),
+      capabilityRecordStatus(
+        context,
+        recommendation,
+        `capability recommendation ${recommendation.id}`,
+        { executionContext, bindingKind: "capability_recommendation" },
+      ),
     ),
   };
   output(
@@ -25401,14 +26023,30 @@ function validateBaselineSourceHashes(context, baseline, label, options = {}) {
     const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
     if (isDerivedArtifactPath(context, resolved)) {
       issues.push(`${label} uses derived source ${sourcePath}`);
-    } else if (!fs.existsSync(resolved)) {
-      issues.push(`${label} source ${sourcePath} is missing`);
     } else if (!expectedHash) {
       issues.push(`${label} source ${sourcePath} has no recorded hash`);
-    } else if (!fs.statSync(resolved).isFile()) {
-      issues.push(`${label} source ${sourcePath} is not a file`);
-    } else if (hashFile(resolved) !== expectedHash) {
-      issues.push(`${label} source ${sourcePath} changed after baseline proposal`);
+    } else {
+      const currentMatches = (
+        fs.existsSync(resolved)
+        && fs.statSync(resolved).isFile()
+        && hashFile(resolved) === expectedHash
+      );
+      if (currentMatches) continue;
+      const evolution = options.executionContext
+        ? executionContextSourceEvolution(context, {
+            ...options.executionContext,
+            sourcePath,
+            expectedSha256: expectedHash,
+            bindingKind: "baseline",
+            bindingId: baseline.id,
+          })
+        : { allowed: false };
+      if (!evolution.allowed) {
+        issues.push(
+          `${label} source ${sourcePath} is missing or changed outside its approved pre-change snapshot. `
+          + executionContextRecoveryMessage(sourcePath),
+        );
+      }
     }
   }
   if (options.failOnStale && issues.length > 0) {
@@ -25766,8 +26404,12 @@ function findApprovedCapabilityProfiles(context, options = {}) {
   });
 }
 
-function capabilityRecordStatus(context, record, label) {
-  const staleSources = validateCapabilityRecordSourceHashes(context, record, label, { collectOnly: true });
+function capabilityRecordStatus(context, record, label, options = {}) {
+  const staleSources = validateCapabilityRecordSourceHashes(context, record, label, {
+    collectOnly: true,
+    executionContext: options.executionContext || null,
+    bindingKind: options.bindingKind,
+  });
   return {
     id: record.id,
     status: record.status || "unknown",
@@ -25786,14 +26428,30 @@ function validateCapabilityRecordSourceHashes(context, record, label, options = 
     const resolved = resolveProjectFilePath(context, sourcePath, { mustExist: false });
     if (isDerivedArtifactPath(context, resolved)) {
       issues.push(`${label} uses derived source ${sourcePath}`);
-    } else if (!fs.existsSync(resolved)) {
-      issues.push(`${label} source ${sourcePath} is missing`);
     } else if (!expectedHash) {
       issues.push(`${label} source ${sourcePath} has no recorded hash`);
-    } else if (!fs.statSync(resolved).isFile()) {
-      issues.push(`${label} source ${sourcePath} is not a file`);
-    } else if (hashFile(resolved) !== expectedHash) {
-      issues.push(`${label} source ${sourcePath} changed after record creation`);
+    } else {
+      const currentMatches = (
+        fs.existsSync(resolved)
+        && fs.statSync(resolved).isFile()
+        && hashFile(resolved) === expectedHash
+      );
+      if (currentMatches) continue;
+      const evolution = options.executionContext
+        ? executionContextSourceEvolution(context, {
+            ...options.executionContext,
+            sourcePath,
+            expectedSha256: expectedHash,
+            bindingKind: options.bindingKind || "capability_profile",
+            bindingId: record.id,
+          })
+        : { allowed: false };
+      if (!evolution.allowed) {
+        issues.push(
+          `${label} source ${sourcePath} changed after record creation and is missing or changed outside its approved pre-change snapshot. `
+          + executionContextRecoveryMessage(sourcePath),
+        );
+      }
     }
   }
   if (options.failOnStale && issues.length > 0) {
@@ -25805,20 +26463,33 @@ function validateCapabilityRecordSourceHashes(context, record, label, options = 
   return issues;
 }
 
-function validateApprovedCapabilityProfileForUse(context, profile, label) {
+function validateApprovedCapabilityProfileForUse(context, profile, label, options = {}) {
   if (!profile || profile.status !== "approved" || !isApprovedRecordFresh(profile)) {
     fail(`${label} is not approved or its approval is stale`);
   }
-  validateCapabilityRecordSourceHashes(context, profile, label, { failOnStale: true });
+  validateCapabilityRecordSourceHashes(context, profile, label, {
+    failOnStale: true,
+    executionContext: options.executionContext || null,
+    bindingKind: "capability_profile",
+  });
 }
 
-function validateApprovedCapabilityRecommendationForUse(context, recommendation, label) {
+function validateApprovedCapabilityRecommendationForUse(context, recommendation, label, options = {}) {
   if (!recommendation || recommendation.status !== "approved" || !isApprovedRecordFresh(recommendation)) {
     fail(`${label} is not approved or its approval is stale`);
   }
-  validateCapabilityRecordSourceHashes(context, recommendation, label, { failOnStale: true });
+  validateCapabilityRecordSourceHashes(context, recommendation, label, {
+    failOnStale: true,
+    executionContext: options.executionContext || null,
+    bindingKind: "capability_recommendation",
+  });
   const profile = readCapabilityProfile(context, recommendation.profile_id);
-  validateApprovedCapabilityProfileForUse(context, profile, `capability profile ${recommendation.profile_id}`);
+  validateApprovedCapabilityProfileForUse(
+    context,
+    profile,
+    `capability profile ${recommendation.profile_id}`,
+    options,
+  );
   for (const item of recommendation.recommendations || []) {
     if (item.install_required && !item.install_approved) {
       fail(`${label} requires installation of ${item.type}:${item.name} without install approval`);
@@ -33081,6 +33752,7 @@ function validateAuthorizations(context, report) {
 
 function validateBaselines(context, report, storyId = null) {
   const allBaselines = readBaselines(context);
+  const storyExecutionContext = storyId ? executionContextForStory(context, storyId) : null;
   const referencedIds = storyId
     ? baselineIdsReferencedByStoryContract(context, storyId)
     : baselineIdsReferencedByAllContracts(context);
@@ -33101,21 +33773,15 @@ function validateBaselines(context, report, storyId = null) {
     const label = `baseline ${baseline.id || "unknown"}`;
     const baselineStatus = String(baseline.status || "").toLowerCase();
     const active = activeIds.has(baseline.id);
-    const snapshotBoundAtStart = Boolean(
-      storyId && active && baselineWasBoundToConfirmedStoryStart(context, storyId, baseline),
-    );
     if (!baseline.id || !baseline.schema_version || !baseline.status || !baseline.kind) {
       report.errors.push(`${label} is missing id, schema_version, status, or kind`);
     }
-    for (const issue of validateBaselineSourceHashes(context, baseline, label, { collectOnly: true })) {
-      if (snapshotBoundAtStart) {
-        report.warnings.push(
-          `${label} is the approved pre-change snapshot for ${storyId}; current files changed after the confirmed task start. Technical detail: ${issue}`,
-        );
-      } else {
-        const severity = active && ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
-        report[severity].push(issue);
-      }
+    for (const issue of validateBaselineSourceHashes(context, baseline, label, {
+      collectOnly: true,
+      executionContext: active ? storyExecutionContext : null,
+    })) {
+      const severity = active && ["approved", "provisionally_approved"].includes(baselineStatus) && report.strict ? "errors" : "warnings";
+      report[severity].push(issue);
     }
     if (report.strict && active && baselineStatus && baselineStatus !== "approved") {
       report.errors.push(
@@ -33139,33 +33805,11 @@ function validateBaselines(context, report, storyId = null) {
   }
 }
 
-function baselineWasBoundToConfirmedStoryStart(context, storyId, baseline) {
+function executionContextForStory(context, storyId) {
   const story = readStory(context, storyId);
-  if (!story?.contract_id) return false;
+  if (!story?.contract_id) return null;
   const contract = readContractById(context, story.contract_id, { missingOk: true });
-  if (!contract) return false;
-  const baselinePath = path.posix.join(SDLC_DIR, "baseline", `${baseline.id}.json`);
-  const contextSource = (contract.contextualization?.context_sources || []).find(
-    (source) => String(source?.path || source || "").replace(/\\/gu, "/") === baselinePath,
-  );
-  if (!contextSource?.sha256) return false;
-  const absoluteBaselinePath = resolveProjectFilePath(context, baselinePath, { mustExist: true, fileOnly: true });
-  if (hashFile(absoluteBaselinePath) !== contextSource.sha256) return false;
-  const receiptPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
-  if (!fs.existsSync(receiptPath)) return false;
-  const receipt = readProjectJson(context, receiptPath);
-  const approval = latestApprovedRecordApproval(baseline);
-  const approvalTime = Date.parse(approval?.created_at || approval?.approved_at || "");
-  const startTime = Date.parse(receipt.confirmed_at || "");
-  return (
-    receipt.status === "confirmed"
-    && receipt.story_id === storyId
-    && receipt.contract_id === contract.id
-    && receipt.contract_approval_hash === latestContractApproval(contract)?.approved_content_hash
-    && Number.isFinite(approvalTime)
-    && Number.isFinite(startTime)
-    && startTime >= approvalTime
-  );
+  return contract ? contractExecutionContext(contract) : null;
 }
 
 function validateDependencyProposals(context, report, storyId = null) {
@@ -33621,6 +34265,7 @@ function validateOutputLink(context, report, registry, templateById, decisions, 
 }
 
 function validateCapabilityDiscovery(context, report, storyId = null) {
+  const executionContext = storyId ? executionContextForStory(context, storyId) : null;
   const profiles = readCapabilityProfiles(context).filter((profile) => !storyId || profile.subject?.story_id === storyId);
   const profileIds = new Set(profiles.map((profile) => profile.id));
   const recommendations = readCapabilityRecommendations(context).filter((recommendation) => {
@@ -33647,7 +34292,11 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
         report.errors.push(`${label} uses derived source ${sourcePath}`);
       }
     }
-    for (const issue of validateCapabilityRecordSourceHashes(context, profile, label, { collectOnly: true })) {
+    for (const issue of validateCapabilityRecordSourceHashes(context, profile, label, {
+      collectOnly: true,
+      executionContext,
+      bindingKind: "capability_profile",
+    })) {
       const severity = approvedRecordIssueSeverity(context, report, profile);
       report[severity].push(issue);
     }
@@ -33675,7 +34324,11 @@ function validateCapabilityDiscovery(context, report, storyId = null) {
     if (!Array.isArray(recommendation.recommendations)) {
       report.errors.push(`${label} recommendations must be an array`);
     }
-    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, label, { collectOnly: true })) {
+    for (const issue of validateCapabilityRecordSourceHashes(context, recommendation, label, {
+      collectOnly: true,
+      executionContext,
+      bindingKind: "capability_recommendation",
+    })) {
       const severity = approvedRecordIssueSeverity(context, report, recommendation);
       report[severity].push(issue);
     }
@@ -34901,6 +35554,7 @@ function validateContracts(context, report, contractIds = null) {
 }
 
 function validateContractContextSources(context, report, contract, label) {
+  const executionContext = contractExecutionContext(contract);
   for (const source of contract.contextualization?.context_sources || []) {
     const sourcePath = source?.path || source;
     if (!sourcePath) {
@@ -34915,18 +35569,31 @@ function validateContractContextSources(context, report, contract, label) {
       report.errors.push(`${label} context source ${sourcePath} is invalid: ${error.message}`);
       continue;
     }
-    if (!fs.existsSync(resolved)) {
-      report.errors.push(`${label} context source ${sourcePath} is missing`);
-      continue;
-    }
-    if (!fs.statSync(resolved).isFile()) {
-      report.errors.push(`${label} context source ${sourcePath} is not a file`);
-      continue;
-    }
     if (!source.sha256) {
       report.errors.push(`${label} context source ${sourcePath} has no recorded hash`);
-    } else if (hashFile(resolved) !== source.sha256) {
-      report.errors.push(`${label} context source ${sourcePath} changed after contract creation`);
+      continue;
+    }
+    const currentMatches = (
+      fs.existsSync(resolved)
+      && fs.statSync(resolved).isFile()
+      && hashFile(resolved) === source.sha256
+    );
+    if (!currentMatches) {
+      const evolution = executionContext
+        ? executionContextSourceEvolution(context, {
+            ...executionContext,
+            sourcePath,
+            expectedSha256: source.sha256,
+            bindingKind: "contract_context",
+            bindingId: contract.id,
+          })
+        : { allowed: false };
+      if (!evolution.allowed) {
+        report.errors.push(
+          `${label} context source ${sourcePath} is missing or changed outside its approved pre-change snapshot. `
+          + executionContextRecoveryMessage(sourcePath),
+        );
+      }
     }
   }
 }
@@ -35584,6 +36251,7 @@ function validateStory(context, storyId, report) {
     return;
   }
   const story = normalizeStoryRecord(readProjectJson(context, storyPath));
+  const executionContext = executionContextForStory(context, storyId);
   for (const field of context.config.gate_policy.story_required_fields) {
     if (story[field] === undefined || story[field] === null || story[field] === "") {
       report.errors.push(`Story ${storyId} is missing required field '${field}'`);
@@ -35660,8 +36328,10 @@ function validateStory(context, storyId, report) {
       if (requirement.status !== "approved" || !isApprovedRecordFresh(requirement)) {
         report.errors.push(`${label} must have a fresh formal approval`);
       }
-      for (const stale of validateRequirementSourceHashes(context, requirement, label)) {
-        report.errors.push(`${label} source ${stale.path} is missing or changed`);
+      for (const stale of validateRequirementSourceHashes(context, requirement, label, {
+        executionContext,
+      })) {
+        report.errors.push(`${label} source ${stale.path} is missing or changed. ${stale.recovery}`);
       }
       if (effectiveRequirementStatus(context, requirement).status === "superseded") {
         report.errors.push(`${label} is superseded and cannot remain an active story input`);
@@ -35757,18 +36427,39 @@ function validateStoryChangedPathsWithinRequirementScope(context, storyId, requi
   const committedPaths = String(
     execGit(context.root, ["diff", "--name-only", "--no-renames", `${baselineSha}..HEAD`, "--"]) || "",
   ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
-  const changedPaths = [...new Set([
-    ...committedPaths,
-    ...pullRequestChangedPaths(context, null, "git.commit"),
-  ])].sort()
-    .filter((filePath) => filePath !== SDLC_DIR && !filePath.startsWith(`${SDLC_DIR}/`));
-  const outside = changedPaths.filter((filePath) => requirementProfiles.some((profile) => {
+  const outsideApprovedScope = (filePath) => requirementProfiles.some((profile) => {
     const allowedPaths = profile.constraints?.allowed_write_paths || [];
     return allowedPaths.length === 0 || !pathMatchesApprovedWriteScope(filePath, allowedPaths);
-  }));
+  });
+  const committedOutside = committedPaths
+    .filter((filePath) => filePath !== SDLC_DIR && !filePath.startsWith(`${SDLC_DIR}/`))
+    .filter(outsideApprovedScope);
+  const currentWorkspace = currentWorkspaceChanges(context);
+  const storyExecutionContext = executionContextForStory(context, storyId);
+  const startedPreflight = readStartedExecutionContextPreflight(
+    context,
+    storyExecutionContext || {},
+  );
+  const currentByPath = new Map(currentWorkspace.map((entry) => [entry.path, entry]));
+  const workspaceOutside = currentWorkspace
+    .filter((entry) => outsideApprovedScope(entry.path))
+    .filter((entry) => (
+      !startedPreflight.receipt
+      || !workspaceChangeMatchesPreflight(startedPreflight.receipt, entry)
+    ))
+    .map((entry) => entry.path);
+  const removedOrRestoredPreexistingOutside = (startedPreflight.receipt?.workspace_changes || [])
+    .filter((entry) => outsideApprovedScope(entry.path))
+    .filter((entry) => !currentByPath.has(entry.path))
+    .map((entry) => entry.path);
+  const outside = [...new Set([
+    ...committedOutside,
+    ...workspaceOutside,
+    ...removedOrRestoredPreexistingOutside,
+  ])].sort();
   if (outside.length > 0) {
     report.errors.push(
-      `Story ${storyId} changed files outside the approved requirement write paths: ${outside.join(", ")}`,
+      `Story ${storyId} changed files outside the approved requirement write paths: ${outside.join(", ")} (detected after task preflight)`,
     );
   }
   report.checked.push(`story ${storyId} changed-path scope`);

@@ -249,6 +249,8 @@ The strongest choice is effective only when a trusted host or CI system signs th
 
 At task start, phases run automatically only when both the selected mode and the exact delivery allow them. The default middle mode permits analysis, design, implementation, and validation between review moments, while release or merge remains a separate stop unless it was explicitly included.
 
+For brownfield work, an approved context file may also be a file the requirement explicitly allows the task to change. Run `task preflight` before starting to see which reviewed sources will be allowed to evolve and which remain immutable; this check is read-only. `task start` repeats the check and stores the exact pre-change hashes, approved write scopes, Git head, and existing dirty-worktree state in an immutable receipt. After that start, a source change is accepted only when the receipt binds that exact baseline, requirement, capability, or contract source and the path is inside every applicable requirement write scope. Drift before start, a new out-of-scope change, or a changed pre-existing local edit remains blocked. Restore the reviewed bytes or approve a new revision instead of bypassing freshness.
+
 ## 5. Exact Authorization: Action × Subject
 
 An authorization is not a bag of actions plus a bag of subjects. That would accidentally allow every combination. Version 2 stores each permitted **action–subject pair** separately. Requirement and delivery profiles constrain what may be authorized; they are not credentials themselves. The CLI derives narrow, per-delivery uses only after the requested work is proven to be a subset of every policy input.
