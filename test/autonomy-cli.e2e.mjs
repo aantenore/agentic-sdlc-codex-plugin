@@ -16,6 +16,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
 const providerCommandShim = path.join(repoRoot, "test", "helpers", "provider-command-shim.cjs");
 const tempProjects = new Set();
+const providerBins = new Map();
 
 function tmpProject(name) {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), `sdlc-autonomy-${name}-`));
@@ -29,6 +30,7 @@ after(() => {
     fs.rmSync(project, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   }
   tempProjects.clear();
+  providerBins.clear();
 });
 
 function run(args, options = {}) {
@@ -129,6 +131,16 @@ function createNativeProviderShim(fakeBin, command) {
   return executable;
 }
 
+function externalProviderBin(project, command) {
+  const key = `${project}\0${command}`;
+  const existing = providerBins.get(key);
+  if (existing) return existing;
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), `sdlc-autonomy-provider-${command}-`));
+  tempProjects.add(fakeBin);
+  providerBins.set(key, fakeBin);
+  return fakeBin;
+}
+
 function providerShimEnv(provider) {
   const requireOption = /\s/u.test(providerCommandShim)
     ? `--require=${JSON.stringify(providerCommandShim)}`
@@ -140,8 +152,7 @@ function providerShimEnv(provider) {
 }
 
 function fakeGitRemoteEnv(project, remoteSha) {
-  const fakeBin = path.join(project, "fake-git-bin");
-  fs.mkdirSync(fakeBin, { recursive: true });
+  const fakeBin = externalProviderBin(project, "git");
   const realGit = resolveHostCommand("git");
   createNativeProviderShim(fakeBin, "git");
   return {
@@ -153,8 +164,7 @@ function fakeGitRemoteEnv(project, remoteSha) {
 }
 
 function fakeGitHubEnv(project, values) {
-  const fakeBin = path.join(project, "fake-gh-bin");
-  fs.mkdirSync(fakeBin, { recursive: true });
+  const fakeBin = externalProviderBin(project, "gh");
   createNativeProviderShim(fakeBin, "gh");
   const baseSha = values.baseSha ?? mustGit(project, ["rev-parse", "refs/remotes/origin/main"]);
   return {
@@ -487,6 +497,119 @@ function assertMergeReceiptGateIntegrity(project) {
   const report = JSON.parse(gate.stdout);
   assert.deepEqual(report.errors, [], gate.stdout);
 }
+
+test("an existing pull request is pinned before approval and cannot be retargeted by later callers", () => {
+  const project = tmpProject("existing-pull-request");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-EXISTING-PR",
+    contractId: "CONTRACT-EXISTING-PR",
+    profileId: "AUT-EXISTING-PR",
+  });
+  const existingHeadPath = path.join(project, "src", "existing-pr-head.txt");
+  fs.mkdirSync(path.dirname(existingHeadPath), { recursive: true });
+  fs.writeFileSync(existingHeadPath, "existing PR reviewed head\n", "utf8");
+  mustGit(project, ["add", "--", "src/existing-pr-head.txt"]);
+  mustGit(project, ["commit", "-m", "test: establish existing PR head"]);
+  const commonProposal = [
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-EXISTING-PR",
+    "--delivery", "PR-184",
+    "--kind", "pull_request",
+    "--pr-mode", "existing",
+    "--story", "ST-EXISTING-PR",
+    "--contract", "CONTRACT-EXISTING-PR",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+  ];
+  mustFail(commonProposal, /requires --pr-number/u);
+  mustFail([
+    ...commonProposal,
+    "--pr-number", "184",
+  ], /requires the exact --pr-url/u);
+  mustFail([
+    ...commonProposal,
+    "--pr-number", "184",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/185",
+  ], /does not match --pr-url number 185/u);
+  mustFail([
+    ...commonProposal,
+    "--pr-number", "184",
+    "--pr-url", "https://github.com/other/repository/pull/184",
+  ], /must identify one exact pull request in the approved repository/u);
+  mustFail([
+    ...commonProposal,
+    "--pr-number", "184",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/184",
+    "--allow-action", "pull_request.create",
+  ], /cannot allow pull_request\.create/u);
+
+  const reviewedHeadSha = mustGit(project, ["rev-parse", "HEAD"]);
+  const proposal = mustRunJson([
+    ...commonProposal,
+    "--pr-number", "184",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/184",
+  ]);
+  const target = proposal.delivery_profile.pull_request_target;
+  assert.equal(target.mode, "existing");
+  assert.equal(target.pr_number, 184);
+  assert.equal(
+    target.pr_url,
+    "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/184",
+  );
+  assert.equal(target.reviewed_head_sha, reviewedHeadSha);
+  assert.equal(target.allowed_actions.includes("pull_request.create"), false);
+  assert.equal(
+    proposal.delivery_profile.provider_bindings.some((binding) =>
+      binding.action === "pull_request.create"),
+    false,
+  );
+  assert.equal(proposal.review.target.pr_number, 184);
+
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-EXISTING-PR",
+    ...humanApproval("Approve work on existing PR 184 only"),
+  ]);
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-EXISTING-PR"),
+    "--delivery-profile", "AUT-EXISTING-PR",
+  ]);
+  assert.equal(started.execution_allowed, true);
+
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-EXISTING-PR",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/185",
+    "--expected-pr-state", "ready",
+  ], /must use the exact existing PR #184/u);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-EXISTING-PR",
+    "--action", "pull_request.create",
+  ], /outside the approved action set/u);
+
+  mustGit(project, ["reset", "--hard", "refs/remotes/origin/main"]);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-EXISTING-PR",
+    "--action", "pull_request.update",
+    "--pr-url", "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/184",
+    "--expected-pr-state", "ready",
+  ], /no longer descended from the reviewed commit/u);
+});
 
 test("requirement ceiling and an exact PR profile govern task start without leaking autonomy to another PR", () => {
   const project = tmpProject("pull-request");
@@ -1515,7 +1638,21 @@ test("an in-flight v1 push authorization completes through its legacy verifier",
     "deliveries",
     "AUT-LEGACY-PUSH.json",
   );
-  const legacyProposed = buildDeliveryExecutionProfile(proposed);
+  const legacyPullRequestTarget = {
+    repository: proposed.pull_request_target.repository,
+    base_branch: proposed.pull_request_target.base_branch,
+    head_branch: proposed.pull_request_target.head_branch,
+    allowed_actions: proposed.pull_request_target.allowed_actions,
+    merge_allowed: proposed.pull_request_target.merge_allowed,
+  };
+  const legacyProposed = buildDeliveryExecutionProfile({
+    ...proposed,
+    pull_request_target: legacyPullRequestTarget,
+    material_scope: {
+      ...proposed.material_scope,
+      release_target: legacyPullRequestTarget,
+    },
+  });
   assert.equal(legacyProposed.schema_version, "delivery-execution-profile:v1");
   fs.writeFileSync(profilePath, `${JSON.stringify(legacyProposed, null, 2)}\n`, "utf8");
 
@@ -2022,6 +2159,140 @@ test("pull-request merge completion rejects provider base drift and unproven loc
   });
 });
 
+test("local release planning accepts a not-yet-created target while protected release execution requires it", () => {
+  const project = tmpProject("local-release-planned-target");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LOCAL-PLANNED",
+    contractId: "CONTRACT-LOCAL-PLANNED",
+    profileId: "AUT-LOCAL-PLANNED",
+  });
+
+  const releaseRoot = path.join(project, "planned-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  assert.equal(fs.existsSync(releaseRoot), false);
+
+  const proposal = mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--delivery", "LOCAL-RELEASE-PLANNED",
+    "--kind", "local_release",
+    "--story", "ST-LOCAL-PLANNED",
+    "--contract", "CONTRACT-LOCAL-PLANNED",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Remove the planned release and restore the previous snapshot.",
+  ]);
+  assert.equal(proposal.status, "proposed");
+  assert.equal(proposal.delivery_profile.local_release_target.root_path, releaseRoot);
+  assert.deepEqual(
+    proposal.delivery_profile.local_release_target.allowed_write_paths,
+    [releaseOutput],
+  );
+  assert.equal(proposal.delivery_profile.local_release_target.smoke_cwd, releaseOutput);
+  assert.equal(fs.existsSync(releaseRoot), false);
+
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--phase", "implementation",
+    ...humanApproval("Approve planning against this exact future local target"),
+  ]);
+  const started = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LOCAL-PLANNED"),
+    "--delivery-profile", "AUT-LOCAL-PLANNED",
+    "--confirm-start",
+    "--actor-type", "human",
+  ]);
+  assert.equal(started.execution_allowed, true);
+  assert.equal(started.task_start_receipt, ".sdlc/stories/ST-LOCAL-PLANNED/task-start.json");
+  assert.equal(
+    fs.existsSync(path.join(project, ...started.task_start_receipt.split("/"))),
+    true,
+  );
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "release.local",
+  ], /must exist before this protected action/u);
+});
+
+test("package-manager local smoke cannot fall back to the parent source package", () => {
+  const project = tmpProject("local-release-package-boundary");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LOCAL-PACKAGE",
+    contractId: "CONTRACT-LOCAL-PACKAGE",
+    profileId: "AUT-LOCAL-PACKAGE",
+  });
+
+  const releaseRoot = path.join(project, "local-package-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  fs.mkdirSync(releaseOutput, { recursive: true });
+  fs.writeFileSync(path.join(project, "package.json"), `${JSON.stringify({
+    name: "source-project-only",
+    private: true,
+    scripts: { "smoke:local": "node --version" },
+  }, null, 2)}\n`);
+
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LOCAL-PACKAGE",
+    "--delivery", "LOCAL-RELEASE-PACKAGE",
+    "--kind", "local_release",
+    "--story", "ST-LOCAL-PACKAGE",
+    "--contract", "CONTRACT-LOCAL-PACKAGE",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--smoke-test", '["npm","run","smoke:local"]',
+    "--rollback", "Remove the local package release and restore its previous snapshot.",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-LOCAL-PACKAGE",
+    "--phase", "implementation",
+    ...humanApproval("Approve the exact package-manager smoke boundary"),
+  ]);
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LOCAL-PACKAGE"),
+    "--delivery-profile", "AUT-LOCAL-PACKAGE",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PACKAGE",
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve this exact local package release"),
+  ]);
+  fs.writeFileSync(path.join(releaseOutput, "release-proof.txt"), "release output exists\n");
+
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PACKAGE",
+    "--action", "release.local",
+    "--outcome", "passed",
+    "--evidence", "local-package-release/app/release-proof.txt",
+    "--smoke-test", '["npm","run","smoke:local"]',
+    "--rollback", "Remove the local package release and restore its previous snapshot.",
+  ], /requires a real package\.json in the governed smoke working directory.*parent project packages are never used/isu);
+});
+
 test("local release autonomy requires a strict child target, smoke test, rollback, and supported sandbox", () => {
   const project = tmpProject("local-release");
   initializeAutonomyProject(project);
@@ -2033,8 +2304,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
 
   const releaseRoot = path.join(project, "local-release");
   const releaseOutput = path.join(releaseRoot, "app");
+  const secondReleaseOutput = path.join(releaseRoot, "config");
   const outsideRoot = path.join(project, "outside-release");
   fs.mkdirSync(releaseOutput, { recursive: true });
+  fs.mkdirSync(secondReleaseOutput, { recursive: true });
   fs.mkdirSync(outsideRoot, { recursive: true });
 
   const baseArgs = [
@@ -2055,6 +2328,16 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     ...baseArgs,
     "--write-path", outsideRoot,
   ], /must be a strict child of root_path/u);
+  mustFail([
+    ...baseArgs,
+    "--write-path", releaseOutput,
+    "--write-path", secondReleaseOutput,
+  ], /requires one explicit --smoke-cwd/u);
+  mustFail([
+    ...baseArgs,
+    "--write-path", releaseOutput,
+    "--smoke-cwd", outsideRoot,
+  ], /must be equal to or inside one approved --write-path/u);
 
   const proposalResponse = mustRunJson([
     ...baseArgs,
@@ -2066,6 +2349,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(proposed.local_release_target.root_path, releaseRoot);
   assert.deepEqual(proposed.local_release_target.allowed_write_paths, [releaseOutput]);
   assert.deepEqual(proposed.local_release_target.smoke_tests, ['["node","--version"]']);
+  assert.equal(proposed.local_release_target.smoke_cwd, releaseOutput);
   assert.deepEqual(proposed.provider_bindings, [
     { action: "release.local", provider_id: "local-filesystem" },
   ]);
@@ -2161,6 +2445,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     "local-filesystem",
   );
   assert.deepEqual(releaseAuthorization.action_receipt.action_details.allowed_write_paths, [releaseOutput]);
+  assert.equal(releaseAuthorization.action_receipt.action_details.smoke_cwd, releaseOutput);
   const localCheckpointPolicy = releaseAuthorization.action_receipt.action_details.checkpoint_policy;
   assert.equal(localCheckpointPolicy.local_boundary_source.schema_version, "delivery-local-boundary-source:v1");
   assert.equal(localCheckpointPolicy.local_boundary_source.target_outside_workspace, false);
@@ -2428,6 +2713,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     "--rollback", "Restore the previous local build directory snapshot.",
   ];
   const completionArgs = completionArgsFor(project);
+  mustFail(
+    [...completionArgs, "--smoke-cwd", secondReleaseOutput],
+    /must match the exact approved smoke working directory/u,
+  );
   if (!hostSupportsLocalSmokeSandbox()) {
     mustFail(
       completionArgs,
@@ -2516,6 +2805,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   );
   assert.equal(completed.action_receipt.local_release_verification.outcome, "passed");
   assert.deepEqual(completed.action_receipt.local_release_verification.smoke_tests, ['["node","--version"]']);
+  assert.equal(completed.action_receipt.local_release_verification.smoke_cwd, releaseOutput);
   assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts.length, 1);
   assert.deepEqual(
     completed.action_receipt.local_release_verification.smoke_test_receipts[0].command,
@@ -2523,6 +2813,7 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   );
   assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts[0].outcome, "passed");
   assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts[0].exit_code, 0);
+  assert.equal(completed.action_receipt.local_release_verification.smoke_test_receipts[0].cwd, releaseOutput);
 
   const closeReceipt = JSON.parse(fs.readFileSync(path.join(project, completed.close_receipt_path), "utf8"));
   assert.equal(closeReceipt.terminal_status, "released");

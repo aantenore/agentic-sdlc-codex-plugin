@@ -18,6 +18,11 @@ import {
   validateWorkflowDefinition,
   validateWorkflowOverlay,
 } from "../../lib/workflow-engine.mjs";
+import {
+  WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  computeWorkflowCanonicalEvidenceHash,
+} from "../../lib/workflow-canonical-evidence.mjs";
+import { STABLE_JSON_HASH_ALGORITHM } from "../../lib/canonical.mjs";
 
 const CREATED_AT = "2026-07-18T08:00:00.000Z";
 const ACTOR = Object.freeze({ id: "codex", type: "agent", name: "Codex" });
@@ -190,6 +195,8 @@ test("built-in guard parameter contracts fail closed during definition build and
     [{ id: "checkpoint-approved", parameters: {} }, /checkpoint must be a non-empty string/u],
     [{ id: "checkpoint-approved", parameters: { checkpoint: 42 } }, /checkpoint must be a non-empty string/u],
     [{ id: "checkpoint-approved", parameters: { checkpoint: "review", unexpected: true } }, /unsupported fields/u],
+    [{ id: "requirement-approved" }, /plain object/u],
+    [{ id: "requirement-approved", parameters: { key: "caller_approved" } }, /unsupported fields/u],
   ];
 
   for (const [guard, expected] of invalidGuards) {
@@ -219,6 +226,88 @@ test("valid built-in guards preserve preset-compatible inputs and compare immuta
     expected: { refundable: true, itinerary: { legs: ["FCO-LHR", "LHR-JFK"] } },
     checkpoint_approvals: { review: true },
   }).allowed, true);
+});
+
+test("canonical guards ignore caller facts and accept only bound integrity-sealed evidence", () => {
+  const proposed = buildWorkflowDefinition({
+    ...definitionInput(),
+    states: [
+      { id: "intake", label: "Intake", terminal: false, metadata: {} },
+      { id: "completed", label: "Completed", terminal: true, metadata: {} },
+    ],
+    transitions: [{
+      id: "complete",
+      from: "intake",
+      to: "completed",
+      label: "Complete",
+      guards: [{ id: "requirement-approved", parameters: {} }],
+      metadata: {},
+    }],
+  });
+  const definition = approveWorkflowDefinition(proposed, approvalOptions());
+  const effective = applyWorkflowOverlay(definition);
+  const instance = createWorkflowInstance({
+    id: "canonical-run",
+    effective_definition: effective,
+    created_at: "2026-07-18T08:04:00.000Z",
+    actor: ACTOR,
+    metadata: { governance_binding: { story_id: "ST-42" } },
+  });
+  const transition = {
+    instance,
+    effective_definition: effective,
+    events: [],
+    to: "completed",
+    timestamp: "2026-07-18T08:05:00.000Z",
+    actor: ACTOR,
+    idempotency_key: "canonical-complete",
+    context: {
+      requirement_approved: true,
+      canonical_evidence: {
+        checks: { requirement_approved: { satisfied: true } },
+      },
+    },
+  };
+
+  assert.throws(() => createWorkflowTransition(transition), /guards denied/u);
+
+  const evidence = canonicalEvidence("canonical-run", "ST-42");
+  const completed = createWorkflowTransition(transition, { canonical_evidence: evidence });
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.event.canonical_evidence_hash, evidence.evidence_hash);
+  assert.equal(completed.event.guard_results[0].allowed, true);
+
+  const substituted = canonicalEvidence("another-run", "ST-42");
+  assert.throws(
+    () => createWorkflowTransition(transition, { canonical_evidence: substituted }),
+    /different workflow instance|binding validation/u,
+  );
+  const tampered = structuredClone(evidence);
+  tampered.checks.requirement_approved.satisfied = false;
+  assert.throws(
+    () => createWorkflowTransition(transition, { canonical_evidence: tampered }),
+    /integrity or binding validation/u,
+  );
+  assert.throws(
+    () => buildWorkflowOverlay({
+      id: "canonical-bypass",
+      version: 1,
+      definition_ref: {
+        id: definition.id,
+        version: definition.version,
+        definition_hash: definition.definition_hash,
+      },
+      transition_overrides: [{
+        transition_id: "complete",
+        guard_parameters: [{
+          guard_id: "requirement-approved",
+          parameters: { key: "caller_approved" },
+        }],
+      }],
+      created_at: "2026-07-18T08:06:00.000Z",
+    }, { definition }),
+    /unsupported fields/u,
+  );
 });
 
 test("approval binds governance evidence without changing material definition identity", () => {
@@ -412,3 +501,25 @@ test("status and explanation expose exact pinned configuration without executabl
   assert.deepEqual(explanation.normal_checkpoints, []);
   assert.deepEqual(explanation.guard_ids, ["context-equals", "context-present"]);
 });
+
+function canonicalEvidence(instanceId, storyId) {
+  const evidence = {
+    kind: "workflow_canonical_evidence",
+    schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+    instance_id: instanceId,
+    story_id: storyId,
+    observed_at: "2026-07-18T08:04:30.000Z",
+    checks: Object.fromEntries([
+      "requirement_approved",
+      "contract_approved",
+      "required_output_linked",
+      "strict_gate_passed",
+      "delivery_terminal",
+    ].map((id) => [id, { satisfied: true, issues: [] }])),
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  return {
+    ...evidence,
+    evidence_hash: computeWorkflowCanonicalEvidenceHash(evidence),
+  };
+}

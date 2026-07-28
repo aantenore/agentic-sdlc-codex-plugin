@@ -23,6 +23,8 @@
     "actor": { "$ref": "workflow-definition.schema.json#/$defs/actor" },
     "idempotency_key": { "type": "string", "minLength": 1 },
     "context_hash": { "$ref": "#/$defs/hash" },
+    "canonical_evidence": { "$ref": "workflow-canonical-evidence.schema.json" },
+    "canonical_evidence_hash": { "$ref": "#/$defs/hash" },
     "guard_results": {
       "type": "array",
       "items": {

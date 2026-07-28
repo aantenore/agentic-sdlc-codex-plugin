@@ -54,7 +54,12 @@
     "constraints": { "$ref": "delivery-execution-profile.schema.json#/properties/constraints" },
     "checkpoints": { "$ref": "delivery-execution-profile.schema.json#/properties/checkpoints" },
     "use_policy": { "$ref": "delivery-execution-profile.schema.json#/properties/use_policy" },
-    "pull_request_target": { "$ref": "delivery-execution-profile.schema.json#/properties/pull_request_target" },
+    "pull_request_target": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/pull_request_target_v2" }
+      ]
+    },
     "local_release_target": { "$ref": "delivery-execution-profile.schema.json#/properties/local_release_target" },
     "provider_bindings": { "type": "array", "uniqueItems": true },
     "provider_bindings_hash": { "$ref": "delivery-execution-profile.schema.json#/$defs/sha256" },
@@ -77,20 +82,32 @@
       "if": { "properties": { "delivery_kind": { "const": "pull_request" } }, "required": ["delivery_kind"] },
       "then": {
         "properties": {
-          "pull_request_target": { "$ref": "delivery-execution-profile.schema.json#/$defs/pull_request_target" },
-          "local_release_target": { "type": "null" },
-          "provider_bindings": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "prefixItems": [
-              { "$ref": "#/$defs/git_push_binding" },
-              { "$ref": "#/$defs/pr_create_binding" },
-              { "$ref": "#/$defs/pr_merge_binding" },
-              { "$ref": "#/$defs/pr_update_binding" }
-            ]
+          "pull_request_target": { "$ref": "#/$defs/pull_request_target_v2" },
+          "local_release_target": { "type": "null" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "pull_request_target": {
+                  "properties": { "mode": { "const": "existing" } },
+                  "required": ["mode"]
+                }
+              },
+              "required": ["pull_request_target"]
+            },
+            "then": {
+              "properties": {
+                "provider_bindings": { "$ref": "#/$defs/existing_pr_bindings" }
+              }
+            },
+            "else": {
+              "properties": {
+                "provider_bindings": { "$ref": "#/$defs/new_pr_bindings" }
+              }
+            }
           }
-        }
+        ]
       },
       "else": {
         "properties": {
@@ -116,6 +133,90 @@
   ],
   "$defs": {
     "provider_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "pull_request_target_v2": {
+      "type": "object",
+      "required": ["repository", "base_branch", "head_branch", "allowed_actions", "merge_allowed"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "base_branch": { "type": "string", "minLength": 1 },
+        "head_branch": { "type": "string", "minLength": 1 },
+        "allowed_actions": { "$ref": "delivery-execution-profile.schema.json#/$defs/string_list" },
+        "merge_allowed": { "type": "boolean" },
+        "mode": { "enum": ["new", "existing"] },
+        "pr_number": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 1 }
+          ]
+        },
+        "pr_url": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "uri", "pattern": "^https://github\\.com/[^/]+/[^/]+/pull/[1-9][0-9]*$" }
+          ]
+        },
+        "reviewed_head_sha": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "existing" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "required": ["pr_number", "pr_url", "reviewed_head_sha"],
+            "properties": {
+              "pr_number": { "type": "integer", "minimum": 1 },
+              "pr_url": { "type": "string", "format": "uri", "pattern": "^https://github\\.com/[^/]+/[^/]+/pull/[1-9][0-9]*$" },
+              "allowed_actions": {
+                "not": { "contains": { "const": "pull_request.create" } }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "mode": { "const": "new" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "required": ["pr_number", "pr_url", "reviewed_head_sha"],
+            "properties": {
+              "pr_number": { "type": "null" },
+              "pr_url": { "type": "null" },
+              "reviewed_head_sha": { "type": "null" }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "new_pr_bindings": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        { "$ref": "#/$defs/git_push_binding" },
+        { "$ref": "#/$defs/pr_create_binding" },
+        { "$ref": "#/$defs/pr_merge_binding" },
+        { "$ref": "#/$defs/pr_update_binding" }
+      ]
+    },
+    "existing_pr_bindings": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/git_push_binding" },
+        { "$ref": "#/$defs/pr_merge_binding" },
+        { "$ref": "#/$defs/pr_update_binding" }
+      ]
+    },
     "git_push_binding": {
       "type": "object",
       "required": ["action", "provider_id"],

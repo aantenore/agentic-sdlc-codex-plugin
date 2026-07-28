@@ -29,6 +29,7 @@ import {
   createWorkflowCheckpoint,
   createWorkflowInstance,
   createWorkflowTransition,
+  evaluateWorkflowGuards,
   replayWorkflowEvents,
   validateWorkflowDefinition,
   validateWorkflowCheckpoint,
@@ -39,6 +40,11 @@ import {
   getWorkflowPreset,
   listWorkflowPresets,
 } from "../lib/workflow-presets.mjs";
+import {
+  CANONICAL_WORKFLOW_GUARD_CHECKS,
+  buildWorkflowCanonicalEvidence,
+  buildWorkflowFinalGateReceipt,
+} from "../lib/workflow-canonical-evidence.mjs";
 import {
   applyBudgetAmendment,
   buildBudgetAmendment,
@@ -168,6 +174,7 @@ import {
   validateIdentityMigrationReceipt,
 } from "../lib/identity-migration.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
+import { inspectBuildIdentity } from "../lib/build-identity.mjs";
 import { computeStableHash } from "../lib/canonical.mjs";
 import { openCanonicalQuerySession } from "../lib/canonical-query-session.mjs";
 import {
@@ -574,6 +581,7 @@ const LEGACY_KNOWN_OPTIONS = new Set([
   "since",
   "source",
   "status",
+  "smoke-cwd",
   "smoke-test",
   "step",
   "story",
@@ -716,6 +724,7 @@ const DELIVERY_TERMINAL_STATUSES = new Set([
 ]);
 const STORY_STEP_NAMES = new Set([
   "discovery",
+  "analysis",
   "functional-analysis",
   "technical-analysis",
   "design",
@@ -1110,7 +1119,9 @@ async function main() {
     parsed = applyCliPresetOptions(parsed);
     if (parsed.options.locale !== undefined) humanGuidanceLocale(parsed.options);
     if (parsed.version) {
-      console.log(VERSION);
+      console.log(parsed.options.json === true
+        ? JSON.stringify(inspectBuildIdentity(PLUGIN_ROOT), null, 2)
+        : VERSION);
       return;
     }
     if (parsed.help || parsed.positionals.length === 0) {
@@ -1276,6 +1287,21 @@ function workflowOverlaysRoot(context) {
 
 function workflowInstancesRoot(context) {
   return path.join(workflowsRoot(context), "instances");
+}
+
+function workflowFinalGatesRoot(context) {
+  return path.join(context.sdlcRoot, "gates");
+}
+
+function workflowFinalGateReceiptPath(context, storyId) {
+  return path.join(workflowFinalGatesRoot(context), `${normalizeId(storyId)}-final.json`);
+}
+
+function sealWorkflowFinalGateReceipt(context, report) {
+  const filePath = workflowFinalGateReceiptPath(context, report.story_id);
+  return buildWorkflowFinalGateReceipt(report, {
+    final_receipt_path: toProjectPath(context, filePath),
+  });
 }
 
 function normalizeWorkflowVersion(value, optionName) {
@@ -1596,6 +1622,24 @@ function describeWorkflowGuard(guard, italian) {
       : (italian ? "il dato richiesto" : "the required information");
     return italian ? `${subject} deve essere disponibile` : `${subject} must be provided`;
   }
+  const canonicalDescriptions = {
+    "requirement-approved": italian
+      ? "il requisito collegato deve risultare approvato e ancora invariato"
+      : "the linked requirement must be approved and still unchanged",
+    "contract-approved": italian
+      ? "l’incarico di lavoro collegato deve risultare approvato e ancora invariato"
+      : "the linked work contract must be approved and still unchanged",
+    "required-output-linked": italian
+      ? "ogni risultato richiesto deve essere collegato e verificato"
+      : "every required output must be linked and verified",
+    "strict-gate-passed": italian
+      ? "il controllo finale rigoroso della story deve essere superato"
+      : "the story’s strict final check must have passed",
+    "delivery-terminal": italian
+      ? "la consegna esatta deve essere terminata con successo"
+      : "the exact delivery must have completed successfully",
+  };
+  if (canonicalDescriptions[guard?.id]) return canonicalDescriptions[guard.id];
   return italian ? "deve essere soddisfatta la condizione di sicurezza configurata" : "the configured safety condition must be satisfied";
 }
 
@@ -2049,9 +2093,13 @@ function listWorkflowDefinitionsCommand(context, options) {
     return {
       id,
       version: descriptor.version || "1",
+      available_versions: descriptor.available_versions || [descriptor.version || "1"],
       status: descriptor.status || "included",
       name: descriptor.name || descriptor.title || descriptor.label || id,
       description: descriptor.description || descriptor.summary || null,
+      journey: descriptor.journey || [],
+      review_moments: descriptor.review_moments || [],
+      governance_controls: descriptor.governance_controls || [],
       source: "included",
     };
   });
@@ -2362,9 +2410,8 @@ function resolveWorkflowDefinitionForRuntime(context, id, version) {
     return resolveWorkflowRecord(context, { kind: "definition", id, version });
   } catch (error) {
     if (!(error instanceof UserError) || !/does not exist/u.test(error.message)) throw error;
-    if (String(version) !== "1") throw error;
     const record = callWorkflowDomain(`Workflow definition ${id} version ${version} does not exist`, () =>
-      buildWorkflowPreset(id, { version: 1 }));
+      buildWorkflowPreset(id, { version: Number(normalizeWorkflowVersion(version, "definition-version")) }));
     return { id: record.id, version: record.version, path: null, record, included: true };
   }
 }
@@ -2415,6 +2462,12 @@ function explainWorkflowOverlay(context, options) {
   ], workflowHumanReviewLines(definitionEntry.record, options, { overlay: resolved.record, effective }));
 }
 
+function workflowDefinitionUsesCanonicalEvidence(definition) {
+  return (definition?.transitions || []).some((transition) =>
+    (transition?.guards || []).some((guard) =>
+      Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id)));
+}
+
 function startWorkflowInstance(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -2444,6 +2497,28 @@ function startWorkflowInstance(context, options) {
     effectiveDefinition = callWorkflowDomain("Unable to calculate the adjusted way of working", () =>
       applyWorkflowOverlay(definition, overlayEntry.record));
   }
+  const storyOption = getOptionString(options, "story");
+  const canonicalEvidenceRequired = workflowDefinitionUsesCanonicalEvidence(effectiveDefinition);
+  if (canonicalEvidenceRequired && !storyOption) {
+    fail(
+      `Workflow definition ${definition.id} uses canonical lifecycle checks. `
+      + "Start it with --story <story-id> so every transition is bound to governed project records.",
+    );
+  }
+  let governanceBinding = null;
+  if (storyOption) {
+    const storyId = normalizeId(storyOption);
+    if (!readStory(context, storyId)) {
+      fail(`Story ${storyId} does not exist and cannot be bound to this workflow instance.`);
+    }
+    governanceBinding = {
+      story_id: storyId,
+      final_gate_receipt_path: toProjectPath(
+        context,
+        workflowFinalGateReceiptPath(context, storyId),
+      ),
+    };
+  }
   const attribution = buildAttribution(context, options, "workflow.instance.start");
   const summary = getOptionString(options, "summary");
   const instancePath = workflowInstancePath(context, id);
@@ -2459,6 +2534,7 @@ function startWorkflowInstance(context, options) {
     effectiveDefinition,
     attribution.actor,
     summary,
+    governanceBinding,
   );
   const releaseCreationLock = acquireFileLock(creationLockPath);
   let instance;
@@ -2495,7 +2571,14 @@ function startWorkflowInstance(context, options) {
         effective_definition: effectiveDefinition,
         created_at: now(),
         actor: attribution.actor,
-        ...(summary ? { metadata: { summary } } : {}),
+        ...((summary || governanceBinding)
+          ? {
+              metadata: {
+                ...(summary ? { summary } : {}),
+                ...(governanceBinding ? { governance_binding: governanceBinding } : {}),
+              },
+            }
+          : {}),
       }));
       const startTrace = prepareGovernedTraceEvent(
         context,
@@ -2559,6 +2642,10 @@ function startWorkflowInstance(context, options) {
     `Definition: ${definition.id} version ${definition.version}`,
     ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
     `Initial state: ${instance.current_state || instance.initial_state || effectiveDefinition.initial_state}`,
+    ...(governanceBinding ? [
+      `Story binding: ${governanceBinding.story_id}`,
+      `Final gate receipt: ${governanceBinding.final_gate_receipt_path}`,
+    ] : []),
     `Path: ${toProjectPath(context, instancePath)}`,
     `Integrity checkpoint: ${toProjectPath(context, checkpointPath)}`,
     ...(recovered ? ["Recovered the exact interrupted start without creating a duplicate instance."] : []),
@@ -2646,7 +2733,14 @@ function buildWorkflowStartTraceRecord(context, instance, definition, overlayEnt
     authorization_ref: null,
     action: "workflow.instance.start",
     evidence: paths.map((filePath) => toProjectPath(context, filePath)),
-    related: [instance.id, definition.id, ...(overlayEntry ? [overlayEntry.record.id] : [])],
+    related: [
+      instance.id,
+      definition.id,
+      ...(overlayEntry ? [overlayEntry.record.id] : []),
+      ...(instance.metadata?.governance_binding?.story_id
+        ? [instance.metadata.governance_binding.story_id]
+        : []),
+    ],
     git: attribution.git,
     run: attribution.run,
     created_at: instance.created_at,
@@ -2681,7 +2775,15 @@ function workflowStartRequestHash(request) {
   return computeStableHash(hashInput);
 }
 
-function buildWorkflowStartRequest(id, definition, overlayEntry, effectiveDefinition, actor, summary) {
+function buildWorkflowStartRequest(
+  id,
+  definition,
+  overlayEntry,
+  effectiveDefinition,
+  actor,
+  summary,
+  governanceBinding = null,
+) {
   const request = {
     instance_id: id,
     definition_ref: workflowDefinitionRef(definition),
@@ -2695,6 +2797,7 @@ function buildWorkflowStartRequest(id, definition, overlayEntry, effectiveDefini
     effective_hash: effectiveDefinition.effective_hash,
     actor,
     summary: summary || null,
+    ...(governanceBinding ? { governance_binding: governanceBinding } : {}),
   };
   return { ...request, intent_hash: workflowStartRequestHash(request) };
 }
@@ -4152,6 +4255,69 @@ function parseWorkflowGuardContext(options) {
   }
 }
 
+function workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, targetState) {
+  const transition = (effectiveDefinition?.transitions || []).find((candidate) =>
+    candidate.from === currentState && candidate.to === targetState);
+  return (transition?.guards || []).some((guard) =>
+    Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id));
+}
+
+function buildCanonicalEvidenceForWorkflowInstance(context, instance) {
+  const binding = instance?.metadata?.governance_binding;
+  if (!binding?.story_id || !binding?.final_gate_receipt_path) {
+    fail(
+      `Workflow instance ${instance?.id || "unknown"} is missing its immutable story and final-gate binding. `
+      + "Start a new governed instance with --story <story-id>.",
+    );
+  }
+  const storyId = normalizeId(binding.story_id);
+  const expectedGatePath = workflowFinalGateReceiptPath(context, storyId);
+  const boundGatePath = resolveProjectFilePath(context, binding.final_gate_receipt_path, {
+    mustExist: false,
+  });
+  if (path.resolve(boundGatePath) !== path.resolve(expectedGatePath)) {
+    fail(`Workflow instance ${instance.id} final-gate binding does not match story ${storyId}.`);
+  }
+  const story = readStory(context, storyId);
+  const requirements = (story?.requirement_refs || [])
+    .map((reference) => readRequirement(context, reference?.id, { missingOk: true }))
+    .filter(Boolean);
+  const contract = story?.contract_id
+    ? readContractById(context, story.contract_id, { missingOk: true })
+    : null;
+  const outputRegistry = readOutputRegistry(context, { missingOk: true });
+  const deliveryProfile = contract?.delivery_execution_profile_id
+    ? readDeliveryAutonomyProfile(context, contract.delivery_execution_profile_id, { missingOk: true })
+    : null;
+  const deliveryCloseReceipt = deliveryProfile
+    ? currentDeliveryExecutionState(context, deliveryProfile).close_receipt
+    : null;
+  const gateReport = fs.existsSync(expectedGatePath)
+    ? readProjectJson(context, expectedGatePath)
+    : null;
+  if (gateReport) {
+    assertRecordSchema(
+      gateReport,
+      "workflow-final-gate-receipt.schema.json",
+      `Final workflow gate receipt ${binding.final_gate_receipt_path}`,
+    );
+  }
+  return buildDomainRecord(
+    `Cannot build canonical workflow evidence for ${instance.id}`,
+    () => buildWorkflowCanonicalEvidence({
+      instance,
+      story,
+      requirements,
+      contract,
+      output_registry: outputRegistry,
+      gate_report: gateReport,
+      delivery_profile: deliveryProfile,
+      delivery_close_receipt: deliveryCloseReceipt,
+      observed_at: now(),
+    }),
+  );
+}
+
 function transitionWorkflowInstance(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -4183,6 +4349,12 @@ function transitionWorkflowInstance(context, options) {
         integrityFailure = integrity;
       } else {
         attribution = buildAttribution(context, options, "workflow.instance.transition");
+        const currentState = workflowCurrentState(integrity.replay, instance, effectiveDefinition);
+        const idempotentReplay = events.some((event) => event.idempotency_key === idempotencyKey);
+        const canonicalEvidence = !idempotentReplay
+          && workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, to)
+          ? buildCanonicalEvidenceForWorkflowInstance(context, instance)
+          : null;
         result = callWorkflowDomain("Unable to move workflow instance", () => createWorkflowTransition({
           instance,
           effective_definition: effectiveDefinition,
@@ -4193,7 +4365,10 @@ function transitionWorkflowInstance(context, options) {
           actor: attribution.actor,
           idempotency_key: idempotencyKey,
           context: parseWorkflowGuardContext(options),
-        }, { require_checkpoint: true }));
+        }, {
+          require_checkpoint: true,
+          ...(canonicalEvidence ? { canonical_evidence: canonicalEvidence } : {}),
+        }));
         if (!result.idempotent) {
           maybeInterleaveConflictingWorkflowTraceForTest(context, id);
           persistWorkflowTransitionTransaction(
@@ -4296,12 +4471,49 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   const replay = integrity.replay;
   const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
   const nextStates = workflowNextStates(effectiveDefinition, currentState);
+  const outgoingTransitions = (effectiveDefinition.transitions || [])
+    .filter((transition) => transition.from === currentState);
+  const canonicalOutgoing = outgoingTransitions.filter((transition) =>
+    (transition.guards || []).some((guard) =>
+      Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id)));
+  const canonicalEvidence = canonicalOutgoing.length > 0
+    ? buildCanonicalEvidenceForWorkflowInstance(context, instance)
+    : null;
+  const nextTransitionChecks = outgoingTransitions.map((transition) => {
+    if (!canonicalOutgoing.includes(transition)) {
+      return {
+        transition_id: transition.id,
+        to: transition.to,
+        canonical: false,
+        allowed: (transition.guards || []).length === 0 ? true : null,
+        guard_results: [],
+      };
+    }
+    const evaluated = evaluateWorkflowGuards(
+      transition.guards,
+      {},
+      undefined,
+      canonicalEvidence,
+    );
+    return {
+      transition_id: transition.id,
+      to: transition.to,
+      canonical: true,
+      allowed: evaluated.allowed,
+      guard_results: evaluated.results,
+    };
+  });
   outputWorkflowResult(options, {
     schema_version: explain ? "workflow-instance-explanation:v1" : "workflow-instance-status:v1",
     status: "ready",
     instance,
     current_state: currentState,
     next_states: nextStates,
+    ready_next_states: nextTransitionChecks
+      .filter((transition) => transition.allowed === true)
+      .map((transition) => transition.to),
+    next_transition_checks: nextTransitionChecks,
+    canonical_evidence_hash: canonicalEvidence?.evidence_hash ?? null,
     event_count: events.length,
     integrity: replay.integrity,
     replay,
@@ -4312,6 +4524,11 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
     `Instance: ${id}`,
     `Current state: ${currentState}`,
     `Next states: ${nextStates.join(", ") || "none"}`,
+    ...nextTransitionChecks
+      .filter((transition) => transition.canonical)
+      .map((transition) =>
+        `Canonical readiness ${transition.to}: ${transition.allowed ? "ready" : "blocked"}; `
+        + transition.guard_results.map((result) => `${result.guard_id}=${result.allowed}`).join(", ")),
     `Events: ${events.length}`,
     `Definition: ${definitionEntry.record.id} version ${definitionEntry.record.version}`,
     ...(overlayEntry ? [`Overlay: ${overlayEntry.record.id} version ${overlayEntry.record.version}`] : []),
@@ -6055,7 +6272,10 @@ function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
     const { decision } = evaluateDeliveryAutonomy(context, profile, {
       id: `AUT-DEC-${uniqueRecordSuffix()}`,
       phase: result.phase || contract.phase,
-      validateRuntimeTarget: true,
+      // A local release directory is often the output of the approved build.
+      // Bind and validate its planned real path now, but require it to exist
+      // only when the protected release.local action is authorized.
+      validateRuntimeTarget: profile.delivery_kind === "pull_request",
       forStart: true,
     });
     result.delivery_profile_id = profile.id;
@@ -10550,19 +10770,122 @@ function requirementByAutonomyProfileId(context, profileId) {
     .find((requirement) => requirement.autonomy_profile_id === profileId) || null;
 }
 
+function parsePullRequestUrlIdentity(value, expectedRepository, label) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    fail(`${label} must be an absolute URL.`);
+  }
+  const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
+  const repository = segments.length >= 2
+    ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
+    : null;
+  if (
+    parsed.protocol !== "https:"
+    || parsed.search
+    || parsed.hash
+    || parsed.hostname.toLowerCase() !== "github.com"
+    || repository !== normalizeGitRepositoryIdentity(expectedRepository)
+    || segments[2] !== "pull"
+    || !/^[1-9]\d*$/u.test(segments[3] || "")
+    || segments.length !== 4
+  ) {
+    fail(`${label} must identify one exact pull request in the approved repository.`);
+  }
+  const number = Number(segments[3]);
+  if (!Number.isSafeInteger(number)) {
+    fail(`${label} pull-request number is outside the supported integer range.`);
+  }
+  parsed.pathname = `/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}/pull/${number}`;
+  return {
+    number,
+    url: canonicalAbsoluteUrl(parsed.toString()),
+    repository,
+  };
+}
+
+function reviewedPullRequestHeadSha(context, headBranch, explicitSha) {
+  if (explicitSha && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(explicitSha)) {
+    fail("--pr-head-sha must be a full lowercase Git commit SHA.");
+  }
+  const revision = explicitSha || `refs/heads/${headBranch}`;
+  const resolved = execGit(context.root, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    "--end-of-options",
+    `${revision}^{commit}`,
+  ]);
+  if (explicitSha && !resolved) {
+    fail("--pr-head-sha must identify a commit available in the local Git repository.");
+  }
+  return resolved ? resolved.toLowerCase() : null;
+}
+
 function deliveryTargetFromOptions(context, kind, options) {
   if (kind === "pull_request") {
+    const mode = (getOptionString(options, "pr-mode") || "new").toLowerCase();
+    if (!["new", "existing"].includes(mode)) {
+      fail("Pull-request --pr-mode must be new or existing.");
+    }
     const allowedActions = [...new Set(normalizeListOption(options["allow-action"])
       .map((action) => normalizeDeliveryAction(kind, action)))].sort();
     const repository = normalizeGitRepositoryIdentity(requireOption(options, "repository"));
     if (!repository?.startsWith("github.com/")) {
       fail("pull_request repository must be an exact GitHub identity (github.com/owner/repo or owner/repo); other providers need an adapter.");
     }
+    const prNumberOption = getOptionString(options, "pr-number");
+    const prUrlOption = getOptionString(options, "pr-url");
+    const prHeadShaOption = getOptionString(options, "pr-head-sha");
+    let existingIdentity = {
+      pr_number: null,
+      pr_url: null,
+      reviewed_head_sha: null,
+    };
+    if (mode === "new") {
+      if (prNumberOption || prUrlOption || prHeadShaOption) {
+        fail("--pr-number, --pr-url, and --pr-head-sha are only valid with --pr-mode existing.");
+      }
+    } else {
+      if (!prNumberOption || !/^[1-9]\d*$/u.test(prNumberOption)) {
+        fail("Existing pull-request delivery requires --pr-number as a positive integer.");
+      }
+      if (!prUrlOption) {
+        fail("Existing pull-request delivery requires the exact --pr-url.");
+      }
+      const prNumber = Number(prNumberOption);
+      if (!Number.isSafeInteger(prNumber)) {
+        fail("--pr-number is outside the supported integer range.");
+      }
+      const parsedIdentity = parsePullRequestUrlIdentity(
+        prUrlOption,
+        repository,
+        "Existing pull-request --pr-url",
+      );
+      if (parsedIdentity.number !== prNumber) {
+        fail(`Existing pull-request --pr-number ${prNumber} does not match --pr-url number ${parsedIdentity.number}.`);
+      }
+      if (allowedActions.includes("pull_request.create")) {
+        fail("Existing pull-request delivery cannot allow pull_request.create.");
+      }
+      existingIdentity = {
+        pr_number: prNumber,
+        pr_url: parsedIdentity.url,
+        reviewed_head_sha: reviewedPullRequestHeadSha(
+          context,
+          requireOption(options, "head"),
+          prHeadShaOption,
+        ),
+      };
+    }
     return {
       pull_request_target: {
         repository,
         base_branch: requireOption(options, "base"),
         head_branch: requireOption(options, "head"),
+        mode,
+        ...existingIdentity,
         allowed_actions: (allowedActions.length > 0
           ? allowedActions
           : [
@@ -10571,7 +10894,7 @@ function deliveryTargetFromOptions(context, kind, options) {
               "test.run",
               "git.commit",
               "git.push",
-              "pull_request.create",
+              ...(mode === "new" ? ["pull_request.create"] : []),
               "pull_request.update",
             ]).sort(),
         merge_allowed: options["merge-allowed"] === true,
@@ -10580,9 +10903,28 @@ function deliveryTargetFromOptions(context, kind, options) {
     };
   }
   const rootPath = path.resolve(requireOption(options, "target-root"));
-  const writePaths = normalizeRawListOption(options["write-path"])
-    .map((item) => path.isAbsolute(item) ? path.resolve(item) : path.resolve(rootPath, item))
-    .sort();
+  const writePaths = [...new Set(
+    normalizeRawListOption(options["write-path"])
+      .map((item) => path.isAbsolute(item) ? path.resolve(item) : path.resolve(rootPath, item)),
+  )].sort();
+  if (writePaths.length === 0) {
+    fail("Local-release delivery autonomy requires at least one explicit --write-path.");
+  }
+  const smokeCwdOption = getOptionString(options, "smoke-cwd");
+  if (!smokeCwdOption && writePaths.length !== 1) {
+    fail(
+      "Local release with multiple --write-path values requires one explicit --smoke-cwd "
+      + "inside the released artifact that the smoke test must verify.",
+    );
+  }
+  const smokeCwd = smokeCwdOption
+    ? path.isAbsolute(smokeCwdOption)
+      ? path.resolve(smokeCwdOption)
+      : path.resolve(rootPath, smokeCwdOption)
+    : writePaths[0];
+  if (!writePaths.some((writePath) => isInsidePath(writePath, smokeCwd))) {
+    fail("Local-release --smoke-cwd must be equal to or inside one approved --write-path.");
+  }
   const allowedActions = [...new Set(normalizeListOption(options["allow-action"])
     .map((action) => normalizeDeliveryAction(kind, action)))].sort();
   const localReleaseTarget = {
@@ -10591,12 +10933,13 @@ function deliveryTargetFromOptions(context, kind, options) {
     allowed_write_paths: writePaths,
     allowed_actions: (allowedActions.length > 0 ? allowedActions : ["build.local", "test.run", "release.local"]).sort(),
     smoke_tests: normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort(),
+    smoke_cwd: smokeCwd,
     rollback: { required: true, procedure: requireOption(options, "rollback") },
     external_access_allowed: false,
     production_access_allowed: false,
     destructive_actions_allowed: false,
   };
-  validateLocalReleaseFilesystemBoundary(localReleaseTarget);
+  validateLocalReleaseFilesystemBoundary(localReleaseTarget, { requireExistingRoot: false });
   return {
     pull_request_target: null,
     local_release_target: localReleaseTarget,
@@ -10610,11 +10953,14 @@ function deliveryConcreteIdentity(kind, target) {
       repository: normalizeGitRepositoryIdentity(target.pull_request_target?.repository),
       base_branch: target.pull_request_target?.base_branch,
       head_branch: target.pull_request_target?.head_branch,
+      mode: target.pull_request_target?.mode || "new",
+      pr_number: target.pull_request_target?.pr_number ?? null,
+      pr_url: target.pull_request_target?.pr_url ?? null,
     };
   }
   return {
     kind,
-    root_path: fs.realpathSync.native(path.resolve(target.local_release_target?.root_path)),
+    root_path: plannedRealPath(target.local_release_target?.root_path),
   };
 }
 
@@ -10635,8 +10981,11 @@ function normalizeDeliveryProviderId(value, label) {
   return providerId;
 }
 
-function deliveryProviderBindingsFromOptions(context, kind, options) {
+function deliveryProviderBindingsFromOptions(context, kind, options, target) {
   const configured = configuredDeliveryProviderSelection(context);
+  const pullRequestActions = target?.pull_request_target?.mode === "existing"
+    ? ["pull_request.merge", "pull_request.update"]
+    : ["pull_request.create", "pull_request.merge", "pull_request.update"];
   const selected = kind === "pull_request"
     ? [
         {
@@ -10646,7 +10995,7 @@ function deliveryProviderBindingsFromOptions(context, kind, options) {
             "Git provider",
           ),
         },
-        ...["pull_request.create", "pull_request.merge", "pull_request.update"].map((action) => ({
+        ...pullRequestActions.map((action) => ({
           action,
           provider_id: normalizeDeliveryProviderId(
             getOptionString(options, "pull-request-provider") || configured.pull_request,
@@ -10743,6 +11092,7 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     return {
       target_root: profile.local_release_target.root_path,
       allowed_write_paths: profile.local_release_target.allowed_write_paths,
+      smoke_cwd: governedLocalSmokeCwd(profile).smokeCwd,
     };
   }
   const observedPaths = pullRequestChangedPaths(context, runtimeTarget, action);
@@ -10820,35 +11170,41 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     };
   }
   if (["pull_request.create", "pull_request.update", "pull_request.merge"].includes(action)) {
+    const pullRequestMode = profile.pull_request_target.mode || "new";
+    if (action === "pull_request.create" && pullRequestMode === "existing") {
+      fail("pull_request.create is not valid for an existing pull request pinned by the approved delivery profile.");
+    }
     const prUrl = getOptionString(options, "pr-url");
     if (action !== "pull_request.create" && !prUrl) {
       fail(`${action} requires the exact --pr-url shown at the checkpoint.`);
     }
-    let parsed;
+    let parsedIdentity = null;
     if (prUrl) {
-      try {
-        parsed = new URL(prUrl);
-      } catch {
-        fail(`${action} --pr-url must be an absolute URL.`);
-      }
-      const segments = parsed.pathname.replace(/^\/+|\/+$/gu, "").split("/");
-      const repository = segments.length >= 2
-        ? `${parsed.hostname.toLowerCase()}/${segments[0].toLowerCase()}/${segments[1].replace(/\.git$/iu, "").toLowerCase()}`
-        : null;
-      if (
-        parsed.protocol !== "https:"
-        || parsed.search
-        || parsed.hash
-        || repository !== normalizeGitRepositoryIdentity(profile.pull_request_target.repository)
-        || segments[2] !== "pull"
-        || !/^\d+$/u.test(segments[3] || "")
-        || segments.length !== 4
-      ) {
-        fail(`${action} --pr-url does not match the exact approved repository.`);
-      }
+      parsedIdentity = parsePullRequestUrlIdentity(
+        prUrl,
+        profile.pull_request_target.repository,
+        `${action} --pr-url`,
+      );
     }
-    const canonicalPrUrl = prUrl ? canonicalAbsoluteUrl(prUrl) : null;
-    details.pull_request = { pr_url: canonicalPrUrl, source_sha: runtimeTarget.head_sha };
+    if (
+      pullRequestMode === "existing"
+      && (
+        parsedIdentity?.number !== profile.pull_request_target.pr_number
+        || parsedIdentity?.url !== profile.pull_request_target.pr_url
+      )
+    ) {
+      fail(
+        `${action} must use the exact existing PR #${profile.pull_request_target.pr_number} `
+        + `approved as ${profile.pull_request_target.pr_url}; create and approve a new delivery profile to retarget it.`,
+      );
+    }
+    const canonicalPrUrl = parsedIdentity?.url || null;
+    details.pull_request = {
+      mode: pullRequestMode,
+      pr_number: parsedIdentity?.number || null,
+      pr_url: canonicalPrUrl,
+      source_sha: runtimeTarget.head_sha,
+    };
     if (action === "pull_request.merge") {
       details.merge = {
         pr_url: canonicalPrUrl,
@@ -11434,10 +11790,112 @@ function normalizeSmokeTestCommand(value) {
   return stableJson(argv);
 }
 
+function governedLocalSmokeCwd(profile) {
+  const target = profile.local_release_target || {};
+  const allowedWritePaths = [...new Set((target.allowed_write_paths || [])
+    .map((item) => path.resolve(String(item))))].sort();
+  let smokeCwd = target.smoke_cwd
+    ? path.resolve(String(target.smoke_cwd))
+    : null;
+  if (!smokeCwd) {
+    if (allowedWritePaths.length !== 1) {
+      fail(
+        `Historical local-release profile ${profile.id || "unknown"} has no governed smoke working directory `
+        + `and ${allowedWritePaths.length} allowed write paths. Create a new delivery profile with --smoke-cwd.`,
+      );
+    }
+    smokeCwd = allowedWritePaths[0];
+  }
+  const containingWritePath = allowedWritePaths.find((writePath) => isInsidePath(writePath, smokeCwd));
+  if (!containingWritePath) {
+    fail("Local release smoke working directory is outside the approved write paths.");
+  }
+  return { smokeCwd, containingWritePath };
+}
+
+function approvedLocalSmokeCwd(profile) {
+  const { smokeCwd, containingWritePath } = governedLocalSmokeCwd(profile);
+  const target = profile.local_release_target || {};
+  if (!fs.existsSync(smokeCwd) || !fs.statSync(smokeCwd).isDirectory()) {
+    fail(`Local release smoke working directory must exist as a directory before completion: ${smokeCwd}.`);
+  }
+  const rootPath = path.resolve(String(target.root_path || ""));
+  assertNoSymlinkPathSegments(smokeCwd, rootPath);
+  if (fs.lstatSync(smokeCwd).isSymbolicLink()) {
+    fail(`Local release smoke working directory cannot be a symlink: ${smokeCwd}.`);
+  }
+  const realWritePath = fs.realpathSync.native(containingWritePath);
+  const realSmokeCwd = fs.realpathSync.native(smokeCwd);
+  if (!isInsidePath(realWritePath, realSmokeCwd)) {
+    fail(`Local release smoke working directory resolves outside its approved write path: ${smokeCwd}.`);
+  }
+  return smokeCwd;
+}
+
+function validateLocalSmokeCommandBoundary(cwd, argv) {
+  const executable = path.basename(String(argv[0] || "")).toLowerCase();
+  if (![
+    "npm",
+    "npm.cmd",
+    "npm.exe",
+    "npx",
+    "npx.cmd",
+    "npx.exe",
+    "pnpm",
+    "pnpm.cmd",
+    "pnpm.exe",
+    "yarn",
+    "yarn.cmd",
+    "yarn.exe",
+    "bun",
+    "bunx",
+  ].includes(executable)) {
+    return;
+  }
+  const forbiddenLocationArgs = new Set([
+    "--cwd",
+    "--dir",
+    "--global",
+    "--prefix",
+    "--workspace",
+    "--workspaces",
+    "-c",
+    "-g",
+    "-w",
+  ]);
+  const locationOverride = argv.slice(1).find((item) => {
+    const normalized = String(item).toLowerCase();
+    return forbiddenLocationArgs.has(normalized)
+      || [...forbiddenLocationArgs].some((flag) => normalized.startsWith(`${flag}=`));
+  });
+  if (locationOverride) {
+    fail(
+      `Package-manager smoke test cannot override its governed working directory with ${locationOverride}. `
+      + "Run a script from the package.json stored in --smoke-cwd.",
+    );
+  }
+  const manifestPath = path.join(cwd, "package.json");
+  if (
+    !pathEntryExistsNoFollow(manifestPath)
+    || fs.lstatSync(manifestPath).isSymbolicLink()
+    || !fs.statSync(manifestPath).isFile()
+  ) {
+    fail(
+      `Package-manager smoke test ${argv[0]} requires a real package.json in the governed `
+      + `smoke working directory ${cwd}; parent project packages are never used as release evidence.`,
+    );
+  }
+  const realManifestPath = fs.realpathSync.native(manifestPath);
+  if (!isInsidePath(fs.realpathSync.native(cwd), realManifestPath)) {
+    fail(`Package-manager smoke manifest resolves outside the governed smoke working directory: ${manifestPath}.`);
+  }
+}
+
 function runApprovedLocalSmokeTests(profile) {
-  const cwd = profile.local_release_target.root_path;
+  const cwd = approvedLocalSmokeCwd(profile);
   return (profile.local_release_target.smoke_tests || []).map((canonicalCommand) => {
     const argv = JSON.parse(canonicalCommand);
+    validateLocalSmokeCommandBoundary(cwd, argv);
     const sandbox = localSmokeSandboxCommand(cwd, argv);
     const startedAt = now();
     const result = childProcess.spawnSync(sandbox.executable, sandbox.args, {
@@ -11501,30 +11959,87 @@ function localSmokeSandboxCommand(cwd, argv) {
   fail("Local smoke-test execution requires a configured read-only, no-network sandbox on this host.");
 }
 
-function validateLocalReleaseFilesystemBoundary(target) {
-  const rootPath = path.resolve(String(target?.root_path || ""));
-  if (!target?.root_path || !fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) {
-    fail(`Local release target root must be an existing directory: ${target?.root_path || "missing"}.`);
+function plannedRealPath(rawPath) {
+  const targetPath = path.resolve(String(rawPath || ""));
+  if (fs.existsSync(targetPath)) {
+    return fs.realpathSync.native(targetPath);
   }
-  assertNoSymlinkPathSegments(rootPath, rootPath);
-  if (fs.lstatSync(rootPath).isSymbolicLink()) {
+  const existingParent = nearestExistingParent(targetPath);
+  if (!fs.statSync(existingParent).isDirectory() || fs.lstatSync(existingParent).isSymbolicLink()) {
+    fail(`Nearest existing local-release parent must be a real directory: ${existingParent}.`);
+  }
+  assertNoSymlinkPathSegments(targetPath, existingParent);
+  const relative = path.relative(existingParent, targetPath);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    fail(`Local release target cannot be resolved safely: ${targetPath}.`);
+  }
+  return path.resolve(fs.realpathSync.native(existingParent), relative);
+}
+
+function validateLocalReleaseFilesystemBoundary(target, options = {}) {
+  const rootPath = path.resolve(String(target?.root_path || ""));
+  const requireExistingRoot = options.requireExistingRoot !== false;
+  if (!target?.root_path) {
+    fail("Local release target root is missing.");
+  }
+  if (requireExistingRoot && (!fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory())) {
+    fail(
+      `Local release target root must exist before this protected action: ${target.root_path}. `
+      + "It may be absent while planning; create it only inside the approved build boundary before authorizing release.local.",
+    );
+  }
+  if (fs.existsSync(rootPath) && !fs.statSync(rootPath).isDirectory()) {
+    fail(`Local release target root must be a directory: ${rootPath}.`);
+  }
+  const boundaryRoot = fs.existsSync(rootPath) ? rootPath : nearestExistingParent(rootPath);
+  assertNoSymlinkPathSegments(rootPath, boundaryRoot);
+  if (fs.existsSync(rootPath) && fs.lstatSync(rootPath).isSymbolicLink()) {
     fail(`Local release target root cannot be a symlink: ${rootPath}.`);
   }
-  const realRoot = fs.realpathSync.native(rootPath);
+  const realRoot = plannedRealPath(rootPath);
   for (const rawWritePath of target.allowed_write_paths || []) {
     const writePath = path.resolve(String(rawWritePath));
     const relative = path.relative(rootPath, writePath);
     if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      fail(`Local release write path must be a strict child of root_path ${rootPath}: ${writePath}.`);
+      fail(
+        `Local release write path must be a strict child of root_path ${rootPath}: ${writePath}. `
+        + "Use the stable parent as --target-root and the releasable folder below it as --write-path.",
+      );
     }
-    assertNoSymlinkPathSegments(writePath, rootPath);
+    assertNoSymlinkPathSegments(writePath, boundaryRoot);
     if (pathEntryExistsNoFollow(writePath) && fs.lstatSync(writePath).isSymbolicLink()) {
       fail(`Local release write path cannot be a symlink: ${writePath}.`);
     }
     const existingBoundary = fs.existsSync(writePath) ? writePath : nearestExistingParent(writePath);
     const realBoundary = fs.realpathSync.native(existingBoundary);
-    if (!isInsidePath(realRoot, realBoundary)) {
+    if (
+      fs.existsSync(rootPath)
+      && !isInsidePath(realRoot, realBoundary)
+    ) {
       fail(`Local release write path resolves outside target root: ${writePath}.`);
+    }
+  }
+  if (target.smoke_cwd !== undefined && target.smoke_cwd !== null) {
+    const smokeCwd = path.resolve(String(target.smoke_cwd));
+    const containingWritePath = (target.allowed_write_paths || [])
+      .map((item) => path.resolve(String(item)))
+      .find((writePath) => isInsidePath(writePath, smokeCwd));
+    if (!containingWritePath) {
+      fail("Local release smoke working directory must stay inside one approved write path.");
+    }
+    assertNoSymlinkPathSegments(smokeCwd, boundaryRoot);
+    if (pathEntryExistsNoFollow(smokeCwd) && fs.lstatSync(smokeCwd).isSymbolicLink()) {
+      fail(`Local release smoke working directory cannot be a symlink: ${smokeCwd}.`);
+    }
+    if (fs.existsSync(smokeCwd) && !fs.statSync(smokeCwd).isDirectory()) {
+      fail(`Local release smoke working directory must be a directory: ${smokeCwd}.`);
+    }
+    if (fs.existsSync(smokeCwd) && fs.existsSync(containingWritePath)) {
+      const realWritePath = fs.realpathSync.native(containingWritePath);
+      const realSmokeCwd = fs.realpathSync.native(smokeCwd);
+      if (!isInsidePath(realWritePath, realSmokeCwd)) {
+        fail(`Local release smoke working directory resolves outside its approved write path: ${smokeCwd}.`);
+      }
     }
   }
 }
@@ -11539,9 +12054,9 @@ function localReleaseGlobalRoots(platform = process.platform) {
 }
 
 function localReleaseBoundarySource(context, target) {
-  validateLocalReleaseFilesystemBoundary(target);
+  validateLocalReleaseFilesystemBoundary(target, { requireExistingRoot: false });
   const realWorkspace = fs.realpathSync.native(context.root);
-  const realTarget = fs.realpathSync.native(path.resolve(target.root_path));
+  const realTarget = plannedRealPath(target.root_path);
   const policy = context.config.autonomy_policy?.local_release || {};
   const globalRoots = localReleaseGlobalRoots();
   return {
@@ -11661,6 +12176,20 @@ function validatePullRequestGitBoundary(context, target) {
   }
   if (currentBranch !== target.head_branch) {
     fail(`Pull-request delivery head mismatch: current branch is ${currentBranch}, expected ${target.head_branch}.`);
+  }
+  if (target.mode === "existing" && target.reviewed_head_sha) {
+    if (
+      !gitCommandSucceeds(context.root, ["cat-file", "-e", `${target.reviewed_head_sha}^{commit}`])
+      || !gitCommandSucceeds(
+        context.root,
+        ["merge-base", "--is-ancestor", target.reviewed_head_sha, metadata.head_sha],
+      )
+    ) {
+      fail(
+        `Existing pull-request delivery head is no longer descended from the reviewed commit ${target.reviewed_head_sha}. `
+        + "Create and approve a new delivery profile before changing the PR target lineage.",
+      );
+    }
   }
   const expectedRepository = normalizeGitRepositoryIdentity(target.repository);
   const matchingRemotes = [];
@@ -11854,7 +12383,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     constraints,
   });
   const createdAt = now();
-  const providerBindings = deliveryProviderBindingsFromOptions(context, kind, options);
+  const providerBindings = deliveryProviderBindingsFromOptions(context, kind, options, target);
   const profile = buildDomainRecord(`Cannot propose delivery autonomy ${profileId}`, () => buildDeliveryExecutionProfileV2({
     schema_version: "delivery-execution-profile:v2",
     id: profileId,
@@ -11908,6 +12437,18 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     git: attribution.git,
     run: attribution.run,
   });
+  const authorityEffectiveCap = (context.config.authority_policy?.mode || "audit_only") === "host_verified"
+    ? "bounded-autonomous"
+    : "checkpointed";
+  const effectiveProposalLevel = authorityEffectiveCap === "checkpointed" && requestedLevel === "bounded-autonomous"
+    ? "checkpointed"
+    : requestedLevel;
+  const effectivePreset = context.config.autonomy_policy?.presets?.[effectiveProposalLevel] || {};
+  const relevantCheckpoints = (effectivePreset.checkpoints || profile.checkpoints || []).filter((checkpoint) => (
+    kind === "local_release"
+      ? !["deploy.remote", "pull_request.merge", "sync.pr", "sync.push"].includes(checkpoint)
+      : !["deploy.remote", "release.local"].includes(checkpoint)
+  ));
   const review = {
     profile_id: profileId,
     delivery: { id: deliveryId, kind },
@@ -11919,14 +12460,12 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     most_restrictive_requirement_ceiling: ceiling,
     contract_ceiling: contractLevel,
     requested_level: requestedLevel,
-    authority_effective_cap: (context.config.authority_policy?.mode || "audit_only") === "host_verified"
-      ? "bounded-autonomous"
-      : "checkpointed",
+    authority_effective_cap: authorityEffectiveCap,
     target: kind === "pull_request" ? profile.pull_request_target : profile.local_release_target,
     allowed_actions: deliveryTargetAllowedActions(profile),
     allowed_write_paths: constraints.allowed_write_paths,
-    automatic_phases: context.config.autonomy_policy?.presets?.[requestedLevel]?.automatic_phases || [],
-    checkpoints: profile.checkpoints,
+    automatic_phases: effectivePreset.automatic_phases || [],
+    checkpoints: relevantCheckpoints,
     forbidden_actions: constraints.forbidden_actions,
     proposal_authority_mode: profile.authority_assurance.mode,
     provider_bindings: profile.provider_bindings,
@@ -11944,13 +12483,12 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     base_branch: profile.pull_request_target?.base_branch,
     head_branch: profile.pull_request_target?.head_branch,
     target_root: profile.local_release_target?.root_path,
+    smoke_cwd: profile.local_release_target?.smoke_cwd || null,
     allowed_write_paths: review.allowed_write_paths,
     review_moments: profile.checkpoints,
     expires_at: profile.expires_at,
     requested_level: requestedLevel,
-    effective_level: review.authority_effective_cap === "checkpointed" && requestedLevel === "bounded-autonomous"
-      ? "checkpointed"
-      : requestedLevel,
+    effective_level: effectiveProposalLevel,
     authority_mode: context.config.authority_policy?.mode || "audit_only",
     authority_verified: false,
     merge_allowed: profile.pull_request_target?.merge_allowed === true,
@@ -11970,13 +12508,18 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
       `Delivery: ${deliveryId}; story ${storyId}; contract ${contractId}`,
       `Project: ${projectName} (${context.root})`,
       `Destination: ${kind === "pull_request"
-        ? `${profile.pull_request_target.repository} ${profile.pull_request_target.head_branch} from ${profile.pull_request_target.base_branch}`
+        ? profile.pull_request_target.mode === "existing"
+          ? `existing PR #${profile.pull_request_target.pr_number} ${profile.pull_request_target.pr_url}; ${profile.pull_request_target.head_branch} from ${profile.pull_request_target.base_branch}`
+          : `new PR in ${profile.pull_request_target.repository}; ${profile.pull_request_target.head_branch} from ${profile.pull_request_target.base_branch}`
         : profile.local_release_target.root_path}`,
       `Requested technical level: ${requestedLevel}`,
       `Highest currently enforceable level: ${guidance.details.effective_level}`,
       ...autonomyVerificationTechnicalLines(guidance, options),
       `Allowed actions: ${review.allowed_actions.join(", ")}`,
       `Allowed write paths: ${review.allowed_write_paths.join(", ")}`,
+      ...(kind === "local_release"
+        ? [`Smoke working directory: ${profile.local_release_target.smoke_cwd}`]
+        : []),
       `Checkpoints: ${review.checkpoints.join(", ") || "global exceptions only"}`,
       `Expires at: ${profile.expires_at || "delivery lifecycle only"}`,
     ], options),
@@ -12149,7 +12692,9 @@ function currentDeliveryAutonomyInputs(context, profile, options = {}) {
     local_release_target: profile.local_release_target,
   };
   if (profile.delivery_kind === "local_release") {
-    validateLocalReleaseFilesystemBoundary(profile.local_release_target);
+    validateLocalReleaseFilesystemBoundary(profile.local_release_target, {
+      requireExistingRoot: options.validateRuntimeTarget === true,
+    });
   } else if (options.validateRuntimeTarget === true) {
     validatePullRequestGitBoundary(context, profile.pull_request_target);
   }
@@ -12191,6 +12736,13 @@ function evaluateDeliveryAutonomy(context, profile, options = {}) {
     active_run_count: executionState.active_run_count + (options.forStart === true ? 1 : 0),
   };
   const contractLevel = current.contract.autonomy_level || profile.requested_level;
+  const capabilityBoundary = deliveryCapabilityBoundary(
+    context,
+    current.contract,
+    profile.requested_level,
+  );
+  const environmentBoundary = deliveryEnvironmentBoundary(profile);
+  const budgetBoundary = deliveryBudgetBoundary(current, profile.requested_level);
   const decision = buildDomainRecord(`Cannot evaluate delivery autonomy ${profile.id}`, () => evaluateAutonomyPolicy({
     id: options.id,
     evaluated_at: options.evaluated_at || now(),
@@ -12212,9 +12764,9 @@ function evaluateDeliveryAutonomy(context, profile, options = {}) {
       autonomy_level: contractLevel,
       delivery_profile_ref: { id: profile.id, hash: profile.profile_hash },
     },
-    capability_policy: { max_level: profile.requested_level, allowed: true, status: "available" },
-    environment_policy: { max_level: profile.requested_level, allowed: true, status: "available" },
-    budget_policy: { max_level: profile.requested_level, allowed_to_start_next: true, status: "available" },
+    capability_policy: capabilityBoundary,
+    environment_policy: environmentBoundary,
+    budget_policy: budgetBoundary,
   }));
   const integrity = validateAutonomyDecisionIntegrity(decision);
   if (!integrity.valid) {
@@ -12222,6 +12774,77 @@ function evaluateDeliveryAutonomy(context, profile, options = {}) {
   }
   assertRecordSchema(decision, "autonomy-decision.schema.json", `Autonomy decision ${decision.id}`);
   return { decision, current, executionState };
+}
+
+function deliveryCapabilityBoundary(context, contract, requestedLevel) {
+  const refs = Array.isArray(contract.capability_recommendation_refs)
+    ? contract.capability_recommendation_refs
+    : [];
+  if (refs.length === 0) {
+    return {
+      max_level: "checkpointed",
+      allowed: true,
+      status: "not_verified",
+    };
+  }
+  for (const ref of refs) {
+    const recommendation = readProjectJson(context, capabilityRecommendationPath(context, ref.id));
+    validateApprovedCapabilityRecommendationForUse(
+      context,
+      recommendation,
+      `capability recommendation ${ref.id}`,
+    );
+    const approvedHash = latestApprovedRecordApproval(recommendation)?.approved_content_hash || null;
+    if (ref.approved_content_hash && ref.approved_content_hash !== approvedHash) {
+      fail(`Capability recommendation ${ref.id} no longer matches contract ${contract.id}.`);
+    }
+    const unavailable = (recommendation.recommendations || []).filter((item) =>
+      !["available"].includes(String(item.availability || "").toLowerCase())
+      || (item.install_required && !item.install_approved));
+    if (unavailable.length > 0) {
+      return {
+        max_level: "supervised",
+        allowed: false,
+        status: "unavailable",
+      };
+    }
+  }
+  return {
+    max_level: requestedLevel,
+    allowed: true,
+    status: "approved_evidence",
+  };
+}
+
+function deliveryEnvironmentBoundary(profile) {
+  const targetBound = profile.delivery_kind === "local_release"
+    ? Boolean(profile.local_release_target?.root_path)
+    : Boolean(
+        profile.pull_request_target?.repository
+        && profile.pull_request_target?.base_branch
+        && profile.pull_request_target?.head_branch,
+      );
+  return {
+    max_level: targetBound ? profile.requested_level : "supervised",
+    allowed: targetBound,
+    status: targetBound ? "target_bound" : "unavailable",
+  };
+}
+
+function deliveryBudgetBoundary(current, requestedLevel) {
+  const refs = [
+    current.contract.execution_budget_ref,
+    ...current.requirementProfiles.map((profile) => profile.constraints?.budget_ref || null),
+  ].filter(Boolean);
+  // The generic delivery path can bind a budget reference, but it does not yet
+  // have a provider-neutral metering receipt. Never describe that boundary as
+  // "available" or grant unattended execution from an unverified assumption.
+  return {
+    max_level: "checkpointed",
+    allowed_to_start_next: true,
+    status: refs.length > 0 ? "configured_unmetered" : "not_configured",
+    requested_level: requestedLevel,
+  };
 }
 
 function approveDeliveryAutonomy(context, options) {
@@ -13568,7 +14191,8 @@ function evaluateDeliveryAction(context, options) {
     const { decision } = evaluateDeliveryAutonomy(context, profile, {
       id: `AUT-ACTION-${uniqueRecordSuffix()}`,
       phase: getOptionString(options, "phase") || undefined,
-      validateRuntimeTarget: profile.delivery_kind === "pull_request",
+      validateRuntimeTarget: profile.delivery_kind === "pull_request"
+        || (profile.delivery_kind === "local_release" && action === "release.local"),
     });
     const invalidConstraints = decision.source_constraints.filter((constraint) => constraint.valid === false);
     if (decision.blocked || invalidConstraints.length > 0 || decision.material_drift.length > 0) {
@@ -13647,6 +14271,10 @@ function evaluateDeliveryAction(context, options) {
         host_receipt_required: (context.config.authority_policy?.mode || "audit_only") === "host_verified",
         execution_performed: false,
         merge_executed: false,
+        target_root: profile.local_release_target?.root_path || null,
+        smoke_cwd: actionDetails?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
+        smoke_tests: profile.local_release_target?.smoke_tests || [],
+        rollback: profile.local_release_target?.rollback?.procedure || null,
         reason_codes: ["autonomy.action_checkpoint_required"],
       }, { locale: humanGuidanceLocale(options) });
       output(options, {
@@ -13809,8 +14437,18 @@ function evaluateDeliveryAction(context, options) {
     if (action === "release.local" && completingAction) {
       const smokeTests = normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort();
       const approvedSmokeTests = [...(profile.local_release_target?.smoke_tests || [])].sort();
+      const approvedSmokeCwd = governedLocalSmokeCwd(profile).smokeCwd;
+      const reportedSmokeCwdOption = getOptionString(options, "smoke-cwd");
+      const reportedSmokeCwd = reportedSmokeCwdOption
+        ? path.isAbsolute(reportedSmokeCwdOption)
+          ? path.resolve(reportedSmokeCwdOption)
+          : path.resolve(profile.local_release_target.root_path, reportedSmokeCwdOption)
+        : approvedSmokeCwd;
       if (stableJson(smokeTests) !== stableJson(approvedSmokeTests)) {
         fail("release.local must report the exact approved smoke-test command set.");
+      }
+      if (reportedSmokeCwd !== approvedSmokeCwd) {
+        fail("release.local --smoke-cwd must match the exact approved smoke working directory.");
       }
       if (reportedOutcome !== "passed") {
         fail("release.local completion must report --outcome passed before the delivery can be released.");
@@ -13827,6 +14465,7 @@ function evaluateDeliveryAction(context, options) {
         target_root: profile.local_release_target.root_path,
         allowed_write_paths: profile.local_release_target.allowed_write_paths,
         smoke_tests: approvedSmokeTests,
+        smoke_cwd: approvedSmokeCwd,
         smoke_test_receipts: smokeTestReceipts,
         outcome: "passed",
         evidence,
@@ -13918,6 +14557,10 @@ function evaluateDeliveryAction(context, options) {
           host_receipt_required: (context.config.authority_policy?.mode || "audit_only") === "host_verified",
           execution_performed: false,
           merge_executed: false,
+          target_root: profile.local_release_target?.root_path || null,
+          smoke_cwd: receipt.action_details?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
+          smoke_tests: profile.local_release_target?.smoke_tests || [],
+          rollback: profile.local_release_target?.rollback?.procedure || null,
         }, { locale: humanGuidanceLocale(options) })
       : null;
     const locale = humanGuidanceLocale(options);
@@ -19924,7 +20567,7 @@ function renderApprovalRequestsAssistantMessage(requests) {
     "",
     ...requests.flatMap((request, index) => formatHumanApprovalRequest(request, index + 1)),
     internalRefreshOnly ? null : "You can answer in natural language, for example:",
-    internalRefreshOnly ? null : '- "Use README.md, package.json, and src/ as the trusted context; the proposed assessment format is fine."',
+    internalRefreshOnly ? null : '- "Use README.md, package.json, and src/ as the trusted context; the proposed output format is fine."',
     internalRefreshOnly ? null : '- "The sections are fine, but also include deployment risks."',
     internalRefreshOnly ? null : '- "Do not start yet; first explain item 2 in simpler terms."',
   ].filter(Boolean).join("\n");
@@ -20481,15 +21124,15 @@ function buildOutputTemplateApprovalRequest(context, template) {
     artifact_type: template.type || null,
     sources: [template.path, ".sdlc/output-contracts/registry.json"].filter(Boolean),
     ...humanApprovalFields({
-      title: `Assessment format (${template.id})`,
-      why_needed: "Before I write the assessment, I need to confirm its sections, level of detail, and canonical file format.",
+      title: `Output format (${template.id})`,
+      why_needed: "Before I create the result, I need to confirm its sections, level of detail, and canonical file format.",
       review_items: [
-        "What this is: the proposed structure and delivery style for the assessment. It does not approve the final assessment content or the work brief.",
-        `Decision scope: this only approves the document structure for ${template.type || "this"} outputs. It does not approve the final assessment content.`,
+        "What this is: the proposed structure and delivery style for the result. It does not approve the final content or the work brief.",
+        `Decision scope: this only approves the document structure for ${template.type || "this"} outputs. It does not approve the final content.`,
         `Output type: ${template.type || "unknown"}`,
         `Canonical result: ${formatOutputDeliveryForHuman(delivery)}. This choice is enforced when the output file is linked.`,
         template.summary ? `Summary: ${template.summary}` : null,
-        templateHeadings.length ? `Assessment sections: ${templateHeadings.join(" > ")}` : null,
+        templateHeadings.length ? `Document sections: ${templateHeadings.join(" > ")}` : null,
         template.path ? `Template file: ${template.path}` : null,
         `Template content to review: ${templateExcerpt || "unavailable"}`,
       ],
@@ -20499,12 +21142,12 @@ function buildOutputTemplateApprovalRequest(context, template) {
       ],
       recommended_delivery_format: formatOutputDeliveryForHuman(delivery),
       delivery_question: `Should the canonical result remain ${delivery.label} (${delivery.extension}) with delivery mode ${delivery.mode}, or should I change it before approval?`,
-      approval_meaning: "If you approve it, I can write the assessment using this structure and must deliver the canonical file in the selected format. You will still review the actual content afterwards.",
-      approve_if: "Approve if these sections match the assessment you expect.",
+      approval_meaning: "If you approve it, I can create the result using this structure and must deliver the canonical file in the selected format. You will still review the actual content afterwards.",
+      approve_if: "Approve if these sections match the result you expect.",
       change_if: "Ask for changes if you want different sections, more detail, less detail, or a different presentation.",
-      after_approval: `Then I can use ${template.id} as the assessment format.`,
-      user_prompt: `Is this assessment format OK, or should I change the sections before writing it?`,
-      approval_phrase: `The assessment format ${template.id} is OK.`,
+      after_approval: `Then I can use ${template.id} as the output format.`,
+      user_prompt: `Is this output format OK, or should I change the sections before creating the result?`,
+      approval_phrase: `The output format ${template.id} is OK.`,
     }),
     suggested_question: `After reviewing the template structure, do you approve output format ${template.id} for ${template.type}?`,
     suggested_command: `agentic-sdlc output template approve --id ${template.id} --actor-type human --approval-source explicit-user --summary "<user-approved output format>"`,
@@ -21071,12 +21714,12 @@ function simplifyReviewItemForUser(request, item) {
   if (/^Decision scope:/.test(text)) {
     return `Decision scope: this only approves the document structure for ${humanOutputLabel(request.artifact_type || "this output")} work. It does not approve the final content.`;
   }
-  if (/^Assessment sections:/.test(text)) {
+  if (/^(?:Assessment|Document) sections:/.test(text)) {
     const sections = text
-      .replace(/^Assessment sections:\s*/, "")
+      .replace(/^(?:Assessment|Document) sections:\s*/, "")
       .split(/\s*>\s*/)
       .filter((section) => section && !/-v\d+$/i.test(section));
-    return `Assessment sections: ${sections.join(", ")}`;
+    return `Document sections: ${sections.join(", ")}`;
   }
   if (/^Output type:/.test(text)) {
     return `Output: ${humanOutputLabel(text.replace(/^Output type:\s*/, ""))}`;
@@ -21117,9 +21760,9 @@ function plainApprovalRequestCopy(request) {
       };
     case "output_template_approval":
       return {
-        title: `Assessment format (${request.subject_id})`,
-        explanation: "This is the structure of the assessment I will write: sections, level of detail, and presentation style.",
-        example: `The assessment format ${request.subject_id} is OK.`,
+        title: `Output format (${request.subject_id})`,
+        explanation: "This is the structure of the result I will create: sections, level of detail, and presentation style.",
+        example: `The output format ${request.subject_id} is OK.`,
       };
     case "capability_profile_approval":
       return {
@@ -22799,6 +23442,8 @@ function buildActor(options = {}, root = process.cwd()) {
   const commandAgent = getOptionString(options, "agent");
   const requestedActorType = getOptionString(options, "actor-type");
   const explicitActorType = requestedActorType ? normalizeActorType(requestedActorType) : null;
+  const explicitActorName = getOptionString(options, "actor-name");
+  const explicitActorEmail = getOptionString(options, "actor-email");
   const envAgent = process.env.CODEX_AGENT_NAME || null;
   const envCiActor = process.env.CI ? process.env.GITHUB_ACTOR || "ci" : null;
   const actorType = explicitActorType || inferActorType(options, explicitActor || commandAgent || envAgent || envCiActor || "codex");
@@ -22806,19 +23451,19 @@ function buildActor(options = {}, root = process.cwd()) {
     explicitActor ||
     commandAgent ||
     (actorType === "human" ? defaultHumanActorId(root) : null) ||
-    (actorType === "ci" ? envCiActor : null) ||
+    (actorType === "ci" ? envCiActor || explicitActorName || "ci" : null) ||
     envAgent ||
     envCiActor ||
     "codex";
-  const useHumanIdentity = ["human", "ci"].includes(actorType);
+  const useGitIdentity = actorType === "human";
   const name =
-    getOptionString(options, "actor-name") ||
+    explicitActorName ||
     (actorType === "agent" && id === "codex" ? "Codex" : null) ||
-    (useHumanIdentity ? process.env.GIT_AUTHOR_NAME || gitConfigValue(root, "user.name") : null) ||
+    (useGitIdentity ? process.env.GIT_AUTHOR_NAME || gitConfigValue(root, "user.name") : null) ||
     null;
   const email =
-    getOptionString(options, "actor-email") ||
-    (useHumanIdentity ? process.env.GIT_AUTHOR_EMAIL || gitConfigValue(root, "user.email") : null) ||
+    explicitActorEmail ||
+    (useGitIdentity ? process.env.GIT_AUTHOR_EMAIL || gitConfigValue(root, "user.email") : null) ||
     null;
 
   return {
@@ -22826,7 +23471,9 @@ function buildActor(options = {}, root = process.cwd()) {
     type: actorType,
     name,
     email,
-    source: explicitActor || commandAgent ? "cli" : envAgent || envCiActor || useHumanIdentity ? "environment" : "default",
+    source: explicitActor || commandAgent || explicitActorType || explicitActorName || explicitActorEmail
+      ? "cli"
+      : envAgent || envCiActor || useGitIdentity ? "environment" : "default",
   };
 }
 
@@ -22966,6 +23613,18 @@ function execGit(root, args) {
       .trim() || null;
   } catch {
     return null;
+  }
+}
+
+function gitCommandSucceeds(root, args) {
+  try {
+    childProcess.execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -24256,18 +24915,50 @@ function buildDefaultCapabilityRecommendations(profile, availableCapabilities) {
       install_required: false,
     });
   }
+  const declaredGroups = [
+    ["skills", "skill"],
+    ["tools", "tool"],
+    ["mcp", "mcp"],
+    ["plugins", "plugin"],
+    ["connectors", "connector"],
+    ["models", "model"],
+  ];
+  const recommendedKeys = new Set(recommendations.map((item) => `${item.type}\0${item.name}`));
+  for (const [group, type] of declaredGroups) {
+    for (const item of normalizeAvailableCapabilityEntries(availableCapabilities, group)) {
+      const key = `${type}\0${item.name}`;
+      if (recommendedKeys.has(key) || item.recommended === false) continue;
+      recommendations.push({
+        type,
+        name: item.name,
+        availability: "available",
+        purpose: item.purpose || item.description || `Use the declared available ${type} capability for this work.`,
+        rationale: item.rationale || "The capability was supplied in the reviewed available-capabilities inventory.",
+        permissions: normalizeListValue(item.permissions, type === "tool" ? ["read", "execute"] : []),
+        install_required: false,
+      });
+      recommendedKeys.add(key);
+    }
+  }
   return recommendations;
 }
 
-function normalizeAvailableCapabilityNames(availableCapabilities, key) {
+function normalizeAvailableCapabilityEntries(availableCapabilities, key) {
   const value = availableCapabilities?.[key] || availableCapabilities?.[key.replace(/s$/, "")] || [];
-  if (Array.isArray(value)) {
-    return value.map((item) => (typeof item === "string" ? item : item?.name)).filter(Boolean);
-  }
-  if (value && typeof value === "object") {
-    return normalizeListValue(value.installed || value.available || value.names, []);
-  }
-  return [];
+  const rawEntries = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? value.installed || value.available || value.names || []
+      : [];
+  return (Array.isArray(rawEntries) ? rawEntries : [])
+    .map((item) => typeof item === "string" ? { name: item } : item)
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .map((item) => ({ ...item, name: String(item.name || "").trim() }))
+    .filter((item) => item.name);
+}
+
+function normalizeAvailableCapabilityNames(availableCapabilities, key) {
+  return normalizeAvailableCapabilityEntries(availableCapabilities, key).map((item) => item.name);
 }
 
 function buildDefaultCapabilityPolicyPatch(recommendations) {
@@ -25017,7 +25708,7 @@ function completeStoryStep(context, options) {
     fail(`Story ${storyId} does not exist`);
   }
   assertReleaseClaimPrecondition(context, storyId, options);
-  const step = normalizeStoryStep(requireOption(options, "step"));
+  const step = normalizeStoryStep(context, requireOption(options, "step"));
   const summary = getOptionString(options, "summary") || null;
   const outputTypes = normalizeListOption(options.type).map(normalizeArtifactType);
   validateApprovedStoryContractForPhaseOutput(
@@ -25051,11 +25742,12 @@ function completeStoryStep(context, options) {
     }
     const requiredTraceType = step === "validation" ? "test" : "release";
     const acceptableOutcomes = step === "validation" ? ["passed"] : ["ready", "passed"];
-    const supportingTrace = readTraceEvents(context, storyId).find(
-      (event) => event.type === requiredTraceType && acceptableOutcomes.includes(event.outcome),
-    );
-    if (!supportingTrace) {
-      fail(`${step} completion requires a ${requiredTraceType} trace with outcome ${acceptableOutcomes.join(" or ")}.`);
+    const supportingTrace = latestTraceEvent(readTraceEvents(context, storyId), requiredTraceType);
+    if (!supportingTrace || !acceptableOutcomes.includes(supportingTrace.outcome)) {
+      fail(
+        `${step} completion requires the latest ${requiredTraceType} trace to have outcome `
+        + `${acceptableOutcomes.join(" or ")}.`,
+      );
     }
   }
 
@@ -25068,7 +25760,7 @@ function completeStoryStep(context, options) {
     story_id: storyId,
     step,
     status: "completed",
-    phase: storyStepPhase(step),
+    phase: storyStepPhase(context, step),
     summary,
     output_types: outputTypes,
     output_links: outputLinks.map((link) => ({
@@ -25082,7 +25774,9 @@ function completeStoryStep(context, options) {
     })),
     artifacts: artifactEvidence,
     evidence: extraEvidence,
-    next_step: options["next-step"] ? normalizeStoryStep(options["next-step"]) : defaultNextStoryStep(step),
+    next_step: options["next-step"]
+      ? normalizeStoryStep(context, options["next-step"])
+      : defaultNextStoryStep(context, step),
     completed_at: now(),
     audit: {
       completed_by: attribution.actor,
@@ -25353,8 +26047,63 @@ function appendTrace(context, options) {
     correlation_id: CLI_OPERATION_CONTEXT.correlation_id,
     created_at: now(),
   };
-  const sealedEvent = sealGovernedTraceEvent(context, tracePath, event);
+  assertManualTraceActionIsSafe(event);
+  const snapshottedEvent = snapshotManualTraceEvidence(context, event);
+  const sealedEvent = sealGovernedTraceEvent(context, tracePath, snapshottedEvent);
   output(options, { status: "appended", trace_path: tracePath, event: sealedEvent }, [`Appended ${type} trace ${sealedEvent.id}`]);
+}
+
+function assertManualTraceActionIsSafe(event) {
+  const generatedBy = {
+    "git.commit": "autonomy delivery action",
+    "git.push": "autonomy delivery action",
+    "pull_request.merge": "autonomy delivery action",
+    "release.local": "autonomy delivery action",
+    "sync.commit": "sync record",
+    "sync.merge": "sync record",
+    "sync.push": "sync record",
+  };
+  const command = generatedBy[event.action];
+  if (!command) return;
+  fail(
+    `Protected action '${event.action}' cannot be appended manually because one incomplete event would permanently block strict gates. `
+    + `Run '${command}' for the exact action instead; it records the verified receipt and trace automatically.`,
+  );
+}
+
+function snapshotManualTraceEvidence(context, event) {
+  if (!["test", "release"].includes(event.type) || !Array.isArray(event.evidence) || event.evidence.length === 0) {
+    return event;
+  }
+  const redactionPolicy = buildTraceRedactionPolicy(context);
+  const mappings = [];
+  const evidence = event.evidence.map((projectPath, index) => {
+    const sourcePath = resolveProjectFilePath(context, projectPath, { mustExist: true, fileOnly: true });
+    assertNotDerivedArtifact(context, sourcePath, "Trace evidence");
+    const safeName = path.basename(sourcePath)
+      .replace(/[^A-Za-z0-9._-]+/gu, "-")
+      .replace(/^-+|-+$/gu, "") || "evidence.txt";
+    const snapshotRelativePath = [
+      SDLC_DIR,
+      "traces",
+      "evidence",
+      normalizeId(event.id),
+      `${String(index + 1).padStart(2, "0")}-${safeName}`,
+    ].join("/");
+    const snapshotPath = resolveProjectFilePath(context, snapshotRelativePath, { mustExist: false });
+    const representation = redactedEvidenceRepresentation(context, sourcePath, redactionPolicy);
+    writeTextFile(snapshotPath, representation, { atomicCreate: true, durable: true });
+    mappings.push({
+      source_path: projectPath,
+      snapshot_path: snapshotRelativePath,
+    });
+    return snapshotRelativePath;
+  });
+  return {
+    ...event,
+    evidence,
+    evidence_sources: mappings,
+  };
 }
 
 function bindHistoricalTraceEvidencePolicy(context, options) {
@@ -25808,17 +26557,86 @@ function resolveOutput(context, options) {
     }
   }
 
+  const decisionRequired = ["template_required", "reuse_delta"].includes(resolution.recommendation);
+  const payload = {
+    ...resolution,
+    status: decisionRequired ? "needs_user_input" : "resolved",
+    decision_required: decisionRequired,
+    human_guidance: outputResolutionGuidance(resolution, options),
+  };
   output(
     options,
-    resolution,
-    [
+    payload,
+    humanGuidanceLines(payload.human_guidance, [
       `Output resolution for ${storyId}/${artifactType}: ${resolution.recommendation}`,
       resolution.template_id ? `Template: ${resolution.template_id}` : "Template: missing approved template",
       resolution.delivery ? `Canonical delivery: ${formatOutputDeliveryForHuman(resolution.delivery)}` : null,
       resolution.base_artifact ? `Base artifact: ${resolution.base_artifact}` : "Base artifact: none",
       resolution.next_action,
-    ].filter(Boolean),
+    ].filter(Boolean), options),
   );
+}
+
+function outputResolutionGuidance(resolution, options = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  if (resolution.recommendation === "template_required") {
+    return {
+      result: italian
+        ? "Manca ancora un formato governato per questo risultato."
+        : "A governed format for this result is still missing.",
+      impact: italian
+        ? "Il risultato non può essere creato o collegato finché struttura e formato canonico non sono stati concordati."
+        : "The result cannot be created or linked until its structure and canonical file format are agreed.",
+      required_decision: italian
+        ? "Esamina la struttura proposta e approvala, oppure chiedi di cambiare sezioni o formato del file."
+        : "Review and approve the proposed structure, or ask to change its sections or file format.",
+      protection_boundary: italian
+        ? "Questa verifica non crea documenti, non approva formati e non autorizza una consegna."
+        : "This lookup creates no document, approves no format, and authorizes no delivery.",
+      next_action: italian
+        ? "Proponi il formato, esamina la struttura mostrata e approvala prima di scrivere il risultato."
+        : "Propose the format, review the displayed structure, and approve it before writing the result.",
+      details: {},
+    };
+  }
+  if (resolution.recommendation === "reuse_delta") {
+    return {
+      result: italian
+        ? "Esiste già un risultato approvato che può essere riutilizzato."
+        : "An approved result already exists and can be reused.",
+      impact: italian
+        ? "È sufficiente produrre solo le differenze necessarie, senza duplicare tutto il documento."
+        : "Only the necessary differences need to be produced instead of duplicating the whole document.",
+      required_decision: italian
+        ? "Conferma che il risultato precedente sia ancora una base valida, oppure richiedi un nuovo documento completo."
+        : "Confirm that the earlier result is still a valid base, or request a complete new document.",
+      protection_boundary: italian
+        ? "La base esistente non viene modificata e nessun nuovo risultato viene collegato da questa verifica."
+        : "The existing base is not modified, and this lookup links no new result.",
+      next_action: italian
+        ? "Conferma il riuso; poi crea e collega soltanto le differenze concordate."
+        : "Confirm reuse, then create and link only the agreed differences.",
+      details: {},
+    };
+  }
+  return {
+    result: resolution.recommendation === "linked"
+      ? (italian ? "Il risultato ufficiale è già collegato." : "The official result is already linked.")
+      : (italian ? "È disponibile un formato approvato per creare il risultato." : "An approved format is available for creating the result."),
+    impact: resolution.recommendation === "linked"
+      ? (italian ? "I controlli successivi useranno il file già registrato." : "Later checks will use the file already recorded.")
+      : (italian ? "Il risultato può essere scritto nel formato concordato e poi collegato ai controlli." : "The result can be written in the agreed format and then linked for checks."),
+    required_decision: italian
+      ? "Non serve una nuova decisione, salvo che tu voglia cambiare formato o sostituire il risultato."
+      : "No new decision is needed unless you want to change the format or replace the result.",
+    protection_boundary: italian
+      ? "Questa verifica non crea, modifica o collega alcun file."
+      : "This lookup creates, changes, or links no file.",
+    next_action: resolution.recommendation === "linked"
+      ? (italian ? "Continua con il prossimo controllo concordato." : "Continue with the next agreed check.")
+      : (italian ? "Crea il file nel formato approvato e collegalo come risultato ufficiale." : "Create the file in the approved format and link it as the official result."),
+    details: {},
+  };
 }
 
 function outputResolutionFingerprint(resolution) {
@@ -26144,11 +26962,12 @@ function linkOutputArtifact(context, options) {
 function showOutputStatus(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "story"));
-  if (!readStory(context, storyId)) {
+  const story = readStory(context, storyId);
+  if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
   const registry = readOutputRegistry(context, { missingOk: true });
-  const types = outputStatusTypes(context, registry, options);
+  const types = outputStatusTypes(context, registry, { ...options, story });
   const links = registry ? registry.links.filter((link) => link.story_id === storyId) : [];
   const resolutions = types.map((type) => buildOutputResolution(context, storyId, type, { registry }));
 
@@ -29498,6 +30317,25 @@ function outputStatusTypes(context, registry, options = {}) {
   if (explicitTypes.length > 0) {
     return explicitTypes;
   }
+  const story = options.story || null;
+  if (story) {
+    const activeTypes = new Set(
+      (registry?.links || [])
+        .filter((link) => link.story_id === story.id)
+        .map((link) => link.artifact_type)
+        .filter(Boolean)
+        .map(normalizeArtifactType),
+    );
+    const contract = story.contract_id
+      ? readContractById(context, story.contract_id, { missingOk: true })
+      : null;
+    for (const ref of contract?.output_contract_refs || []) {
+      if (ref.artifact_type) activeTypes.add(normalizeArtifactType(ref.artifact_type));
+    }
+    if (activeTypes.size > 0) {
+      return Array.from(activeTypes).sort();
+    }
+  }
   return collectOutputArtifactTypes(context, registry);
 }
 
@@ -30337,6 +31175,16 @@ function humanReadableGateBlocker(error, locale = "en") {
   const italian = locale === "it";
   const rules = [
     {
+      pattern: /lifecycle completion|complete lifecycle|terminal .* delivery/i,
+      en: "The final lifecycle is not complete yet: every configured phase and the exact delivery must finish successfully.",
+      it: "Il ciclo finale non è ancora completo: tutte le fasi configurate e la consegna esatta devono terminare con successo.",
+    },
+    {
+      pattern: /outside the approved requirement write paths|changed-path scope/i,
+      en: "At least one changed file is outside the approved implementation area.",
+      it: "Almeno un file modificato si trova fuori dall’area di implementazione approvata.",
+    },
+    {
       pattern: /output ref .*not (?:linked|satisfied)|has no .*output|missing .*output/i,
       en: "The agreed deliverable or implementation evidence has not been linked to this work item yet.",
       it: "Il risultato concordato o la prova di implementazione non è ancora collegato a questa attività.",
@@ -30379,6 +31227,10 @@ function gateCheck(context, options) {
     status: "passed",
     strict: Boolean(options.strict),
     scope,
+    lifecycle_complete: Boolean(options["lifecycle-complete"]),
+    certification_level: options["lifecycle-complete"]
+      ? "lifecycle_complete"
+      : options.strict && scope === "story" ? "strict_intermediate" : "standard",
     story_id: storyId,
     release_manifest_id: null,
     checked_at: now(),
@@ -30400,6 +31252,9 @@ function gateCheck(context, options) {
   }
   if (scope === "release-manifest" && !releaseManifestInput) {
     fail("Gate scope 'release-manifest' requires --release-manifest <manifest-id-or-path>.");
+  }
+  if (options["lifecycle-complete"] && (!options.strict || scope !== "story")) {
+    fail("--lifecycle-complete requires --strict with one exact --story.");
   }
   validateProject(context, report);
 
@@ -30481,6 +31336,9 @@ function gateCheck(context, options) {
     validateHandoffs(context, report, storyId);
     validateStory(context, storyId, report);
     validateOutputContracts(context, report, storyId);
+    if (report.strict && options["lifecycle-complete"]) {
+      validateStoryLifecycleCompletion(context, storyId, report);
+    }
   } else if (scope === "all") {
     validateDependencyProposals(context, report);
     validateContracts(context, report);
@@ -30514,6 +31372,17 @@ function gateCheck(context, options) {
   const plainBlockers = Array.from(new Set(report.errors.map((item) => humanReadableGateBlocker(item, locale))));
   const guidance = gateGuidance({ ...report, human_blockers: plainBlockers }, { locale });
   report.human_guidance = guidance;
+  if (
+    report.status === "passed"
+    && report.strict === true
+    && scope === "story"
+    && options["lifecycle-complete"] === true
+  ) {
+    const finalReceipt = sealWorkflowFinalGateReceipt(context, report);
+    const finalReceiptPath = workflowFinalGateReceiptPath(context, storyId);
+    writeWorkflowJsonDurably(finalReceiptPath, finalReceipt, { force: true });
+    Object.assign(report, finalReceipt);
+  }
   if (options.out) {
     writeGateReport(context, report, options);
   }
@@ -30547,12 +31416,16 @@ function gateCheck(context, options) {
     [
       ...humanGuidanceLines(guidance, [
         `Scope checked: ${scope}${storyId ? `; story ${storyId}` : ""}`,
+        `Certification level: ${report.certification_level}`,
         `Items checked: ${report.checked.length}`,
         `Blocking issues: ${report.errors.length}`,
         `Warnings: ${report.warnings.length}`,
         `Recorded follow-ups: ${report.approval_requests.length}`,
         ...report.errors.map((item) => `Blocker: ${item}`),
         ...report.warnings.map((item) => `Warning: ${item}`),
+        ...(report.final_receipt_path
+          ? [`Final lifecycle receipt: ${report.final_receipt_path}`]
+          : []),
       ], options, blockerSummary),
       ...followUpSummary,
     ],
@@ -31083,36 +31956,51 @@ function readHandoffs(context) {
     .map((name) => readProjectJson(context, path.join(handoffsRoot, name)));
 }
 
-function normalizeStoryStep(value) {
+function normalizeStoryStep(context, value) {
   const normalized = String(value || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "-");
-  if (!STORY_STEP_NAMES.has(normalized)) {
-    fail(`Unknown story step '${value}'. Valid values: ${Array.from(STORY_STEP_NAMES).join(", ")}`);
+  const configuredPhases = normalizeListValue(
+    context?.config?.phase_order,
+    Object.keys(context?.config?.phases || {}),
+  );
+  const validSteps = new Set([...configuredPhases, ...STORY_STEP_NAMES]);
+  if (!validSteps.has(normalized)) {
+    fail(`Unknown story step '${value}'. Valid values: ${Array.from(validSteps).join(", ")}`);
   }
   return normalized;
 }
 
-function storyStepPhase(step) {
-  if (["functional-analysis", "technical-analysis"].includes(step)) {
+function storyStepPhase(context, step) {
+  if (
+    ["functional-analysis", "technical-analysis"].includes(step)
+    && context.config.phases.analysis
+  ) {
     return "analysis";
   }
   return step;
 }
 
-function defaultNextStoryStep(step) {
-  const order = [
-    "discovery",
-    "functional-analysis",
-    "technical-analysis",
-    "design",
-    "implementation",
-    "validation",
-    "release",
-  ];
-  const index = order.indexOf(step);
-  return index >= 0 && index < order.length - 1 ? order[index + 1] : null;
+function defaultNextStoryStep(context, step) {
+  const configuredOrder = normalizeListValue(
+    context.config.phase_order,
+    Object.keys(context.config.phases || {}),
+  );
+  const configuredIndex = configuredOrder.indexOf(step);
+  if (configuredIndex >= 0) {
+    return configuredIndex < configuredOrder.length - 1
+      ? configuredOrder[configuredIndex + 1]
+      : null;
+  }
+  if (step === "functional-analysis") return "technical-analysis";
+  if (step === "technical-analysis") {
+    const analysisIndex = configuredOrder.indexOf("analysis");
+    return analysisIndex >= 0 && analysisIndex < configuredOrder.length - 1
+      ? configuredOrder[analysisIndex + 1]
+      : null;
+  }
+  return null;
 }
 
 function buildCanonicalEvidence(context, rawPaths, label) {
@@ -32645,11 +33533,29 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         const verification = receipt.local_release_verification;
         const commands = (verification?.smoke_test_receipts || []).map((item) => stableJson(item.command)).sort();
         const approvedCommands = [...(profile.local_release_target?.smoke_tests || [])].sort();
+        const configuredSmokeCwd = profile.local_release_target?.smoke_cwd
+          ? path.resolve(profile.local_release_target.smoke_cwd)
+          : null;
+        const derivedSmokeCwd = !configuredSmokeCwd
+          && profile.local_release_target?.allowed_write_paths?.length === 1
+          ? path.resolve(profile.local_release_target.allowed_write_paths[0])
+          : null;
+        const recordedSmokeCwd = verification?.smoke_cwd
+          ? path.resolve(verification.smoke_cwd)
+          : null;
+        const legacySmokeCwd = !configuredSmokeCwd
+          && !recordedSmokeCwd
+          && profile.local_release_target?.root_path
+          ? path.resolve(profile.local_release_target.root_path)
+          : null;
+        const expectedSmokeCwd = configuredSmokeCwd || recordedSmokeCwd || legacySmokeCwd;
         if (
           verification?.target_root !== profile.local_release_target?.root_path
           || stableJson(commands) !== stableJson(approvedCommands)
+          || (configuredSmokeCwd && recordedSmokeCwd !== configuredSmokeCwd)
+          || (recordedSmokeCwd && recordedSmokeCwd !== derivedSmokeCwd && !configuredSmokeCwd)
           || (verification?.smoke_test_receipts || []).some((item) =>
-            item.cwd !== profile.local_release_target?.root_path
+            path.resolve(item.cwd) !== expectedSmokeCwd
             || item.outcome !== "passed"
             || item.exit_code !== 0)
         ) {
@@ -33849,6 +34755,7 @@ function validateStory(context, storyId, report) {
     report[severity].push(`Story ${storyId} has no contract_id`);
   }
   const requirementIds = Array.isArray(story.links?.requirements) ? story.links.requirements.filter(Boolean) : [];
+  const storyRequirementProfiles = [];
   if (story.proposal_ref && requirementIds.length === 0) {
     report.errors.push(`Story ${storyId} is proposal-bound but has no canonical requirement link`);
   }
@@ -33889,6 +34796,7 @@ function validateStory(context, storyId, report) {
       }
       try {
         const profile = readRequirementAutonomyProfile(context, requirement.autonomy_profile_id);
+        storyRequirementProfiles.push(profile);
         appendRecordSchemaIssues(
           report,
           profile,
@@ -33913,6 +34821,13 @@ function validateStory(context, storyId, report) {
       report.errors.push(`Story ${storyId} and requirement ${requirementId} are bound to different proposal content`);
     }
   }
+  if (
+    report.strict
+    && context.config.gate_policy?.strict_mode?.requires_write_scope_integrity !== false
+    && storyRequirementProfiles.length > 0
+  ) {
+    validateStoryChangedPathsWithinRequirementScope(context, storyId, storyRequirementProfiles, report);
+  }
   const traceEvents = readTraceEvents(context, storyId);
   const latestTestTrace = latestTraceEvent(traceEvents, "test");
   if (
@@ -33934,6 +34849,114 @@ function validateStory(context, storyId, report) {
   report.checked.push(`story ${storyId}`);
 }
 
+function validateStoryChangedPathsWithinRequirementScope(context, storyId, requirementProfiles, report) {
+  if (execGit(context.root, ["rev-parse", "--is-inside-work-tree"]) !== "true") {
+    report.errors.push(
+      `Story ${storyId} cannot verify approved write paths because the project is not a Git worktree`,
+    );
+    return;
+  }
+  const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+  const taskStart = fs.existsSync(taskStartPath) ? readProjectJson(context, taskStartPath) : null;
+  const baselineSha = taskStart?.audit?.git?.head_sha || null;
+  if (
+    !baselineSha
+    || !/^[a-f0-9]{40,64}$/iu.test(baselineSha)
+    || !gitCommandSucceeds(context.root, ["cat-file", "-e", `${baselineSha}^{commit}`])
+    || !gitCommandSucceeds(context.root, ["merge-base", "--is-ancestor", baselineSha, "HEAD"])
+  ) {
+    report.errors.push(
+      `Story ${storyId} changed-path scope has no verifiable task-start Git baseline`,
+    );
+    return;
+  }
+  const committedPaths = String(
+    execGit(context.root, ["diff", "--name-only", "--no-renames", `${baselineSha}..HEAD`, "--"]) || "",
+  ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  const changedPaths = [...new Set([
+    ...committedPaths,
+    ...pullRequestChangedPaths(context, null, "git.commit"),
+  ])].sort()
+    .filter((filePath) => filePath !== SDLC_DIR && !filePath.startsWith(`${SDLC_DIR}/`));
+  const outside = changedPaths.filter((filePath) => requirementProfiles.some((profile) => {
+    const allowedPaths = profile.constraints?.allowed_write_paths || [];
+    return allowedPaths.length === 0 || !pathMatchesApprovedWriteScope(filePath, allowedPaths);
+  }));
+  if (outside.length > 0) {
+    report.errors.push(
+      `Story ${storyId} changed files outside the approved requirement write paths: ${outside.join(", ")}`,
+    );
+  }
+  report.checked.push(`story ${storyId} changed-path scope`);
+}
+
+function validateStoryLifecycleCompletion(context, storyId, report) {
+  const steps = readStoryStepRecords(context, storyId)
+    .filter((record) => record.status === "completed");
+  const completedPhases = new Set(steps.map((record) => record.phase));
+  const requiredPhases = normalizeListValue(
+    context.config.phase_order,
+    ["discovery", "analysis", "design", "implementation", "validation", "release"],
+  );
+  const missingPhases = requiredPhases.filter((phase) => !completedPhases.has(phase));
+  if (missingPhases.length > 0) {
+    report.errors.push(
+      `Story ${storyId} lifecycle completion requires completed phases: ${missingPhases.join(", ")}`,
+    );
+  }
+
+  const orderedCompletions = requiredPhases
+    .map((phase) => steps
+      .filter((record) => record.phase === phase)
+      .sort((left, right) => String(left.completed_at).localeCompare(String(right.completed_at)))[0])
+    .filter(Boolean);
+  for (let index = 1; index < orderedCompletions.length; index += 1) {
+    if (Date.parse(orderedCompletions[index].completed_at) < Date.parse(orderedCompletions[index - 1].completed_at)) {
+      report.errors.push(
+        `Story ${storyId} lifecycle phases were not completed in configured order`,
+      );
+      break;
+    }
+  }
+
+  const traceEvents = readTraceEvents(context, storyId);
+  if (latestTraceEvent(traceEvents, "test")?.outcome !== "passed") {
+    report.errors.push(`Story ${storyId} lifecycle completion requires the latest test trace to pass`);
+  }
+  if (latestTraceEvent(traceEvents, "release")?.outcome !== "passed") {
+    report.errors.push(`Story ${storyId} lifecycle completion requires the latest release trace to pass`);
+  }
+
+  const story = readStory(context, storyId);
+  const contract = story?.contract_id
+    ? readContractById(context, story.contract_id, { missingOk: true })
+    : null;
+  const deliveryProfileId = contract?.delivery_execution_profile_id || null;
+  if (!deliveryProfileId) {
+    report.errors.push(`Story ${storyId} lifecycle completion requires one exact delivery profile`);
+  } else {
+    try {
+      const profile = readDeliveryAutonomyProfile(context, deliveryProfileId);
+      const state = currentDeliveryExecutionState(context, profile);
+      const successfulStatuses = profile.delivery_kind === "local_release"
+        ? ["released"]
+        : ["merged", "closed"];
+      if (
+        state.lifecycle_status !== "terminal"
+        || !successfulStatuses.includes(state.status)
+      ) {
+        report.errors.push(
+          `Story ${storyId} lifecycle completion requires terminal ${profile.delivery_kind} delivery; found ${state.status}`,
+        );
+      }
+      report.checked.push(`story ${storyId} terminal delivery ${profile.delivery_id}`);
+    } catch (error) {
+      report.errors.push(`Story ${storyId} lifecycle delivery cannot be verified: ${error.message}`);
+    }
+  }
+  report.checked.push(`story ${storyId} complete lifecycle`);
+}
+
 function validateStoryStepRecords(context, storyId, report) {
   const stepsRoot = path.join(context.sdlcRoot, "stories", storyId, "steps");
   for (const fileName of safeReadDir(stepsRoot).filter((name) => name.endsWith(".json"))) {
@@ -33943,7 +34966,11 @@ function validateStoryStepRecords(context, storyId, report) {
     if (record.story_id !== storyId) {
       report.errors.push(`${label} story_id must match ${storyId}`);
     }
-    if (!record.step || !STORY_STEP_NAMES.has(String(record.step))) {
+    const validSteps = new Set([
+      ...normalizeListValue(context.config.phase_order, Object.keys(context.config.phases || {})),
+      ...STORY_STEP_NAMES,
+    ]);
+    if (!record.step || !validSteps.has(String(record.step))) {
       report.errors.push(`${label} has unknown step '${record.step}'`);
     }
     if (record.status !== "completed") {
@@ -34205,7 +35232,16 @@ function inferTitle(filePath, raw) {
 function ensureInitialized(context) {
   const projectPath = path.join(context.sdlcRoot, "project.json");
   if (!fs.existsSync(projectPath)) {
-    fail(`No ${SDLC_DIR}/project.json found. Run 'agentic-sdlc init' first.`);
+    const existingEntries = safeReadDir(context.root)
+      .filter((name) => ![SDLC_DIR, ".DS_Store"].includes(name));
+    if (existingEntries.length > 0) {
+      fail(
+        `No ${SDLC_DIR}/project.json found, but this folder already contains project files. `
+        + "Run 'agentic-sdlc onboard existing-project --project-name <name>' to inspect them and prepare a reviewable baseline. "
+        + "Use 'agentic-sdlc init' only for a genuinely new or empty project.",
+      );
+    }
+    fail(`No ${SDLC_DIR}/project.json found. Run 'agentic-sdlc init' to start this new empty project.`);
   }
   resolveProjectFilePath(context, path.join(SDLC_DIR, "project.json"), { mustExist: true, fileOnly: true });
   assertNoSymlinkPathSegments(projectPath, context.root);
@@ -35382,12 +36418,16 @@ Usage:
       --requirement REQ-001 --level supervised|checkpointed|bounded-autonomous
       --repository owner/repo --base main --head codex/ST-001
       --write-path src [--write-path test]
+      [--pr-mode new|existing]
+      [--pr-number 184 --pr-url https://github.com/owner/repo/pull/184]
+      [--pr-head-sha full-commit-sha]
       [--allow-action repository.read|repository.write|test.run|git.commit|git.push|pull_request.create|pull_request.update|pull_request.merge]
       [--merge-allowed]
   agentic-sdlc autonomy delivery propose --id AUT-LOCAL-1 --delivery LOCAL-1
       --kind local_release --story ST-001 --contract CONTRACT-001
       --requirement REQ-001 --level supervised|checkpointed|bounded-autonomous
       --target-root /absolute/local/root --write-path /absolute/local/root/output
+      [--smoke-cwd /absolute/local/root/output]
       --smoke-test '["node","--test"]' --rollback "reversible procedure"
       [--allow-action build.local|test.run|release.local]
   agentic-sdlc autonomy delivery approve --id AUT-PR-1 [--phase implementation]
@@ -35400,7 +36440,7 @@ Usage:
       [--confirm-action --actor-type human|ci --approval-source explicit-user|ci --summary text]
       [--host-receipt-file path]
       [--outcome passed|failed --evidence path]
-      [--smoke-test '["node","--test"]' --rollback "exact approved procedure"]
+      [--smoke-cwd path --smoke-test '["node","--test"]' --rollback "exact approved procedure"]
   agentic-sdlc autonomy delivery close --id AUT-PR-1
       --terminal-status closed|rolled_back|cancelled|superseded
       --reason text --actor-type human|ci --approval-source explicit-user|ci --summary text

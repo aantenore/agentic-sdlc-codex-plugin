@@ -77,7 +77,17 @@ test("workflow catalog and completion expose the complete bounded command family
   const definition = completionCandidates(["workflow", "definition"]);
   for (const child of ["approve", "list", "propose", "show"]) assert.equal(definition.includes(child), true, child);
   const transition = completionCandidates(["workflow", "instance", "transition"]);
-  for (const flag of ["--id", "--to", "--request-id", "--guard-input-json", "--locale", "--json"]) {
+  for (const flag of [
+    "--id",
+    "--to",
+    "--request-id",
+    "--guard-input-json",
+    "--actor-type",
+    "--actor-name",
+    "--actor-email",
+    "--locale",
+    "--json",
+  ]) {
     assert.equal(transition.includes(flag), true, flag);
   }
 
@@ -85,6 +95,9 @@ test("workflow catalog and completion expose the complete bounded command family
   for (const flag of ["--id", "--definition-version", "--actor-type", "--approval-source", "--authorization", "--summary"]) {
     assert.equal(approvalFlags.has(flag), true, flag);
   }
+  const startStory = listOptions("workflow instance start").find((entry) => entry.flag === "--story");
+  assert.ok(startStory);
+  assert.match(startStory.required_when?.en || "", /canonical lifecycle checks/u);
 });
 
 test("preset definition approval and an event-sourced run are stable and retry-safe", () => {
@@ -99,12 +112,25 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "technical-assessment",
     "generic-governed-process",
   ]);
+  const softwareProject = listed.included.find((entry) => entry.id === "software-project");
+  assert.equal(softwareProject.version, "2");
+  assert.match(softwareProject.description, /governed workflow preset/u);
+  assert.deepEqual(softwareProject.journey, [
+    "discovery", "analysis", "design", "implementation", "validation", "release",
+  ]);
+  assert.deepEqual(softwareProject.governance_controls, [
+    "requirement-approved",
+    "contract-approved",
+    "required-output-linked",
+    "strict-gate-passed",
+    "delivery-terminal",
+  ]);
 
   const italianProposal = mustRun([
     "workflow", "definition", "propose",
     "--root", project,
     "--id", "team-delivery",
-    "--definition-version", "1",
+    "--definition-version", "2",
     "--workflow-preset", "software-project",
     "--summary", "Sei passaggi di consegna con revisioni concordate",
     "--locale", "it",
@@ -119,7 +145,7 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "workflow", "definition", "approve",
     "--root", project,
     "--id", "team-delivery",
-    "--definition-version", "1",
+    "--definition-version", "2",
     "--actor-type", "human",
     "--approval-source", "explicit-user",
     "--summary", "Approved the displayed steps, checks, and limits",
@@ -130,11 +156,11 @@ test("preset definition approval and an event-sourced run are stable and retry-s
 
   const firstShow = mustRun([
     "workflow", "definition", "show", "--root", project,
-    "--id", "team-delivery", "--definition-version", "1", "--json",
+    "--id", "team-delivery", "--definition-version", "2", "--json",
   ], project);
   const secondShow = mustRun([
     "workflow", "definition", "show", "--root", project,
-    "--id", "team-delivery", "--definition-version", "1", "--json",
+    "--id", "team-delivery", "--definition-version", "2", "--json",
   ], project);
   const { correlation_id: firstCorrelationId, ...firstStableShow } = JSON.parse(firstShow);
   const { correlation_id: secondCorrelationId, ...secondStableShow } = JSON.parse(secondShow);
@@ -149,7 +175,7 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "--id", "team-labels",
     "--overlay-version", "1",
     "--definition", "team-delivery",
-    "--definition-version", "1",
+    "--definition-version", "2",
     "--overlay-json", JSON.stringify({
       label: "Team delivery",
       state_overrides: [{ state_id: "analysis", label: "Impact review", metadata: {} }],
@@ -180,17 +206,72 @@ test("preset definition approval and an event-sourced run are stable and retry-s
   assert.equal(explainedOverlay.status, "ready");
   assert.equal(explainedOverlay.effective_definition.states.find((state) => state.id === "analysis").label, "Impact review");
 
+  mustRunJson([
+    "requirement", "propose",
+    "--root", project,
+    "--id", "REQ-WORKFLOW-42",
+    "--title", "Govern the workflow test delivery",
+    "--summary", "Keep the test delivery bound to one approved requirement.",
+    "--acceptance", "The first workflow phase can advance from canonical requirement evidence.",
+    "--non-goal", "Do not perform a remote delivery.",
+    "--autonomy-ceiling", "supervised",
+  ], project);
+  mustRunJson([
+    "requirement", "approve",
+    "--root", project,
+    "--id", "REQ-WORKFLOW-42",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow test",
+    "--approval-source", "ci",
+    "--summary", "Approved the exact workflow test requirement.",
+  ], project);
+  mustRunJson([
+    "story", "create",
+    "--root", project,
+    "--id", "ST-WORKFLOW-42",
+    "--title", "Exercise canonical workflow transitions",
+    "--requirement", "REQ-WORKFLOW-42",
+    "--acceptance", "Canonical requirement evidence unlocks analysis.",
+  ], project);
+
+  const unboundStart = run([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", "unbound-delivery-42",
+    "--definition", "team-delivery",
+    "--definition-version", "2",
+    "--overlay", "team-labels",
+    "--overlay-version", "1",
+    "--json",
+  ], project);
+  assert.notEqual(unboundStart.status, 0);
+  assert.match(unboundStart.stderr, /--story/u);
+
   const started = mustRunJson([
     "workflow", "instance", "start",
     "--root", project,
     "--id", "delivery-42",
     "--definition", "team-delivery",
-    "--definition-version", "1",
+    "--definition-version", "2",
     "--overlay", "team-labels",
     "--overlay-version", "1",
+    "--story", "ST-WORKFLOW-42",
+    "--actor", "workflow-test-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow test CI",
   ], project);
   assert.equal(started.status, "started");
   assert.equal(started.instance.overlay_ref.id, "team-labels");
+  assert.deepEqual(started.instance.actor, {
+    id: "workflow-test-ci",
+    type: "ci",
+    name: "Workflow test CI",
+  });
+  assert.equal(started.instance.metadata.governance_binding.story_id, "ST-WORKFLOW-42");
+  assert.equal(
+    started.instance.metadata.governance_binding.final_gate_receipt_path,
+    ".sdlc/gates/ST-WORKFLOW-42-final.json",
+  );
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "workflows", "instances", "delivery-42", "instance.json")), true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "workflows", "instances", "delivery-42", "events.jsonl")), true);
 
@@ -200,9 +281,27 @@ test("preset definition approval and an event-sourced run are stable and retry-s
     "--id", "delivery-42",
     "--to", "analysis",
     "--request-id", "delivery-42-analysis",
+    "--actor", "workflow-test-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow test CI",
+    "--guard-input-json", JSON.stringify({
+      requirement_approved: false,
+      canonical_evidence: { requirement_approved: false },
+    }),
   ], project);
   assert.equal(transitioned.status, "transitioned");
   assert.equal(transitioned.replay.current_state, "analysis");
+  assert.equal(transitioned.event.guard_results[0].guard_id, "requirement-approved");
+  assert.equal(transitioned.event.guard_results[0].allowed, true);
+  assert.deepEqual(transitioned.event.actor, {
+    id: "workflow-test-ci",
+    type: "ci",
+    name: "Workflow test CI",
+  });
+  assert.equal(
+    transitioned.event.canonical_evidence.checks.requirement_approved.satisfied,
+    true,
+  );
 
   const retried = mustRunJson([
     "workflow", "instance", "transition",
@@ -219,6 +318,14 @@ test("preset definition approval and an event-sourced run are stable and retry-s
   assert.equal(status.current_state, "analysis");
   assert.equal(status.event_count, 1);
   assert.deepEqual(status.next_states, ["design"]);
+  assert.deepEqual(status.ready_next_states, ["design"]);
+  assert.deepEqual(status.next_transition_checks, [{
+    transition_id: "analysis-to-design",
+    to: "design",
+    canonical: false,
+    allowed: true,
+    guard_results: [],
+  }]);
 
   const humanStatus = mustRun([
     "workflow", "instance", "status", "--root", project, "--id", "delivery-42", "--locale", "en",
@@ -228,6 +335,54 @@ test("preset definition approval and an event-sourced run are stable and retry-s
   assert.match(englishPrimary, /reconstructed from its recorded history/u);
   assert.doesNotMatch(englishPrimary, /\b(?:schema|hash|profile|receipt|bounded-autonomous|checkpointed|audit_only)\b/iu);
   assert.doesNotMatch(englishPrimary, /\.sdlc\/|--[a-z]/u);
+
+  mustRunJson([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", "delivery-42",
+    "--to", "design",
+    "--request-id", "delivery-42-design",
+  ], project);
+  const callerBypass = run([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", "delivery-42",
+    "--to", "implementation",
+    "--request-id", "delivery-42-implementation-bypass",
+    "--guard-input-json", JSON.stringify({
+      contract_approved: true,
+      canonical_evidence: { contract_approved: true },
+    }),
+    "--json",
+  ], project);
+  assert.notEqual(callerBypass.status, 0);
+  assert.match(callerBypass.stderr, /canonical project records|guards denied/u);
+  const afterBypass = mustRunJson([
+    "workflow", "instance", "status", "--root", project, "--id", "delivery-42",
+  ], project);
+  assert.equal(afterBypass.current_state, "design");
+  assert.equal(afterBypass.event_count, 2);
+  assert.deepEqual(afterBypass.ready_next_states, []);
+  assert.equal(afterBypass.next_transition_checks.length, 1);
+  assert.equal(afterBypass.next_transition_checks[0].to, "implementation");
+  assert.equal(afterBypass.next_transition_checks[0].canonical, true);
+  assert.equal(afterBypass.next_transition_checks[0].allowed, false);
+  assert.equal(afterBypass.next_transition_checks[0].guard_results[0].guard_id, "contract-approved");
+  assert.equal(afterBypass.next_transition_checks[0].guard_results[0].allowed, false);
+
+  const failedFinalGate = run([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", "ST-WORKFLOW-42",
+    "--lifecycle-complete",
+    "--json",
+  ], project);
+  assert.notEqual(failedFinalGate.status, 0);
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "gates", "ST-WORKFLOW-42-final.json")),
+    false,
+  );
 });
 
 test("an included preset can start a run without being copied into project storage", () => {

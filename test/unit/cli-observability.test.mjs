@@ -367,6 +367,88 @@ test("trace append seals a redacted event without treating identifiers or opaque
   assert.equal(checkpoint.new_writes.last_event_hash, payload.event._trace_integrity.event_hash);
 });
 
+test("manual test traces bind an immutable redacted evidence snapshot", () => {
+  const project = initializedProject("trace-evidence-snapshot");
+  const evidencePath = path.join(project, "test-result.json");
+  fs.writeFileSync(
+    evidencePath,
+    `${JSON.stringify({ status: "passed", token: `github_pat_${"B".repeat(32)}` })}\n`,
+  );
+
+  const payload = JSON.parse(mustRun([
+    "trace", "append",
+    "--root", project,
+    "--type", "test",
+    "--outcome", "passed",
+    "--summary", "The local test suite passed",
+    "--evidence", "test-result.json",
+    "--json",
+  ]).stdout);
+
+  assert.equal(payload.status, "appended");
+  assert.equal(payload.event.evidence.length, 1);
+  assert.match(
+    payload.event.evidence[0],
+    /^\.sdlc\/traces\/evidence\/TR-[A-Za-z0-9._-]+\/01-test-result\.json$/u,
+  );
+  assert.deepEqual(payload.event.evidence_sources, [{
+    source_path: "test-result.json",
+    snapshot_path: payload.event.evidence[0],
+  }]);
+  const snapshotPath = path.join(project, ...payload.event.evidence[0].split("/"));
+  const originalSnapshot = fs.readFileSync(snapshotPath, "utf8");
+  assert.match(originalSnapshot, /"status":"passed"/u);
+  assert.doesNotMatch(originalSnapshot, /github_pat_/u);
+
+  fs.writeFileSync(evidencePath, `${JSON.stringify({ status: "failed" })}\n`);
+  assert.equal(fs.readFileSync(snapshotPath, "utf8"), originalSnapshot);
+  assert.equal(readOnlyJsonLine(
+    path.join(project, ".sdlc", "traces", "project.jsonl"),
+  ).evidence[0], payload.event.evidence[0]);
+});
+
+test("manual trace append cannot impersonate protected delivery actions", () => {
+  const project = initializedProject("trace-protected-action");
+  const result = mustFail([
+    "trace", "append",
+    "--root", project,
+    "--type", "release",
+    "--outcome", "passed",
+    "--action", "release.local",
+    "--summary", "Claim that a local release completed",
+    "--json",
+  ]);
+  const payload = JSON.parse(result.stderr);
+  assert.equal(payload.status, "error");
+  assert.match(payload.error.message, /cannot be appended manually/u);
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "traces", "project.jsonl")),
+    false,
+  );
+});
+
+test("explicit CI attribution does not inherit the local Git user identity", () => {
+  const project = initializedProject("ci-attribution");
+  const payload = JSON.parse(mustRun([
+    "trace", "append",
+    "--root", project,
+    "--type", "decision",
+    "--summary", "CI recorded a governed decision",
+    "--actor-type", "ci",
+    "--actor-name", "Novice Evaluation Harness",
+    "--actor-email", "ci@example.invalid",
+    "--json",
+  ]).stdout);
+
+  assert.deepEqual(payload.event.actor, {
+    id: "Novice Evaluation Harness",
+    type: "ci",
+    name: "Novice Evaluation Harness",
+    email: REDACTION_PLACEHOLDER,
+    source: "cli",
+  });
+});
+
 test("strict gate reports a sealed trace that was edited after append", () => {
   const project = initializedProject("trace-tamper");
   mustRun([
@@ -476,7 +558,7 @@ test("strict story gate detects trace deletion, checkpoint deletion, and deletio
   }
 });
 
-test("strict gate reports current-content evidence drift without storing original evidence", () => {
+test("strict gate reports current-content snapshot drift without storing original evidence", () => {
   const project = initializedProject("evidence-drift");
   const evidenceRelativePath = "evidence/current.txt";
   const evidencePath = path.join(project, evidenceRelativePath);
@@ -493,9 +575,18 @@ test("strict gate reports current-content evidence drift without storing origina
     "--json",
   ]);
   const appendPayload = JSON.parse(appendResult.stdout);
-  assert.deepEqual(appendPayload.event.evidence, [evidenceRelativePath]);
+  const snapshotRelativePath = appendPayload.event.evidence[0];
+  assert.match(
+    snapshotRelativePath,
+    /^\.sdlc\/traces\/evidence\/TR-[A-Za-z0-9._-]+\/01-current\.txt$/u,
+  );
+  assert.deepEqual(appendPayload.event.evidence, [snapshotRelativePath]);
+  assert.deepEqual(appendPayload.event.evidence_sources, [{
+    source_path: evidenceRelativePath,
+    snapshot_path: snapshotRelativePath,
+  }]);
   assert.equal(appendPayload.event.evidence_refs.length, 1);
-  assert.equal(appendPayload.event.evidence_refs[0].path, evidenceRelativePath);
+  assert.equal(appendPayload.event.evidence_refs[0].path, snapshotRelativePath);
   assert.equal(appendPayload.event.evidence_refs[0].verification, "current_content");
   assert.equal(appendPayload.event.evidence_refs[0].representation, "redacted_utf8_v2");
   assert.match(appendPayload.event.evidence_refs[0].sha256, /^[a-f0-9]{64}$/u);
@@ -507,12 +598,13 @@ test("strict gate reports current-content evidence drift without storing origina
   assert.equal(crypto.createHash("sha256").update(policyBytes).digest("hex"), policyRef.sha256);
   assert.equal(JSON.stringify(appendPayload.event).includes("verified evidence before change"), false);
 
-  fs.writeFileSync(evidencePath, "different evidence after change\n");
+  const snapshotPath = path.join(project, ...snapshotRelativePath.split("/"));
+  fs.writeFileSync(snapshotPath, "different evidence after change\n");
   const result = mustFail(["gate", "check", "--root", project, "--strict", "--json"]);
   const report = JSON.parse(result.stdout);
   assert.equal(report.status, "failed");
   assert.equal(
-    report.errors.some((error) => error.includes(`evidence content drift detected for ${evidenceRelativePath}`)),
+    report.errors.some((error) => error.includes(`evidence content drift detected for ${snapshotRelativePath}`)),
     true,
     report.errors.join("\n"),
   );
@@ -641,6 +733,10 @@ test("historical v1 requires one explicit policy binding and rejects cross-polic
   ]).stdout);
   const ref = append.event.evidence_refs[0];
   assert.equal(ref.representation, "redacted_utf8_v2");
+  assert.deepEqual(append.event.evidence_sources, [{
+    source_path: evidenceRelativePath,
+    snapshot_path: ref.path,
+  }]);
 
   ref.representation = "redacted_utf8_v1";
   delete ref.policy_source_ref;
@@ -667,7 +763,8 @@ test("historical v1 requires one explicit policy binding and rejects cross-polic
   assert.equal(binding.event.evidence_policy_bindings[0].target.event_hash, target._trace_integrity.event_hash);
   assert.equal(binding.event.evidence_policy_bindings[0].target.evidence_sha256, ref.sha256);
 
-  fs.writeFileSync(evidencePath, entropyOnly);
+  const evidenceSnapshotPath = path.join(project, ...ref.path.split("/"));
+  fs.writeFileSync(evidenceSnapshotPath, entropyOnly);
   const collisionReport = JSON.parse(mustFail([
     "gate", "check", "--root", project, "--strict", "--json",
   ]).stdout);
@@ -845,8 +942,23 @@ test("large evidence uses a validated manifest without reading the referenced ar
     "--json",
   ]).stdout);
   assert.equal(append.event.evidence_refs.length, 1);
-  assert.equal(append.event.evidence_refs[0].path, manifestRelativePath);
+  const snapshotRelativePath = append.event.evidence[0];
+  assert.match(
+    snapshotRelativePath,
+    /^\.sdlc\/traces\/evidence\/TR-[A-Za-z0-9._-]+\/01-large-report\.manifest\.json$/u,
+  );
+  assert.deepEqual(append.event.evidence_sources, [{
+    source_path: manifestRelativePath,
+    snapshot_path: snapshotRelativePath,
+  }]);
+  assert.equal(append.event.evidence_refs[0].path, snapshotRelativePath);
   assert.equal(append.event.evidence_refs[0].verification, "current_content");
+  const immutableManifest = JSON.parse(fs.readFileSync(
+    path.join(project, ...snapshotRelativePath.split("/")),
+    "utf8",
+  ));
+  assert.equal(immutableManifest.schema_version, "trace-evidence-manifest:v1");
+  assert.equal(immutableManifest.content_handling.raw_content_read_by_agentic_sdlc, false);
   assert.equal(
     fs.existsSync(path.join(project, "evidence", "raw-report-that-is-not-present.json")),
     false,

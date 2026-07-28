@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-canonical-evidence.schema.json",
+  "title": "Canonical workflow lifecycle evidence snapshot",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "instance_id",
+    "story_id",
+    "observed_at",
+    "checks",
+    "hash_algorithm",
+    "evidence_hash"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_canonical_evidence" },
+    "schema_version": { "const": "workflow-canonical-evidence:v1" },
+    "instance_id": { "type": "string", "minLength": 1 },
+    "story_id": { "type": "string", "minLength": 1 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "checks": {
+      "type": "object",
+      "required": [
+        "requirement_approved",
+        "contract_approved",
+        "required_output_linked",
+        "strict_gate_passed",
+        "delivery_terminal"
+      ],
+      "properties": {
+        "requirement_approved": { "$ref": "#/$defs/check" },
+        "contract_approved": { "$ref": "#/$defs/check" },
+        "required_output_linked": { "$ref": "#/$defs/check" },
+        "strict_gate_passed": { "$ref": "#/$defs/check" },
+        "delivery_terminal": { "$ref": "#/$defs/check" }
+      },
+      "additionalProperties": false
+    },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "evidence_hash": { "$ref": "#/$defs/hash" }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["satisfied", "issues"],
+      "properties": {
+        "satisfied": { "type": "boolean" },
+        "issues": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": false
+}

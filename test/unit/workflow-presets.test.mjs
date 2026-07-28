@@ -17,7 +17,34 @@ const EXPECTED_PRESETS = [
 ];
 
 test("catalog exposes exactly the four governed presets", () => {
-  assert.deepEqual(listWorkflowPresets().map(({ id }) => id), EXPECTED_PRESETS);
+  const listed = listWorkflowPresets();
+  assert.deepEqual(listed.map(({ id }) => id), EXPECTED_PRESETS);
+  assert.deepEqual(
+    listed.find(({ id }) => id === "software-project"),
+    {
+      id: "software-project",
+      version: "2",
+      available_versions: ["1", "2"],
+      status: "included",
+      label: "Software project",
+      description: "Software project governed workflow preset.",
+      state_count: 6,
+      journey: SOFTWARE_PROJECT_PHASES,
+      review_moments: [],
+      governance_controls: [
+        "requirement-approved",
+        "contract-approved",
+        "required-output-linked",
+        "strict-gate-passed",
+        "delivery-terminal",
+      ],
+      metadata: {
+        compatibility: { phase_order: SOFTWARE_PROJECT_PHASES },
+        governance_binding: "story",
+        canonical_evidence_schema: "workflow-canonical-evidence:v1",
+      },
+    },
+  );
   assert.throws(() => getWorkflowPreset("unknown"), /Unknown workflow preset/u);
 });
 
@@ -29,6 +56,44 @@ test("software-project preserves the exact six existing SDLC phases and order", 
   assert.deepEqual(preset.states.map(({ id }) => id), SOFTWARE_PROJECT_PHASES);
   assert.equal(preset.initial_state, "discovery");
   assert.equal(preset.states.at(-1).terminal, true);
+});
+
+test("software-project phase changes are bound to canonical lifecycle evidence", () => {
+  const preset = getWorkflowPreset("software-project", 2);
+  const guardsByRoute = Object.fromEntries(preset.transitions.map((transition) => [
+    `${transition.from}->${transition.to}`,
+    transition.guards.map((guard) => guard.id),
+  ]));
+
+  assert.deepEqual(guardsByRoute, {
+    "discovery->analysis": ["requirement-approved"],
+    "analysis->design": [],
+    "design->implementation": ["contract-approved"],
+    "implementation->validation": ["required-output-linked"],
+    "validation->release": ["strict-gate-passed", "delivery-terminal"],
+  });
+  assert.equal(preset.metadata.governance_binding, "story");
+  assert.equal(preset.metadata.canonical_evidence_schema, "workflow-canonical-evidence:v1");
+});
+
+test("software-project v1 remains byte-stable in behavior while v2 adds canonical governance", () => {
+  const legacy = buildWorkflowPreset("software-project", { version: 1 });
+  const governed = buildWorkflowPreset("software-project", { version: 2 });
+
+  assert.equal(legacy.version, "1");
+  assert.equal(
+    legacy.definition_hash,
+    "f7a8282e726fdb6c4082ceab3aba65c2cd930f07d9865899d802a65d13e7c3aa",
+  );
+  assert.equal(governed.version, "2");
+  assert.equal(legacy.transitions.every((transition) => transition.guards.length === 0), true);
+  assert.equal(legacy.metadata.governance_binding, undefined);
+  assert.equal(governed.metadata.governance_binding, "story");
+  assert.notEqual(legacy.definition_hash, governed.definition_hash);
+  assert.throws(
+    () => buildWorkflowPreset("software-project", { version: 3 }),
+    /available versions: 1, 2/u,
+  );
 });
 
 test("technical-assessment has exactly two normal approval checkpoints", () => {

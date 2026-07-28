@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-final-gate-receipt.schema.json",
+  "title": "Governed final story gate receipt",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "status",
+    "strict",
+    "scope",
+    "story_id",
+    "checked_at",
+    "errors",
+    "final_receipt_path",
+    "hash_algorithm",
+    "receipt_hash"
+  ],
+  "properties": {
+    "kind": { "const": "workflow_final_gate_receipt" },
+    "schema_version": { "const": "workflow-final-gate-receipt:v1" },
+    "status": { "const": "passed" },
+    "strict": { "const": true },
+    "scope": { "const": "story" },
+    "story_id": { "type": "string", "minLength": 1 },
+    "checked_at": { "type": "string", "format": "date-time" },
+    "errors": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "final_receipt_path": {
+      "type": "string",
+      "pattern": "^\\.sdlc/gates/[A-Za-z0-9._-]+-final\\.json$"
+    },
+    "hash_algorithm": { "const": "sha256:stable-json:v1" },
+    "receipt_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": true
+}

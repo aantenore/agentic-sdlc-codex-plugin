@@ -281,6 +281,7 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 2, "pattern": "^\\[.*\\]$" }
         },
+        "smoke_cwd": { "type": "string", "minLength": 1 },
         "rollback": {
           "type": "object",
           "required": ["required", "procedure"],

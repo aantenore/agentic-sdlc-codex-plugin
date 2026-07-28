@@ -58,6 +58,50 @@ For implementation work, Codex follows one visible order:
 
 If a material requirement, branch, path, tool, budget, environment, or destination changes, Codex shows the changed boundary before continuing.
 
+## Walk Through One Complete First Project
+
+This example follows one small result all the way through the lifecycle. It is
+the same trip-policy journey summarized in the README, so a first-time user
+does not need to assemble separate feature examples.
+
+Start in a disposable repository and ask:
+
+```text
+Inspect this repository, then implement a configurable trip-policy module as a
+local-only release. It must reject trips above a configurable cost limit, include
+tests, and avoid network, production, and machine-global changes.
+```
+
+Use `ST-TRIP-POLICY-001` as the stable story identifier. Codex should make each
+stage understandable before moving to the next:
+
+| Stage | What Codex should show | What makes the stage ready |
+| --- | --- | --- |
+| Discovery | Observed project facts, inferences, relevant files, assumptions, and missing decisions | You correct or accept the displayed context; no implementation has started |
+| Requirement | Configurable limit behavior, observable acceptance checks, non-goals, constraints, and maximum autonomy | One exact requirement revision is approved |
+| Contract | Source/test paths, configuration boundary, commands, local destination, allowed smoke-test working directory, smoke test, rollback, allowed writes, and excluded actions | One exact implementation agreement is approved |
+| Story and workflow | Story `ST-TRIP-POLICY-001` and a story-bound `software-project` v2 journey through discovery, analysis, design, implementation, validation, and release | The workflow status names the current stage and any canonical evidence still missing |
+| Implementation | Only the approved source, configuration, test, and documentation changes | The implementation matches the requirement and contract |
+| Test and validation | The exact test command, latest outcome, evidence location, and any failed or skipped check | The latest required test and output verification pass; an older success cannot hide a newer failure |
+| Local release | Exact local destination, terminal `released` status, successful smoke evidence, and usable rollback | The one approved delivery is closed; push, PR, deployment, and production remain excluded |
+| Final certification | One strict lifecycle result bound to this story and its terminal delivery | Every configured phase and current canonical record passes together |
+
+After the local release is terminal, Codex runs:
+
+```bash
+agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
+```
+
+A strict check without `--lifecycle-complete` may be useful while work is still
+in progress, but it is not the final delivery certificate. The lifecycle
+command must fail before required phases, current test evidence, and the named
+release are complete. On success, ask Codex to show the final receipt, delivered
+path, checks run, exclusions, and residual risks in plain language.
+
+If the same requirement later needs a pull request, create a new delivery
+profile and autonomy choice for that PR. Do not reuse the completed local
+release authorization.
+
 ## What You Approve
 
 Approval is attached to the content just shown, not to a vague permanent permission.

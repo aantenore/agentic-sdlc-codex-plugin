@@ -3,16 +3,21 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { STABLE_JSON_HASH_ALGORITHM } from "../../lib/canonical.mjs";
 import { validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
 import {
   applyWorkflowOverlay,
   computeWorkflowCheckpointHash,
   createWorkflowCheckpoint,
   createWorkflowInstance,
-  createWorkflowTransition,
+  createWorkflowTransition as createWorkflowTransitionDomain,
   replayWorkflowEvents,
   validateWorkflowCheckpoint,
 } from "../../lib/workflow-engine.mjs";
+import {
+  WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  computeWorkflowCanonicalEvidenceHash,
+} from "../../lib/workflow-canonical-evidence.mjs";
 import { buildWorkflowPreset } from "../../lib/workflow-presets.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -30,8 +35,34 @@ function runtime(id = "checkpoint-instance") {
     effective_definition: effective,
     created_at: CREATED_AT,
     actor: ACTOR,
+    metadata: { governance_binding: { story_id: `ST-${id}` } },
   });
   return { effective, instance };
+}
+
+function createWorkflowTransition(input, options = {}) {
+  const evidence = {
+    kind: "workflow_canonical_evidence",
+    schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+    instance_id: input.instance.id,
+    story_id: input.instance.metadata.governance_binding.story_id,
+    observed_at: CREATED_AT,
+    checks: Object.fromEntries([
+      "requirement_approved",
+      "contract_approved",
+      "required_output_linked",
+      "strict_gate_passed",
+      "delivery_terminal",
+    ].map((id) => [id, { satisfied: true, issues: [] }])),
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  return createWorkflowTransitionDomain(input, {
+    ...options,
+    canonical_evidence: {
+      ...evidence,
+      evidence_hash: computeWorkflowCanonicalEvidenceHash(evidence),
+    },
+  });
 }
 
 function rehash(checkpoint, overrides) {

@@ -1331,6 +1331,7 @@
       "requires_active_claim_for_implementation": true,
       "requires_attributed_traces": true,
       "requires_output_contract_coverage": true,
+      "requires_write_scope_integrity": true,
       "blocks_cache_as_primary_source": true,
       "blocks_unapproved_duplicate_outputs": true
     },

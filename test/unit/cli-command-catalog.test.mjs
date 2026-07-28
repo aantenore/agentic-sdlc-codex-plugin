@@ -98,7 +98,7 @@ test("delivery self-service help mirrors the runtime flags and marks the main re
   for (const flag of ["--id", "--delivery", "--kind", "--story", "--contract", "--requirement", "--level"]) {
     assert.equal(propose.get(flag)?.required, true, `${flag} should be marked required`);
   }
-  for (const flag of ["--repository", "--base", "--head", "--write-path", "--allow-action", "--merge-allowed", "--target-root", "--smoke-test", "--rollback"]) {
+  for (const flag of ["--repository", "--base", "--head", "--write-path", "--allow-action", "--merge-allowed", "--target-root", "--smoke-cwd", "--smoke-test", "--rollback"]) {
     assert.equal(propose.has(flag), true, `missing runtime proposal flag: ${flag}`);
   }
   assert.equal(propose.has("--contract-id"), false);
@@ -114,7 +114,7 @@ test("delivery self-service help mirrors the runtime flags and marks the main re
   const action = describe("autonomy delivery action");
   assert.equal(action.get("--id")?.required, true);
   assert.equal(action.get("--action")?.required, true);
-  for (const flag of ["--scope-path", "--remote", "--pr-url", "--confirm-action", "--actor-type", "--approval-source", "--outcome", "--evidence", "--smoke-test", "--rollback"]) {
+  for (const flag of ["--scope-path", "--remote", "--pr-url", "--confirm-action", "--actor-type", "--approval-source", "--outcome", "--evidence", "--smoke-cwd", "--smoke-test", "--rollback"]) {
     assert.equal(action.has(flag), true, `missing runtime action flag: ${flag}`);
   }
 

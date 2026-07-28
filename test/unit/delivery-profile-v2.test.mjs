@@ -69,6 +69,14 @@ function pullRequestBindings(overrides = {}) {
   ];
 }
 
+function existingPullRequestBindings(overrides = {}) {
+  return [
+    { action: "git.push", provider_id: overrides.git || "git-remote" },
+    { action: "pull_request.merge", provider_id: overrides.pr || "github-cli" },
+    { action: "pull_request.update", provider_id: overrides.pr || "github-cli" },
+  ];
+}
+
 test("v1 profile hash remains a fixed compatibility golden", () => {
   const profile = buildDeliveryExecutionProfile(sharedInput());
   assert.equal(profile.schema_version, "delivery-execution-profile:v1");
@@ -103,6 +111,51 @@ test("v2 PR profiles round-trip with exact, independently hash-bound provider bi
   assert.equal(validateAgainstSchema(reordered, "delivery-execution-profile-v2").valid, false);
 });
 
+test("v2 existing PR profiles pin number, URL, and reviewed head without a create action", () => {
+  const reviewedHeadSha = "1".repeat(40);
+  const input = {
+    ...sharedInput({
+      delivery_id: "PR-184",
+      pull_request_target: {
+        repository: "aantenore/agentic-sdlc-codex-plugin",
+        base_branch: "main",
+        head_branch: "codex/provider-v2",
+        mode: "existing",
+        pr_number: 184,
+        pr_url: "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/184",
+        reviewed_head_sha: reviewedHeadSha,
+        allowed_actions: ["git.push", "pull_request.update"],
+        merge_allowed: false,
+      },
+    }),
+    provider_bindings: existingPullRequestBindings(),
+  };
+  const profile = buildDeliveryExecutionProfileV2(input);
+  assert.equal(profile.pull_request_target.mode, "existing");
+  assert.equal(profile.pull_request_target.pr_number, 184);
+  assert.equal(profile.pull_request_target.reviewed_head_sha, reviewedHeadSha);
+  assert.equal(profile.pull_request_target.allowed_actions.includes("pull_request.create"), false);
+  assert.equal(profile.provider_bindings.some((binding) => binding.action === "pull_request.create"), false);
+  assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
+  assert.equal(validateDeliveryExecutionProfileIntegrity(profile).valid, true);
+  assertAgainstSchema(profile, "delivery-execution-profile-v2");
+
+  assert.throws(() => buildDeliveryExecutionProfileV2({
+    ...input,
+    pull_request_target: {
+      ...input.pull_request_target,
+      pr_url: "https://github.com/aantenore/agentic-sdlc-codex-plugin/pull/185",
+    },
+  }), /must identify the exact approved PR number/u);
+  assert.throws(() => buildDeliveryExecutionProfileV2({
+    ...input,
+    pull_request_target: {
+      ...input.pull_request_target,
+      allowed_actions: [...input.pull_request_target.allowed_actions, "pull_request.create"],
+    },
+  }), /cannot include pull_request\.create/u);
+});
+
 test("v2 local releases bind only release.local to a filesystem observer", () => {
   const profile = buildDeliveryExecutionProfileV2({
     ...sharedInput({
@@ -127,7 +180,48 @@ test("v2 local releases bind only release.local to a filesystem observer", () =>
   assert.deepEqual(profile.provider_bindings, [
     { action: "release.local", provider_id: "local-filesystem" },
   ]);
+  assert.equal(profile.local_release_target.smoke_cwd, undefined);
+  assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
   assertAgainstSchema(profile, "delivery-execution-profile-v2");
+});
+
+test("local release smoke working directories stay inside an allowed write path", () => {
+  const base = {
+    ...sharedInput({
+      id: "AUT-LOCAL-SMOKE-CWD",
+      delivery_id: "LOCAL-SMOKE-CWD",
+      delivery_kind: "local_release",
+      pull_request_target: null,
+      local_release_target: {
+        environment: "local",
+        root_path: "/workspace/travelops/release",
+        allowed_write_paths: ["/workspace/travelops/release/app"],
+        allowed_actions: ["build.local", "release.local", "test.run"],
+        smoke_tests: ['["npm","run","smoke:local"]'],
+        smoke_cwd: "/workspace/travelops/release/app/package",
+        rollback: { required: true, procedure: "Restore the previous package" },
+        external_access_allowed: false,
+        production_access_allowed: false,
+        destructive_actions_allowed: false,
+      },
+    }),
+    provider_bindings: [{ action: "release.local", provider_id: "local-filesystem" }],
+  };
+  const profile = buildDeliveryExecutionProfileV2(base);
+  assert.equal(
+    profile.local_release_target.smoke_cwd,
+    "/workspace/travelops/release/app/package",
+  );
+  assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
+  assertAgainstSchema(profile, "delivery-execution-profile-v2");
+
+  assert.throws(() => buildDeliveryExecutionProfileV2({
+    ...base,
+    local_release_target: {
+      ...base.local_release_target,
+      smoke_cwd: "/workspace/travelops/release/other",
+    },
+  }), /smoke_cwd must be equal to or inside one allowed_write_path/u);
 });
 
 test("v2 has no implicit provider fallback and unsupported bindings fail closed", () => {

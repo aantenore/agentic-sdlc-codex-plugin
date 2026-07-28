@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.13.0 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.13.1 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -99,13 +99,57 @@ A successful list result contains an installed, enabled entry with:
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "installed": true,
   "enabled": true
 }
 ```
 
 Start a new Codex task after installing. Existing tasks do not need to be treated as proof that the new skills and card were reloaded.
+
+### Verify The Exact Build, Not Only The Version
+
+The semantic version identifies a release line; it does not prove that two
+plugin trees contain the same bytes. After staging or updating, inspect the
+source checkout and the installed command:
+
+```bash
+# Run in the source checkout.
+node bin/agentic-sdlc.mjs --version --json
+
+# Run the installed plugin command.
+agentic-sdlc --version --json
+```
+
+Each result contains at least:
+
+```json
+{
+  "package_version": "0.13.1",
+  "build_fingerprint": "<sha256-of-distributed-paths-and-bytes>"
+}
+```
+
+Interpret the fields as follows:
+
+| Field | Meaning | How to use it |
+| --- | --- | --- |
+| `package_version` | The declared semantic release | Confirm compatibility, but do not use it alone to claim two builds are identical |
+| `build_fingerprint` | A deterministic SHA-256 over every distributed relative path and its exact bytes | Require the source and installed values to match when verifying that this exact checkout was installed |
+| `git_commit` | The checkout `HEAD` that supplied the command | When present, record it as source provenance; an unpacked or staged install may omit it |
+| `git_dirty` | Whether that exact Git checkout has tracked or untracked changes | `false` binds the fingerprint to the displayed commit's clean tree; `true` means the commit alone does not describe the build |
+
+The fingerprint excludes Git metadata, dependencies, runtime `.sdlc/` state,
+coverage, and other non-distributed directories. It therefore remains stable
+when the same package bytes are copied to another path, but changes when any
+distributed source, schema, template, skill, UI asset, or document changes.
+
+It is normal for the installed result to omit `git_commit` and `git_dirty`
+because generated plugin staging is not a Git checkout. In that case the
+matching fingerprint is the exact build check. If the versions match but the
+fingerprints do not, do not treat the installed cache as verified: rerun the
+reviewed V2 staging transaction, add the plugin again, open a new task, and
+repeat both commands.
 
 ### What The Installer Changes
 
@@ -200,7 +244,7 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.13.0` | Rerun staging, add again, then open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.13.1` | Rerun staging, add again, then open a new task |
 | `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all four skills, Caveman/native-meter assets, Observatory launcher/UI, preset, optional RTK provider, and project KB checks as passed or not applicable | Repair a required failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
 | Package dry run | Contains manifest, all four skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |

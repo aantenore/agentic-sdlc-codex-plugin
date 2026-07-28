@@ -8,16 +8,48 @@ Once work starts, later edits to the general process do not change that run. A p
 
 ## Built-in processes
 
-Four presets are shipped with the plugin:
+Four preset identifiers are shipped with the plugin. `software-project` has
+two included definition versions so existing work can remain reproducible
+while new work uses stronger lifecycle governance:
 
-| Preset | Intended use | Stable journey |
-| --- | --- | --- |
-| Software project | Feature delivery from discovery through release | `discovery`, `analysis`, `design`, `implementation`, `validation`, `release` |
-| Change request | A bounded change with review and verification | Intake, impact review, approval, implementation, validation, closure |
-| Technical assessment | The existing guided assessment | Project context, complete proposal, execution, verification, completion; exactly two normal user checkpoints |
-| Generic governed process | A reusable approval-and-execution skeleton | Draft, review, approval, execution, verification, completion |
+| Preset | Version | Intended use | Stable journey |
+| --- | --- | --- | --- |
+| Software project | v2, current | New feature delivery governed by canonical story evidence | `discovery`, `analysis`, `design`, `implementation`, `validation`, `release` |
+| Software project | v1, legacy | Replay or resume an instance already pinned to the original sequential definition | The same six phases, without v2 canonical transition guards |
+| Change request | v1 | A bounded change with review and verification | Intake, impact review, approval, implementation, validation, closure |
+| Technical assessment | v1 | The existing guided assessment | Project context, complete proposal, execution, verification, completion; exactly two normal user checkpoints |
+| Generic governed process | v1 | A reusable approval-and-execution skeleton | Draft, review, approval, execution, verification, completion |
 
-Existing projects keep the six software phases already stored in their project configuration. The technical-assessment preset complements the existing `assessment-proposal:v1` and `assessment-workflow:v1` records; it does not replace their files, commands, JSON fields, or two-checkpoint behavior.
+`software-project` v1 is intentionally preserved with its original definition
+hash and behavior. An instance pinned to v1 is never silently upgraded. Use it
+only when compatibility with an existing stored instance requires that exact
+definition; choose v2 for new software delivery.
+
+Version 2 keeps the same phase identifiers and order but binds the instance to
+one story and derives its guard decisions from canonical project records:
+
+| Transition | Canonical evidence required |
+| --- | --- |
+| `discovery` → `analysis` | The story's referenced requirement is currently approved with matching content |
+| `analysis` → `design` | No additional transition guard |
+| `design` → `implementation` | The story's implementation contract is currently approved and matches the story |
+| `implementation` → `validation` | Every output required by that contract is linked with valid current verification |
+| `validation` → `release` | The story has passing strict gate evidence and its exact delivery is terminal successfully |
+
+The runtime loads requirement, contract, output, final-gate, delivery-profile,
+and delivery-close records through the governed project reader, then seals one
+`workflow-canonical-evidence:v1` snapshot. A caller cannot bypass a v2 guard by
+claiming success in `--guard-input-json`; missing, stale, mismatched, modified,
+or unsuccessful canonical evidence fails closed. The final discovery-to-release
+certificate remains the story gate:
+
+```bash
+agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
+```
+
+The technical-assessment preset complements the existing
+`assessment-proposal:v1` and `assessment-workflow:v1` records; it does not
+replace their files, commands, JSON fields, or two-checkpoint behavior.
 
 ## Definitions, overlays, and running instances
 
@@ -75,6 +107,7 @@ Use focused help for the exact options supported by the installed version:
 ```bash
 agentic-sdlc workflow definition list
 agentic-sdlc workflow definition show --id software-project --definition-version 1
+agentic-sdlc workflow definition show --id software-project --definition-version 2
 agentic-sdlc workflow definition propose --id my-process --definition-version 1 --definition-file workflow.json
 agentic-sdlc workflow definition approve --id my-process --definition-version 1 --actor-type human --approval-source explicit-user --summary "I confirm these steps and checks"
 
@@ -87,6 +120,20 @@ agentic-sdlc workflow instance transition --id change-184 --to impact-review --r
 agentic-sdlc workflow instance status --id change-184
 agentic-sdlc workflow instance explain --id change-184
 ```
+
+For a new governed software project, pin v2 and its story explicitly:
+
+```bash
+agentic-sdlc workflow instance start \
+  --id DELIVERY-TRIP-POLICY-001 \
+  --definition software-project \
+  --definition-version 2 \
+  --story ST-TRIP-POLICY-001
+```
+
+Omitting `--definition-version` is not accepted when an instance starts.
+Explicit version pinning keeps the chosen process reviewable even after a newer
+preset is released.
 
 Human output begins with the outcome, practical impact, any decision needed, what remains protected, and one next action. `--json` returns stable machine output. Internal hashes and record paths remain supporting detail rather than prerequisites for understanding the result.
 

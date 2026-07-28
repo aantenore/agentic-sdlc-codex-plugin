@@ -165,6 +165,7 @@ node bin/agentic-sdlc.mjs autonomy delivery propose \
   --allow-action build.local \
   --allow-action test.run \
   --allow-action release.local \
+  --smoke-cwd /absolute/project/.local-release/app \
   --smoke-test '["npm","run","smoke:local"]' \
   --rollback "Restore the previous local package and restart the local process" \
   --json
@@ -267,12 +268,13 @@ node bin/agentic-sdlc.mjs autonomy delivery action \
   --root <project> --id AUT-LOCAL-REL-009 \
   --action release.local --outcome passed \
   --evidence .local-release/release-evidence.json \
+  --smoke-cwd /absolute/project/.local-release/app \
   --smoke-test '["npm","run","smoke:local"]' \
   --rollback "Restore the previous local package and restart the local process" \
   --json
 ```
 
-Local completion runs the approved smoke argv without a shell in a supported read-only, no-network sandbox and records structured output hashes. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed before a `released` receipt is written. Passing `release.local` and `pull_request.merge` completions automatically close the lifecycle as `released` or `merged`; do not also call manual close for those statuses. Use `autonomy delivery close` for formally approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other allowed non-success terminal outcomes.
+Local completion runs the approved smoke argv without a shell from the exact governed `--smoke-cwd` in a supported read-only, no-network sandbox and records structured output hashes. That directory must be equal to or inside one allowed write path; it defaults to the only write path and is required when several are allowed. Package-manager commands require a real, non-symlinked `package.json` there and cannot fall back to a parent source project. Historical profiles without the field derive it only from one unambiguous write path and otherwise fail closed. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed before a `released` receipt is written. Passing `release.local` and `pull_request.merge` completions automatically close the lifecycle as `released` or `merged`; do not also call manual close for those statuses. Use `autonomy delivery close` for formally approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other allowed non-success terminal outcomes.
 
 The CLI revalidates local Git identity, branches, SHA transitions, paths, action receipts, and evidence hashes. Push authorization observes the base SHA directly on the selected remote, requires one passing completed `git.commit` receipt for every commit from that SHA to the exact head, and rejects remotes with any fetch/push URL outside the approved repository. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for the expected later post-state. This observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence and do not claim signed proof when no attestation adapter is configured.
 

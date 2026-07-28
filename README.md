@@ -18,7 +18,7 @@
 
 ## Technical summary
 
-Agentic SDLC 0.13.0 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.13.1 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -98,6 +98,48 @@ For implementation work, the order is deliberately linear:
 7. create or update the named PR, or verify the local-only release.
 
 Before showing the autonomy choices, Codex explains whether the most independent option can really be used. If this installation cannot digitally verify who approved the delivery, option 3 is reduced to **autonomy with checkpoints**; this is disclosed before you choose.
+
+### One complete first project
+
+Use one journey from start to finish instead of treating the lifecycle commands
+as unrelated features. For example, ask Codex:
+
+```text
+Inspect this repository, then implement a configurable trip-policy module as a
+local-only release. It must reject trips above a configurable cost limit, include
+tests, and avoid network, production, and machine-global changes.
+```
+
+Codex should lead the same `ST-TRIP-POLICY-001` story through these visible
+stages:
+
+1. **Discovery** — inspect the repository read-only and explain facts,
+   inferences, constraints, and missing information.
+2. **Requirement** — agree the observable policy behavior, tests, exclusions,
+   and maximum delivery independence.
+3. **Contract** — agree the configurable source and test paths, local
+   destination, smoke test, rollback, tools, and write boundary.
+4. **Story and workflow** — create the story and bind a
+   `software-project` v2 workflow to it, preserving the ordered
+   discovery-to-release journey.
+5. **Implementation and test** — change only approved paths, run the agreed
+   tests, and record the latest successful evidence.
+6. **Release** — complete the named local release, smoke-test that exact result,
+   and retain the declared rollback procedure. Push, PR creation, deployment,
+   and production remain excluded.
+7. **Final lifecycle certification** — only after release is terminal, run:
+
+   ```bash
+   agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
+   ```
+
+The final command is intentionally stronger than an intermediate strict check.
+It passes only when every configured story phase, current requirement and
+contract, required output, latest test evidence, exact terminal delivery, and
+release evidence agree. Codex then reports the delivered location, checks,
+exclusions, residual risks, and final receipt. The reader does not need to run
+the preceding low-level commands manually; [Getting Started](docs/getting-started.md#walk-through-one-complete-first-project)
+shows what to expect at each decision.
 
 ### Know where work happens
 
@@ -293,7 +335,7 @@ deploy remotely, use secrets, or write outside the approved paths. This choice e
 when PR-184 is merged, closed, or cancelled and does not apply to another PR.
 ```
 
-A local release is a first-class delivery unit. Its profile must name the local root, allowed actions and write paths, smoke tests, and a required rollback procedure. Local does not mean unrestricted: machine-global changes, writes outside the workspace, destructive actions, external access, remote deployment, and production access remain explicit exception boundaries.
+A local release is a first-class delivery unit. Its profile must name the local root, allowed actions and write paths, smoke tests, their governed working directory, and a required rollback procedure. The smoke directory must be inside an allowed write path; it defaults to the only allowed write path and must be explicit when several are present. Local does not mean unrestricted: machine-global changes, writes outside the workspace, destructive actions, external access, remote deployment, and production access remain explicit exception boundaries.
 
 Delivery binding is one-way and hash-safe: reserve the planned profile ID in the requirement-bound story contract, approve that contract, then create the matching delivery profile against the immutable requirement, story, and contract hashes. The ID is not a profile hash or approval. Task start receives the profile and rejects drift; the approved contract is not rewritten to point back to it.
 
@@ -316,7 +358,7 @@ After task start, every state-changing delivery operation follows **authorize �
 
 New delivery choices use `delivery-execution-profile:v2`. The profile records which registered observer verifies Git pushes, pull-request state, or the local filesystem boundary. That choice is part of the profile hash and cannot silently change between authorization and completion. The observer only checks the before/after state; it never pushes, merges, or releases. Historical v1 profiles keep their original bytes and hashes and use only the documented in-memory compatibility mapping.
 
-Local smoke tests are stored as shell-free JSON argv arrays, for example `--smoke-test '["npm","run","smoke:local"]'`, and are executed at release completion in a supported read-only, no-network sandbox. Successful local completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; other hosts and Linux systems without `bwrap` fail closed before a `released` receipt is written. A push can be authorized only when every commit from the live remote base SHA to the exact head has one passing `git.commit` completion receipt, and every configured fetch/push URL of the selected remote resolves to the approved repository. For remote push and merge, authorization records a live pre-state and completion queries the exact Git remote or GitHub PR for the post-state. Those authenticated live observations are hash-bound, but they are not provider-signed offline attestations; preserve durable host/CI/provider evidence and do not overstate that boundary.
+Local smoke tests are stored as shell-free JSON argv arrays, for example `--smoke-test '["npm","run","smoke:local"]'`, and are executed from the exact governed `--smoke-cwd` at release completion in a supported read-only, no-network sandbox. Package-manager smoke commands require a real `package.json` in that exact directory, preventing npm, pnpm, Yarn, or Bun from climbing to and certifying the source project instead of the released artifact. Successful local completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; other hosts and Linux systems without `bwrap` fail closed before a `released` receipt is written. A push can be authorized only when every commit from the live remote base SHA to the exact head has one passing `git.commit` completion receipt, and every configured fetch/push URL of the selected remote resolves to the approved repository. For remote push and merge, authorization records a live pre-state and completion queries the exact Git remote or GitHub PR for the post-state. Those authenticated live observations are hash-bound, but they are not provider-signed offline attestations; preserve durable host/CI/provider evidence and do not overstate that boundary.
 
 A custom limit is meaningful only if a configured source can measure it. A hard limit fails closed when its required exact, trusted coverage is unavailable.
 
@@ -566,7 +608,7 @@ If the plugin is absent or shows an older version, rerun the installer and `code
 - Every assessment uses an explicit story before its contract or output is persisted.
 - Every `requirement:v2` has an approved execution profile that is a ceiling, not an executable grant.
 - Every pull request and local release has its own explicit delivery execution profile; a prior PR choice is never reused.
-- A local release records its target root, smoke tests, rollback, write paths, and allowed actions.
+- A local release records its target root, smoke tests, governed smoke working directory, rollback, write paths, and allowed actions.
 - Protected-branch merge, remote deployment, and production access remain explicit exception decisions.
 - A free-text scope or `actor-type human` flag is not authority. Checkpoint 2 binds a host/CI receipt and content authorization to the proposal hash; every covered use stores a validity-at-use receipt.
 - The approved budget aggregates main-agent and subagent usage, preserves a completion reserve, and changes only through a versioned amendment.

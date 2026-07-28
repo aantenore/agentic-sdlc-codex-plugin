@@ -141,6 +141,7 @@ test("describes an Italian local-release proposal with its real boundary before 
     delivery_kind: "local_release",
     project_name: "Operazioni di viaggio",
     target_root: "/opt/travel-operations/local-release",
+    smoke_cwd: "/opt/travel-operations/local-release/app",
     allowed_write_paths: [
       "/opt/travel-operations/local-release/app",
       "/opt/travel-operations/local-release/config",
@@ -156,6 +157,7 @@ test("describes an Italian local-release proposal with its real boundary before 
   assert.match(guidance.impact, /progetto “Operazioni di viaggio”/u);
   assert.match(guidance.impact, /cartella locale “\/opt\/travel-operations\/local-release”/u);
   assert.match(guidance.impact, /“\/opt\/travel-operations\/local-release\/app” e “\/opt\/travel-operations\/local-release\/config”/u);
+  assert.match(guidance.impact, /smoke test parte da “\/opt\/travel-operations\/local-release\/app”/u);
   assert.match(guidance.required_decision, /prima di completare il rilascio locale/u);
   assert.match(guidance.required_decision, /scade il 31 dicembre 2099/u);
   assert.match(guidance.required_decision, /Per questo rilascio locale, quanto vuoi che lavori in autonomia\?/u);
@@ -165,6 +167,7 @@ test("describes an Italian local-release proposal with its real boundary before 
   assert.match(guidance.required_decision, /Questa scelta vale solo per questo rilascio locale e non sarà riutilizzata/u);
   assert.doesNotMatch(guidance.required_decision, /Per questa PR|PR o rilascio locale/u);
   assert.equal(guidance.details.target_root, "/opt/travel-operations/local-release");
+  assert.equal(guidance.details.smoke_cwd, "/opt/travel-operations/local-release/app");
   assert.deepEqual(guidance.details.review_moments, ["release.local"]);
   assert.equal(guidance.details.expires_at, "2099-12-31T23:59:00.000Z");
 });
@@ -258,6 +261,28 @@ test("distinguishes audit-only and host-verified action checkpoints without exec
   assert.equal(audit.details.host_receipt_required, false);
   assert.equal(audit.details.execution_performed, false);
 
+  const localRelease = actionCheckpointGuidance({
+    status: "checkpoint_required",
+    action: "release.local",
+    authority_mode: "audit_only",
+    target_root: "/opt/travel-operations/local-release",
+    smoke_cwd: "/opt/travel-operations/local-release/app",
+    smoke_tests: ['["node","test/smoke.mjs"]'],
+    rollback: "Restore the previous release snapshot.",
+  }, { locale: "en" });
+  assertCanonicalCodesOnlyInDetails(localRelease);
+  assert.match(
+    localRelease.required_decision,
+    /Exact local-release boundary: target “\/opt\/travel-operations\/local-release”/u,
+  );
+  assert.match(localRelease.required_decision, /node.*test\/smoke\.mjs/u);
+  assert.match(localRelease.required_decision, /smoke working directory “\/opt\/travel-operations\/local-release\/app”/u);
+  assert.match(localRelease.required_decision, /Restore the previous release snapshot/u);
+  assert.equal(localRelease.details.target_root, "/opt/travel-operations/local-release");
+  assert.equal(localRelease.details.smoke_cwd, "/opt/travel-operations/local-release/app");
+  assert.deepEqual(localRelease.details.smoke_tests, ['["node","test/smoke.mjs"]']);
+  assert.equal(localRelease.details.rollback, "Restore the previous release snapshot.");
+
   const verified = actionCheckpointGuidance({
     status: "checkpoint_required",
     action: "pull_request.merge",
@@ -334,6 +359,29 @@ test("explains passed and failed gates without leaking canonical blocker codes",
   assert.match(passed.required_decision, /Decide whether to start the next step/u);
   assert.match(passed.protection_boundary, /did not approve or perform/u);
   assert.deepEqual(passed.details.warnings, ["gate.optional_evidence_missing"]);
+
+  const intermediate = gateGuidance({
+    status: "passed",
+    strict: true,
+    scope: "story",
+    lifecycle_complete: false,
+    certification_level: "strict_intermediate",
+  });
+  assert.match(intermediate.result, /not a final lifecycle certification/u);
+  assert.match(intermediate.next_action, /run the final lifecycle check explicitly/u);
+  assert.equal(intermediate.details.lifecycle_complete, false);
+
+  const final = gateGuidance({
+    status: "passed",
+    strict: true,
+    scope: "story",
+    lifecycle_complete: true,
+    certification_level: "lifecycle_complete",
+  }, { locale: "it" });
+  assert.match(final.result, /controllo completo del ciclo di vita è superato/u);
+  assert.match(final.impact, /Tutte le fasi configurate/u);
+  assert.equal(final.details.lifecycle_complete, true);
+  assert.equal(final.details.certification_level, "lifecycle_complete");
 
   const failed = gateGuidance({
     status: "failed",

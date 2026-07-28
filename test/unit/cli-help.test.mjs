@@ -59,6 +59,15 @@ test("delivery help exposes required runtime inputs rather than internal aliases
   assert.doesNotMatch(proposeTechnical, /--contract-id/u);
   assert.match(proposeTechnical, /--repository[^\n]*required with --kind pull_request/u);
   assert.match(proposeTechnical, /--target-root[^\n]*required with --kind local_release/u);
+  assert.match(proposeTechnical, /--smoke-cwd[^\n]*required when more than one --write-path is present/u);
+  assert.match(proposeTechnical, /--pr-mode <new\|existing>/u);
+  assert.match(proposeTechnical, /--pr-mode[^\n]*defaults to new/u);
+  assert.match(proposeTechnical, /--pr-number[^\n]*required with --kind pull_request and --pr-mode existing/u);
+  assert.match(proposeTechnical, /--pr-url[^\n]*required with --kind pull_request and --pr-mode existing/u);
+  assert.match(proposeTechnical, /--pr-head-sha[^\n]*local head cannot supply it/u);
+  assert.ok(proposeTechnical.includes(
+    "--pr-mode existing --pr-number 184 --pr-url https://github.com/owner/repository/pull/184",
+  ));
   assert.match(proposeTechnical, /supervised means Guided/u);
   assert.match(proposeTechnical, /checkpointed means Autonomy with checks/u);
 
@@ -132,6 +141,145 @@ test("core work commands keep human guidance plain and runtime flags in optional
     for (const flag of expectation.flags) {
       assert.match(technical, new RegExp(flag, "u"), `${expectation.path.join(" ")} should expose ${flag}`);
     }
+  }
+});
+
+test("first-project lifecycle help exposes the exact assessment, evidence, and gate inputs", () => {
+  const describe = (command) => buildHelpModel(command.split(" "));
+  const flags = (command) => new Map(describe(command).options.map((entry) => [entry.flag, entry]));
+
+  const prepare = flags("assessment proposal prepare");
+  for (const flag of [
+    "--id",
+    "--baseline",
+    "--story",
+    "--requirement",
+    "--scope-title",
+    "--scope-summary",
+    "--type",
+    "--template",
+    "--section",
+    "--acceptance",
+    "--artifact",
+    "--capability",
+    "--budget-json",
+    "--budget-file",
+    "--force",
+  ]) {
+    assert.equal(prepare.has(flag), true, `assessment proposal prepare should expose ${flag}`);
+  }
+
+  const approve = flags("assessment proposal approve");
+  assert.equal(approve.get("--id")?.required, true);
+  assert.equal(approve.get("--actor-type")?.required, true);
+  assert.equal(approve.get("--actor-type")?.value, "human|ci");
+  assert.match(approve.get("--approval-source")?.required_when, /not supplied by CI/u);
+  assert.equal(approve.get("--approval-source")?.value, "explicit-user|ci");
+  assert.equal(approve.get("--summary")?.required_one_of, "--summary or --approval-evidence");
+  assert.equal(approve.has("--host-receipt-file"), true);
+
+  const complete = flags("story complete-step");
+  assert.equal(complete.get("--id")?.required, true);
+  assert.equal(complete.get("--step")?.required, true);
+  assert.equal(
+    complete.get("--summary")?.required_one_of,
+    "one of --summary, --type, --artifact, or --evidence",
+  );
+  for (const flag of ["--type", "--artifact", "--evidence", "--next-step", "--release-claim", "--allow-unapproved-contract-output"]) {
+    assert.equal(complete.has(flag), true, `story complete-step should expose ${flag}`);
+  }
+
+  const taskStart = flags("task start");
+  for (const flag of ["--actor", "--actor-type", "--actor-name", "--actor-email"]) {
+    assert.equal(taskStart.has(flag), true, `task start should expose ${flag}`);
+  }
+
+  const link = flags("output link");
+  for (const flag of ["--story", "--type", "--artifact", "--template", "--mode"]) {
+    assert.equal(link.get(flag)?.required, true, `output link ${flag} should be marked required`);
+  }
+  for (const flag of ["--base-artifact", "--requirement", "--evidence", "--receipt-file", "--authorization", "--decision-id", "--rationale"]) {
+    assert.equal(link.has(flag), true, `output link should expose ${flag}`);
+  }
+  const linkHelp = describe("output link");
+  assert.match(linkHelp.human.result, /render or visual verification evidence/u);
+  assert.doesNotMatch(linkHelp.examples[0], /--evidence/u);
+
+  const gate = flags("gate check");
+  for (const flag of ["--story", "--scope", "--release-manifest", "--strict", "--lifecycle-complete", "--out", "--force"]) {
+    assert.equal(gate.has(flag), true, `gate check should expose ${flag}`);
+  }
+  assert.match(gate.get("--release-manifest")?.required_when, /scope release-manifest/u);
+  assert.equal(gate.get("--lifecycle-complete")?.value, null);
+  assert.match(gate.get("--lifecycle-complete")?.description, /terminal delivery/u);
+
+  for (const command of [
+    "assessment proposal prepare",
+    "assessment proposal approve",
+    "story complete-step",
+    "output link",
+    "gate check",
+  ]) {
+    const model = describe(command);
+    assert.match(model.usage, new RegExp(`^agentic-sdlc ${command}`, "u"), command);
+    assert.equal(model.examples.length > 0, true, `${command} should include a useful example`);
+    assert.doesNotMatch(model.examples[0], /<[^>]+>/u, `${command} example should not contain placeholders`);
+  }
+});
+
+test("optimization and budget focused help expose executable and metering boundaries", () => {
+  const describe = (command) => buildHelpModel(command.split(" "));
+  const flags = (command) => new Map(describe(command).options.map((entry) => [entry.flag, entry]));
+
+  const run = flags("optimization run");
+  assert.equal(run.get("--command-json")?.required, true);
+  assert.match(run.get("--proposal")?.required_when, /governed assessment/u);
+  for (const flag of ["--profile", "--exact", "--trust-custom-rtk-command"]) {
+    assert.equal(run.has(flag), true, `optimization run should expose ${flag}`);
+  }
+  assert.match(run.get("--json")?.description, /Not supported.*child output is streamed/u);
+
+  const usage = flags("budget usage record");
+  assert.equal(usage.get("--proposal")?.required, true);
+  for (const flag of [
+    "--receipt-json",
+    "--receipt-file",
+    "--active-time-seconds",
+    "--steps",
+    "--model-calls",
+    "--tool-calls",
+    "--input-tokens",
+    "--output-tokens",
+    "--cost-amount",
+    "--currency",
+    "--metering-accuracy",
+    "--metering-source",
+    "--pricing-ref",
+    "--subagent",
+  ]) {
+    assert.equal(usage.has(flag), true, `budget usage record should expose ${flag}`);
+  }
+
+  for (const command of ["budget meter start", "budget meter record", "budget amend", "budget status"]) {
+    assert.equal(flags(command).get("--proposal")?.required, true, `${command} should require --proposal`);
+  }
+  assert.equal(flags("budget meter record").has("--baseline"), true);
+  assert.equal(flags("budget meter record").has("--thread-id"), true);
+  assert.equal(flags("budget amend").get("--budget-json")?.required_one_of, "--budget-json or --budget-file");
+  assert.equal(flags("budget amend").get("--reason")?.required_one_of, "--reason or --summary");
+
+  for (const command of [
+    "optimization run",
+    "budget usage record",
+    "budget meter start",
+    "budget meter record",
+    "budget amend",
+    "budget status",
+  ]) {
+    const model = describe(command);
+    assert.match(model.usage, new RegExp(`^agentic-sdlc ${command}`, "u"), command);
+    assert.equal(model.examples.length > 0, true, `${command} should include a useful example`);
+    assert.doesNotMatch(model.examples[0], /<[^>]+>/u, `${command} example should not contain placeholders`);
   }
 });
 

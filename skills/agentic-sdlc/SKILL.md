@@ -257,6 +257,7 @@ The dedicated assessment journey remains the exception described above: it packa
      --allow-action build.local \
      --allow-action test.run \
      --allow-action release.local \
+     --smoke-cwd /absolute/project/.local-release/app \
      --smoke-test '["npm","run","smoke:local"]' \
      --rollback "Restore the previous local package and restart the local process" \
      --json
@@ -321,7 +322,7 @@ The dedicated assessment journey remains the exception described above: it packa
 
    An `authorized` receipt grants only the displayed operation; it does not run it. Push authorization observes the base SHA directly on the selected remote, requires exactly one passing `git.commit` completion for every commit from that SHA to the exact head, and rejects the remote if any configured fetch/push URL identifies another repository. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for the expected post-state after authorization. That observation and the declared evidence are hash-bound, but the observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence and do not call a generic file signed proof. A passing `pull_request.merge` completion or `release.local` completion creates the terminal close receipt automatically; do not manually close either as `merged` or `released`. Other terminal outcomes use `autonomy delivery close` with a formal reason and approval.
 
-   For local release completion, repeat the exact approved shell-free smoke-test argv and rollback. The CLI runs the smoke command in its supported read-only, no-network sandbox and stores structured output hashes before automatically closing the profile as `released`. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and remain unreleased:
+   For local release completion, repeat the exact approved shell-free smoke-test argv and rollback. The smoke working directory is governed by `--smoke-cwd`, must be equal to or inside one allowed write path, defaults to the only allowed write path, and is mandatory when several write paths are allowed. Package-manager smoke commands require a real, non-symlinked `package.json` in that exact directory, so they cannot climb to the source project. Historical profiles without this field derive it only when their write path is unambiguous; otherwise completion fails closed. The CLI runs the smoke command from that exact released-artifact directory in its supported read-only, no-network sandbox and stores structured output hashes before automatically closing the profile as `released`. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and remain unreleased:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
@@ -337,6 +338,7 @@ The dedicated assessment journey remains the exception described above: it packa
      --root <target-project> --id AUT-LOCAL-REL-009 \
      --action release.local --outcome passed \
      --evidence .local-release/release-evidence.json \
+     --smoke-cwd /absolute/project/.local-release/app \
      --smoke-test '["npm","run","smoke:local"]' \
      --rollback "Restore the previous local package and restart the local process" \
      --json

@@ -1,10 +1,54 @@
-# How Agentic SDLC 0.13.0 Works
+# How Agentic SDLC 0.13.1 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
 The core rule is simple: **Codex may reason broadly, but it may write only what the approved requirement, current delivery unit, and exact authorization all allow.**
 
 For the adjacent details, see [Limits and Metering](limits-and-metering.md), [Agent Interactions](agent-interactions.md), and the deeper [Architecture](architecture.md).
+
+## One End-To-End Governed Delivery
+
+The controls below form one lifecycle, not a menu of independent records.
+Consider the same first-project request used in the README and Getting Started:
+a configurable trip-policy module, verified and released only to a named local
+destination, with no network or production access.
+
+The technical chain for `ST-TRIP-POLICY-001` is:
+
+1. **Discovery** records the inspected project context and separates observed
+   facts from inference. It grants no write or delivery authority.
+2. **Requirement** approves one immutable revision containing the configurable
+   cost-limit behavior, acceptance criteria, exclusions, constraints, and
+   autonomy ceiling.
+3. **Contract** binds the story to that approved requirement, required output,
+   source and test paths, capabilities, checks, delivery profile, and write
+   scope.
+4. **Story and workflow** start one `software-project` v2 instance bound to
+   `ST-TRIP-POLICY-001`. Its transitions consult canonical requirement,
+   contract, output, gate, and delivery records rather than trusting
+   caller-supplied guard claims.
+5. **Implementation and validation** write only the intersection of approved
+   scopes, link the real output, and record the latest test and verification
+   evidence. A newer failure supersedes an older passing trace.
+6. **Release** closes the exact local delivery as `released` only after its
+   build, smoke test, destination, and rollback evidence agree. Repository
+   publication and production remain separate.
+7. **Final certification** evaluates the complete story after the terminal
+   release:
+
+   ```bash
+   agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
+   ```
+
+Only that lifecycle-complete form is the final story certificate. It binds all
+configured phases, current approvals, required output, latest test evidence,
+terminal delivery, and release evidence into the final receipt. A strict check
+run earlier may support an intermediate decision but must not be presented as
+proof that discovery-to-release delivery is complete.
+
+The normal user experiences this chain as an explained sequence of decisions
+and results. Codex prepares the structured inputs and runs the CLI; record IDs,
+hashes, and low-level transition commands remain optional audit detail.
 
 ## 1. The Mental Model
 
@@ -35,7 +79,7 @@ The installed command is `agentic-sdlc`. From a source checkout, the equivalent 
 node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs --help
 ```
 
-All examples below use commands exposed by the `Agentic SDLC 0.13.0` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.13.1` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project
@@ -251,7 +295,7 @@ For `git.push`, pull-request create/update/merge, and `release.local`, v2 profil
 
 Canonical PR actions are `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, and `pull_request.merge`. Canonical local actions are `build.local`, `test.run`, and `release.local`. `git.commit` authorization additionally binds repeatable exact `--scope-path` values; completion accepts only one non-merge commit with the authorized parent and file set. `git.push` binds one matching remote, source SHA, destination ref, and non-force/non-delete semantics. Before push authorization, the CLI observes the base SHA directly on that remote; every commit from that SHA to the exact head must have one passing completed `git.commit` receipt, and every fetch/push URL configured for the selected remote must identify the approved repository. Merge authorization binds the exact `--pr-url`.
 
-For local release, smoke tests are shell-free JSON argv arrays such as `--smoke-test '["npm","run","smoke:local"]'`. Completion must repeat the exact approved command set and rollback procedure. The CLI executes those commands in a supported read-only, no-network sandbox, records command/cwd/sandbox/exit/output hashes, and only then creates a `released` close receipt. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and leave the delivery started. A passing `pull_request.merge` completion similarly creates `merged` automatically. Manual close remains available for approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other valid non-success terminal outcomes; it cannot be used to assert `merged` or `released` without the terminal action receipt.
+For local release, smoke tests are shell-free JSON argv arrays such as `--smoke-test '["npm","run","smoke:local"]'`. `--smoke-cwd` binds their working directory to the released artifact: it must be equal to or inside an allowed write path, defaults to the only allowed write path, and is required when more than one write path exists. Package-manager commands also require a real, non-symlinked `package.json` in that exact directory, so npm, pnpm, Yarn, or Bun cannot climb to the source project and accidentally certify it instead. Historical profiles without this field remain valid and derive it only from one unambiguous write path; otherwise smoke execution fails closed. Completion must repeat the exact approved command set and rollback procedure. The CLI executes those commands from the governed working directory in a supported read-only, no-network sandbox, records command/cwd/sandbox/exit/output hashes, and only then creates a `released` close receipt. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed and leave the delivery started. A passing `pull_request.merge` completion similarly creates `merged` automatically. Manual close remains available for approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other valid non-success terminal outcomes; it cannot be used to assert `merged` or `released` without the terminal action receipt.
 
 The remote boundary is deliberately explicit. For push, authorization records the destination ref before the operation and completion queries that exact ref for the authorized source SHA. For merge, authorization requires the exact open, non-draft GitHub PR at the approved head/base/SHA and completion queries it again for a later merged state and merge commit. These live authenticated observations are hash-bound but are not provider-signed offline attestations. Retain durable host/CI/provider evidence, and do not describe a generic evidence file as signed remote proof.
 

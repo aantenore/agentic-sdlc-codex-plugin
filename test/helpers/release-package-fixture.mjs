@@ -101,7 +101,7 @@ export function buildTarGzip(entries, { trailingData, zeroBlocks = 2 } = {}) {
 }
 
 
-export function validReleaseFixtureEntries({ version = "0.13.0", extra = [] } = {}) {
+export function validReleaseFixtureEntries({ version = "0.13.1", extra = [] } = {}) {
   const packageJson = {
     name: "agentic-sdlc-codex-plugin",
     version,

@@ -745,6 +745,11 @@ test("--version is not shadowed by help and boolean --json does not consume quer
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+$/);
   assert.equal(version.stdout.trim(), readJson(path.join(repoRoot, "package.json")).version);
   assert.equal(version.stdout.trim(), readJson(path.join(repoRoot, ".codex-plugin", "plugin.json")).version);
+  const buildIdentity = JSON.parse(mustRun(["--version", "--json"]).stdout);
+  assert.equal(buildIdentity.package_version, version.stdout.trim());
+  assert.match(buildIdentity.build_fingerprint, /^[a-f0-9]{64}$/u);
+  assert.match(buildIdentity.git_commit, /^[a-f0-9]{40,64}$/u);
+  assert.equal(typeof buildIdentity.git_dirty, "boolean");
 
   const project = tmpProject("parser");
   initProject(project);
@@ -3842,8 +3847,14 @@ test("strict gates reject missing historical baselines still referenced by contr
   mustRun(["baseline", "approve", "--root", project, "--id", "BASELINE-NEWER", ...humanApproval("Approved newer baseline")]);
   const passedGate = mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
   const passedGuidance = splitHumanGuidance(passedGate.stdout);
-  assert.match(passedGuidance.firstLine, /^Outcome: The checks completed without a blocking issue/i);
-  assert.match(passedGuidance.primary, /did not change, release, deploy, or merge anything/u);
+  assert.match(
+    passedGuidance.firstLine,
+    /^Outcome: The current story check passed, but this is not a final lifecycle certification\.$/i,
+  );
+  assert.match(
+    passedGuidance.primary,
+    /did not approve or perform a change, merge, release, deployment, production access, secret access, or work outside the approved files/u,
+  );
   assert.match(passedGuidance.technical, /ST-001/u);
   fs.rmSync(path.join(project, ".sdlc", "baseline", "BASELINE-USED.json"));
   mustFail(
@@ -4010,6 +4021,35 @@ test("cache tampering is not used as source of truth for output resolve", () => 
   mustFail(["output", "resolve", "--root", project, "--story", "ST-001", "--type", "functional-analysis"], /cache output resolution differs/i);
 });
 
+test("output resolve explains a missing governed format as a decision, not a ready result", () => {
+  const project = tmpProject("output-resolve-guidance");
+  initProject(project);
+  story(project, "ST-001");
+
+  const machine = JSON.parse(mustRun([
+    "output", "resolve",
+    "--root", project,
+    "--story", "ST-001",
+    "--type", "implementation-summary",
+    "--json",
+  ]).stdout);
+  assert.equal(machine.recommendation, "template_required");
+  assert.equal(machine.status, "needs_user_input");
+  assert.equal(machine.decision_required, true);
+  assert.match(machine.human_guidance.result, /format .* still missing/u);
+  assert.match(machine.human_guidance.required_decision, /Review and approve/u);
+
+  const human = splitHumanGuidance(mustRun([
+    "output", "resolve",
+    "--root", project,
+    "--story", "ST-001",
+    "--type", "implementation-summary",
+  ]).stdout);
+  assert.match(human.firstLine, /^Outcome: A governed format for this result is still missing/u);
+  assert.match(human.primary, /Review and approve the proposed structure/u);
+  assert.match(human.technical, /template_required/u);
+});
+
 test("unsafe config directories are blocked", () => {
   const project = tmpProject("safe-paths");
   const templateDir = tmpProject("bad-template");
@@ -4075,10 +4115,51 @@ test("test and release traces require real canonical evidence in strict mode", (
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /test trace requires at least one evidence path/);
 
   const evidence = writeArtifact(project, ".sdlc/tests/ST-001-test-run.json", "{}\n");
-  mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "test", "--summary", "Tests passed", "--evidence", evidence.replaceAll("/", "\\")]);
-  assert.deepEqual(readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl")).at(-1).evidence, [evidence]);
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "test",
+    "--outcome",
+    "passed",
+    "--summary",
+    "Tests passed",
+    "--evidence",
+    evidence.replaceAll("/", "\\"),
+  ]);
+  const testTrace = readJsonLines(path.join(project, ".sdlc", "traces", "ST-001.jsonl")).at(-1);
+  assert.equal(testTrace.evidence.length, 1);
+  assert.match(
+    testTrace.evidence[0],
+    /^\.sdlc\/traces\/evidence\/TR-[A-Za-z0-9._-]+\/01-ST-001-test-run\.json$/,
+  );
+  assert.deepEqual(testTrace.evidence_sources, [{
+    source_path: evidence,
+    snapshot_path: testTrace.evidence[0],
+  }]);
+  const evidenceSnapshot = path.join(project, ...testTrace.evidence[0].split("/"));
+  assert.deepEqual(readJson(evidenceSnapshot), {});
+  fs.writeFileSync(path.join(project, ...evidence.split("/")), "{\"mutated\":true}\n");
+  assert.deepEqual(readJson(evidenceSnapshot), {});
   writeJson(storyPath, { ...storyData, phase: "release", status: "release" });
-  mustRun(["trace", "append", "--root", project, "--story", "ST-001", "--type", "release", "--summary", "Release ready"]);
+  mustRun([
+    "trace",
+    "append",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--type",
+    "release",
+    "--outcome",
+    "ready",
+    "--summary",
+    "Release ready",
+  ]);
   mustFail(["gate", "check", "--root", project, "--story", "ST-001", "--strict"], /release.*requires at least one evidence path/);
 });
 
@@ -4443,6 +4524,59 @@ test("capability profiles and recommendations can be approved and applied to con
   assert.equal(contract.capability_bindings.some((binding) => binding.name === "repo"), true);
   assert.equal(contract.execution_policy.reasoning.level, "high");
   assert.equal(contract.capability_recommendation_refs[0].id, "CAP-REC-ST-001");
+});
+
+test("default capability recommendations use the reviewed available inventory", () => {
+  const project = tmpProject("capability-reviewed-inventory");
+  initProject(project);
+  fs.writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+  story(project, "ST-001");
+  mustRun([
+    "capability",
+    "profile",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "CAP-PROFILE-ST-001",
+    "--story",
+    "ST-001",
+    "--phase",
+    "implementation",
+    "--context-file",
+    "package.json",
+  ]);
+
+  const available = {
+    skills: [
+      { name: "agentic-sdlc", purpose: "Govern the complete project lifecycle." },
+      { name: "frontend-testing", purpose: "Exercise the user-facing flow." },
+    ],
+    tools: [
+      { name: "node", purpose: "Run the dependency-free implementation." },
+      { name: "unused-tool", recommended: false },
+    ],
+  };
+  const proposed = JSON.parse(mustRun([
+    "capability",
+    "recommend",
+    "--root",
+    project,
+    "--id",
+    "CAP-REC-ST-001",
+    "--profile",
+    "CAP-PROFILE-ST-001",
+    "--available-capabilities-json",
+    JSON.stringify(available),
+    "--json",
+  ]).stdout).recommendation;
+
+  const byKey = new Map(proposed.recommendations.map((item) => [`${item.type}:${item.name}`, item]));
+  assert.equal(byKey.get("skill:agentic-sdlc").availability, "available");
+  assert.equal(byKey.get("skill:frontend-testing").purpose, "Exercise the user-facing flow.");
+  assert.equal(byKey.get("tool:node").purpose, "Run the dependency-free implementation.");
+  assert.equal(byKey.has("tool:test-runner"), true);
+  assert.equal(byKey.has("tool:unused-tool"), false);
 });
 
 test("story approval requests do not leak capability records from another story", () => {
@@ -5918,6 +6052,57 @@ test("report query does not inherit output types from links owned by another sto
   assert.deepEqual(report.results.map((item) => item.id), ["ST-LINKED"]);
 });
 
+test("output status stays scoped to the active story instead of every registered template", () => {
+  const project = tmpProject("output-status-story-scope");
+  initProject(project);
+  createStrictReadyStory(project, "ST-LINKED");
+  createApprovedTemplate(project, "implementation-summary");
+
+  const status = JSON.parse(mustRun([
+    "output",
+    "status",
+    "--root",
+    project,
+    "--story",
+    "ST-LINKED",
+    "--json",
+  ]).stdout);
+  assert.deepEqual(status.resolutions.map((item) => item.artifact_type), ["functional-analysis"]);
+});
+
+test("story steps honor custom configured phases and their configured order", () => {
+  const project = tmpProject("custom-story-phase");
+  initProject(project);
+  story(project, "ST-001");
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.phases["security-review"] = {
+    ...config.phases.design,
+    purpose: "Review security boundaries before analysis.",
+  };
+  config.phase_order = ["discovery", "security-review", "analysis", "design", "implementation", "validation", "release"];
+  writeJson(configPath, config);
+  pinProjectConfig(project);
+
+  const result = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "security-review",
+    "--summary",
+    "Security boundaries reviewed",
+    "--allow-unapproved-contract-output",
+    "--json",
+  ]).stdout);
+  assert.equal(result.step.step, "security-review");
+  assert.equal(result.step.phase, "security-review");
+  assert.equal(result.step.next_step, "analysis");
+});
+
 test("contract create asks before missing guidance or story output agreement", () => {
   const project = tmpProject("contract-readiness");
   initProject(project);
@@ -6361,7 +6546,7 @@ test("contract create requires agreed output templates and approval requests sum
     "Technical analysis format",
     "--json",
   ]).stdout);
-  assert.match(proposedTemplate.assistant_message, /Assessment format \(technical-analysis-v1\)/);
+  assert.match(proposedTemplate.assistant_message, /Output format \(technical-analysis-v1\)/);
   assert.equal(proposedTemplate.approval_request.type, "output_template_approval");
   assert.ok(proposedTemplate.approval_request.review_items.some((item) => /What this is: the proposed structure/.test(item)));
 
@@ -6419,7 +6604,7 @@ test("contract create requires agreed output templates and approval requests sum
   assert.ok(requests.requests.some((request) => request.type === "contract_clarification" && /Context:/.test(request.review_items.join(" "))));
   const outputTemplateRequest = requests.requests.find((request) => request.type === "output_template_approval");
   assert.ok(outputTemplateRequest.review_items.some((item) => /Decision scope:/.test(item)));
-  assert.ok(outputTemplateRequest.review_items.some((item) => /Assessment sections:/.test(item)));
+  assert.ok(outputTemplateRequest.review_items.some((item) => /Document sections:/.test(item)));
   assert.ok(outputTemplateRequest.review_items.some((item) => /Template content to review:/.test(item)));
   const outputTemplateDeliveryIds = outputTemplateRequest.delivery_format_options.map((option) => option.id);
   assert.deepEqual(outputTemplateDeliveryIds.slice(0, 8), ["markdown", "docx", "xlsx", "pdf", "pptx", "html", "json", "csv"]);

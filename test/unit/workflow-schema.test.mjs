@@ -4,6 +4,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
+import { STABLE_JSON_HASH_ALGORITHM } from "../../lib/canonical.mjs";
 import {
   applyWorkflowOverlay,
   approveWorkflowOverlay,
@@ -11,6 +12,11 @@ import {
   createWorkflowInstance,
   createWorkflowTransition,
 } from "../../lib/workflow-engine.mjs";
+import {
+  WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  buildWorkflowFinalGateReceipt,
+  computeWorkflowCanonicalEvidenceHash,
+} from "../../lib/workflow-canonical-evidence.mjs";
 import { buildWorkflowPreset } from "../../lib/workflow-presets.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -49,6 +55,36 @@ test("workflow domain records conform to their published JSON schemas", () => {
     effective_definition: effective,
     created_at: AT,
     actor: ACTOR,
+    metadata: { governance_binding: { story_id: "ST-SCHEMA" } },
+  });
+  const evidenceSubject = {
+    kind: "workflow_canonical_evidence",
+    schema_version: WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+    instance_id: instance.id,
+    story_id: "ST-SCHEMA",
+    observed_at: AT,
+    checks: Object.fromEntries([
+      "requirement_approved",
+      "contract_approved",
+      "required_output_linked",
+      "strict_gate_passed",
+      "delivery_terminal",
+    ].map((id) => [id, { satisfied: true, issues: [] }])),
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  const canonicalEvidence = {
+    ...evidenceSubject,
+    evidence_hash: computeWorkflowCanonicalEvidenceHash(evidenceSubject),
+  };
+  const finalGateReceipt = buildWorkflowFinalGateReceipt({
+    status: "passed",
+    strict: true,
+    scope: "story",
+    story_id: "ST-SCHEMA",
+    checked_at: AT,
+    errors: [],
+  }, {
+    final_receipt_path: ".sdlc/gates/ST-SCHEMA-final.json",
   });
   const transition = createWorkflowTransition({
     instance,
@@ -58,7 +94,7 @@ test("workflow domain records conform to their published JSON schemas", () => {
     timestamp: AT,
     actor: ACTOR,
     idempotency_key: "schema-transition-1",
-  });
+  }, { canonical_evidence: canonicalEvidence });
   const checkpoint = {
     sequence: transition.event.sequence,
     last_event_hash: transition.event.event_hash,
@@ -70,6 +106,8 @@ test("workflow domain records conform to their published JSON schemas", () => {
     ["workflow-overlay.schema.json", overlay],
     ["workflow-effective-definition.schema.json", effective],
     ["workflow-instance.schema.json", instance],
+    ["workflow-canonical-evidence.schema.json", canonicalEvidence],
+    ["workflow-final-gate-receipt.schema.json", finalGateReceipt],
     ["workflow-transition-event.schema.json", transition.event],
     ["workflow-checkpoint.schema.json", checkpoint],
   ]) {
