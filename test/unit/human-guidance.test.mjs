@@ -283,6 +283,42 @@ test("distinguishes audit-only and host-verified action checkpoints without exec
   assert.deepEqual(localRelease.details.smoke_tests, ['["node","test/smoke.mjs"]']);
   assert.equal(localRelease.details.rollback, "Restore the previous release snapshot.");
 
+  const dataMigration = actionCheckpointGuidance({
+    status: "checkpoint_required",
+    action: "data.migrate",
+    authority_mode: "audit_only",
+    data_target: "/opt/travel-operations/local-data/store.json",
+    data_scopes: ["records[*].schemaVersion"],
+    backup_path: "/opt/travel-operations/local-data/store.before.json",
+    preview_evidence: ["evidence/migration-preview.json"],
+    rollback: "Restore store.json from store.before.json.",
+  }, { locale: "en" });
+  assert.match(dataMigration.result, /previewed local data migration/u);
+  assert.match(dataMigration.required_decision, /Exact reversible-data boundary/u);
+  assert.match(dataMigration.required_decision, /records\[\*\]\.schemaVersion/u);
+  assert.match(dataMigration.required_decision, /store\.before\.json/u);
+  assert.deepEqual(dataMigration.details.data_scopes, ["records[*].schemaVersion"]);
+  assert.equal(
+    dataMigration.details.backup_path,
+    "/opt/travel-operations/local-data/store.before.json",
+  );
+
+  const rollbackVerification = actionCheckpointGuidance({
+    status: "checkpoint_required",
+    action: "rollback.verify",
+    authority_mode: "audit_only",
+    target_root: "/opt/travel-operations/local-release",
+    rollback: "Restore the previous release snapshot.",
+    rollback_evidence: ["evidence/rollback-rehearsal.json"],
+  }, { locale: "en" });
+  assert.match(rollbackVerification.result, /verify the exact local rollback evidence/u);
+  assert.match(rollbackVerification.required_decision, /Exact rollback-verification boundary/u);
+  assert.match(rollbackVerification.required_decision, /rollback-rehearsal\.json/u);
+  assert.deepEqual(
+    rollbackVerification.details.rollback_evidence,
+    ["evidence/rollback-rehearsal.json"],
+  );
+
   const verified = actionCheckpointGuidance({
     status: "checkpoint_required",
     action: "pull_request.merge",

@@ -11052,16 +11052,100 @@ function deliveryTargetFromOptions(context, kind, options) {
   if (!writePaths.some((writePath) => isInsidePath(writePath, smokeCwd))) {
     fail("Local-release --smoke-cwd must be equal to or inside one approved --write-path.");
   }
-  const allowedActions = [...new Set(normalizeListOption(options["allow-action"])
+  const explicitlyAllowedActions = [...new Set(normalizeListOption(options["allow-action"])
     .map((action) => normalizeDeliveryAction(kind, action)))].sort();
+  const allowedActions = [...new Set([
+    ...(explicitlyAllowedActions.length > 0
+      ? explicitlyAllowedActions
+      : ["build.local", "test.run", "release.local"]),
+    "rollback.verify",
+  ])].sort();
+  const dataActionDeclared = allowedActions.includes("data.migrate")
+    || allowedActions.includes("data.rollback");
+  const dataOptionsDeclared = [
+    getOptionString(options, "data-target"),
+    getOptionString(options, "backup-path"),
+    ...normalizeRawListOption(options["data-scope"]),
+    ...normalizeRawListOption(options["migration-preview"]),
+  ].some(Boolean);
+  if (
+    dataActionDeclared
+    && (!allowedActions.includes("data.migrate") || !allowedActions.includes("data.rollback"))
+  ) {
+    fail("Reversible local data changes require both --allow-action data.migrate and --allow-action data.rollback.");
+  }
+  if (!dataActionDeclared && dataOptionsDeclared) {
+    fail("Data migration options require both data.migrate and data.rollback in the approved action set.");
+  }
+  let dataMigration = null;
+  if (dataActionDeclared) {
+    const dataTargetOption = requireOption(options, "data-target");
+    const backupPathOption = requireOption(options, "backup-path");
+    const dataTarget = path.isAbsolute(dataTargetOption)
+      ? path.resolve(dataTargetOption)
+      : path.resolve(rootPath, dataTargetOption);
+    const backupPath = path.isAbsolute(backupPathOption)
+      ? path.resolve(backupPathOption)
+      : path.resolve(rootPath, backupPathOption);
+    if (dataTarget === backupPath) {
+      fail("Local data migration --backup-path must differ from --data-target.");
+    }
+    for (const [label, candidate] of [["--data-target", dataTarget], ["--backup-path", backupPath]]) {
+      if (!isInsidePath(rootPath, candidate) || candidate === rootPath) {
+        fail(`Local data migration ${label} must be a strict child of --target-root.`);
+      }
+      if (!writePaths.some((writePath) => isInsidePath(writePath, candidate))) {
+        fail(`Local data migration ${label} must be equal to or inside one approved --write-path.`);
+      }
+    }
+    let dataTargetStats;
+    try {
+      dataTargetStats = fs.lstatSync(dataTarget);
+    } catch (error) {
+      fail(`Local data migration --data-target must already exist as a regular file: ${error.message}`);
+    }
+    if (dataTargetStats.isSymbolicLink() || !dataTargetStats.isFile()) {
+      fail("Local data migration --data-target must be a real regular file, not a directory or symlink.");
+    }
+    const scopes = [...new Set(
+      normalizeRawListOption(options["data-scope"])
+        .map((item) => String(item).trim())
+        .filter(Boolean),
+    )].sort();
+    if (scopes.length === 0) {
+      fail("Local data migration requires at least one exact --data-scope.");
+    }
+    const previewEvidence = buildActionEvidence(context, options["migration-preview"]);
+    if (previewEvidence.length === 0) {
+      fail("Local data migration requires at least one immutable --migration-preview evidence file.");
+    }
+    for (const evidence of previewEvidence) {
+      const evidencePath = resolveProjectFilePath(context, evidence.path, { mustExist: true, fileOnly: true });
+      if (writePaths.some((writePath) => isInsidePath(writePath, evidencePath))) {
+        fail("Local data migration preview evidence must be outside every approved mutable write path.");
+      }
+    }
+    dataMigration = {
+      target_path: dataTarget,
+      scopes,
+      preview_evidence: previewEvidence,
+      backup: { required: true, path: backupPath },
+      rollback_verification_required: true,
+    };
+  }
   const localReleaseTarget = {
     environment: "local",
     root_path: rootPath,
     allowed_write_paths: writePaths,
-    allowed_actions: (allowedActions.length > 0 ? allowedActions : ["build.local", "test.run", "release.local"]).sort(),
+    allowed_actions: allowedActions,
     smoke_tests: normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort(),
     smoke_cwd: smokeCwd,
-    rollback: { required: true, procedure: requireOption(options, "rollback") },
+    ...(dataMigration ? { data_migration: dataMigration } : {}),
+    rollback: {
+      required: true,
+      procedure: requireOption(options, "rollback"),
+      verification_required: true,
+    },
     external_access_allowed: false,
     production_access_allowed: false,
     destructive_actions_allowed: false,
@@ -11130,13 +11214,21 @@ function deliveryProviderBindingsFromOptions(context, kind, options, target) {
           ),
         })),
       ]
-    : [{
-        action: "release.local",
+    : [
+        ...(target?.local_release_target?.data_migration
+          ? ["data.migrate", "data.rollback"]
+          : []),
+        "release.local",
+        ...(target?.local_release_target?.rollback?.verification_required === true
+          ? ["rollback.verify"]
+          : []),
+      ].map((action) => ({
+        action,
         provider_id: normalizeDeliveryProviderId(
           getOptionString(options, "local-release-provider") || configured.local_release,
           "Local-release provider",
         ),
-      }];
+      }));
   const registry = createDefaultDeliveryProviderRegistry();
   for (const binding of selected) {
     try {
@@ -11167,6 +11259,9 @@ function normalizeDeliveryAction(kind, value) {
     update: "pull_request.update",
     merge: "pull_request.merge",
     build: "build.local",
+    migrate: "data.migrate",
+    rollback: "data.rollback",
+    "verify-rollback": "rollback.verify",
     release: "release.local",
   };
   const action = aliases[raw] || raw;
@@ -11181,7 +11276,14 @@ function normalizeDeliveryAction(kind, value) {
         "pull_request.update",
         "pull_request.merge",
       ])
-    : new Set(["build.local", "test.run", "release.local"]);
+    : new Set([
+        "build.local",
+        "data.migrate",
+        "data.rollback",
+        "rollback.verify",
+        "test.run",
+        "release.local",
+      ]);
   if (!catalog.has(action)) {
     fail(`Unknown ${kind} delivery action '${value}'. Valid actions: ${[...catalog].sort().join(", ")}.`);
   }
@@ -11216,11 +11318,46 @@ function pullRequestChangedPaths(context, runtimeTarget, action) {
 
 function buildDeliveryActionDetails(context, profile, action, runtimeTarget, options) {
   if (profile.delivery_kind === "local_release") {
-    return {
+    const details = {
       target_root: profile.local_release_target.root_path,
       allowed_write_paths: profile.local_release_target.allowed_write_paths,
       smoke_cwd: governedLocalSmokeCwd(profile).smokeCwd,
     };
+    if (action === "rollback.verify") {
+      const verificationEvidence = buildActionEvidence(context, options.evidence)
+        .sort((left, right) => left.path.localeCompare(right.path));
+      if (verificationEvidence.length === 0) {
+        fail("rollback.verify requires at least one immutable --evidence file.");
+      }
+      if (new Set(verificationEvidence.map((item) => item.path)).size !== verificationEvidence.length) {
+        fail("rollback.verify evidence paths must be unique.");
+      }
+      for (const evidence of verificationEvidence) {
+        const evidencePath = resolveProjectFilePath(
+          context,
+          evidence.path,
+          { mustExist: true, fileOnly: true },
+        );
+        if (
+          profile.local_release_target.allowed_write_paths
+            .some((writePath) => isInsidePath(writePath, evidencePath))
+        ) {
+          fail("rollback.verify evidence must stay outside every approved mutable write path.");
+        }
+      }
+      details.rollback_verification = {
+        target_root: profile.local_release_target.root_path,
+        allowed_write_paths: profile.local_release_target.allowed_write_paths,
+        rollback_procedure: profile.local_release_target.rollback.procedure,
+        evidence_root: context.root,
+        evidence: verificationEvidence,
+      };
+    }
+    if (["data.migrate", "data.rollback"].includes(action)) {
+      assertDataMigrationPreviewEvidenceCurrent(context, profile.local_release_target.data_migration);
+      details.data_migration = structuredClone(profile.local_release_target.data_migration);
+    }
+    return details;
   }
   const observedPaths = pullRequestChangedPaths(context, runtimeTarget, action);
   const requestedScopePaths = action === "git.commit"
@@ -11665,11 +11802,14 @@ function remoteAuthorizationProjection(action, actionDetails) {
 }
 
 const DELIVERY_PROVIDER_ACTIONS = new Set([
+  "data.migrate",
+  "data.rollback",
   "git.push",
   "pull_request.create",
   "pull_request.merge",
   "pull_request.update",
   "release.local",
+  "rollback.verify",
 ]);
 
 function resolveDeliveryProviderBinding(profile, action) {
@@ -11727,6 +11867,30 @@ function deliveryProviderOperationSubject(context, profile, action, actionDetail
     return {
       root_path: profile.local_release_target.root_path,
       allowed_write_paths: profile.local_release_target.allowed_write_paths,
+    };
+  }
+  if (action === "rollback.verify") {
+    const verification = actionDetails.rollback_verification;
+    return {
+      root_path: verification.target_root,
+      allowed_write_paths: verification.allowed_write_paths,
+      rollback_procedure: verification.rollback_procedure,
+      evidence_root: verification.evidence_root,
+      evidence: verification.evidence.map((item) => ({
+        path: path.resolve(verification.evidence_root, item.path),
+        sha256: item.sha256,
+      })),
+    };
+  }
+  if (["data.migrate", "data.rollback"].includes(action)) {
+    const migration = profile.local_release_target.data_migration;
+    return {
+      root_path: profile.local_release_target.root_path,
+      target_path: migration.target_path,
+      scopes: migration.scopes,
+      preview_evidence: migration.preview_evidence,
+      backup_path: migration.backup.path,
+      rollback: profile.local_release_target.rollback.procedure,
     };
   }
   return null;
@@ -13197,6 +13361,21 @@ function deliveryTargetAllowedActions(profile) {
 }
 
 const DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS = Object.freeze(["deploy.remote", "pull_request.merge"]);
+const REVERSIBLE_DATA_ACTIONS = Object.freeze(["data.migrate", "data.rollback"]);
+const ROLLBACK_VERIFICATION_ACTIONS = Object.freeze(["rollback.verify"]);
+
+function deliveryBoundaryCheckpointActions(profile) {
+  if (profile.delivery_kind !== "local_release") {
+    return [...DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS];
+  }
+  return [
+    ...DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS,
+    ...(profile.local_release_target?.data_migration ? REVERSIBLE_DATA_ACTIONS : []),
+    ...(profile.local_release_target?.rollback?.verification_required === true
+      ? ROLLBACK_VERIFICATION_ACTIONS
+      : []),
+  ].sort();
+}
 
 function deliveryCheckpointPolicySourcesRoot(context) {
   return path.join(context.sdlcRoot, "autonomy", "policy-sources");
@@ -13348,7 +13527,7 @@ function deliveryActionCheckpointRequired(context, profile, effectiveLevel, acti
   ))].sort();
   const profileCheckpoints = [...new Set(profile.checkpoints || [])].sort();
   const checkpoints = new Set([...presetCheckpoints, ...profileCheckpoints]);
-  const boundaryActions = [...DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS];
+  const boundaryActions = deliveryBoundaryCheckpointActions(profile);
   const localBoundarySource = profile.delivery_kind === "local_release"
     ? localReleaseBoundarySource(context, profile.local_release_target)
     : null;
@@ -13432,7 +13611,7 @@ function validateDeliveryActionCheckpointPolicySnapshot(context, snapshot, profi
   if (stableJson(snapshot.profile_checkpoints) !== stableJson(immutableProfileCheckpoints)) {
     errors.push("checkpoint policy snapshot disagrees with immutable profile checkpoints");
   }
-  if (stableJson(snapshot.boundary_actions) !== stableJson(DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS)) {
+  if (stableJson(snapshot.boundary_actions) !== stableJson(deliveryBoundaryCheckpointActions(profile))) {
     errors.push("checkpoint policy snapshot disagrees with protected boundary actions");
   }
   let policySource = null;
@@ -13546,6 +13725,96 @@ function deliveryActionReceipts(context, profileId) {
 function compareDeliveryAuthorizationOrder(left, right) {
   return String(left.authorized_at).localeCompare(String(right.authorized_at))
     || String(left.id).localeCompare(String(right.id));
+}
+
+function rollbackVerificationReceiptErrors(context, profile, receipt, actions) {
+  const errors = [];
+  if (
+    receipt?.action !== "rollback.verify"
+    || receipt?.status !== "completed"
+    || receipt?.outcome !== "passed"
+  ) {
+    return ["receipt is not a completed passing rollback.verify action"];
+  }
+  const authorization = actions.find((candidate) =>
+    candidate.id === receipt.authorization_receipt_ref?.id
+    && candidate.receipt_hash === receipt.authorization_receipt_ref?.hash
+    && candidate.action === "rollback.verify"
+    && candidate.status === "authorized");
+  if (!authorization) {
+    return ["receipt lacks its exact rollback.verify authorization"];
+  }
+  const verification = receipt.rollback_verification;
+  const approved = authorization.action_details?.rollback_verification;
+  if (
+    verification?.action !== "rollback.verify"
+    || verification?.verification !== "evidence_verified"
+    || verification?.verified !== true
+    || verification?.target_root !== profile.local_release_target?.root_path
+    || stableJson(verification?.allowed_write_paths)
+      !== stableJson(profile.local_release_target?.allowed_write_paths)
+    || verification?.rollback_procedure
+      !== profile.local_release_target?.rollback?.procedure
+    || verification?.evidence_root !== approved?.evidence_root
+    || stableJson(verification?.evidence) !== stableJson(receipt.evidence)
+    || stableJson(approved) !== stableJson({
+      target_root: verification?.target_root,
+      allowed_write_paths: verification?.allowed_write_paths,
+      rollback_procedure: verification?.rollback_procedure,
+      evidence_root: verification?.evidence_root,
+      evidence: verification?.evidence,
+    })
+  ) {
+    errors.push("typed rollback verification differs from the exact local target, procedure, or evidence");
+  }
+  for (const evidence of verification?.evidence || []) {
+    try {
+      const evidencePath = resolveProjectFilePath(
+        context,
+        evidence.path,
+        { mustExist: true, fileOnly: true },
+      );
+      if (hashFile(evidencePath) !== evidence.sha256) {
+        errors.push(`rollback verification evidence changed: ${evidence.path}`);
+      }
+    } catch (error) {
+      errors.push(`rollback verification evidence is unavailable: ${evidence?.path || "unknown"} (${error.message})`);
+    }
+  }
+  const providerReport = { errors: [] };
+  validateCompletedProviderActionReceipt(
+    context,
+    providerReport,
+    profile,
+    receipt,
+    authorization,
+    `rollback.verify receipt ${receipt.id}`,
+  );
+  errors.push(...providerReport.errors);
+  return errors;
+}
+
+function latestPassingRollbackVerification(context, profile, beforeReceipt = null) {
+  const actions = deliveryActionReceipts(context, profile.id);
+  const candidates = actions
+    .filter((receipt) =>
+      receipt.action === "rollback.verify"
+      && receipt.status === "completed"
+      && receipt.outcome === "passed"
+      && (!beforeReceipt || compareDeliveryAuthorizationOrder(receipt, beforeReceipt) < 0))
+    .sort(compareDeliveryAuthorizationOrder)
+    .reverse();
+  for (const receipt of candidates) {
+    const errors = rollbackVerificationReceiptErrors(context, profile, receipt, actions);
+    if (errors.length === 0) return { receipt, errors: [] };
+  }
+  const latest = candidates[0] || null;
+  return {
+    receipt: null,
+    errors: latest
+      ? rollbackVerificationReceiptErrors(context, profile, latest, actions)
+      : ["no completed passing rollback.verify receipt exists before release.local"],
+  };
 }
 
 function pullRequestCommitLineage(context, profile) {
@@ -14015,6 +14284,36 @@ function buildActionEvidence(context, values) {
   });
 }
 
+function dataMigrationPreviewEvidenceErrors(context, migration) {
+  const errors = [];
+  if (!migration || !Array.isArray(migration.preview_evidence) || migration.preview_evidence.length === 0) {
+    return ["declared local data migration has no immutable dry-run or preview evidence"];
+  }
+  for (const evidence of migration.preview_evidence) {
+    try {
+      const evidencePath = resolveProjectFilePath(
+        context,
+        evidence.path,
+        { mustExist: true, fileOnly: true },
+      );
+      assertNotDerivedArtifact(context, evidencePath, "Data migration preview evidence");
+      if (hashFile(evidencePath) !== evidence.sha256) {
+        errors.push(`data migration preview evidence changed after approval: ${evidence.path}`);
+      }
+    } catch (error) {
+      errors.push(`data migration preview evidence is unavailable: ${evidence?.path || "unknown"} (${error.message})`);
+    }
+  }
+  return errors;
+}
+
+function assertDataMigrationPreviewEvidenceCurrent(context, migration) {
+  const errors = dataMigrationPreviewEvidenceErrors(context, migration);
+  if (errors.length > 0) {
+    fail(`Local data migration preview is invalid: ${errors.join("; ")}.`);
+  }
+}
+
 function validateDeliveryActionHostAuthority(context, profile, authorization) {
   const assurance = authorization.approval?.authority_assurance;
   if (profile.authority_assurance?.mode === "host_verified" && assurance?.mode !== "host_verified") {
@@ -14405,6 +14704,13 @@ function evaluateDeliveryAction(context, options) {
         target_root: profile.local_release_target?.root_path || null,
         smoke_cwd: actionDetails?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
         smoke_tests: profile.local_release_target?.smoke_tests || [],
+        data_target: profile.local_release_target?.data_migration?.target_path || null,
+        data_scopes: profile.local_release_target?.data_migration?.scopes || [],
+        backup_path: profile.local_release_target?.data_migration?.backup?.path || null,
+        preview_evidence: (profile.local_release_target?.data_migration?.preview_evidence || [])
+          .map((item) => item.path),
+        rollback_evidence: (actionDetails?.rollback_verification?.evidence || [])
+          .map((item) => item.path),
         rollback: profile.local_release_target?.rollback?.procedure || null,
         reason_codes: ["autonomy.action_checkpoint_required"],
       }, { locale: humanGuidanceLocale(options) });
@@ -14478,6 +14784,15 @@ function evaluateDeliveryAction(context, options) {
       : null;
     if (completingAction && !priorAuthorization) {
       fail(`Delivery action ${action} must be authorized before recording its outcome.`);
+    }
+    if (
+      completingAction
+      && action === "rollback.verify"
+      && stableJson(evidence) !== stableJson(
+        priorAuthorization?.action_details?.rollback_verification?.evidence || [],
+      )
+    ) {
+      fail("rollback.verify completion must use the exact evidence set bound at authorization.");
     }
     let actionAuditWarnings = [];
     if (completingAction) {
@@ -14564,6 +14879,12 @@ function evaluateDeliveryAction(context, options) {
     if (completingAction && evidence.length === 0) {
       fail(`Delivery action ${action} completion requires at least one immutable --evidence file.`);
     }
+    if (["data.migrate", "data.rollback"].includes(action)) {
+      assertDataMigrationPreviewEvidenceCurrent(
+        context,
+        profile.local_release_target?.data_migration,
+      );
+    }
     let localReleaseVerification = null;
     if (action === "release.local" && completingAction) {
       const smokeTests = normalizeListOption(options["smoke-test"]).map(normalizeSmokeTestCommand).sort();
@@ -14592,6 +14913,16 @@ function evaluateDeliveryAction(context, options) {
       if (smokeTestReceipts.some((item) => item.outcome !== "passed")) {
         fail("release.local smoke-test execution failed; the delivery remains started and is not released.");
       }
+      const requiredRollbackVerification = profile.local_release_target?.rollback
+        ?.verification_required === true
+        ? latestPassingRollbackVerification(context, profile, priorAuthorization)
+        : null;
+      if (requiredRollbackVerification && !requiredRollbackVerification.receipt) {
+        fail(
+          "release.local requires a passing rollback.verify receipt for the exact local target, "
+          + `procedure, and immutable evidence before successful completion: ${requiredRollbackVerification.errors.join("; ")}.`,
+        );
+      }
       localReleaseVerification = {
         target_root: profile.local_release_target.root_path,
         allowed_write_paths: profile.local_release_target.allowed_write_paths,
@@ -14601,6 +14932,80 @@ function evaluateDeliveryAction(context, options) {
         outcome: "passed",
         evidence,
         rollback: profile.local_release_target.rollback,
+        ...(requiredRollbackVerification?.receipt
+          ? {
+              rollback_verification_receipt_ref: deliveryActionReceiptRef(
+                context,
+                requiredRollbackVerification.receipt,
+              ),
+            }
+          : {}),
+      };
+    }
+    let rollbackVerification = null;
+    if (
+      completingAction
+      && reportedOutcome === "passed"
+      && action === "rollback.verify"
+    ) {
+      const verification = actionDetails?.rollback_verification;
+      const providerProof = actionDetails?.provider_operation?.completion_receipt?.proof;
+      if (
+        providerProof?.transition !== "rollback_evidence_verified"
+        || providerProof?.verified !== true
+        || providerProof?.root_path !== verification?.target_root
+        || stableJson(providerProof?.allowed_write_paths?.map((item) => item.path))
+          !== stableJson(verification?.allowed_write_paths)
+        || providerProof?.rollback_procedure !== verification?.rollback_procedure
+        || stableJson(
+          providerProof?.evidence?.map((item) => ({
+            path: toProjectPath(context, item.path),
+            sha256: item.sha256,
+          })),
+        ) !== stableJson(verification?.evidence)
+      ) {
+        fail("rollback.verify completion lacks exact target, procedure, or immutable evidence proof.");
+      }
+      rollbackVerification = {
+        action: "rollback.verify",
+        target_root: verification.target_root,
+        allowed_write_paths: verification.allowed_write_paths,
+        rollback_procedure: verification.rollback_procedure,
+        evidence_root: verification.evidence_root,
+        evidence: verification.evidence,
+        verification: "evidence_verified",
+        verified: true,
+      };
+    }
+    let dataOperationVerification = null;
+    if (
+      completingAction
+      && reportedOutcome === "passed"
+      && ["data.migrate", "data.rollback"].includes(action)
+    ) {
+      const providerProof = actionDetails?.provider_operation?.completion_receipt?.proof;
+      const migration = profile.local_release_target.data_migration;
+      const expectedTransition = action === "data.migrate" ? "migrated" : "rolled_back";
+      if (
+        providerProof?.transition !== expectedTransition
+        || providerProof?.target?.path !== migration.target_path
+        || providerProof?.backup?.path !== migration.backup.path
+        || stableJson(providerProof?.scopes) !== stableJson(migration.scopes)
+      ) {
+        fail(`${action} completion lacks exact target, scope, backup, or transition proof.`);
+      }
+      dataOperationVerification = {
+        action,
+        transition: expectedTransition,
+        target_path: migration.target_path,
+        scopes: migration.scopes,
+        backup_path: migration.backup.path,
+        preview_evidence: migration.preview_evidence,
+        before_target_sha256: providerProof.before_target_sha256,
+        after_target_sha256: providerProof.after_target_sha256,
+        backup_sha256: providerProof.backup_sha256,
+        rollback_procedure: profile.local_release_target.rollback.procedure,
+        rollback_verified: action === "data.rollback",
       };
     }
     const createdAt = actionReceiptTimestamp;
@@ -14631,6 +15036,8 @@ function evaluateDeliveryAction(context, options) {
           }
         : null,
       local_release_verification: localReleaseVerification,
+      ...(rollbackVerification ? { rollback_verification: rollbackVerification } : {}),
+      ...(dataOperationVerification ? { data_operation_verification: dataOperationVerification } : {}),
       evidence,
       outcome: reportedOutcome || null,
       status: completingAction ? "completed" : "authorized",
@@ -14691,6 +15098,13 @@ function evaluateDeliveryAction(context, options) {
           target_root: profile.local_release_target?.root_path || null,
           smoke_cwd: receipt.action_details?.smoke_cwd || profile.local_release_target?.smoke_cwd || null,
           smoke_tests: profile.local_release_target?.smoke_tests || [],
+          data_target: profile.local_release_target?.data_migration?.target_path || null,
+          data_scopes: profile.local_release_target?.data_migration?.scopes || [],
+          backup_path: profile.local_release_target?.data_migration?.backup?.path || null,
+          preview_evidence: (profile.local_release_target?.data_migration?.preview_evidence || [])
+            .map((item) => item.path),
+          rollback_evidence: (receipt.action_details?.rollback_verification?.evidence || [])
+            .map((item) => item.path),
           rollback: profile.local_release_target?.rollback?.procedure || null,
         }, { locale: humanGuidanceLocale(options) })
       : null;
@@ -26367,6 +26781,8 @@ function appendTrace(context, options) {
 
 function assertManualTraceActionIsSafe(event) {
   const generatedBy = {
+    "data.migrate": "autonomy delivery action",
+    "data.rollback": "autonomy delivery action",
     "git.commit": "autonomy delivery action",
     "git.push": "autonomy delivery action",
     "pull_request.merge": "autonomy delivery action",
@@ -31411,7 +31827,15 @@ function redactedEvidenceRepresentation(context, filePath, policy) {
 
 function shouldVerifyTraceEvidence(event, projectPath) {
   if (["test", "release"].includes(event.type)) return true;
-  if (["git.commit", "git.push", "pull_request.merge", "release.local"].includes(event.action)) {
+  if ([
+    "data.migrate",
+    "data.rollback",
+    "git.commit",
+    "git.push",
+    "pull_request.merge",
+    "release.local",
+    "rollback.verify",
+  ].includes(event.action)) {
     return String(projectPath).replace(/\\/gu, "/").startsWith(`${SDLC_DIR}/autonomy/actions/`)
       || String(projectPath).replace(/\\/gu, "/").includes("/evidence/");
   }
@@ -33474,6 +33898,47 @@ function validateCompletedProviderActionReceipt(context, report, profile, receip
     )) {
       throw new Error("filesystem provider proof does not preserve the authorized root identity");
     }
+    if (receipt.action === "rollback.verify" && (
+      completion.proof?.transition !== "rollback_evidence_verified"
+      || completion.proof?.verified !== true
+      || completion.proof?.root_path !== precondition.subject.root_path
+      || completion.proof?.rollback_procedure !== precondition.subject.rollback_procedure
+      || completion.proof?.root_identity?.device !== precondition.proof?.root_identity?.device
+      || completion.proof?.root_identity?.inode !== precondition.proof?.root_identity?.inode
+      || completion.proof?.evidence_root_identity?.device
+        !== precondition.proof?.evidence_root_identity?.device
+      || completion.proof?.evidence_root_identity?.inode
+        !== precondition.proof?.evidence_root_identity?.inode
+      || stableJson(
+        completion.proof?.evidence?.map((item) => ({
+          path: item.path,
+          sha256: item.sha256,
+        })),
+      ) !== stableJson(precondition.subject.evidence)
+    )) {
+      throw new Error("filesystem provider proof does not verify the exact rollback target, procedure, and evidence");
+    }
+    if (receipt.action === "data.migrate" && (
+      completion.proof?.transition !== "migrated"
+      || completion.proof?.target?.path !== precondition.subject.target_path
+      || completion.proof?.backup?.path !== precondition.subject.backup_path
+      || completion.proof?.before_target_sha256 !== precondition.proof?.target?.sha256
+      || completion.proof?.backup_sha256 !== precondition.proof?.target?.sha256
+      || completion.proof?.after_target_sha256 !== completion.proof?.target?.sha256
+      || completion.proof?.after_target_sha256 === completion.proof?.before_target_sha256
+    )) {
+      throw new Error("filesystem provider proof does not show the exact migrated target and pre-migration backup");
+    }
+    if (receipt.action === "data.rollback" && (
+      completion.proof?.transition !== "rolled_back"
+      || completion.proof?.target?.path !== precondition.subject.target_path
+      || completion.proof?.backup?.path !== precondition.subject.backup_path
+      || completion.proof?.backup_sha256 !== precondition.proof?.backup?.sha256
+      || completion.proof?.after_target_sha256 !== completion.proof?.backup_sha256
+      || completion.proof?.after_target_sha256 !== completion.proof?.target?.sha256
+    )) {
+      throw new Error("filesystem provider proof does not show restoration from the exact approved backup");
+    }
     const stripCompletion = (details) => {
       const copy = structuredClone(details || {});
       if (copy.provider_operation) copy.provider_operation.completion_receipt = null;
@@ -33630,6 +34095,12 @@ function validateDeliveryActionEvidence(context, report, receipt, actionLabel, e
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  if (profile.local_release_target?.data_migration) {
+    report.errors.push(...dataMigrationPreviewEvidenceErrors(
+      context,
+      profile.local_release_target.data_migration,
+    ).map((error) => `${label} ${error}`));
+  }
   const recoverableTerminal = options.allowRecoverableTerminal === true
     && actions.some((receipt) =>
       terminalStatusForDeliveryAction(receipt.action)
@@ -33812,7 +34283,7 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     } else if (receiptHistorical) {
       const immutableLegacyCheckpoint = expectedEffectiveLevel === "supervised"
         || (profile.checkpoints || []).includes(receipt.action)
-        || DELIVERY_BOUNDARY_CHECKPOINT_ACTIONS.includes(receipt.action)
+        || deliveryBoundaryCheckpointActions(profile).includes(receipt.action)
         || receipt.action === "release.local";
       if (immutableLegacyCheckpoint && receipt.checkpoint_required !== true) {
         report.errors.push(`${actionLabel} omits a checkpoint required by its immutable legacy boundary`);
@@ -33922,6 +34393,57 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
             || item.exit_code !== 0)
         ) {
           report.errors.push(`${actionLabel} does not prove the exact approved local smoke-test set and target`);
+        }
+        if (profile.local_release_target?.rollback?.verification_required === true) {
+          const rollbackRef = verification?.rollback_verification_receipt_ref;
+          const rollbackReceipt = actions.find((candidate) =>
+            candidate.id === rollbackRef?.id
+            && candidate.receipt_hash === rollbackRef?.hash
+            && candidate.action === "rollback.verify"
+            && candidate.status === "completed"
+            && candidate.outcome === "passed");
+          const rollbackErrors = rollbackReceipt
+            ? rollbackVerificationReceiptErrors(context, profile, rollbackReceipt, actions)
+            : ["release receipt does not reference a completed passing rollback.verify receipt"];
+          if (
+            rollbackReceipt
+            && authorization
+            && compareDeliveryAuthorizationOrder(rollbackReceipt, authorization) >= 0
+          ) {
+            rollbackErrors.push("rollback.verify was not completed before release.local authorization");
+          }
+          report.errors.push(...rollbackErrors.map((error) =>
+            `${actionLabel} lacks its required rollback verification: ${error}`));
+        }
+      }
+      if (receipt.action === "rollback.verify" && receipt.outcome === "passed") {
+        report.errors.push(...rollbackVerificationReceiptErrors(
+          context,
+          profile,
+          receipt,
+          actions,
+        ).map((error) => `${actionLabel} is invalid: ${error}`));
+      }
+      if (["data.migrate", "data.rollback"].includes(receipt.action) && receipt.outcome === "passed") {
+        const migration = profile.local_release_target?.data_migration;
+        const verification = receipt.data_operation_verification;
+        const proof = receipt.action_details?.provider_operation?.completion_receipt?.proof;
+        const expectedTransition = receipt.action === "data.migrate" ? "migrated" : "rolled_back";
+        if (
+          !migration
+          || verification?.action !== receipt.action
+          || verification?.transition !== expectedTransition
+          || verification?.target_path !== migration.target_path
+          || verification?.backup_path !== migration.backup.path
+          || stableJson(verification?.scopes) !== stableJson(migration.scopes)
+          || stableJson(verification?.preview_evidence) !== stableJson(migration.preview_evidence)
+          || verification?.before_target_sha256 !== proof?.before_target_sha256
+          || verification?.after_target_sha256 !== proof?.after_target_sha256
+          || verification?.backup_sha256 !== proof?.backup_sha256
+          || verification?.rollback_procedure !== profile.local_release_target.rollback.procedure
+          || verification?.rollback_verified !== (receipt.action === "data.rollback")
+        ) {
+          report.errors.push(`${actionLabel} lacks its exact reversible data-operation verification`);
         }
       }
       for (const evidence of receipt.local_release_verification?.evidence || []) {
@@ -35343,6 +35865,86 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
         report.errors.push(
           `Story ${storyId} lifecycle completion requires terminal ${profile.delivery_kind} delivery; found ${state.status}`,
         );
+      }
+      if (profile.local_release_target?.rollback?.verification_required === true) {
+        const actions = deliveryActionReceipts(context, profile.id);
+        const releaseCompletion = actions.find((receipt) =>
+          receipt.id === state.close_receipt?.terminal_action_receipt_ref?.id
+          && receipt.receipt_hash === state.close_receipt?.terminal_action_receipt_ref?.hash
+          && receipt.action === "release.local"
+          && receipt.status === "completed"
+          && receipt.outcome === "passed");
+        const rollbackRef = releaseCompletion?.local_release_verification
+          ?.rollback_verification_receipt_ref;
+        const rollbackReceipt = actions.find((receipt) =>
+          receipt.id === rollbackRef?.id
+          && receipt.receipt_hash === rollbackRef?.hash
+          && receipt.action === "rollback.verify"
+          && receipt.status === "completed"
+          && receipt.outcome === "passed");
+        const rollbackErrors = rollbackReceipt
+          ? rollbackVerificationReceiptErrors(context, profile, rollbackReceipt, actions)
+          : ["no exact passing rollback.verify receipt is bound to the local release"];
+        const releaseAuthorization = releaseCompletion
+          ? actions.find((receipt) =>
+              receipt.id === releaseCompletion.authorization_receipt_ref?.id
+              && receipt.receipt_hash === releaseCompletion.authorization_receipt_ref?.hash
+              && receipt.action === "release.local"
+              && receipt.status === "authorized")
+          : null;
+        if (
+          rollbackReceipt
+          && releaseAuthorization
+          && compareDeliveryAuthorizationOrder(rollbackReceipt, releaseAuthorization) >= 0
+        ) {
+          rollbackErrors.push("rollback.verify was not completed before release.local authorization");
+        }
+        if (rollbackErrors.length > 0) {
+          report.errors.push(
+            `Story ${storyId} lifecycle completion requires verified rollback evidence for its exact local target and procedure: ${rollbackErrors.join("; ")}`,
+          );
+        }
+        report.checked.push(`story ${storyId} local rollback verification`);
+      }
+      if (profile.local_release_target?.data_migration) {
+        const actions = deliveryActionReceipts(context, profile.id);
+        const passing = (action) => actions
+          .filter((receipt) =>
+            receipt.action === action
+            && receipt.status === "completed"
+            && receipt.outcome === "passed")
+          .sort(compareDeliveryAuthorizationOrder);
+        const rollbackReceipts = passing("data.rollback");
+        const migrationReceipts = passing("data.migrate");
+        const latestRollback = rollbackReceipts.at(-1) || null;
+        const finalMigration = latestRollback
+          ? migrationReceipts.filter((receipt) =>
+              compareDeliveryAuthorizationOrder(latestRollback, receipt) < 0).at(-1) || null
+          : null;
+        const releaseCompletion = actions.find((receipt) =>
+          receipt.id === state.close_receipt?.terminal_action_receipt_ref?.id
+          && receipt.receipt_hash === state.close_receipt?.terminal_action_receipt_ref?.hash
+          && receipt.action === "release.local"
+          && receipt.status === "completed"
+          && receipt.outcome === "passed");
+        if (!latestRollback?.data_operation_verification?.rollback_verified) {
+          report.errors.push(
+            `Story ${storyId} lifecycle completion requires a passing verified data.rollback for its declared migration`,
+          );
+        }
+        if (!finalMigration) {
+          report.errors.push(
+            `Story ${storyId} lifecycle completion requires a passing data.migrate after the verified rollback`,
+          );
+        } else if (
+          !releaseCompletion
+          || compareDeliveryAuthorizationOrder(finalMigration, releaseCompletion) >= 0
+        ) {
+          report.errors.push(
+            `Story ${storyId} lifecycle completion requires release.local after the final verified data.migrate`,
+          );
+        }
+        report.checked.push(`story ${storyId} reversible data migration and rollback verification`);
       }
       report.checked.push(`story ${storyId} terminal delivery ${profile.delivery_id}`);
     } catch (error) {
@@ -36838,7 +37440,9 @@ Usage:
       --target-root /absolute/local/root --write-path /absolute/local/root/output
       [--smoke-cwd /absolute/local/root/output]
       --smoke-test '["node","--test"]' --rollback "reversible procedure"
-      [--allow-action build.local|test.run|release.local]
+      [--allow-action build.local|test.run|data.migrate|data.rollback|rollback.verify|release.local]
+      [--data-target exact-file --data-scope exact-scope
+       --migration-preview evidence/file.json --backup-path exact-backup-file]
   agentic-sdlc autonomy delivery approve --id AUT-PR-1 [--phase implementation]
       --actor-type human|ci --approval-source explicit-user|ci --summary text
       [--host-receipt-file path]
@@ -36850,6 +37454,9 @@ Usage:
       [--host-receipt-file path]
       [--outcome passed|failed --evidence path]
       [--smoke-cwd path --smoke-test '["node","--test"]' --rollback "exact approved procedure"]
+      Local releases automatically govern rollback.verify as a checkpointed,
+      non-executing verification; authorize and complete it with the same exact
+      immutable --evidence before a successful release.local completion.
   agentic-sdlc autonomy delivery close --id AUT-PR-1
       --terminal-status closed|rolled_back|cancelled|superseded
       --reason text --actor-type human|ci --approval-source explicit-user|ci --summary text

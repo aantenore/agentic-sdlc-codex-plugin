@@ -261,18 +261,115 @@
           "items": { "type": "string", "minLength": 2, "pattern": "^\\[.*\\]$" }
         },
         "smoke_cwd": { "type": "string", "minLength": 1 },
+        "data_migration": { "$ref": "#/$defs/data_migration" },
         "rollback": {
           "type": "object",
           "required": ["required", "procedure"],
           "properties": {
             "required": { "const": true },
-            "procedure": { "type": "string", "minLength": 1 }
+            "procedure": { "type": "string", "minLength": 1 },
+            "verification_required": { "const": true }
           },
           "additionalProperties": false
         },
         "external_access_allowed": { "const": false },
         "production_access_allowed": { "const": false },
         "destructive_actions_allowed": { "const": false }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "allowed_actions": {
+                "contains": { "enum": ["data.migrate", "data.rollback"] }
+              }
+            },
+            "required": ["allowed_actions"]
+          },
+          "then": {
+            "required": ["data_migration"],
+            "properties": {
+              "allowed_actions": {
+                "allOf": [
+                  { "contains": { "const": "data.migrate" } },
+                  { "contains": { "const": "data.rollback" } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rollback": {
+                "properties": { "verification_required": { "const": true } },
+                "required": ["verification_required"]
+              }
+            },
+            "required": ["rollback"]
+          },
+          "then": {
+            "properties": {
+              "allowed_actions": { "contains": { "const": "rollback.verify" } }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "allowed_actions": { "contains": { "const": "rollback.verify" } }
+            },
+            "required": ["allowed_actions"]
+          },
+          "then": {
+            "properties": {
+              "rollback": {
+                "required": ["verification_required"],
+                "properties": { "verification_required": { "const": true } }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "data_migration": {
+      "type": "object",
+      "required": [
+        "target_path",
+        "scopes",
+        "preview_evidence",
+        "backup",
+        "rollback_verification_required"
+      ],
+      "properties": {
+        "target_path": { "type": "string", "minLength": 1 },
+        "scopes": { "$ref": "#/$defs/non_empty_string_list" },
+        "preview_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/path_hash" }
+        },
+        "backup": {
+          "type": "object",
+          "required": ["required", "path"],
+          "properties": {
+            "required": { "const": true },
+            "path": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "rollback_verification_required": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "path_hash": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
       },
       "additionalProperties": false
     },

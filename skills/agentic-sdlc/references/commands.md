@@ -222,7 +222,7 @@ The evaluator chooses the most restrictive host, project, requirement, delivery,
 The action command creates a single-use authorization receipt; it does not perform the Git, provider, or local-write operation. Use canonical actions only:
 
 - PR: `repository.read`, `repository.write`, `test.run`, `git.commit`, `git.push`, `pull_request.create`, `pull_request.update`, `pull_request.merge`;
-- local release: `build.local`, `test.run`, `release.local`.
+- local release: `build.local`, `test.run`, mandatory non-executing `rollback.verify`, optional paired `data.migrate` and `data.rollback`, then `release.local`.
 
 Ask for the exact action first. A configured checkpoint returns `checkpoint_required` without authority. After showing that exact subject, rerun with `--confirm-action` and formal attribution. When `authority_policy.mode` is `host_verified`, also pass an external `--host-receipt-file`: its Ed25519 signature must bind action `autonomy.delivery.action.<canonical-action>` and the exact profile/delivery/runtime/action-details subject. In `audit_only`, the explicit approval is recorded but cannot be represented as host-verified authority. Then execute the exact recorded operation, collect evidence, and complete the same action:
 
@@ -277,6 +277,58 @@ node bin/agentic-sdlc.mjs autonomy delivery action \
 Local completion runs the approved smoke argv without a shell from the exact governed `--smoke-cwd` in a supported read-only, no-network sandbox and records structured output hashes. That directory must be equal to or inside one allowed write path; it defaults to the only write path and is required when several are allowed. Package-manager commands require a real, non-symlinked `package.json` there and cannot fall back to a parent source project. Historical profiles without the field derive it only from one unambiguous write path and otherwise fail closed. Successful completion currently requires `/usr/bin/sandbox-exec` on macOS or `/usr/bin/bwrap` on Linux; unsupported hosts and Linux without `bwrap` fail closed before a `released` receipt is written. Passing `release.local` and `pull_request.merge` completions automatically close the lifecycle as `released` or `merged`; do not also call manual close for those statuses. Use `autonomy delivery close` for formally approved `closed`, `cancelled`, `rolled_back`, `superseded`, or other allowed non-success terminal outcomes.
 
 The CLI revalidates local Git identity, branches, SHA transitions, paths, action receipts, and evidence hashes. Push authorization observes the base SHA directly on the selected remote, requires one passing completed `git.commit` receipt for every commit from that SHA to the exact head, and rejects remotes with any fetch/push URL outside the approved repository. Push/merge authorization records a live remote pre-state, and completion queries the exact Git remote or GitHub PR for the expected later post-state. This observation is not a provider-signed offline attestation; retain durable host/CI/provider evidence and do not claim signed proof when no attestation adapter is configured.
+
+For a reversible local data migration, declare the full boundary while proposing the local release:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery propose \
+  --root <project> \
+  --id AUT-LOCAL-DATA-009 \
+  --delivery LOCAL-DATA-009 \
+  --kind local_release \
+  --story ST-001 \
+  --contract contract-ST-001-release \
+  --requirement REQ-001 \
+  --level checkpointed \
+  --target-root /absolute/project/local-data \
+  --write-path /absolute/project/local-data/app \
+  --write-path /absolute/project/local-data/data \
+  --smoke-cwd /absolute/project/local-data/app \
+  --smoke-test '["npm","run","smoke:local"]' \
+  --allow-action build.local \
+  --allow-action test.run \
+  --allow-action data.migrate \
+  --allow-action data.rollback \
+  --allow-action release.local \
+  --data-target /absolute/project/local-data/data/store.json \
+  --data-scope 'records[*].schemaVersion' \
+  --migration-preview evidence/migration-preview.json \
+  --backup-path /absolute/project/local-data/data/store.before.json \
+  --rollback "Restore store.json byte-for-byte from store.before.json"
+```
+
+Both data actions are checkpoints and use the normal authorize → external execution → complete sequence. `data.migrate` completion proves that the exact backup contains the pre-migration target bytes and that the target changed. `data.rollback` completion proves that the target was restored byte-for-byte from that backup. The CLI accepts no executable or shell option for either action. A final `--lifecycle-complete` gate requires a passing rollback, a later passing migration, and only then the terminal `release.local`.
+
+For every new local release, record the rollback rehearsal separately:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-009 \
+  --action rollback.verify \
+  --evidence evidence/rollback-rehearsal.json \
+  --confirm-action \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve this exact rollback rehearsal evidence"
+
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-009 \
+  --action rollback.verify \
+  --outcome passed \
+  --evidence evidence/rollback-rehearsal.json
+```
+
+The evidence must be unchanged and outside every approved mutable write path. The provider observes the exact root, write paths, procedure, and evidence hashes without running shell or rollback code. `release.local` and final lifecycle completion fail closed without that earlier passing receipt or after evidence tampering.
 
 ## Create Contract
 

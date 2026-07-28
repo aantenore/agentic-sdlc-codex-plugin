@@ -45,7 +45,7 @@ Ask only questions that change the contract. Good questions include:
 - What is the requirement's approved autonomy ceiling?
 - Is this delivery one named `pull_request` or one named `local_release`, and which level does the user select for it?
 - For a PR, which repository/base/head/actions are in scope, and is protected-branch merge excluded?
-- For a local release, what exact target, canonical writes/actions, shell-free JSON-argv smoke tests, and rollback are required?
+- For a local release, what exact target, canonical writes/actions, shell-free JSON-argv smoke tests, rollback procedure, and immutable `rollback.verify` rehearsal evidence are required? If local data changes are declared, what exact regular file, logical scopes, immutable dry-run/preview evidence, backup path, and data rollback cycle apply?
 - Which contract actions must narrow the selected delivery level or remain checkpoints?
 - Should this contract inherit the main Codex thread model/reasoning, or use a specific model or reasoning level?
 - Should any required output use an existing approved template, a delta from a base artifact, or a user-approved new structure?

@@ -263,6 +263,50 @@ The dedicated assessment journey remains the exception described above: it packa
      --json
    ```
 
+   When the local delivery changes a data file, add both typed actions and bind
+   the reversible boundary at proposal time:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery propose \
+     --root <target-project> \
+     --id AUT-LOCAL-DATA-009 \
+     --delivery LOCAL-DATA-009 \
+     --kind local_release \
+     --story ST-001 \
+     --contract contract-ST-001-release \
+     --requirement REQ-001 \
+     --level checkpointed \
+     --target-root /absolute/project/local-data \
+     --write-path /absolute/project/local-data/app \
+     --write-path /absolute/project/local-data/data \
+     --smoke-cwd /absolute/project/local-data/app \
+     --smoke-test '["npm","run","smoke:local"]' \
+     --allow-action data.migrate \
+     --allow-action data.rollback \
+     --allow-action release.local \
+     --data-target /absolute/project/local-data/data/store.json \
+     --data-scope 'records[*].schemaVersion' \
+     --migration-preview evidence/migration-preview.json \
+     --backup-path /absolute/project/local-data/data/store.before.json \
+     --rollback "Restore store.json byte-for-byte from store.before.json" \
+     --json
+   ```
+
+   `data.migrate` and `data.rollback` are always separate checkpoints. The CLI
+   never accepts migration shell text or performs the mutation. Authorize the
+   exact action, execute it externally, then complete it with immutable
+   evidence. The local observer proves target and backup hashes. Final
+   lifecycle completion requires a verified rollback, a later passing
+   migration, and then the terminal local release.
+
+   Every new local release also includes `rollback.verify`, even when no data
+   migration is declared. Authorize it with immutable rollback-rehearsal
+   `--evidence`, then complete it with the exact same evidence. The provider
+   binds the local root, write paths, rollback procedure, and evidence hashes
+   but executes no command. A passing receipt must exist before
+   `release.local`; missing or changed evidence blocks release and the final
+   lifecycle gate.
+
    Approve and inspect the exact profile:
 
    ```bash
@@ -488,7 +532,8 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify the effective autonomy is the most restrictive host/project/requirement/delivery/contract/capability/environment/budget result;
 - verify `audit_only` never produces `bounded-autonomous` and that the highest level has host/CI assurance;
 - verify no delivery profile or authorization was reused for another delivery;
-- verify local releases identify target root, writes/actions, successful smoke tests, and rollback;
+- verify local releases identify target root, writes/actions, successful smoke tests, rollback, and an earlier passing `rollback.verify` receipt bound to unchanged evidence;
+- verify declared local data migrations have paired `data.migrate`/`data.rollback`, exact target and scopes, immutable preview evidence, an exact backup, a passing rollback verification, and a later passing final migration before release;
 - verify protected-branch merge and remote/production deployment have separate exact authority when requested;
 - verify relevant contracts exist under `.sdlc/contracts/`;
 - verify durable outputs are linked in `.sdlc/output-contracts/registry.json` with approved templates;

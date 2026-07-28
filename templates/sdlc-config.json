@@ -575,6 +575,9 @@
           "sync.commit",
           "sync.push",
           "sync.pr",
+          "data.migrate",
+          "data.rollback",
+          "rollback.verify",
           "release.local",
           "pull_request.merge",
           "deploy.remote"
@@ -588,6 +591,9 @@
           "validation"
         ],
         "checkpoints": [
+          "data.migrate",
+          "data.rollback",
+          "rollback.verify",
           "release.local",
           "pull_request.merge",
           "deploy.remote"
@@ -602,6 +608,9 @@
           "release"
         ],
         "checkpoints": [
+          "data.migrate",
+          "data.rollback",
+          "rollback.verify",
           "pull_request.merge",
           "deploy.remote"
         ]

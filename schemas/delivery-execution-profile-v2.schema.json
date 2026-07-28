@@ -112,14 +112,62 @@
       "else": {
         "properties": {
           "pull_request_target": { "type": "null" },
-          "local_release_target": { "$ref": "delivery-execution-profile.schema.json#/$defs/local_release_target" },
-          "provider_bindings": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 1,
-            "prefixItems": [{ "$ref": "#/$defs/local_release_binding" }]
+          "local_release_target": { "$ref": "delivery-execution-profile.schema.json#/$defs/local_release_target" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "local_release_target": {
+                  "properties": {
+                    "allowed_actions": { "contains": { "const": "data.migrate" } }
+                  },
+                  "required": ["allowed_actions"]
+                }
+              },
+              "required": ["local_release_target"]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "if": { "$ref": "#/$defs/local_rollback_verification_enabled" },
+                  "then": {
+                    "properties": {
+                      "provider_bindings": { "$ref": "#/$defs/local_data_verified_release_bindings" }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "provider_bindings": { "$ref": "#/$defs/local_data_release_bindings" }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "allOf": [
+                {
+                  "if": { "$ref": "#/$defs/local_rollback_verification_enabled" },
+                  "then": {
+                    "properties": {
+                      "provider_bindings": { "$ref": "#/$defs/local_verified_release_bindings" }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "provider_bindings": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "prefixItems": [{ "$ref": "#/$defs/local_release_binding" }]
+                      }
+                    }
+                  }
+                }
+              ]
+            }
           }
-        }
+        ]
       }
     },
     {
@@ -245,6 +293,68 @@
       "type": "object",
       "required": ["action", "provider_id"],
       "properties": { "action": { "const": "release.local" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "rollback_verify_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "rollback.verify" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "local_rollback_verification_enabled": {
+      "properties": {
+        "local_release_target": {
+          "properties": {
+            "rollback": {
+              "properties": { "verification_required": { "const": true } },
+              "required": ["verification_required"]
+            }
+          },
+          "required": ["rollback"]
+        }
+      },
+      "required": ["local_release_target"]
+    },
+    "local_verified_release_bindings": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "$ref": "#/$defs/local_release_binding" },
+        { "$ref": "#/$defs/rollback_verify_binding" }
+      ]
+    },
+    "local_data_release_bindings": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/data_migrate_binding" },
+        { "$ref": "#/$defs/data_rollback_binding" },
+        { "$ref": "#/$defs/local_release_binding" }
+      ]
+    },
+    "local_data_verified_release_bindings": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        { "$ref": "#/$defs/data_migrate_binding" },
+        { "$ref": "#/$defs/data_rollback_binding" },
+        { "$ref": "#/$defs/local_release_binding" },
+        { "$ref": "#/$defs/rollback_verify_binding" }
+      ]
+    },
+    "data_migrate_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "data.migrate" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
+      "additionalProperties": false
+    },
+    "data_rollback_binding": {
+      "type": "object",
+      "required": ["action", "provider_id"],
+      "properties": { "action": { "const": "data.rollback" }, "provider_id": { "$ref": "#/$defs/provider_id" } },
       "additionalProperties": false
     }
   },

@@ -22,6 +22,8 @@ It is intentionally stored in the project repository so people and agents can co
 - Start a phase automatically only when it is present in the effective level's configured `automatic_phases`; `supervised` always confirms.
 - Govern delivery actions as authorize → exact host/tool execution → complete with immutable evidence. A `host_verified` checkpoint requires an external Ed25519 receipt for the exact canonical action subject; `audit_only` records unverified explicit approval. Passing merge/local-release completion writes the success close receipt automatically.
 - For local releases, record the target root, allowed canonical actions and writes, shell-free JSON-argv smoke tests, and rollback. Treat protected-branch merge and remote or production deployment as explicit exceptions.
+- For reversible local data changes, require paired `data.migrate`/`data.rollback`, one exact file and scope set, immutable preview evidence outside mutable paths, an exact backup, and a verified rollback followed by the final passing migration. The CLI verifies hashes but never executes migration shell text.
+- Before every new local release, require a passing `rollback.verify` receipt bound to the exact local root, write paths, rollback procedure, and immutable rehearsal evidence. The CLI verifies evidence and never executes a rollback command.
 - Preserve durable host/CI/provider evidence for remote push and merge; live remote pre/post observations are hash-bound but are not provider-signed offline attestations.
 - Run `agentic-sdlc orchestrate status` before starting work in another chat.
 - Run `agentic-sdlc sync record --event push` after pushing a branch.

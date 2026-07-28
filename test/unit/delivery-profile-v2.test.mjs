@@ -185,6 +185,117 @@ test("v2 local releases bind only release.local to a filesystem observer", () =>
   assertAgainstSchema(profile, "delivery-execution-profile-v2");
 });
 
+test("v2 local releases can require a typed rollback verifier before release", () => {
+  const localReleaseTarget = {
+    environment: "local",
+    root_path: "/workspace/travelops",
+    allowed_write_paths: ["/workspace/travelops/dist"],
+    allowed_actions: ["build.local", "release.local", "rollback.verify", "test.run"],
+    smoke_tests: ['["node","--version"]'],
+    rollback: {
+      required: true,
+      procedure: "Restore the previous package",
+      verification_required: true,
+    },
+    external_access_allowed: false,
+    production_access_allowed: false,
+    destructive_actions_allowed: false,
+  };
+  const profile = buildDeliveryExecutionProfileV2({
+    ...sharedInput({
+      id: "AUT-LOCAL-ROLLBACK-V2",
+      delivery_id: "LOCAL-ROLLBACK-V2",
+      delivery_kind: "local_release",
+      pull_request_target: null,
+      local_release_target: localReleaseTarget,
+    }),
+    provider_bindings: [
+      { action: "release.local", provider_id: "local-filesystem" },
+      { action: "rollback.verify", provider_id: "local-filesystem" },
+    ],
+  });
+  assert.deepEqual(profile.provider_bindings.map((item) => item.action), [
+    "release.local",
+    "rollback.verify",
+  ]);
+  assert.equal(profile.local_release_target.rollback.verification_required, true);
+  assertAgainstSchema(profile, "delivery-execution-profile-v2");
+
+  assert.throws(() => buildDeliveryExecutionProfileV2({
+    ...profile,
+    provider_bindings: [
+      { action: "release.local", provider_id: "local-filesystem" },
+    ],
+  }), /must bind exactly: release\.local, rollback\.verify/u);
+});
+
+test("v2 local releases bind reversible data actions to an exact migration declaration", () => {
+  const profile = buildDeliveryExecutionProfileV2({
+    ...sharedInput({
+      id: "AUT-LOCAL-DATA-V2",
+      delivery_id: "LOCAL-DATA-V2",
+      delivery_kind: "local_release",
+      pull_request_target: null,
+      local_release_target: {
+        environment: "local",
+        root_path: "/workspace/travelops",
+        allowed_write_paths: [
+          "/workspace/travelops/app",
+          "/workspace/travelops/data",
+        ],
+        allowed_actions: [
+          "build.local",
+          "data.migrate",
+          "data.rollback",
+          "release.local",
+          "test.run",
+        ],
+        smoke_tests: ['["node","--version"]'],
+        smoke_cwd: "/workspace/travelops/app",
+        data_migration: {
+          target_path: "/workspace/travelops/data/store.json",
+          scopes: ["customers.version"],
+          preview_evidence: [{ path: "evidence/preview.json", sha256: "a".repeat(64) }],
+          backup: {
+            required: true,
+            path: "/workspace/travelops/data/store.before.json",
+          },
+          rollback_verification_required: true,
+        },
+        rollback: { required: true, procedure: "Restore the exact approved backup" },
+        external_access_allowed: false,
+        production_access_allowed: false,
+        destructive_actions_allowed: false,
+      },
+    }),
+    provider_bindings: [
+      { action: "data.migrate", provider_id: "local-filesystem" },
+      { action: "data.rollback", provider_id: "local-filesystem" },
+      { action: "release.local", provider_id: "local-filesystem" },
+    ],
+  });
+  assert.deepEqual(profile.provider_bindings.map((item) => item.action), [
+    "data.migrate",
+    "data.rollback",
+    "release.local",
+  ]);
+  assert.equal(
+    profile.local_release_target.data_migration.backup.path,
+    "/workspace/travelops/data/store.before.json",
+  );
+  assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
+  assertAgainstSchema(profile, "delivery-execution-profile-v2");
+
+  assert.throws(() => buildDeliveryExecutionProfileV2({
+    ...profile,
+    local_release_target: {
+      ...profile.local_release_target,
+      allowed_actions: profile.local_release_target.allowed_actions
+        .filter((action) => action !== "data.rollback"),
+    },
+  }), /require both data\.migrate and data\.rollback/u);
+});
+
 test("local release smoke working directories stay inside an allowed write path", () => {
   const base = {
     ...sharedInput({

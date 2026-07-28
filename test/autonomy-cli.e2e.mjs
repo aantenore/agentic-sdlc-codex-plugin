@@ -2159,6 +2159,358 @@ test("pull-request merge completion rejects provider base drift and unproven loc
   });
 });
 
+test("local release governs a failed data migration, verified rollback, and final retry without executing commands", () => {
+  const project = tmpProject("local-data-migration");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LOCAL-DATA",
+    contractId: "CONTRACT-LOCAL-DATA",
+    profileId: "AUT-LOCAL-DATA",
+  });
+
+  const releaseRoot = path.join(project, "local-data-release");
+  const appPath = path.join(releaseRoot, "app");
+  const dataDirectory = path.join(releaseRoot, "data");
+  const dataPath = path.join(dataDirectory, "store.json");
+  const backupPath = path.join(dataDirectory, "store.before.json");
+  const previewPath = path.join(project, "evidence", "migration-preview.json");
+  fs.mkdirSync(appPath, { recursive: true });
+  fs.mkdirSync(dataDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(previewPath), { recursive: true });
+  fs.writeFileSync(dataPath, '{"schemaVersion":1,"records":[{"id":"A"}]}\n', "utf8");
+  fs.writeFileSync(
+    previewPath,
+    '{"dryRun":true,"from":1,"to":2,"scope":"records[*].schemaVersion"}\n',
+    "utf8",
+  );
+
+  const proposalArgs = [
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--delivery", "LOCAL-DATA",
+    "--kind", "local_release",
+    "--story", "ST-LOCAL-DATA",
+    "--contract", "CONTRACT-LOCAL-DATA",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", appPath,
+    "--write-path", dataDirectory,
+    "--smoke-cwd", appPath,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore store.json byte-for-byte from store.before.json.",
+    "--allow-action", "build.local",
+    "--allow-action", "test.run",
+    "--allow-action", "data.migrate",
+    "--allow-action", "release.local",
+    "--data-target", dataPath,
+    "--data-scope", "records[*].schemaVersion",
+    "--migration-preview", "evidence/migration-preview.json",
+    "--backup-path", backupPath,
+  ];
+  mustFail(
+    proposalArgs,
+    /require both --allow-action data\.migrate and --allow-action data\.rollback/u,
+  );
+  const proposal = mustRunJson([
+    ...proposalArgs,
+    "--allow-action", "data.rollback",
+  ]);
+  assert.deepEqual(
+    proposal.delivery_profile.provider_bindings.map((binding) => binding.action),
+    ["data.migrate", "data.rollback", "release.local", "rollback.verify"],
+  );
+  assert.equal(proposal.delivery_profile.local_release_target.data_migration.target_path, dataPath);
+  assert.equal(
+    proposal.delivery_profile.local_release_target.data_migration.backup.path,
+    backupPath,
+  );
+  assert.deepEqual(
+    proposal.delivery_profile.local_release_target.data_migration.scopes,
+    ["records[*].schemaVersion"],
+  );
+  assert.equal(
+    proposal.delivery_profile.local_release_target.data_migration.preview_evidence.length,
+    1,
+  );
+
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--phase", "implementation",
+    ...humanApproval("Approve the exact reversible local data migration boundary"),
+  ]);
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-LOCAL-DATA"),
+    "--delivery-profile", "AUT-LOCAL-DATA",
+  ]);
+
+  const originalPreview = fs.readFileSync(previewPath, "utf8");
+  fs.writeFileSync(previewPath, `${originalPreview.trim()}\nchanged\n`, "utf8");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--confirm-action",
+    ...humanApproval("Attempt a migration after preview drift"),
+  ], /preview evidence changed after approval/u);
+  fs.writeFileSync(previewPath, originalPreview, "utf8");
+
+  fs.writeFileSync(backupPath, '{"stale":true}\n', "utf8");
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--confirm-action",
+    ...humanApproval("Attempt a migration with a stale backup"),
+  ], /existing backup does not match the current target/u);
+  fs.rmSync(backupPath);
+
+  const migrationCheckpoint = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+  ]);
+  assert.equal(migrationCheckpoint.status, "checkpoint_required");
+  assert.match(migrationCheckpoint.human_guidance.required_decision, /store\.json/u);
+  assert.match(migrationCheckpoint.human_guidance.required_decision, /records\[\*\]\.schemaVersion/u);
+  assert.match(migrationCheckpoint.human_guidance.required_decision, /store\.before\.json/u);
+
+  const firstMigrationAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--confirm-action",
+    ...humanApproval("Approve the exact previewed data migration"),
+  ]);
+  assert.equal(firstMigrationAuthorization.action_receipt.checkpoint_required, true);
+  assert.equal(
+    firstMigrationAuthorization.action_receipt.action_details
+      .provider_operation.precondition_receipt.proof.backup.status,
+    "absent",
+  );
+
+  fs.copyFileSync(dataPath, backupPath);
+  fs.writeFileSync(dataPath, '{"schemaVersion":2,"partial":true}\n', "utf8");
+  fs.writeFileSync(path.join(project, "evidence", "migration-failed.json"), '{"outcome":"failed"}\n');
+  const failedMigration = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--outcome", "failed",
+    "--evidence", "evidence/migration-failed.json",
+  ]);
+  assert.equal(failedMigration.action_receipt.outcome, "failed");
+  assert.equal(
+    failedMigration.action_receipt.authorization_receipt_ref.id,
+    firstMigrationAuthorization.action_receipt.id,
+  );
+
+  const beforeRollbackGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-DATA",
+    "--strict",
+    "--lifecycle-complete",
+    "--json",
+  ]);
+  assert.notEqual(beforeRollbackGate.status, 0);
+  const beforeRollbackReport = JSON.parse(beforeRollbackGate.stdout);
+  assert.ok(beforeRollbackReport.errors.some((error) =>
+    /requires a passing verified data\.rollback/u.test(error)));
+
+  const rollbackAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.rollback",
+    "--confirm-action",
+    ...humanApproval("Approve restoration from the exact migration backup"),
+  ]);
+  fs.copyFileSync(backupPath, dataPath);
+  fs.writeFileSync(path.join(project, "evidence", "rollback-passed.json"), '{"restored":true}\n');
+  const rollbackCompletion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.rollback",
+    "--outcome", "passed",
+    "--evidence", "evidence/rollback-passed.json",
+  ]);
+  assert.equal(
+    rollbackCompletion.action_receipt.authorization_receipt_ref.id,
+    rollbackAuthorization.action_receipt.id,
+  );
+  assert.equal(
+    rollbackCompletion.action_receipt.data_operation_verification.rollback_verified,
+    true,
+  );
+  assert.equal(
+    rollbackCompletion.action_receipt.data_operation_verification.after_target_sha256,
+    rollbackCompletion.action_receipt.data_operation_verification.backup_sha256,
+  );
+
+  const finalMigrationAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--confirm-action",
+    ...humanApproval("Approve the corrected exact data migration"),
+  ]);
+  fs.writeFileSync(dataPath, '{"schemaVersion":2,"records":[{"id":"A"}]}\n', "utf8");
+  fs.writeFileSync(path.join(project, "evidence", "migration-passed.json"), '{"outcome":"passed"}\n');
+  const finalMigration = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "data.migrate",
+    "--outcome", "passed",
+    "--evidence", "evidence/migration-passed.json",
+  ]);
+  assert.equal(
+    finalMigration.action_receipt.authorization_receipt_ref.id,
+    finalMigrationAuthorization.action_receipt.id,
+  );
+  assert.equal(finalMigration.action_receipt.data_operation_verification.transition, "migrated");
+
+  const afterRetryGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-DATA",
+    "--strict",
+    "--lifecycle-complete",
+    "--json",
+  ]);
+  assert.notEqual(afterRetryGate.status, 0);
+  const afterRetryReport = JSON.parse(afterRetryGate.stdout);
+  assert.equal(
+    afterRetryReport.errors.some((error) =>
+      /requires a passing verified data\.rollback|requires a passing data\.migrate after/u.test(error)),
+    false,
+  );
+  assert.ok(afterRetryReport.errors.some((error) =>
+    /requires release\.local after the final verified data\.migrate/u.test(error)));
+  assert.ok(afterRetryReport.errors.some((error) =>
+    /requires verified rollback evidence/u.test(error)));
+
+  const rollbackEvidencePath = path.join(project, "evidence", "rollback-passed.json");
+  const rollbackVerificationCheckpoint = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "rollback.verify",
+    "--evidence", "evidence/rollback-passed.json",
+  ]);
+  assert.equal(rollbackVerificationCheckpoint.status, "checkpoint_required");
+  assert.match(
+    rollbackVerificationCheckpoint.human_guidance.required_decision,
+    /rollback-passed\.json/u,
+  );
+  const rollbackVerificationAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "rollback.verify",
+    "--evidence", "evidence/rollback-passed.json",
+    "--confirm-action",
+    ...humanApproval("Approve the exact rollback rehearsal evidence"),
+  ]);
+  fs.writeFileSync(rollbackEvidencePath, '{"restored":"tampered"}\n');
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "rollback.verify",
+    "--outcome", "passed",
+    "--evidence", "evidence/rollback-passed.json",
+  ], /must use the exact evidence set bound at authorization/u);
+  fs.writeFileSync(rollbackEvidencePath, '{"restored":true}\n');
+  const rollbackVerification = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "rollback.verify",
+    "--outcome", "passed",
+    "--evidence", "evidence/rollback-passed.json",
+  ]);
+  assert.equal(
+    rollbackVerification.action_receipt.authorization_receipt_ref.id,
+    rollbackVerificationAuthorization.action_receipt.id,
+  );
+  assert.equal(rollbackVerification.action_receipt.rollback_verification.verified, true);
+  fs.writeFileSync(rollbackEvidencePath, '{"restored":"tampered-after-receipt"}\n');
+  const tamperedRollbackGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-DATA",
+    "--strict",
+    "--json",
+  ]);
+  assert.notEqual(tamperedRollbackGate.status, 0);
+  assert.match(
+    tamperedRollbackGate.stdout,
+    /rollback verification evidence changed|evidence changed after recording/u,
+  );
+  fs.writeFileSync(rollbackEvidencePath, '{"restored":true}\n');
+
+  if (!hostSupportsLocalSmokeSandbox()) return;
+  const releaseAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve the final local release after rollback verification"),
+  ]);
+  fs.writeFileSync(path.join(project, "evidence", "release-passed.json"), '{"released":true}\n');
+  const released = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-DATA",
+    "--action", "release.local",
+    "--outcome", "passed",
+    "--evidence", "evidence/release-passed.json",
+    "--smoke-cwd", appPath,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore store.json byte-for-byte from store.before.json.",
+  ], { timeout: 90_000 });
+  assert.equal(released.lifecycle_status, "terminal");
+  assert.equal(
+    released.action_receipt.authorization_receipt_ref.id,
+    releaseAuthorization.action_receipt.id,
+  );
+
+  const afterReleaseGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-DATA",
+    "--strict",
+    "--lifecycle-complete",
+    "--json",
+  ]);
+  const afterReleaseReport = JSON.parse(afterReleaseGate.stdout);
+  assert.equal(
+    afterReleaseReport.errors.some((error) =>
+      /data\.rollback|data\.migrate|release\.local after the final verified/u.test(error)),
+    false,
+    afterReleaseGate.stdout,
+  );
+});
+
 test("local release planning accepts a not-yet-created target while protected release execution requires it", () => {
   const project = tmpProject("local-release-planned-target");
   initializeAutonomyProject(project);
@@ -2352,8 +2704,10 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(proposed.local_release_target.smoke_cwd, releaseOutput);
   assert.deepEqual(proposed.provider_bindings, [
     { action: "release.local", provider_id: "local-filesystem" },
+    { action: "rollback.verify", provider_id: "local-filesystem" },
   ]);
   assert.equal(proposed.local_release_target.rollback.required, true);
+  assert.equal(proposed.local_release_target.rollback.verification_required, true);
   assert.match(proposed.local_release_target.rollback.procedure, /previous local build/u);
   assert.equal(proposed.local_release_target.external_access_allowed, false);
   assert.equal(proposed.local_release_target.production_access_allowed, false);
@@ -2426,6 +2780,55 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(checkpoint.status, "checkpoint_required");
   assert.equal(checkpoint.execution_allowed, false);
   assert.equal(checkpoint.checkpoints.includes("release.local"), true);
+
+  const missingRollbackGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--lifecycle-complete",
+    "--json",
+  ]);
+  assert.notEqual(missingRollbackGate.status, 0);
+  assert.match(
+    missingRollbackGate.stdout,
+    /requires verified rollback evidence/u,
+  );
+  fs.writeFileSync(
+    path.join(project, "rollback-rehearsal.json"),
+    '{"target":"local-release/app","restored":true}\n',
+    "utf8",
+  );
+  const rollbackVerificationAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-1",
+    "--action", "rollback.verify",
+    "--evidence", "rollback-rehearsal.json",
+    "--confirm-action",
+    ...humanApproval("Approve the exact local rollback rehearsal evidence"),
+  ]);
+  const rollbackVerificationCompletion = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-1",
+    "--action", "rollback.verify",
+    "--outcome", "passed",
+    "--evidence", "rollback-rehearsal.json",
+  ]);
+  assert.equal(
+    rollbackVerificationCompletion.action_receipt.authorization_receipt_ref.id,
+    rollbackVerificationAuthorization.action_receipt.id,
+  );
+  assert.equal(
+    rollbackVerificationCompletion.action_receipt.rollback_verification.target_root,
+    releaseRoot,
+  );
+  assert.deepEqual(
+    rollbackVerificationCompletion.action_receipt.rollback_verification.allowed_write_paths,
+    [releaseOutput],
+  );
 
   const releaseAuthorization = mustRunJson([
     "autonomy", "delivery", "action",

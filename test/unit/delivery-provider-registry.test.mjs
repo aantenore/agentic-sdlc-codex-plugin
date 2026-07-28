@@ -469,6 +469,140 @@ test("local-filesystem pins the root identity, permits bounded changes, and neve
   assertAgainstSchema(completion, "provider-operation-receipt");
 });
 
+test("local-filesystem verifies rollback evidence without executing or accepting a command", (t) => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "provider-rollback-evidence-"));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  const releaseRoot = path.join(workspace, "release");
+  const outputPath = path.join(releaseRoot, "dist");
+  const evidencePath = path.join(workspace, "evidence", "rollback-rehearsal.json");
+  fs.mkdirSync(outputPath, { recursive: true });
+  fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+  fs.writeFileSync(evidencePath, '{"restored":true}\n', "utf8");
+  const evidenceSha = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(evidencePath))
+    .digest("hex");
+  const subject = {
+    root_path: releaseRoot,
+    allowed_write_paths: [outputPath],
+    rollback_procedure: "Restore the previous dist snapshot byte-for-byte.",
+    evidence_root: workspace,
+    evidence: [{ path: evidencePath, sha256: evidenceSha }],
+  };
+  const registry = createProviderRegistry([createLocalFilesystemProvider()]);
+  const precondition = registry.observePrecondition(
+    "local-filesystem",
+    operation("ROLLBACK-VERIFY-001", "rollback.verify", subject),
+  );
+  const completion = registry.verifyCompletion(
+    "local-filesystem",
+    operation("ROLLBACK-VERIFY-001", "rollback.verify", subject, TIME.completed),
+    precondition,
+  );
+  assert.equal(completion.proof.transition, "rollback_evidence_verified");
+  assert.equal(completion.proof.verified, true);
+  assert.equal(Object.hasOwn(completion.subject, "command"), false);
+  assertAgainstSchema(completion, "provider-operation-receipt");
+
+  fs.writeFileSync(evidencePath, '{"restored":false}\n', "utf8");
+  assertProviderError(() => registry.verifyCompletion(
+    "local-filesystem",
+    operation("ROLLBACK-VERIFY-001", "rollback.verify", subject, TIME.completed),
+    precondition,
+  ), "provider_boundary_invalid");
+});
+
+test("local-filesystem verifies an external reversible data migration and rollback by exact file hashes", (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-local-data-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const dataPath = path.join(tempRoot, "data", "store.json");
+  const backupPath = path.join(tempRoot, "backup", "store.before.json");
+  fs.mkdirSync(path.dirname(dataPath), { recursive: true });
+  fs.writeFileSync(dataPath, '{"version":1}\n', "utf8");
+  const registry = createProviderRegistry([createLocalFilesystemProvider()]);
+  const subject = {
+    root_path: tempRoot,
+    target_path: dataPath,
+    scopes: ["records.version"],
+    preview_evidence: [{ path: "evidence/preview.json", sha256: "a".repeat(64) }],
+    backup_path: backupPath,
+    rollback: "Restore the exact target bytes from the approved backup.",
+  };
+
+  const migrationPrecondition = registry.observePrecondition(
+    "local-filesystem",
+    operation("LOCAL-DATA-MIGRATE", "data.migrate", subject),
+  );
+  assert.equal(migrationPrecondition.proof.backup.status, "absent");
+  fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+  fs.copyFileSync(dataPath, backupPath);
+  fs.writeFileSync(dataPath, '{"version":2}\n', "utf8");
+  const migrationCompletion = registry.verifyCompletion(
+    "local-filesystem",
+    operation("LOCAL-DATA-MIGRATE", "data.migrate", subject, TIME.completed),
+    migrationPrecondition,
+  );
+  assert.equal(migrationCompletion.proof.transition, "migrated");
+  assert.equal(
+    migrationCompletion.proof.backup_sha256,
+    migrationCompletion.proof.before_target_sha256,
+  );
+  assert.notEqual(
+    migrationCompletion.proof.after_target_sha256,
+    migrationCompletion.proof.before_target_sha256,
+  );
+  assertAgainstSchema(migrationCompletion, "provider-operation-receipt");
+
+  const rollbackPrecondition = registry.observePrecondition(
+    "local-filesystem",
+    operation("LOCAL-DATA-ROLLBACK", "data.rollback", subject),
+  );
+  fs.copyFileSync(backupPath, dataPath);
+  const rollbackCompletion = registry.verifyCompletion(
+    "local-filesystem",
+    operation("LOCAL-DATA-ROLLBACK", "data.rollback", subject, TIME.completed),
+    rollbackPrecondition,
+  );
+  assert.equal(rollbackCompletion.proof.transition, "rolled_back");
+  assert.equal(
+    rollbackCompletion.proof.after_target_sha256,
+    rollbackCompletion.proof.backup_sha256,
+  );
+  assertAgainstSchema(rollbackCompletion, "provider-operation-receipt");
+});
+
+test("local-filesystem rejects a stale backup and an unproven rollback", (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-local-data-negative-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const dataPath = path.join(tempRoot, "data.json");
+  const backupPath = path.join(tempRoot, "data.backup.json");
+  fs.writeFileSync(dataPath, '{"version":2}\n', "utf8");
+  fs.writeFileSync(backupPath, '{"version":1}\n', "utf8");
+  const registry = createProviderRegistry([createLocalFilesystemProvider()]);
+  const subject = {
+    root_path: tempRoot,
+    target_path: dataPath,
+    scopes: ["records.version"],
+    preview_evidence: [{ path: "evidence/preview.json", sha256: "b".repeat(64) }],
+    backup_path: backupPath,
+    rollback: "Restore the target from the exact backup.",
+  };
+  assertProviderError(() => registry.observePrecondition(
+    "local-filesystem",
+    operation("LOCAL-DATA-STALE", "data.migrate", subject),
+  ), "provider_boundary_invalid");
+
+  const rollbackPrecondition = registry.observePrecondition(
+    "local-filesystem",
+    operation("LOCAL-DATA-NOT-RESTORED", "data.rollback", subject),
+  );
+  assertProviderError(() => registry.verifyCompletion(
+    "local-filesystem",
+    operation("LOCAL-DATA-NOT-RESTORED", "data.rollback", subject, TIME.completed),
+    rollbackPrecondition,
+  ), "provider_completion_unproven");
+});
+
 test("local-filesystem fails closed on traversal", (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-boundary-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-outside-"));
