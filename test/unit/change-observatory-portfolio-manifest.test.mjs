@@ -11,6 +11,7 @@ import {
   loadPortfolioManifest,
 } from "../../lib/change-observatory/portfolio-manifest.mjs";
 import { captureDirectoryIdentity } from "../../lib/change-observatory/path-safety.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 async function fixture(t, name = "valid") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `observatory-portfolio-${name}-`));
@@ -249,6 +250,7 @@ test("rejects malformed JSON, invalid UTF-8, and files larger than 256 KiB", asy
 });
 
 test("rejects symlinked project paths", async (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = await fixture(t, "symlink");
   await fs.symlink(path.join(root, "projects", "alpha"), path.join(root, "projects", "alias"), "dir");
   await writeManifest(root, manifest([{ id: "alias", path: "projects/alias" }]));
@@ -259,7 +261,8 @@ test("rejects symlinked project paths", async (t) => {
   );
 });
 
-test("rejects symlinked manifests and a symlinked portfolio root", async (t) => {
+test("rejects symlinked manifests", async (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const root = await fixture(t, "manifest-symlink");
   await writeManifest(root, manifest(), "real.json");
   await fs.symlink(path.join(root, "real.json"), path.join(root, "portfolio.json"), "file");
@@ -267,10 +270,16 @@ test("rejects symlinked manifests and a symlinked portfolio root", async (t) => 
     () => loadPortfolioManifest(root, "portfolio.json"),
     (error) => error.code === "symlink_forbidden" && error.statusCode === 403,
   );
+});
 
+test("rejects a symlinked portfolio root", async (t) => {
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  if (!requireSymlinkSupport(t, linkType)) return;
+  const root = await fixture(t, "root-symlink");
+  await writeManifest(root, manifest(), "real.json");
   const alias = `${root}-alias`;
   t.after(() => fs.rm(alias, { force: true }));
-  await fs.symlink(root, alias, "dir");
+  await fs.symlink(root, alias, linkType);
   await assert.rejects(
     () => loadPortfolioManifest(alias, "real.json"),
     (error) => error.code === "portfolio_root_symlink" && error.statusCode === 403,
@@ -278,6 +287,7 @@ test("rejects symlinked manifests and a symlinked portfolio root", async (t) => 
 });
 
 test("rejects a portfolio root reached through a symlinked parent component", async (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const holder = await fs.mkdtemp(path.join(os.tmpdir(), "observatory-portfolio-parent-symlink-"));
   t.after(() => fs.rm(holder, { recursive: true, force: true }));
   const realParent = path.join(holder, "real-parent");

@@ -10,6 +10,7 @@ import { computeStableHash } from "../lib/canonical.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
+import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
@@ -924,6 +925,54 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
   assert.match(doctorGuidance.firstLine, /^Outcome: All available health checks passed/u);
   assert.match(doctorGuidance.technical, /Agentic SDLC doctor: passed/u);
   assert.match(doctorGuidance.technical, /PASS rtk-optimization-provider:/u);
+});
+
+test("Windows shell-free test routing resolves launchers from the requested project root", {
+  skip: process.platform === "win32" ? false : "Windows command-shim regression",
+}, () => {
+  const project = tmpProject("rtk-windows-project-root");
+  initProject(project);
+  const shimRoot = tmpProject("rtk-windows-shim");
+  const launcher = path.join(shimRoot, "jest-runner.js");
+  const shim = path.join(shimRoot, "jest.cmd");
+  const marker = path.join(project, "jest-cwd.txt");
+  fs.writeFileSync(launcher, [
+    "\"use strict\";",
+    "const fs = require(\"node:fs\");",
+    "fs.appendFileSync(process.env.JEST_CWD_MARKER, `${process.cwd()}\\n`, \"utf8\");",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(shim, [
+    "@ECHO off",
+    '"%~dp0\\node.exe" "%~dp0\\jest-runner.js" %*',
+    "",
+  ].join("\r\n"));
+  const pathKey = Object.keys(process.env)
+    .find((key) => key.toLowerCase() === "path") || "PATH";
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["jest"]),
+    "--exact",
+  ], {
+    env: {
+      [pathKey]: shimRoot,
+      JEST_CWD_MARKER: marker,
+    },
+  });
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["jest"]),
+  ], {
+    env: {
+      [pathKey]: shimRoot,
+      JEST_CWD_MARKER: marker,
+    },
+  });
+  assert.deepEqual(
+    fs.readFileSync(marker, "utf8").trim().split("\n"),
+    [project, project],
+  );
 });
 
 test("standard RTK PATH lookup rejects project-local shadows and spawns the canonical host path", {
@@ -3924,7 +3973,7 @@ test("cache tampering is not used as source of truth for output resolve", () => 
   mustFail(["output", "resolve", "--root", project, "--story", "ST-001", "--type", "functional-analysis"], /cache output resolution differs/i);
 });
 
-test("unsafe config directories and symlink context escapes are blocked", () => {
+test("unsafe config directories are blocked", () => {
   const project = tmpProject("safe-paths");
   const templateDir = tmpProject("bad-template");
   fs.cpSync(path.join(repoRoot, "templates"), templateDir, { recursive: true });
@@ -3934,7 +3983,11 @@ test("unsafe config directories and symlink context escapes are blocked", () => 
   writeJson(configPath, config);
   mustFail(["init", "--root", project, "--template-dir", templateDir], /unsafe|must match pattern/);
   assert.equal(fs.existsSync(path.resolve(project, "..", "escape")), false);
+});
 
+test("symlink context escapes are blocked", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("safe-paths-symlink");
   initProject(project);
   const outside = path.join(os.tmpdir(), `outside-${Date.now()}.md`);
   fs.writeFileSync(outside, "outside");

@@ -124,6 +124,10 @@ test("catalog options and explicit compatibility options remain accepted by the 
 test("config recovery uses catalog mutation intent for conditional report writers", () => {
   const project = temporaryProject("config-recovery");
   mustRun(["init", "--root", project, "--project-name", "Dispatch recovery"]);
+  assert.match(
+    fs.readFileSync(path.join(project, ".sdlc", ".gitattributes"), "utf8"),
+    /\*\.jsonl text eol=lf/u,
+  );
   const configPath = path.join(project, ".sdlc", "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.claim_policy.default_ttl_seconds += 1;

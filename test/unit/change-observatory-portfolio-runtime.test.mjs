@@ -59,7 +59,7 @@ test("serves compact summaries, lazy project detail, and project-scoped sources"
 });
 
 test("degrades a swapped project independently while direct access fails closed", async (t) => {
-  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix rename semantics");
+  if (process.platform === "win32") return t.skip("Directory swap coverage requires Unix rename semantics");
   const fixture = await createPortfolioFixture(t);
   const runtime = await createPortfolioRuntime({
     portfolioRoot: fixture.root,
@@ -114,7 +114,7 @@ test("pins the manifest envelope and rejects unknown project identifiers", async
 });
 
 test("revalidates a project root after runtime creation and isolates a construction race", async (t) => {
-  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix rename semantics");
+  if (process.platform === "win32") return t.skip("Directory swap coverage requires Unix rename semantics");
   const fixture = await createPortfolioFixture(t);
   let swapped = false;
   const runtime = await createPortfolioRuntime({

@@ -13,12 +13,14 @@ import { DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT } from "../../lib/governance/mutat
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
+const DETERMINISTIC_USER_INFO = path.join(ROOT, "test", "fixtures", "deterministic-user-info.cjs");
+const DETERMINISTIC_USERNAME = "agentic-sdlc-test";
 const CLI_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
 
 function verifiedCliActor() {
   const credential = typeof process.getuid === "function"
     ? `uid:${process.getuid()}`
-    : `user:${os.userInfo().username}`;
+    : `user:${DETERMINISTIC_USERNAME}`;
   const identityHash = crypto.createHash("sha256")
     .update(`${process.platform}\0${credential}`)
     .digest("hex")
@@ -35,7 +37,17 @@ function projectFixture(t, label) {
 function run(project, args) {
   const env = { ...process.env };
   for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) delete env[key];
-  return spawnSync(process.execPath, [CLI, ...args, "--root", project, "--json"], {
+  const deterministicIdentityArgs = process.platform === "win32"
+    ? ["--require", DETERMINISTIC_USER_INFO]
+    : [];
+  return spawnSync(process.execPath, [
+    ...deterministicIdentityArgs,
+    CLI,
+    ...args,
+    "--root",
+    project,
+    "--json",
+  ], {
     cwd: project,
     env,
     encoding: "utf8",

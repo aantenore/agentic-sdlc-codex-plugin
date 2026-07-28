@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   RTK_GAIN_CONTRACT,
@@ -23,6 +24,37 @@ function gainReport(overrides = {}) {
       total_time_ms: 256_724,
       avg_time_ms: 15_101,
       ...overrides,
+    },
+  };
+}
+
+function virtualWindowsFs(files) {
+  const entries = new Map(
+    Object.entries(files).map(([filePath, contents]) => [
+      path.win32.normalize(filePath).toLowerCase(),
+      String(contents),
+    ]),
+  );
+  const lookup = (filePath) => {
+    const key = path.win32.normalize(filePath).toLowerCase();
+    if (!entries.has(key)) {
+      const error = new Error(`ENOENT: ${filePath}`);
+      error.code = "ENOENT";
+      throw error;
+    }
+    return entries.get(key);
+  };
+  return {
+    lstatSync(filePath) {
+      const contents = lookup(filePath);
+      return {
+        size: Buffer.byteLength(contents),
+        isFile: () => true,
+        isSymbolicLink: () => false,
+      };
+    },
+    readFileSync(filePath) {
+      return lookup(filePath);
     },
   };
 }
@@ -124,7 +156,7 @@ test("telemetry collection uses a shell-free configured command and preserves so
 });
 
 test("automatic routing optimizes safe vectors, preserves machine output natively, and rejects other commands", () => {
-  assert.deepEqual(routeRtkCommand(["npm", "test"]), {
+  assert.deepEqual(routeRtkCommand(["npm", "test"], { platform: "linux" }), {
     mode: "rtk",
     profile: "test",
     command: ["npm", "test"],
@@ -229,14 +261,312 @@ test("an explicitly requested unsafe test profile is rejected instead of invokin
   );
 });
 
-test("Windows command shims normalize to the same safe RTK routes", () => {
-  const npm = routeRtkCommand(["npm.cmd", "test"]);
+test("explicit executable suffixes normalize to the same safe RTK routes", () => {
+  const npm = routeRtkCommand(["npm.cmd", "test"], { platform: "linux" });
   assert.equal(npm.mode, "rtk");
   assert.equal(npm.profile, "test");
   assert.deepEqual(npm.rtk_arguments, ["test", "npm.cmd", "test"]);
 
-  const git = routeRtkCommand(["git.exe", "status", "--short"]);
+  const git = routeRtkCommand(["git.exe", "status", "--short"], { platform: "linux" });
   assert.equal(git.mode, "rtk");
   assert.equal(git.profile, "git");
   assert.deepEqual(git.rtk_arguments, ["git", "status", "--short"]);
+});
+
+test("Windows shell shims without an explicit shell-free adapter fail closed", () => {
+  for (const command of [
+    ["git.cmd", "status", "--short"],
+    ["rg.bat", "needle"],
+    ["node.cmd", "--test"],
+    ["pytest.bat"],
+    ["bun.cmd", "test"],
+  ]) {
+    assert.throws(
+      () => routeRtkCommand(command, { platform: "win32" }),
+      /shell shim.*cannot execute safely/u,
+      command.join(" "),
+    );
+  }
+});
+
+test("Windows test shims resolve to shell-free Node launchers for RTK and native fallback", () => {
+  const nodeExecutable = "C:\\Node\\node.exe";
+  const npmLauncher = "C:\\Tools\\node_modules\\npm\\bin\\npm-cli.js";
+  const fsModule = virtualWindowsFs({
+    [nodeExecutable]: "",
+    "C:\\Tools\\npm.cmd": [
+      "@ECHO off",
+      'SET "NODE_EXE=%~dp0\\node.exe"',
+      'SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+      '"%NODE_EXE%" "%NPM_CLI_JS%" %*',
+      "",
+    ].join("\r\n"),
+    [npmLauncher]: "",
+  });
+  const options = {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { Path: "C:\\Tools" },
+    node_executable: nodeExecutable,
+    fs_module: fsModule,
+  };
+
+  const optimized = routeRtkCommand(["npm", "test"], options);
+  assert.deepEqual(optimized.command, ["npm", "test"]);
+  assert.deepEqual(optimized.execution_command, [
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+  assert.deepEqual(optimized.rtk_arguments, [
+    "test",
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+  assert.equal(optimized.execution_command.some((entry) => /\.cmd$/iu.test(entry)), false);
+  assert.equal(optimized.rtk_arguments.some((entry) => /\.cmd$/iu.test(entry)), false);
+
+  const native = routeRtkCommand(["npm.cmd", "test"], {
+    ...options,
+    profile: "native",
+  });
+  assert.equal(native.mode, "native");
+  assert.deepEqual(native.execution_command, [
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+  assert.equal(native.rtk_arguments, null);
+});
+
+test("Windows routing prefers real executables and fails closed for opaque command shims", () => {
+  const executableFs = virtualWindowsFs({
+    "C:\\Tools\\pnpm.exe": "",
+  });
+  const executable = routeRtkCommand(["pnpm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { PATH: "C:\\Tools" },
+    node_executable: "C:\\Node\\node.exe",
+    fs_module: executableFs,
+  });
+  assert.deepEqual(executable.execution_command, [
+    "C:\\Tools\\pnpm.exe",
+    "test",
+  ]);
+  assert.deepEqual(executable.rtk_arguments, [
+    "test",
+    "C:\\Tools\\pnpm.exe",
+    "test",
+  ]);
+
+  const opaqueShimFs = virtualWindowsFs({
+    "C:\\Node\\node.exe": "",
+    "C:\\Node\\node_modules\\npm\\bin\\npm-cli.js": "",
+    "C:\\Tools\\npm.cmd": "@ECHO off\r\nnpm %*\r\n",
+  });
+  assert.throws(
+    () => routeRtkCommand(["npm", "test"], {
+      platform: "win32",
+      cwd: "C:\\workspace",
+      env: { PATH: "C:\\Tools" },
+      node_executable: "C:\\Node\\node.exe",
+      fs_module: opaqueShimFs,
+    }),
+    /without a safe shell-free Node launcher/u,
+  );
+});
+
+test("Windows PATH lookup is directory-major and honors only safe PATHEXT entries", () => {
+  const nodeExecutable = "C:\\Node\\node.exe";
+  const trustedLauncher = "C:\\Trusted\\npm-cli.js";
+  const directoryMajorFs = virtualWindowsFs({
+    [nodeExecutable]: "",
+    "C:\\Trusted\\npm.cmd": [
+      "@ECHO off",
+      '"%~dp0\\node.exe" "%~dp0\\npm-cli.js" %*',
+      "",
+    ].join("\r\n"),
+    [trustedLauncher]: "",
+    "C:\\Later\\npm.exe": "",
+  });
+  const directoryMajor = routeRtkCommand(["npm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: {
+      PATH: "C:\\Trusted;C:\\Later",
+      PATHEXT: ".CMD;.EXE;.JS;.CMD",
+    },
+    node_executable: nodeExecutable,
+    fs_module: directoryMajorFs,
+  });
+  assert.deepEqual(directoryMajor.execution_command, [
+    nodeExecutable,
+    trustedLauncher,
+    "test",
+  ]);
+
+  const filteredFs = virtualWindowsFs({
+    "C:\\Trusted\\npm.js": "process.exitCode = 99;",
+    "C:\\Later\\npm.exe": "",
+  });
+  const filtered = routeRtkCommand(["npm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: {
+      PATH: "C:\\Trusted;C:\\Later",
+      PATHEXT: ".JS;EXE",
+    },
+    node_executable: nodeExecutable,
+    fs_module: filteredFs,
+  });
+  assert.deepEqual(filtered.execution_command, [
+    "C:\\Later\\npm.exe",
+    "test",
+  ]);
+});
+
+test("Windows generated Node shims require an actual recognized Node invocation", () => {
+  const nodeExecutable = "C:\\Tools\\node.exe";
+  const npmLauncher = "C:\\Tools\\node_modules\\npm\\bin\\npm-cli.js";
+  const fsModule = virtualWindowsFs({
+    [nodeExecutable]: "",
+    [npmLauncher]: "",
+    "C:\\Tools\\npm.cmd": [
+      "@ECHO off",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ") ELSE (",
+      '  SET "_prog=node"',
+      ")",
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\\node_modules\\npm\\bin\\npm-cli.js" %*',
+      "",
+    ].join("\r\n"),
+  });
+  const route = routeRtkCommand(["npm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { PATH: "C:\\Tools", PATHEXT: ".CMD;.EXE" },
+    node_executable: "C:\\Node\\node.exe",
+    fs_module: fsModule,
+  });
+  assert.deepEqual(route.execution_command, [
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+});
+
+test("Windows npm shims with dynamic prefix selection use only the known installation launcher", () => {
+  const nodeExecutable = "C:\\Node\\node.exe";
+  const npmLauncher = "C:\\Node\\node_modules\\npm\\bin\\npm-cli.js";
+  const fsModule = virtualWindowsFs({
+    [nodeExecutable]: "",
+    [npmLauncher]: "",
+    "C:\\Node\\npm.cmd": [
+      ":: Created by npm, please don't edit manually.",
+      "@ECHO off",
+      "SETLOCAL",
+      'SET "NODE_EXE=%~dp0\\node.exe"',
+      'IF NOT EXIST "%NODE_EXE%" (',
+      '  SET "NODE_EXE=node"',
+      ")",
+      'SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+      'FOR /F "delims=" %%F IN (\'CALL "%NODE_EXE%" "%NPM_CLI_JS%" prefix -g\') DO (',
+      '  SET "NPM_PREFIX_NPM_CLI_JS=%%F\\node_modules\\npm\\bin\\npm-cli.js"',
+      ")",
+      'IF EXIST "%NPM_PREFIX_NPM_CLI_JS%" (',
+      '  SET "NPM_CLI_JS=%NPM_PREFIX_NPM_CLI_JS%"',
+      ")",
+      '"%NODE_EXE%" "%NPM_CLI_JS%" %*',
+      "",
+    ].join("\r\n"),
+  });
+  const route = routeRtkCommand(["npm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { PATH: "C:\\Node", PATHEXT: ".CMD;.EXE" },
+    node_executable: nodeExecutable,
+    fs_module: fsModule,
+  });
+  assert.deepEqual(route.execution_command, [
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+});
+
+test("Windows shim parsing rejects commented, echoed, or reassigned JavaScript references", () => {
+  const nodeExecutable = "C:\\Node\\node.exe";
+  const payload = "C:\\Tools\\payload.js";
+  const opaqueSources = [
+    '@REM "%~dp0\\payload.js" %*',
+    '@echo "%~dp0\\payload.js" %*',
+    ':: "%~dp0\\payload.js" %*',
+    [
+      '@SET "PAYLOAD=%~dp0\\payload.js"',
+      '@ECHO "%PAYLOAD%" %*',
+    ].join("\r\n"),
+    [
+      '@SET "NODE_EXE=node"',
+      '@SET "PAYLOAD=%~dp0\\payload.js"',
+      '@SET "PAYLOAD=ignored.txt"',
+      '"%NODE_EXE%" "%PAYLOAD%" %*',
+    ].join("\r\n"),
+    [
+      '@SET "NODE_EXE=node"',
+      '@SET "NODE_EXE=not-node.exe"',
+      '@SET "PAYLOAD=%~dp0\\payload.js"',
+      '"%NODE_EXE%" "%PAYLOAD%" %*',
+    ].join("\r\n"),
+  ];
+  for (const source of opaqueSources) {
+    const fsModule = virtualWindowsFs({
+      [nodeExecutable]: "",
+      [payload]: "process.exitCode = 99;",
+      "C:\\Tools\\npm.cmd": `${source}\r\n`,
+    });
+    assert.throws(
+      () => routeRtkCommand(["npm", "test"], {
+        platform: "win32",
+        cwd: "C:\\workspace",
+        env: { PATH: "C:\\Tools", PATHEXT: ".CMD" },
+        node_executable: nodeExecutable,
+        fs_module: fsModule,
+      }),
+      /without a safe shell-free Node launcher/u,
+      source,
+    );
+  }
+});
+
+test("Windows npm routing can use the Node installation launcher without an implicit cwd lookup", () => {
+  const nodeExecutable = "C:\\Node\\node.exe";
+  const npmLauncher = "C:\\Node\\node_modules\\npm\\bin\\npm-cli.js";
+  const fsModule = virtualWindowsFs({
+    [nodeExecutable]: "",
+    [npmLauncher]: "",
+    "C:\\workspace\\npm.exe": "",
+  });
+  const route = routeRtkCommand(["npm", "test"], {
+    platform: "win32",
+    cwd: "C:\\workspace",
+    env: { PATH: "" },
+    node_executable: nodeExecutable,
+    fs_module: fsModule,
+  });
+  assert.deepEqual(route.execution_command, [
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
+  assert.deepEqual(route.rtk_arguments, [
+    "test",
+    nodeExecutable,
+    npmLauncher,
+    "test",
+  ]);
 });
