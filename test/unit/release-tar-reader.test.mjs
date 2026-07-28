@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { readTarGzipArchive } from "../../lib/release/tar-reader.mjs";
 import { buildTarGzip } from "../helpers/release-package-fixture.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 
 const DEFAULT_LIMITS = {
@@ -185,7 +186,7 @@ test("enforces compressed, header, single-file, total, PAX, and decompressed lim
 });
 
 
-test("rejects corrupt headers, incomplete terminators, and archive symlinks", () => {
+test("rejects corrupt headers and incomplete terminators", () => {
   withArchive([{ path: "package/a", data: "x", corruptChecksum: true }], (archive) => {
     expectCode("HEADER_CHECKSUM_MISMATCH", () => readTarGzipArchive(archive, DEFAULT_LIMITS));
   });
@@ -195,7 +196,10 @@ test("rejects corrupt headers, incomplete terminators, and archive symlinks", ()
   withArchive([{ path: "package/a", data: "x" }], (archive) => {
     expectCode("MISSING_TAR_TERMINATOR", () => readTarGzipArchive(archive, DEFAULT_LIMITS));
   }, { zeroBlocks: 1 });
+});
 
+test("rejects an archive reached through a symlink", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const root = mkdtempSync(path.join(os.tmpdir(), "release-tar-link-"));
   try {
     const target = path.join(root, "target.tgz");

@@ -24,6 +24,7 @@ import {
 } from "../../lib/delivery/providers/github-cli.mjs";
 import { createLocalFilesystemProvider } from "../../lib/delivery/providers/local-filesystem.mjs";
 import { assertAgainstSchema, validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 const SHA = Object.freeze({
   base: "a".repeat(40),
@@ -468,7 +469,7 @@ test("local-filesystem pins the root identity, permits bounded changes, and neve
   assertAgainstSchema(completion, "provider-operation-receipt");
 });
 
-test("local-filesystem fails closed on traversal and symlink escape", (t) => {
+test("local-filesystem fails closed on traversal", (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-boundary-"));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-outside-"));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
@@ -482,7 +483,15 @@ test("local-filesystem fails closed on traversal and symlink escape", (t) => {
       allowed_write_paths: [path.join(tempRoot, "..", path.basename(outside))],
     }),
   ), "provider_operation_invalid");
+});
 
+test("local-filesystem fails closed on symlink escape", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "provider-boundary-symlink-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-outside-symlink-"));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const registry = createProviderRegistry([createLocalFilesystemProvider()]);
   const link = path.join(tempRoot, "linked");
   fs.symlinkSync(outside, link, "dir");
   assertProviderError(() => registry.observePrecondition(

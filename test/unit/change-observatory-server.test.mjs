@@ -13,6 +13,7 @@ import {
 } from "../../lib/change-observatory/index.mjs";
 import { ObservatoryPathError } from "../../lib/change-observatory/path-safety.mjs";
 import { verifySupportBundleDigest } from "../../lib/observability/support-bundle.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 const CORRELATION_PATTERN = /^corr-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 
@@ -220,8 +221,7 @@ test("a privacy change during a model build prevents the mixed-policy response",
   assert.doesNotMatch(blocked.body, /EMP-777777|server-fixture/u);
 });
 
-test("invalid or symlinked configuration introduced after startup fails closed", async (t) => {
-  if (process.platform === "win32") t.skip("Symlink lifecycle coverage requires Unix semantics");
+test("invalid configuration introduced after startup fails closed", async (t) => {
   const fixture = await createServerFixture(t);
   const running = await startObservatoryServer({
     projectRoot: fixture.projectRoot,
@@ -239,7 +239,10 @@ test("invalid or symlinked configuration introduced after startup fails closed",
   assert.equal(invalid.statusCode, 503);
   assert.equal(invalid.json.error.code, "observability_configuration_invalid");
   assert.doesNotMatch(invalid.body, /github_pat_/u);
+});
 
+test("symlinked configuration introduced after startup fails closed", async (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
   const secondFixture = await createServerFixture(t);
   const second = await startObservatoryServer({
     projectRoot: secondFixture.projectRoot,
@@ -437,23 +440,8 @@ test("carries a validated locale to the browser without exposing the access toke
   assert.match(access.hash, /^#access_token=[A-Za-z0-9_-]+$/u);
 });
 
-test("rejects invalid Host, write methods, traversal, derived evidence, and symlink escape", async (t) => {
+test("rejects invalid Host, write methods, traversal, derived evidence, and unsafe source formats", async (t) => {
   const fixture = await createServerFixture(t);
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-outside-"));
-  t.after(() => fs.rm(outside, { recursive: true, force: true }));
-  await fs.writeFile(path.join(outside, "secret.json"), "{\"secret\":true}\n", "utf8");
-  await fs.mkdir(path.join(fixture.projectRoot, "project-hidden"), { recursive: true });
-  await fs.writeFile(path.join(fixture.projectRoot, "project-hidden", "secret.json"), "{\"secret\":true}\n", "utf8");
-  await fs.symlink(
-    outside,
-    path.join(fixture.projectRoot, ".sdlc", "external"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
-  await fs.symlink(
-    path.join(fixture.projectRoot, "project-hidden"),
-    path.join(fixture.projectRoot, ".sdlc", "project-hidden"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
   await fs.mkdir(path.join(fixture.projectRoot, ".sdlc", "cache"), { recursive: true });
   await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "cache", "derived.json"), "{}\n", "utf8");
 
@@ -499,20 +487,6 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
   const encodedStaticTraversal = await request(running, "/%2e%2e%2fsecret.json");
   assert.equal(encodedStaticTraversal.statusCode, 403);
 
-  const symlink = await request(
-    running,
-    `/api/v1/source?path=${encodeURIComponent(".sdlc/external/secret.json")}`,
-  );
-  assert.equal(symlink.statusCode, 403);
-  assert.equal(symlink.json.error.code, "symlink_forbidden");
-
-  const inProjectSymlink = await request(
-    running,
-    `/api/v1/source?path=${encodeURIComponent(".sdlc/project-hidden/secret.json")}`,
-  );
-  assert.equal(inProjectSymlink.statusCode, 403);
-  assert.equal(inProjectSymlink.json.error.code, "symlink_forbidden");
-
   const derived = await request(
     running,
     `/api/v1/source?path=${encodeURIComponent(".sdlc/cache/derived.json")}`,
@@ -527,18 +501,6 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
   assert.equal(upperDerived.statusCode, 403);
   assert.equal(upperDerived.json.error.code, "derived_source_forbidden");
 
-  await fs.symlink(
-    path.join(fixture.projectRoot, ".sdlc", "cache"),
-    path.join(fixture.projectRoot, ".sdlc", "alias"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
-  const alias = await request(
-    running,
-    `/api/v1/source?path=${encodeURIComponent(".sdlc/alias/derived.json")}`,
-  );
-  assert.equal(alias.statusCode, 403);
-  assert.equal(alias.json.error.code, "symlink_forbidden");
-
   for (const relative of [".sdlc/.env", ".sdlc/private.pem", ".sdlc/blob.bin"]) {
     await fs.writeFile(path.join(fixture.projectRoot, ...relative.split("/")), "secret\0bytes");
     const blocked = await request(
@@ -550,8 +512,51 @@ test("rejects invalid Host, write methods, traversal, derived evidence, and syml
   }
 });
 
+test("rejects symlink source escapes", async (t) => {
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  if (!requireSymlinkSupport(t, linkType)) return;
+  const fixture = await createServerFixture(t);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-outside-"));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.writeFile(path.join(outside, "secret.json"), "{\"secret\":true}\n", "utf8");
+  await fs.mkdir(path.join(fixture.projectRoot, "project-hidden"), { recursive: true });
+  await fs.writeFile(path.join(fixture.projectRoot, "project-hidden", "secret.json"), "{\"secret\":true}\n", "utf8");
+  await fs.mkdir(path.join(fixture.projectRoot, ".sdlc", "cache"), { recursive: true });
+  await fs.writeFile(path.join(fixture.projectRoot, ".sdlc", "cache", "derived.json"), "{}\n", "utf8");
+  await fs.symlink(outside, path.join(fixture.projectRoot, ".sdlc", "external"), linkType);
+  await fs.symlink(
+    path.join(fixture.projectRoot, "project-hidden"),
+    path.join(fixture.projectRoot, ".sdlc", "project-hidden"),
+    linkType,
+  );
+  await fs.symlink(
+    path.join(fixture.projectRoot, ".sdlc", "cache"),
+    path.join(fixture.projectRoot, ".sdlc", "alias"),
+    linkType,
+  );
+
+  const running = await startObservatoryServer({
+    projectRoot: fixture.projectRoot,
+    assetRoot: fixture.assetRoot,
+  });
+  t.after(() => running.close());
+
+  for (const relative of [
+    ".sdlc/external/secret.json",
+    ".sdlc/project-hidden/secret.json",
+    ".sdlc/alias/derived.json",
+  ]) {
+    const response = await request(
+      running,
+      `/api/v1/source?path=${encodeURIComponent(relative)}`,
+    );
+    assert.equal(response.statusCode, 403, relative);
+    assert.equal(response.json.error.code, "symlink_forbidden", relative);
+  }
+});
+
 test("rejects a symlinked knowledge base and a swapped project root", async (t) => {
-  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix symlink semantics");
+  if (process.platform === "win32") return t.skip("Directory swap coverage requires Unix symlink semantics");
 
   const symlinkFixture = await createServerFixture(t);
   const hiddenKnowledgeBase = path.join(symlinkFixture.projectRoot, "hidden-sdlc");
@@ -698,7 +703,7 @@ test("allows an explicit server collection limit to override the safe default", 
 });
 
 test("does not serve a warm model after the knowledge-base boundary becomes a symlink", async (t) => {
-  if (process.platform === "win32") t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
+  if (process.platform === "win32") return t.skip("Knowledge-base swap coverage requires Unix symlink semantics");
 
   const fixture = await createServerFixture(t);
   const running = await startObservatoryServer({

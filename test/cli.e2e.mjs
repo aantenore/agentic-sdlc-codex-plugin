@@ -10,9 +10,11 @@ import { computeStableHash } from "../lib/canonical.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
+import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bin = path.join(repoRoot, "bin", "agentic-sdlc.mjs");
+const portableRtkTestCommand = Object.freeze(["node", "--test"]);
 const tempProjects = new Set();
 const meteringFixtureKeys = new Map();
 
@@ -881,11 +883,15 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
 
   const optimized = mustRun([
     "optimization", "run", "--root", project,
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ]);
-  assert.match(optimized.stdout, /fake-rtk:\["git","status","--short"\]/u);
-  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+  assert.match(optimized.stdout, /fake-rtk:/u);
+  const optimizedInvocations = readJsonLines(fakeRtk.invocationPath);
+  assert.equal(optimizedInvocations.length, 1);
+  assert.equal(optimizedInvocations[0][0], "test");
+  assert.match(path.win32.basename(optimizedInvocations[0][1]), /^node(?:\.exe)?$/iu);
+  assert.equal(optimizedInvocations[0].at(-1), "--test");
 
   const native = mustRun([
     "optimization", "run", "--root", project,
@@ -893,7 +899,7 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
     "--exact",
   ]);
   assert.match(native.stdout, /\.sdlc|fake-rtk/u);
-  assert.deepEqual(readJsonLines(fakeRtk.invocationPath), [["git", "status", "--short"]]);
+  assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1);
 
   mustFail([
     "optimization", "run", "--root", project,
@@ -924,6 +930,86 @@ test("RTK optimization gateway validates telemetry, routes safe commands, and by
   assert.match(doctorGuidance.firstLine, /^Outcome: All available health checks passed/u);
   assert.match(doctorGuidance.technical, /Agentic SDLC doctor: passed/u);
   assert.match(doctorGuidance.technical, /PASS rtk-optimization-provider:/u);
+});
+
+test("Windows shell-free test routing resolves launchers from the requested project root", {
+  skip: process.platform === "win32" ? false : "Windows command-shim regression",
+}, () => {
+  const project = tmpProject("rtk-windows-project-root");
+  initProject(project);
+  const shimRoot = tmpProject("rtk-windows-shim");
+  const launcher = path.join(shimRoot, "jest-runner.js");
+  const shim = path.join(shimRoot, "jest.cmd");
+  const marker = path.join(project, "jest-cwd.txt");
+  fs.writeFileSync(launcher, [
+    "\"use strict\";",
+    "const fs = require(\"node:fs\");",
+    "fs.appendFileSync(process.env.JEST_CWD_MARKER, `${process.cwd()}\\n`, \"utf8\");",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(shim, [
+    "@ECHO off",
+    '"%~dp0\\node.exe" "%~dp0\\jest-runner.js" %*',
+    "",
+  ].join("\r\n"));
+  const pathKey = Object.keys(process.env)
+    .find((key) => key.toLowerCase() === "path") || "PATH";
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["jest"]),
+    "--exact",
+  ], {
+    env: {
+      [pathKey]: shimRoot,
+      JEST_CWD_MARKER: marker,
+    },
+  });
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["jest"]),
+  ], {
+    env: {
+      [pathKey]: shimRoot,
+      JEST_CWD_MARKER: marker,
+    },
+  });
+  assert.deepEqual(
+    fs.readFileSync(marker, "utf8").trim().split("\n"),
+    [project, project],
+  );
+});
+
+test("Windows native optimization ignores project-local executable shadows", {
+  skip: process.platform === "win32" ? false : "Windows PATH executable regression",
+}, () => {
+  const project = tmpProject("rtk-windows-native-path");
+  initProject(project);
+  const gitInit = spawnSync("git", ["init", "--quiet"], { cwd: project, encoding: "utf8" });
+  assert.equal(gitInit.status, 0, gitInit.stderr);
+
+  const marker = path.join(project, "project-git-shadow-invoked");
+  fs.copyFileSync(process.execPath, path.join(project, "git.exe"));
+  fs.writeFileSync(path.join(project, "status"), [
+    "\"use strict\";",
+    "const fs = require(\"node:fs\");",
+    "fs.writeFileSync(process.env.GIT_SHADOW_MARKER, \"invoked\\n\", \"utf8\");",
+    "",
+  ].join("\n"));
+  const pathKey = Object.keys(process.env)
+    .find((key) => key.toLowerCase() === "path") || "PATH";
+
+  mustRun([
+    "optimization", "run", "--root", project,
+    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--exact",
+  ], {
+    env: {
+      GIT_SHADOW_MARKER: marker,
+      [pathKey]: [".", project, process.env[pathKey]].filter(Boolean).join(path.delimiter),
+    },
+  });
+  assert.equal(fs.existsSync(marker), false);
 });
 
 test("standard RTK PATH lookup rejects project-local shadows and spawns the canonical host path", {
@@ -1137,7 +1223,7 @@ test("optimization run locks and evaluates every active governed assessment", as
   try {
     lockContendedRun = runAsync([
       "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
-      "--command-json", JSON.stringify(["git", "status", "--short"]),
+      "--command-json", JSON.stringify(portableRtkTestCommand),
       "--trust-custom-rtk-command",
     ]);
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1157,7 +1243,7 @@ test("optimization run locks and evaluates every active governed assessment", as
   assert.equal(stopped.workflow.state, "exception_pending");
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-RTK-GATE-B",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /Cost gate for ASSESS-RTK-GATE-A blocks optimization run: soft_limit/u);
   assert.equal(readJsonLines(fakeRtk.invocationPath).length, 1, "a different proposal bypassed the active soft-limit gate");
@@ -2516,11 +2602,11 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
 
   mustFail([
     "optimization", "run", "--root", project,
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
   ], /requires --proposal.*ASSESS-E2E/u);
   const governedOptimized = mustRun([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ]);
   assert.match(governedOptimized.stdout, /fake-rtk/u);
@@ -2781,7 +2867,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
 
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /Cost gate.*blocks optimization run: soft_limit/u);
 
@@ -3153,7 +3239,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(budgetStatusAtCompletionReserve.optimization_advisory.gate_override, false);
   mustFail([
     "optimization", "run", "--root", project, "--proposal", "ASSESS-E2E",
-    "--command-json", JSON.stringify(["git", "status", "--short"]),
+    "--command-json", JSON.stringify(portableRtkTestCommand),
     "--trust-custom-rtk-command",
   ], /completion_reserve.*cannot start new work/u);
 
@@ -3924,7 +4010,7 @@ test("cache tampering is not used as source of truth for output resolve", () => 
   mustFail(["output", "resolve", "--root", project, "--story", "ST-001", "--type", "functional-analysis"], /cache output resolution differs/i);
 });
 
-test("unsafe config directories and symlink context escapes are blocked", () => {
+test("unsafe config directories are blocked", () => {
   const project = tmpProject("safe-paths");
   const templateDir = tmpProject("bad-template");
   fs.cpSync(path.join(repoRoot, "templates"), templateDir, { recursive: true });
@@ -3934,7 +4020,11 @@ test("unsafe config directories and symlink context escapes are blocked", () => 
   writeJson(configPath, config);
   mustFail(["init", "--root", project, "--template-dir", templateDir], /unsafe|must match pattern/);
   assert.equal(fs.existsSync(path.resolve(project, "..", "escape")), false);
+});
 
+test("symlink context escapes are blocked", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("safe-paths-symlink");
   initProject(project);
   const outside = path.join(os.tmpdir(), `outside-${Date.now()}.md`);
   fs.writeFileSync(outside, "outside");

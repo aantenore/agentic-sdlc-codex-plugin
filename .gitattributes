@@ -1,0 +1,27 @@
+* text=auto
+
+*.gitattributes text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.md text eol=lf
+*.mjs text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+*.docx binary
+*.gif binary
+*.gz binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.pptx binary
+*.tgz binary
+*.xlsx binary
+*.zip binary

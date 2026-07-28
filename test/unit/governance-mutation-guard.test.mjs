@@ -31,6 +31,7 @@ import {
   createGovernanceRevocation,
   evaluateGovernancePolicy,
 } from "../../lib/governance/policy-engine.mjs";
+import { requireSymlinkSupport } from "../helpers/symlink-support.mjs";
 
 const ACTOR = Object.freeze({ type: "agent", id: "writer-1" });
 const NOW = "2026-07-18T12:00:00.000Z";
@@ -210,15 +211,21 @@ test("missing, unknown, and asynchronous decisions fail closed", () => {
   );
 });
 
-test("path normalization rejects traversal, globs, root writes, and symlinks", () => {
+test("path normalization rejects traversal, globs, and root writes", () => {
   const root = fixture(test, "paths");
-  const outside = fixture(test, "outside");
   fs.mkdirSync(path.join(root, "safe"));
-  fs.symlinkSync(outside, path.join(root, "safe", "linked"), "dir");
   assert.equal(normalizeProjectMutationPath(root, path.join(root, "safe", "file.json")), "safe/file.json");
   assert.throws(() => normalizeProjectMutationPath(root, root), /inside the project root/u);
   assert.throws(() => normalizeProjectMutationPath(root, "../outside.json"), /inside the project root/u);
   assert.throws(() => normalizeProjectMutationPath(root, "safe/*.json"), /glob/u);
+});
+
+test("path normalization rejects symlink escapes", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
+  const root = fixture(t, "paths-symlink");
+  const outside = fixture(t, "outside-symlink");
+  fs.mkdirSync(path.join(root, "safe"));
+  fs.symlinkSync(outside, path.join(root, "safe", "linked"), "dir");
   assert.throws(() => normalizeProjectMutationPath(root, path.join(root, "safe", "linked", "file.json")), /symbolic link/u);
 });
 
@@ -726,6 +733,7 @@ test("concurrent audit writers cannot race past the hard event-count bound", asy
 });
 
 test("receipt persistence refuses a configured directory renamed behind an exact symlink", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = fixture(t, "receipt-parent-race");
   const governanceRoot = path.join(root, ".sdlc", "governance");
   const decisionsPath = path.join(governanceRoot, "decisions");
@@ -795,6 +803,7 @@ test("receipt persistence refuses a configured directory renamed behind an exact
 });
 
 test("audit event sink race is fail-open and never writes bytes through a swapped symlink", (t) => {
+  if (!requireSymlinkSupport(t, "dir")) return;
   const root = fixture(t, "audit-event-race");
   const governanceRoot = path.join(root, ".sdlc", "governance");
   const auditRoot = path.join(root, ...DEFAULT_GOVERNANCE_AUDIT_EVENTS_ROOT.split("/"));
@@ -918,7 +927,7 @@ test("enforce rejects a self-asserted actor without verified host or CI identity
   assert.match(governance.configuration_error, /identity verified by the host or CI/u);
 });
 
-test("project configuration is optional and pointer/inline policies are bounded and no-follow", () => {
+test("project configuration is optional and pointer/inline policies are bounded", () => {
   const root = fixture(test, "config");
   fs.mkdirSync(path.join(root, ".sdlc", "governance"), { recursive: true });
   const disabled = createProjectMutationGovernance({ root });
@@ -955,10 +964,25 @@ test("project configuration is optional and pointer/inline policies are bounded 
     actor: ACTOR,
     now: () => NOW,
   }).mode, "audit");
+});
 
+test("project configuration refuses a symlinked policy file", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const root = fixture(t, "config-symlink");
+  fs.mkdirSync(path.join(root, ".sdlc", "governance"), { recursive: true });
+  const subject = mutationSubject();
+  const policy = policyFor(subject);
+  const pointer = {
+    mode: "audit",
+    policy_file: ".sdlc/governance/policy.json",
+    decision_receipts_root: ".sdlc/governance/decisions",
+    use_receipts_root: ".sdlc/governance/uses",
+    revocations_root: ".sdlc/governance/revocations",
+    fail_closed: false,
+  };
+  const policyPath = path.join(root, ".sdlc", "governance", "policy.json");
   const outside = path.join(root, "outside-policy.json");
   fs.writeFileSync(outside, `${JSON.stringify(policy)}\n`);
-  fs.rmSync(policyPath);
   fs.symlinkSync(outside, policyPath);
   const unsafe = createProjectMutationGovernance({
     root,
@@ -971,14 +995,18 @@ test("project configuration is optional and pointer/inline policies are bounded 
   assert.match(unsafe.configuration_error, /symbolic link/u);
 });
 
-test("secure JSONL append uses a no-follow append descriptor and complete records", () => {
+test("secure JSONL append writes complete records", () => {
   const root = fixture(test, "append");
   const target = path.join(root, "events.jsonl");
   for (let index = 0; index < 100; index += 1) appendJsonLineNoFollow(target, { index });
   const records = fs.readFileSync(target, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(records.length, 100);
   assert.deepEqual(records.map(({ index }) => index), Array.from({ length: 100 }, (_, index) => index));
+});
 
+test("secure JSONL append refuses a symlink target", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const root = fixture(t, "append-symlink");
   const outside = path.join(root, "outside.jsonl");
   const linked = path.join(root, "linked.jsonl");
   fs.writeFileSync(outside, "");

@@ -64,7 +64,7 @@ test("keeps a project privacy policy stable for the lifetime of the runtime", as
 });
 
 test("pins the project directory across model and source reads", async (t) => {
-  if (process.platform === "win32") t.skip("Directory swap coverage requires Unix rename semantics");
+  if (process.platform === "win32") return t.skip("Directory swap coverage requires Unix rename semantics");
   const projectRoot = await createProjectFixture(t);
   const runtime = await createProjectDataRuntime({ projectRoot });
   await runtime.getRepresentation();
