@@ -181,6 +181,8 @@ test("first-project lifecycle help exposes the exact assessment, evidence, and g
   const complete = flags("story complete-step");
   assert.equal(complete.get("--id")?.required, true);
   assert.equal(complete.get("--step")?.required, true);
+  assert.equal(complete.get("--step")?.value, "configured-step");
+  assert.match(complete.get("--step")?.description || "", /project's phase_order/u);
   assert.equal(
     complete.get("--summary")?.required_one_of,
     "one of --summary, --type, --artifact, or --evidence",
