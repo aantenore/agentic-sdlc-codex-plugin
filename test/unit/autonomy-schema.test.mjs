@@ -223,6 +223,34 @@ test("profile schemas reject missing approvals, target ambiguity, and phase-leve
   );
 });
 
+test("autonomy schemas accept portable custom phases and reject unsafe phase keys", () => {
+  const customPhase = "architecture-check";
+  const requirement = requirementProfile({
+    phase_levels: { [customPhase]: "checkpointed" },
+  });
+  const delivery = deliveryProfile(requirement, {
+    phase_levels: { [customPhase]: "supervised" },
+  });
+  const decision = {
+    ...validDecision(),
+    phase: customPhase,
+  };
+
+  assertAgainstSchema(requirement, "requirement-execution-profile");
+  assertAgainstSchema(delivery, "delivery-execution-profile");
+  assertAgainstSchema(decision, "autonomy-decision");
+
+  const unsafeRequirement = structuredClone(requirement);
+  unsafeRequirement.phase_levels = { "../escape": "supervised" };
+  assert.equal(
+    validateAgainstSchema(unsafeRequirement, "requirement-execution-profile").valid,
+    false,
+  );
+  const unsafeDecision = structuredClone(decision);
+  unsafeDecision.phase = "../escape";
+  assert.equal(validateAgainstSchema(unsafeDecision, "autonomy-decision").valid, false);
+});
+
 test("autonomy decision schema binds status flags and forbids downstream level expansion", () => {
   const decision = validDecision();
   assertAgainstSchema(decision, "autonomy-decision");

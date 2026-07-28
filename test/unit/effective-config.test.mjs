@@ -244,6 +244,50 @@ test("an already valid lock yields an idempotent migration plan", () => {
   assert.equal(result.receipt, null);
 });
 
+test("an explicit validated target config produces a hash-bound semantic update plan", () => {
+  const lock = buildEffectiveConfigLock({
+    effective_config: DEFAULTS,
+    defaults_profile: PROFILE,
+    created_at: FIXED_TIME,
+  });
+  const targetConfig = structuredClone(DEFAULTS);
+  targetConfig.autonomy_policy.mode = "observe";
+  const plan = prepareConfigMigration({
+    project_config: DEFAULTS,
+    lock,
+    target_config: targetConfig,
+  });
+
+  assert.equal(plan.status, "ready");
+  assert.equal(plan.mode, "update_config");
+  assert.deepEqual(plan.changes, [{
+    operation: "replace",
+    path: "/autonomy_policy/mode",
+    before: "enforce_new_only",
+    after: "observe",
+  }]);
+  assert.equal(validate("config-migration-plan.schema.json", plan).valid, true);
+
+  const applied = buildConfigMigrationApplyData({
+    plan,
+    current_project_config: DEFAULTS,
+    current_lock: lock,
+    expected_plan_hash: plan.plan_hash,
+    applied_at: FIXED_TIME,
+  });
+  assert.equal(applied.config.autonomy_policy.mode, "observe");
+  assert.equal(validate("config-migration-receipt.schema.json", applied.receipt).valid, true);
+
+  const changedTarget = structuredClone(targetConfig);
+  changedTarget.autonomy_policy.mode = "off";
+  const changedPlan = prepareConfigMigration({
+    project_config: DEFAULTS,
+    lock,
+    target_config: changedTarget,
+  });
+  assert.notEqual(changedPlan.plan_hash, plan.plan_hash);
+});
+
 test("the packaged 0.11 compatibility snapshot is exact and independently hashable", () => {
   const compat = JSON.parse(fs.readFileSync(
     path.join(process.cwd(), "templates", "config-compat", "sdlc-config-v1-0.11.0.json"),

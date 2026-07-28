@@ -42,14 +42,8 @@
       "additionalProperties": true
     },
     "phase": {
-      "enum": [
-        "discovery",
-        "analysis",
-        "design",
-        "implementation",
-        "validation",
-        "release"
-      ]
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
     },
     "requirement_refs": {
       "type": "array",

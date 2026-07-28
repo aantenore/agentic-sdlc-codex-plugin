@@ -42,6 +42,34 @@ agentic-sdlc config migrate \
 
 Before writing, the CLI recomputes the plan under a project lock. If the config, previous lock, or plan changed after review, the command stops and preserves the existing files. A successful apply atomically materializes the reviewed config, writes `config.lock.json`, and stores an immutable receipt under `.sdlc/migrations/config/`.
 
+## Change the autonomy rollout mode
+
+Do not edit `autonomy_policy.mode` by hand. Preview one of the four supported modes through the same hash-bound configuration workflow:
+
+```bash
+agentic-sdlc config migrate \
+  --root /path/to/project \
+  --autonomy-mode observe
+```
+
+The preview shows the semantic JSON change, for example:
+
+```text
+replace /autonomy_policy/mode: "enforce_new_only" -> "observe"
+```
+
+Apply the exact reviewed mode and plan together:
+
+```bash
+agentic-sdlc config migrate \
+  --root /path/to/project \
+  --autonomy-mode observe \
+  --apply \
+  --plan-hash <displayed-sha256>
+```
+
+Valid modes are `off`, `observe`, `enforce_new_only`, and `enforce_all`. The mode is part of the plan hash: omitting it, selecting a different mode, or changing the config after preview causes apply to fail before any file is written.
+
 Release-history migration is deliberately separate. It never upgrades configuration as a side effect; pin the project config first, then run the release migration.
 
 ## Esempio in italiano

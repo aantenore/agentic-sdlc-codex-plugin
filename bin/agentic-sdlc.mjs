@@ -722,15 +722,16 @@ const DELIVERY_TERMINAL_STATUSES = new Set([
   "superseded",
   "revoked",
 ]);
-const STORY_STEP_NAMES = new Set([
-  "discovery",
-  "analysis",
-  "functional-analysis",
-  "technical-analysis",
-  "design",
-  "implementation",
-  "validation",
-  "release",
+const PHASE_IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._-]*$/u;
+const AUTONOMY_ROLLOUT_MODES = new Set([
+  "off",
+  "observe",
+  "enforce_new_only",
+  "enforce_all",
+]);
+const LEGACY_STORY_STEP_PHASE_ALIASES = new Map([
+  ["functional-analysis", "analysis"],
+  ["technical-analysis", "analysis"],
 ]);
 const ACTIVITY_REPORT_VIEWS = new Set(["business", "dev", "agent-verbose"]);
 const REPORT_QUERY_SUBJECTS = new Set([
@@ -2468,6 +2469,41 @@ function workflowDefinitionUsesCanonicalEvidence(definition) {
       Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id)));
 }
 
+function workflowPhaseOrderDifference(context, definition) {
+  const configured = configuredPhaseOrder(context);
+  const selected = Array.isArray(definition?.phase_order)
+    ? definition.phase_order.map((phase) => String(phase))
+    : [];
+  const exact = configured.length === selected.length
+    && configured.every((phase, index) => phase === selected[index]);
+  return {
+    exact,
+    configured,
+    selected,
+    missing: configured.filter((phase) => !selected.includes(phase)),
+    extra: selected.filter((phase) => !configured.includes(phase)),
+  };
+}
+
+function assertStoryBoundWorkflowPhaseOrder(context, definition) {
+  const difference = workflowPhaseOrderDifference(context, definition);
+  if (difference.exact) return;
+  const details = [
+    `configured phase order: ${difference.configured.join(", ")}`,
+    `workflow phase order: ${difference.selected.join(", ") || "(empty)"}`,
+    ...(difference.missing.length > 0
+      ? [`missing configured phases: ${difference.missing.join(", ")}`]
+      : []),
+    ...(difference.extra.length > 0
+      ? [`unconfigured workflow phases: ${difference.extra.join(", ")}`]
+      : []),
+  ];
+  fail(
+    "A story-bound workflow must use the exact configured phase order; "
+    + `${details.join("; ")}.`,
+  );
+}
+
 function startWorkflowInstance(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -2511,6 +2547,7 @@ function startWorkflowInstance(context, options) {
     if (!readStory(context, storyId)) {
       fail(`Story ${storyId} does not exist and cannot be bound to this workflow instance.`);
     }
+    assertStoryBoundWorkflowPhaseOrder(context, effectiveDefinition);
     governanceBinding = {
       story_id: storyId,
       final_gate_receipt_path: toProjectPath(
@@ -5082,16 +5119,41 @@ function showConfigStatus(context, options) {
   ].map((line) => line.replace(/^- /u, "")), options));
 }
 
-function prepareProjectConfigMigration(context, projectConfig, projectLock) {
+function normalizeRequestedAutonomyMode(options) {
+  const requested = getOptionString(options, "autonomy-mode");
+  if (!requested) return null;
+  if (!AUTONOMY_ROLLOUT_MODES.has(requested)) {
+    fail(
+      `Invalid --autonomy-mode '${requested}'. Valid values: `
+      + `${Array.from(AUTONOMY_ROLLOUT_MODES).join(", ")}.`,
+    );
+  }
+  return requested;
+}
+
+function prepareProjectConfigMigration(context, projectConfig, projectLock, autonomyMode = null) {
+  let plan;
+  const migrationInput = {
+    project_config: projectConfig,
+    legacy_defaults: context.templateConfig,
+    defaults_profile: context.templateDefaultsProfile,
+    lock: projectLock,
+    config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
+    lock_path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
+  };
   try {
-    return prepareConfigMigration({
-      project_config: projectConfig,
-      legacy_defaults: context.templateConfig,
-      defaults_profile: context.templateDefaultsProfile,
-      lock: projectLock,
-      config_path: `${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}`,
-      lock_path: `${SDLC_DIR}/${PROJECT_CONFIG_LOCK_FILE_NAME}`,
-    });
+    plan = prepareConfigMigration(migrationInput);
+    if (autonomyMode) {
+      const targetConfig = structuredClone(plan.target_config);
+      targetConfig.autonomy_policy = {
+        ...targetConfig.autonomy_policy,
+        mode: autonomyMode,
+      };
+      plan = prepareConfigMigration({
+        ...migrationInput,
+        target_config: targetConfig,
+      });
+    }
   } catch (error) {
     if (error instanceof TypeError) {
       fail([
@@ -5103,11 +5165,26 @@ function prepareProjectConfigMigration(context, projectConfig, projectLock) {
     }
     throw error;
   }
+  try {
+    validateSdlcConfig(plan.target_config);
+  } catch (error) {
+    if (!(error instanceof UserError)) throw error;
+    fail([
+      "A safe configuration migration plan could not be created; no applicable plan or plan hash was emitted.",
+      "Impact: governed writes remain blocked because the target configuration is invalid.",
+      `Next: correct ${SDLC_DIR}/${PROJECT_CONFIG_FILE_NAME}, then run the preview again.`,
+      `Technical detail: target configuration is invalid: ${error.message}`,
+    ].join("\n"));
+  }
+  return plan;
 }
 
 function configMigrationChangeSummary(plan) {
   if (plan.mode === "already_locked") {
     return "The current configuration and lock already match; applying this plan will make no changes.";
+  }
+  if (plan.mode === "update_config") {
+    return `Applying this plan will update ${plan.changes.length} reviewed project policy value(s) and replace the matching lock.`;
   }
   if (plan.mode === "reconcile_drift") {
     return "Applying this plan will accept the current materialized configuration and replace its stale lock.";
@@ -5118,6 +5195,22 @@ function configMigrationChangeSummary(plan) {
   return `Applying this plan will materialize ${plan.changes.length} reviewed configuration change(s) and create a matching lock.`;
 }
 
+function formatConfigMigrationChange(change) {
+  const before = Object.hasOwn(change, "before") ? change.before : undefined;
+  const after = Object.hasOwn(change, "after") ? change.after : undefined;
+  const scalar = (value) => value === null || ["string", "number", "boolean"].includes(typeof value);
+  if (change.operation === "replace" && scalar(before) && scalar(after)) {
+    return `- replace ${change.path || "/"}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`;
+  }
+  if (change.operation === "add" && scalar(after)) {
+    return `- add ${change.path || "/"}: ${JSON.stringify(after)}`;
+  }
+  if (change.operation === "remove" && scalar(before)) {
+    return `- remove ${change.path || "/"}: ${JSON.stringify(before)}`;
+  }
+  return `- ${change.operation} ${change.path || "/"}`;
+}
+
 function migrateProjectConfig(context, options) {
   if (!context.rawProjectConfig) {
     fail([
@@ -5126,6 +5219,7 @@ function migrateProjectConfig(context, options) {
       "Next: run `agentic-sdlc init` instead.",
     ].join("\n"));
   }
+  const autonomyMode = normalizeRequestedAutonomyMode(options);
 
   if (options.apply && options.__bootstrapGrantConsumed !== true) {
     const expectedPlanHash = getOptionString(options, "plan-hash");
@@ -5134,6 +5228,7 @@ function migrateProjectConfig(context, options) {
         context,
         context.rawProjectConfig,
         context.projectConfigLock,
+        autonomyMode,
       );
       if (expectedPlanHash !== currentPlan.plan_hash) {
         fail([
@@ -5161,16 +5256,20 @@ function migrateProjectConfig(context, options) {
       context,
       context.rawProjectConfig,
       context.projectConfigLock,
+      autonomyMode,
     );
     const verification = verifyConfigMigrationPlan(plan);
     if (!verification.valid) {
       fail(`Configuration migration plan failed its integrity check: ${verification.errors.join(", ")}`);
     }
     const impact = configMigrationChangeSummary(plan);
+    const autonomyModeArgument = autonomyMode ? ` --autonomy-mode ${autonomyMode}` : "";
     output(options, {
       status: "planned",
       files_changed: 0,
       impact,
+      requested_autonomy_mode: autonomyMode,
+      semantic_diff: plan.changes,
       next_action: plan.status === "already_applied"
         ? "No action is required."
         : `Review the changes, then apply plan ${plan.plan_hash}.`,
@@ -5180,13 +5279,13 @@ function migrateProjectConfig(context, options) {
       `Impact: ${impact}`,
       plan.status === "already_applied"
         ? "Next: no action is required."
-        : `Next: review the changes, then run \`agentic-sdlc config migrate --apply --plan-hash ${plan.plan_hash}\`.`,
+        : `Next: review the changes, then run \`agentic-sdlc config migrate${autonomyModeArgument} --apply --plan-hash ${plan.plan_hash}\`.`,
       "",
       "Details:",
       `- Plan: ${plan.plan_hash}`,
       `- Mode: ${plan.mode}`,
       `- Reviewed changes: ${plan.changes.length}`,
-      ...plan.changes.map((change) => `- ${change.operation} ${change.path || "/"}`),
+      ...plan.changes.map(formatConfigMigrationChange),
     ]);
     return;
   }
@@ -5217,7 +5316,7 @@ function migrateProjectConfig(context, options) {
       lockBefore = readProjectText(context, context.configLockPath);
     }
     const currentLock = lockExisted ? JSON.parse(lockBefore) : null;
-    plan = prepareProjectConfigMigration(context, currentConfig, currentLock);
+    plan = prepareProjectConfigMigration(context, currentConfig, currentLock, autonomyMode);
     try {
       application = buildConfigMigrationApplyData({
         plan,
@@ -5300,6 +5399,7 @@ function migrateProjectConfig(context, options) {
   output(options, {
     status: application.status === "already_applied" ? "already_applied" : "applied",
     plan_hash: plan.plan_hash,
+    autonomy_mode: application.config.autonomy_policy?.mode || null,
     config_hash: application.lock.config_hash,
     lock_hash: application.lock.lock_hash,
     receipt: application.receipt
@@ -5317,6 +5417,7 @@ function migrateProjectConfig(context, options) {
     "",
     "Details:",
     `- Plan: ${plan.plan_hash}`,
+    `- Autonomy mode: ${application.config.autonomy_policy?.mode || "not configured"}`,
     `- Config hash: ${application.lock.config_hash}`,
     `- Lock hash: ${application.lock.lock_hash}`,
     ...(application.receipt ? [`- Receipt: ${toProjectPath(context, receiptPath)}`] : []),
@@ -5425,9 +5526,35 @@ function validateSdlcConfig(config) {
   if (!config.phases || typeof config.phases !== "object" || Array.isArray(config.phases)) {
     fail("SDLC config phases must be an object");
   }
+  const configuredPhases = new Set();
   for (const phase of config.phase_order) {
+    if (typeof phase !== "string" || !PHASE_IDENTIFIER_PATTERN.test(phase)) {
+      fail(`SDLC config phase_order contains invalid phase identifier '${phase}'`);
+    }
+    if (configuredPhases.has(phase)) {
+      fail(`SDLC config phase_order contains duplicate phase '${phase}'`);
+    }
+    configuredPhases.add(phase);
     if (!config.phases[phase] || typeof config.phases[phase] !== "object") {
       fail(`SDLC config phase_order references missing phase '${phase}'`);
+    }
+  }
+  for (const phase of Object.keys(config.phases)) {
+    if (!PHASE_IDENTIFIER_PATTERN.test(phase)) {
+      fail(`SDLC config phases contains invalid phase identifier '${phase}'`);
+    }
+    if (!configuredPhases.has(phase)) {
+      fail(`SDLC config phases contains '${phase}' but phase_order does not`);
+    }
+  }
+  for (const [presetName, preset] of Object.entries(config.autonomy_policy?.presets || {})) {
+    for (const phase of preset?.automatic_phases || []) {
+      if (!configuredPhases.has(phase)) {
+        fail(
+          `SDLC config autonomy_policy.presets.${presetName}.automatic_phases `
+          + `references unconfigured phase '${phase}'`,
+        );
+      }
     }
   }
   if (!config.gate_policy || typeof config.gate_policy !== "object" || Array.isArray(config.gate_policy)) {
@@ -5634,7 +5761,7 @@ function validateAutonomyPolicy(policy) {
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
     fail("autonomy_policy must be an object");
   }
-  if (!["off", "observe", "enforce_new_only", "enforce_all"].includes(String(policy.mode || ""))) {
+  if (!AUTONOMY_ROLLOUT_MODES.has(String(policy.mode || ""))) {
     fail("autonomy_policy.mode must be off, observe, enforce_new_only, or enforce_all");
   }
   const levels = Array.isArray(policy.allowed_levels) ? policy.allowed_levels : [];
@@ -12743,10 +12870,14 @@ function evaluateDeliveryAutonomy(context, profile, options = {}) {
   );
   const environmentBoundary = deliveryEnvironmentBoundary(profile);
   const budgetBoundary = deliveryBudgetBoundary(current, profile.requested_level);
+  const phase = options.phase || current.story.phase || current.contract.phase;
+  if (phase && !configuredPhaseOrder(context).includes(phase)) {
+    fail(`Cannot evaluate delivery autonomy for unconfigured phase '${phase}'.`);
+  }
   const decision = buildDomainRecord(`Cannot evaluate delivery autonomy ${profile.id}`, () => evaluateAutonomyPolicy({
     id: options.id,
     evaluated_at: options.evaluated_at || now(),
-    phase: options.phase || current.story.phase || current.contract.phase,
+    phase,
     host_policy: { ...profile.authority_assurance, max_level: "bounded-autonomous" },
     project_policy: {
       max_level: context.config.autonomy_policy?.project_max_level || "bounded-autonomous",
@@ -32160,16 +32291,30 @@ function readHandoffs(context) {
     .map((name) => readProjectJson(context, path.join(handoffsRoot, name)));
 }
 
+function configuredPhaseOrder(context) {
+  return normalizeListValue(
+    context?.config?.phase_order,
+    Object.keys(context?.config?.phases || {}),
+  );
+}
+
+function configuredStorySteps(context) {
+  const configuredPhases = configuredPhaseOrder(context);
+  const configuredPhaseSet = new Set(configuredPhases);
+  return [
+    ...configuredPhases,
+    ...Array.from(LEGACY_STORY_STEP_PHASE_ALIASES.entries())
+      .filter(([, phase]) => configuredPhaseSet.has(phase))
+      .map(([alias]) => alias),
+  ];
+}
+
 function normalizeStoryStep(context, value) {
   const normalized = String(value || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "-");
-  const configuredPhases = normalizeListValue(
-    context?.config?.phase_order,
-    Object.keys(context?.config?.phases || {}),
-  );
-  const validSteps = new Set([...configuredPhases, ...STORY_STEP_NAMES]);
+  const validSteps = new Set(configuredStorySteps(context));
   if (!validSteps.has(normalized)) {
     fail(`Unknown story step '${value}'. Valid values: ${Array.from(validSteps).join(", ")}`);
   }
@@ -32177,31 +32322,35 @@ function normalizeStoryStep(context, value) {
 }
 
 function storyStepPhase(context, step) {
-  if (
-    ["functional-analysis", "technical-analysis"].includes(step)
-    && context.config.phases.analysis
-  ) {
-    return "analysis";
-  }
-  return step;
+  const aliasPhase = LEGACY_STORY_STEP_PHASE_ALIASES.get(step);
+  return aliasPhase && configuredPhaseOrder(context).includes(aliasPhase)
+    ? aliasPhase
+    : step;
 }
 
 function defaultNextStoryStep(context, step) {
-  const configuredOrder = normalizeListValue(
-    context.config.phase_order,
-    Object.keys(context.config.phases || {}),
-  );
+  const configuredOrder = configuredPhaseOrder(context);
   const configuredIndex = configuredOrder.indexOf(step);
   if (configuredIndex >= 0) {
     return configuredIndex < configuredOrder.length - 1
       ? configuredOrder[configuredIndex + 1]
       : null;
   }
-  if (step === "functional-analysis") return "technical-analysis";
-  if (step === "technical-analysis") {
-    const analysisIndex = configuredOrder.indexOf("analysis");
-    return analysisIndex >= 0 && analysisIndex < configuredOrder.length - 1
-      ? configuredOrder[analysisIndex + 1]
+  if (
+    step === "functional-analysis"
+    && LEGACY_STORY_STEP_PHASE_ALIASES.get(step)
+    && configuredOrder.includes("analysis")
+  ) {
+    return "technical-analysis";
+  }
+  if (
+    step === "technical-analysis"
+    && LEGACY_STORY_STEP_PHASE_ALIASES.get(step)
+    && configuredOrder.includes("analysis")
+  ) {
+    const aliasPhaseIndex = configuredOrder.indexOf("analysis");
+    return aliasPhaseIndex >= 0 && aliasPhaseIndex < configuredOrder.length - 1
+      ? configuredOrder[aliasPhaseIndex + 1]
       : null;
   }
   return null;
@@ -35103,6 +35252,38 @@ function validateStoryChangedPathsWithinRequirementScope(context, storyId, requi
   report.checked.push(`story ${storyId} changed-path scope`);
 }
 
+function validateStoryWorkflowPhaseOrders(context, storyId, report) {
+  const instancesRoot = workflowInstancesRoot(context);
+  for (const entry of safeReadDir(instancesRoot).sort((left, right) => left.localeCompare(right, "en"))) {
+    if (entry.startsWith(".")) continue;
+    const instancePath = path.join(instancesRoot, entry, "instance.json");
+    if (!fs.existsSync(instancePath)) continue;
+    let instance;
+    try {
+      instance = readProjectJson(context, instancePath);
+    } catch (error) {
+      report.errors.push(`Workflow instance ${entry} cannot be read: ${error.message}`);
+      continue;
+    }
+    if (instance.metadata?.governance_binding?.story_id !== storyId) continue;
+    const label = `story ${storyId} workflow instance ${instance.id || entry}`;
+    try {
+      const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+      const difference = workflowPhaseOrderDifference(context, effectiveDefinition);
+      if (!difference.exact) {
+        report.errors.push(
+          `${label} does not match the configured phase order `
+          + `[${difference.configured.join(", ")}]; pinned workflow order is `
+          + `[${difference.selected.join(", ")}]`,
+        );
+      }
+    } catch (error) {
+      report.errors.push(`${label} cannot verify its pinned phase order: ${error.message}`);
+    }
+    report.checked.push(label);
+  }
+}
+
 function validateStoryLifecycleCompletion(context, storyId, report) {
   const steps = readStoryStepRecords(context, storyId)
     .filter((record) => record.status === "completed");
@@ -35131,6 +35312,7 @@ function validateStoryLifecycleCompletion(context, storyId, report) {
       break;
     }
   }
+  validateStoryWorkflowPhaseOrders(context, storyId, report);
 
   const traceEvents = readTraceEvents(context, storyId);
   if (latestTraceEvent(traceEvents, "test")?.outcome !== "passed") {
@@ -35179,10 +35361,7 @@ function validateStoryStepRecords(context, storyId, report) {
     if (record.story_id !== storyId) {
       report.errors.push(`${label} story_id must match ${storyId}`);
     }
-    const validSteps = new Set([
-      ...normalizeListValue(context.config.phase_order, Object.keys(context.config.phases || {})),
-      ...STORY_STEP_NAMES,
-    ]);
+    const validSteps = new Set(configuredStorySteps(context));
     if (!record.step || !validSteps.has(String(record.step))) {
       report.errors.push(`${label} has unknown step '${record.step}'`);
     }

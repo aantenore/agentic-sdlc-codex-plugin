@@ -26,7 +26,7 @@
     "kind": { "const": "config_migration_plan" },
     "schema_version": { "const": "config-migration-plan:v1" },
     "status": { "enum": ["ready", "already_applied"] },
-    "mode": { "enum": ["materialize_legacy_defaults", "adopt_lock", "reconcile_drift", "already_locked"] },
+    "mode": { "enum": ["materialize_legacy_defaults", "adopt_lock", "reconcile_drift", "update_config", "already_locked"] },
     "config_path": { "$ref": "#/$defs/sdlc_path" },
     "lock_path": { "$ref": "#/$defs/sdlc_path" },
     "source_config_hash": { "$ref": "#/$defs/sha256" },

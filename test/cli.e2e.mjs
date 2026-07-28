@@ -10,6 +10,7 @@ import { computeStableHash } from "../lib/canonical.mjs";
 import { buildBudgetAmendment, buildExecutionUsageReceipt } from "../lib/execution-budget.mjs";
 import { buildHostApprovalReceipt } from "../lib/authorization-receipts.mjs";
 import { buildMeteringAttestation } from "../lib/metering-attestations.mjs";
+import { validateAgainstSchema } from "../lib/json-schema-validator.mjs";
 import { requireSymlinkSupport } from "./helpers/symlink-support.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -854,6 +855,73 @@ test("effective configuration is human-readable, reviewable, hash-bound, and fai
   mustFail(["cache", "rebuild", "--root", project], /configuration is invalid/i);
   mustFail(["config", "migrate", "--root", project], /no files were changed.*structurally invalid/is);
   writeJson(lockPath, validLock);
+});
+
+test("autonomy rollout mode changes are previewed semantically and applied only by exact hash", () => {
+  const project = tmpProject("config-autonomy-mode");
+  initProject(project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const lockPath = path.join(project, ".sdlc", "config.lock.json");
+  const configBefore = fs.readFileSync(configPath, "utf8");
+  const lockBefore = fs.readFileSync(lockPath, "utf8");
+
+  const preview = JSON.parse(mustRun([
+    "config", "migrate",
+    "--root", project,
+    "--autonomy-mode", "observe",
+    "--json",
+  ]).stdout);
+  assert.equal(preview.status, "planned");
+  assert.equal(preview.files_changed, 0);
+  assert.equal(preview.requested_autonomy_mode, "observe");
+  assert.equal(preview.plan.mode, "update_config");
+  assert.deepEqual(preview.semantic_diff, [{
+    operation: "replace",
+    path: "/autonomy_policy/mode",
+    before: "enforce_new_only",
+    after: "observe",
+  }]);
+  assert.equal(fs.readFileSync(configPath, "utf8"), configBefore);
+  assert.equal(fs.readFileSync(lockPath, "utf8"), lockBefore);
+
+  const humanPreview = mustRun([
+    "config", "migrate",
+    "--root", project,
+    "--autonomy-mode", "observe",
+  ]).stdout;
+  assert.match(humanPreview, /replace \/autonomy_policy\/mode: "enforce_new_only" -> "observe"/u);
+  assert.match(humanPreview, /config migrate --autonomy-mode observe --apply --plan-hash/u);
+
+  mustFail([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", preview.plan.plan_hash,
+  ], /reviewed plan no longer matches/u);
+  assert.equal(fs.readFileSync(configPath, "utf8"), configBefore);
+  assert.equal(fs.readFileSync(lockPath, "utf8"), lockBefore);
+
+  const applied = JSON.parse(mustRun([
+    "config", "migrate",
+    "--root", project,
+    "--autonomy-mode", "observe",
+    "--apply",
+    "--plan-hash", preview.plan.plan_hash,
+    "--actor-type", "human",
+    "--json",
+  ]).stdout);
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.autonomy_mode, "observe");
+  assert.equal(readJson(configPath).autonomy_policy.mode, "observe");
+  assert.equal(JSON.parse(mustRun([
+    "config", "status", "--root", project, "--json",
+  ]).stdout).status, "locked");
+
+  mustFail([
+    "config", "migrate",
+    "--root", project,
+    "--autonomy-mode", "unsafe",
+  ], /autonomy-mode.*Valid values|Expected one of/u);
 });
 
 test("RTK optimization gateway validates telemetry, routes safe commands, and bypasses exact output", () => {
@@ -6070,17 +6138,22 @@ test("output status stays scoped to the active story instead of every registered
   assert.deepEqual(status.resolutions.map((item) => item.artifact_type), ["functional-analysis"]);
 });
 
-test("story steps honor custom configured phases and their configured order", () => {
+test("story, contract, autonomy, and legacy analysis steps honor configured phases", () => {
   const project = tmpProject("custom-story-phase");
   initProject(project);
   story(project, "ST-001");
   const configPath = path.join(project, ".sdlc", "config.json");
   const config = readJson(configPath);
-  config.phases["security-review"] = {
+  const customPhase = "security-review";
+  config.phases[customPhase] = {
     ...config.phases.design,
     purpose: "Review security boundaries before analysis.",
   };
-  config.phase_order = ["discovery", "security-review", "analysis", "design", "implementation", "validation", "release"];
+  config.phase_order = ["discovery", customPhase, "analysis", "design", "implementation", "validation", "release"];
+  config.autonomy_policy.presets.checkpointed.automatic_phases = [
+    customPhase,
+    ...config.autonomy_policy.presets.checkpointed.automatic_phases,
+  ];
   writeJson(configPath, config);
   pinProjectConfig(project);
 
@@ -6092,15 +6165,154 @@ test("story steps honor custom configured phases and their configured order", ()
     "--id",
     "ST-001",
     "--step",
-    "security-review",
+    customPhase,
     "--summary",
     "Security boundaries reviewed",
     "--allow-unapproved-contract-output",
     "--json",
   ]).stdout);
-  assert.equal(result.step.step, "security-review");
-  assert.equal(result.step.phase, "security-review");
+  assert.equal(result.step.step, customPhase);
+  assert.equal(result.step.phase, customPhase);
   assert.equal(result.step.next_step, "analysis");
+
+  const analysis = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "analysis",
+    "--summary",
+    "Canonical analysis completed",
+    "--allow-unapproved-contract-output",
+    "--json",
+  ]).stdout);
+  assert.equal(analysis.step.phase, "analysis");
+  assert.equal(analysis.step.next_step, "design");
+
+  const storyRecord = readJson(path.join(project, ".sdlc", "stories", "ST-001", "story.json"));
+  storyRecord.phase = customPhase;
+  assert.equal(validateAgainstSchema(storyRecord, "story").valid, true);
+
+  const customContract = JSON.parse(mustRun([
+    "contract",
+    "create",
+    "--root",
+    project,
+    "--phase",
+    customPhase,
+    "--id",
+    "contract-custom-phase",
+    "--context-summary",
+    "Review the configured custom phase boundary.",
+    "--allow-incomplete-contract",
+    "--json",
+  ]).stdout).contract;
+  assert.equal(customContract.phase, customPhase);
+  assert.equal(validateAgainstSchema(customContract, "contract").valid, true);
+
+  const phaseLock = JSON.parse(mustRun([
+    "phase",
+    "lock",
+    "--root",
+    project,
+    "--phase",
+    customPhase,
+    "--reason",
+    "Coordinate the configured custom review phase.",
+    "--json",
+  ]).stdout).lock;
+  assert.equal(phaseLock.phase, customPhase);
+  assert.equal(validateAgainstSchema(phaseLock, "phase-lock").valid, true);
+
+  story(project, "ST-LEGACY");
+  const functional = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-LEGACY",
+    "--step",
+    "functional-analysis",
+    "--summary",
+    "Legacy functional analysis completed",
+    "--allow-unapproved-contract-output",
+    "--json",
+  ]).stdout);
+  assert.equal(functional.step.phase, "analysis");
+  assert.equal(functional.step.next_step, "technical-analysis");
+  const technical = JSON.parse(mustRun([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-LEGACY",
+    "--step",
+    "technical-analysis",
+    "--summary",
+    "Legacy technical analysis completed",
+    "--allow-unapproved-contract-output",
+    "--json",
+  ]).stdout);
+  assert.equal(technical.step.phase, "analysis");
+  assert.equal(technical.step.next_step, "design");
+});
+
+test("analysis aliases disappear when analysis is not a configured phase", () => {
+  const project = tmpProject("custom-story-phase-no-analysis");
+  initProject(project);
+  story(project, "ST-001");
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  const customPhase = "requirements-review";
+  config.phases[customPhase] = {
+    ...config.phases.analysis,
+    purpose: "Use a project-specific requirements review instead of the stock analysis phase.",
+  };
+  delete config.phases.analysis;
+  config.phase_order = config.phase_order.map((phase) => phase === "analysis" ? customPhase : phase);
+  for (const preset of Object.values(config.autonomy_policy.presets)) {
+    preset.automatic_phases = preset.automatic_phases
+      .map((phase) => phase === "analysis" ? customPhase : phase);
+  }
+  writeJson(configPath, config);
+  pinProjectConfig(project);
+
+  mustFail([
+    "story",
+    "complete-step",
+    "--root",
+    project,
+    "--id",
+    "ST-001",
+    "--step",
+    "technical-analysis",
+    "--summary",
+    "This legacy alias has no configured canonical target",
+    "--allow-unapproved-contract-output",
+  ], /Unknown story step 'technical-analysis'/);
+});
+
+test("config migration refuses to emit an applicable plan for an invalid target", () => {
+  const project = tmpProject("invalid-config-migration-target");
+  initProject(project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  config.autonomy_policy.presets.checkpointed.automatic_phases.push("unconfigured-review");
+  writeJson(configPath, config);
+
+  const failed = mustFail([
+    "config",
+    "migrate",
+    "--root",
+    project,
+    "--json",
+  ], /target configuration|automatic_phases|configured phase/i);
+  assert.doesNotMatch(failed.stdout, /"plan_hash"/u);
 });
 
 test("contract create asks before missing guidance or story output agreement", () => {

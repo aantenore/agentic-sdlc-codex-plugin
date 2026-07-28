@@ -41,7 +41,7 @@
     "story_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
     "contract_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
     "contract_approval_hash": { "$ref": "#/$defs/sha256" },
-    "phase": { "enum": ["discovery", "analysis", "design", "implementation", "validation", "release"] },
+    "phase": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
     "route": { "type": "string", "minLength": 1 },
     "autonomy_decision_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
     "effective_level": { "enum": ["supervised", "checkpointed", "bounded-autonomous"] },

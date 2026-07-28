@@ -46,6 +46,25 @@ function mustRunJson(args, cwd) {
   return JSON.parse(mustRun([...args, "--json"], cwd));
 }
 
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function writeJson(filePath, value) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function pinProjectConfig(project) {
+  const preview = mustRunJson(["config", "migrate", "--root", project], project);
+  return mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", preview.plan.plan_hash,
+    "--actor-type", "system",
+  ], project);
+}
+
 function primaryHumanText(output, locale = "en") {
   const divider = locale === "it" ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):";
   assert.match(output, new RegExp(divider.replace(/[()]/gu, "\\$&"), "u"));
@@ -416,4 +435,136 @@ test("an included preset can start a run without being copied into project stora
     "workflow", "instance", "status", "--root", project, "--id", "change-184",
   ], project);
   assert.equal(status.current_state, "impact-review");
+});
+
+test("a story-bound workflow must pin the exact configured custom phase order", () => {
+  const project = temporaryProject("custom-phases");
+  mustRun(["init", "--root", project, "--project-name", "Custom phases"], project);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(configPath);
+  const customPhase = "dependency-audit";
+  config.phases[customPhase] = {
+    ...config.phases.design,
+    purpose: "Review cross-package dependencies before implementation.",
+  };
+  config.phase_order = [
+    "discovery",
+    "analysis",
+    "design",
+    customPhase,
+    "implementation",
+    "validation",
+    "release",
+  ];
+  config.autonomy_policy.presets.checkpointed.automatic_phases = [
+    ...config.autonomy_policy.presets.checkpointed.automatic_phases,
+    customPhase,
+  ];
+  writeJson(configPath, config);
+  pinProjectConfig(project);
+
+  mustRunJson([
+    "story", "create",
+    "--root", project,
+    "--id", "ST-CUSTOM-PHASE",
+    "--title", "Exercise a custom workflow phase",
+    "--acceptance", "The configured workflow order is enforced.",
+  ], project);
+
+  const base = mustRunJson([
+    "workflow", "definition", "show",
+    "--root", project,
+    "--id", "software-project",
+    "--definition-version", "2",
+  ], project).definition;
+  const transitions = base.transitions.flatMap((transition) => {
+    if (transition.from !== "design" || transition.to !== "implementation") return [transition];
+    return [
+      {
+        ...transition,
+        id: "design-to-custom-phase",
+        to: customPhase,
+        label: "Design to custom phase",
+        guards: [],
+      },
+      {
+        ...transition,
+        id: "custom-phase-to-implementation",
+        from: customPhase,
+        label: "Custom phase to implementation",
+      },
+    ];
+  });
+  const customDefinition = {
+    label: "Software project with dependency audit",
+    description: "The configured project lifecycle with one custom phase.",
+    initial_state: base.initial_state,
+    states: [
+      ...base.states.filter((state) => state.id !== "implementation"),
+      {
+        id: customPhase,
+        label: "Dependency audit",
+        terminal: false,
+        metadata: { order: 4 },
+      },
+      ...base.states
+        .filter((state) => state.id === "implementation")
+        .map((state) => ({ ...state, metadata: { ...state.metadata, order: 5 } })),
+    ].sort((left, right) => config.phase_order.indexOf(left.id) - config.phase_order.indexOf(right.id)),
+    transitions,
+    phase_order: config.phase_order,
+    normal_checkpoints: base.normal_checkpoints,
+    metadata: { governance_binding: "story" },
+  };
+  mustRunJson([
+    "workflow", "definition", "propose",
+    "--root", project,
+    "--id", "custom-software-project",
+    "--definition-version", "1",
+    "--definition-json", JSON.stringify(customDefinition),
+  ], project);
+  mustRunJson([
+    "workflow", "definition", "approve",
+    "--root", project,
+    "--id", "custom-software-project",
+    "--definition-version", "1",
+    "--actor-type", "ci",
+    "--approval-source", "ci",
+    "--summary", "Approve the exact configured custom lifecycle.",
+  ], project);
+
+  const started = mustRunJson([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", "WF-CUSTOM-PHASE",
+    "--definition", "custom-software-project",
+    "--definition-version", "1",
+    "--story", "ST-CUSTOM-PHASE",
+  ], project);
+  assert.deepEqual(started.instance.phase_order, undefined);
+  const definition = readJson(path.join(
+    project,
+    ".sdlc",
+    "workflows",
+    "definitions",
+    "custom-software-project",
+    "v1.json",
+  ));
+  assert.deepEqual(definition.phase_order, config.phase_order);
+
+  const mismatched = run([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", "WF-MISSING-CUSTOM-PHASE",
+    "--definition", "software-project",
+    "--definition-version", "2",
+    "--story", "ST-CUSTOM-PHASE",
+    "--json",
+  ], project);
+  assert.notEqual(mismatched.status, 0);
+  assert.match(mismatched.stderr, /configured phase order|dependency-audit/u);
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "workflows", "instances", "WF-MISSING-CUSTOM-PHASE")),
+    false,
+  );
 });

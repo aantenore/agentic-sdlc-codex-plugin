@@ -81,7 +81,18 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {
-        "type": "string"
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      }
+    },
+    "phases": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "type": "object"
       }
     },
     "execution_policy": {
@@ -408,7 +419,7 @@
         "automatic_phases": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "enum": ["discovery", "analysis", "design", "implementation", "validation", "release"] }
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
         },
         "checkpoints": {
           "type": "array",

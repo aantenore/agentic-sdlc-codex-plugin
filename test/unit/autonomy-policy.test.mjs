@@ -201,6 +201,38 @@ test("autonomy levels are ordered and downstream policies may only narrow", () =
   );
 });
 
+test("custom configured phase identifiers remain governable without a built-in name", () => {
+  const customPhase = "dependency-audit";
+  const requirement = requirementProfile({
+    phase_levels: { [customPhase]: "checkpointed" },
+  });
+  const delivery = deliveryProfile(requirement, {
+    phase_levels: { [customPhase]: "supervised" },
+  });
+  const decision = evaluateAutonomyPolicy(evaluationInput(requirement, delivery, {
+    phase: customPhase,
+  }));
+
+  assert.equal(requirement.phase_levels[customPhase], "checkpointed");
+  assert.equal(delivery.phase_levels[customPhase], "supervised");
+  assert.equal(decision.phase, customPhase);
+  assert.equal(decision.effective_level, "supervised");
+  assert.equal(validateAutonomyDecisionIntegrity(decision).valid, true);
+
+  assert.throws(
+    () => requirementProfile({
+      phase_levels: { "invalid phase": "supervised" },
+    }),
+    /phase identifier|phase_levels/u,
+  );
+  assert.throws(
+    () => evaluateAutonomyPolicy(evaluationInput(requirement, delivery, {
+      phase: "../escape",
+    })),
+    /phase identifier|phase/u,
+  );
+});
+
 test("requirement and delivery profiles are canonical, schema-valid, and tamper-evident", () => {
   const requirement = requirementProfile();
   const delivery = deliveryProfile(requirement);

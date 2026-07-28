@@ -181,39 +181,18 @@
     },
     "phase_levels": {
       "type": "object",
-      "properties": {
-        "discovery": { "$ref": "#/$defs/autonomy_level" },
-        "analysis": { "$ref": "#/$defs/autonomy_level" },
-        "design": { "$ref": "#/$defs/autonomy_level" },
-        "implementation": { "$ref": "#/$defs/autonomy_level" },
-        "validation": { "$ref": "#/$defs/autonomy_level" },
-        "release": { "$ref": "#/$defs/autonomy_level" }
-      },
-      "additionalProperties": false
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/autonomy_level" }
     },
     "supervised_phase_levels": {
       "type": "object",
-      "properties": {
-        "discovery": { "const": "supervised" },
-        "analysis": { "const": "supervised" },
-        "design": { "const": "supervised" },
-        "implementation": { "const": "supervised" },
-        "validation": { "const": "supervised" },
-        "release": { "const": "supervised" }
-      },
-      "additionalProperties": false
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+      "additionalProperties": { "const": "supervised" }
     },
     "checkpointed_phase_levels": {
       "type": "object",
-      "properties": {
-        "discovery": { "enum": ["supervised", "checkpointed"] },
-        "analysis": { "enum": ["supervised", "checkpointed"] },
-        "design": { "enum": ["supervised", "checkpointed"] },
-        "implementation": { "enum": ["supervised", "checkpointed"] },
-        "validation": { "enum": ["supervised", "checkpointed"] },
-        "release": { "enum": ["supervised", "checkpointed"] }
-      },
-      "additionalProperties": false
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+      "additionalProperties": { "enum": ["supervised", "checkpointed"] }
     },
     "constraints": {
       "type": "object",

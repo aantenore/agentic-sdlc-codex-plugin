@@ -89,6 +89,17 @@ test("child and option discovery is deterministic and does not expose mutable ar
   assert.equal(options.some((entry) => entry.flag === "--authorization"), true);
   assert.equal(new Set(options.map((entry) => entry.name)).size, options.length);
   assert.equal(Object.isFrozen(options), true);
+
+  const configOptions = new Map(
+    listOptions("config migrate", { includeGlobal: false })
+      .map((entry) => [entry.flag, entry]),
+  );
+  assert.deepEqual(
+    configOptions.get("--autonomy-mode")?.values,
+    ["enforce_all", "enforce_new_only", "observe", "off"],
+  );
+  assert.equal(configOptions.has("--apply"), true);
+  assert.equal(configOptions.has("--plan-hash"), true);
 });
 
 test("delivery self-service help mirrors the runtime flags and marks the main required inputs", () => {

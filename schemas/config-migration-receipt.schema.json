@@ -30,7 +30,7 @@
     "kind": { "const": "config_migration_receipt" },
     "schema_version": { "const": "config-migration-receipt:v1" },
     "status": { "const": "applied" },
-    "mode": { "enum": ["materialize_legacy_defaults", "adopt_lock", "reconcile_drift"] },
+    "mode": { "enum": ["materialize_legacy_defaults", "adopt_lock", "reconcile_drift", "update_config"] },
     "plan_hash": { "$ref": "#/$defs/sha256" },
     "config_path": { "$ref": "#/$defs/sdlc_path" },
     "lock_path": { "$ref": "#/$defs/sdlc_path" },

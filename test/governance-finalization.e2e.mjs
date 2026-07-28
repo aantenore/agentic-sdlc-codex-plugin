@@ -116,8 +116,44 @@ function implementationIntent(storyId) {
   });
 }
 
-function initializeGitProject(project, branch) {
+function pinProjectConfig(project) {
+  const preview = mustRunJson(["config", "migrate", "--root", project], project);
+  return mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", preview.plan.plan_hash,
+    "--actor-type", "system",
+  ], project);
+}
+
+function configureCustomPhase(project, customPhase) {
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = readJson(project, ".sdlc/config.json");
+  config.phases[customPhase] = {
+    ...config.phases.design,
+    purpose: "Review package boundaries before implementation.",
+  };
+  config.phase_order = [
+    "discovery",
+    "analysis",
+    "design",
+    customPhase,
+    "implementation",
+    "validation",
+    "release",
+  ];
+  config.autonomy_policy.presets.checkpointed.automatic_phases = [
+    ...config.autonomy_policy.presets.checkpointed.automatic_phases,
+    customPhase,
+  ];
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  pinProjectConfig(project);
+}
+
+function initializeGitProject(project, branch, configureProject = null) {
   mustRun(["init", "--root", project, "--project-name", "Finalization regression"], project);
+  configureProject?.(project);
   mustGit(project, ["init"]);
   mustGit(project, ["config", "user.name", "Finalization E2E"]);
   mustGit(project, ["config", "user.email", "finalization-e2e@example.invalid"]);
@@ -134,13 +170,14 @@ function createGovernedPullRequestStory(project, {
   suffix,
   allowedWritePaths,
   outputType = "implementation-summary",
+  configureProject = null,
 }) {
   const requirementId = `REQ-${suffix}`;
   const storyId = `ST-${suffix}`;
   const contractId = `CONTRACT-${suffix}`;
   const profileId = `AUT-${suffix}`;
   const branch = `codex/${storyId}`;
-  initializeGitProject(project, branch);
+  initializeGitProject(project, branch, configureProject);
 
   mustRun([
     "requirement", "propose",
@@ -348,10 +385,12 @@ function appendTrace(project, storyId, type, outcome, evidence) {
 
 test("lifecycle-complete strict gate seals a canonical receipt only after every phase and terminal delivery", () => {
   const project = temporaryProject("lifecycle");
+  const customPhase = "package-boundary-check";
   const fixture = createGovernedPullRequestStory(project, {
     suffix: "FINAL",
     allowedWritePaths: ["docs"],
     outputType: "implementation-summary",
+    configureProject: (target) => configureCustomPhase(target, customPhase),
   });
   const finalReceiptPath = `.sdlc/gates/${fixture.storyId}-final.json`;
 
@@ -371,7 +410,7 @@ test("lifecycle-complete strict gate seals a canonical receipt only after every 
     "--requirement", fixture.requirementId,
   ], project);
 
-  for (const step of ["discovery", "functional-analysis", "design", "implementation"]) {
+  for (const step of ["discovery", "analysis", "design", customPhase, "implementation"]) {
     mustRun([
       "story", "complete-step",
       "--root", project,

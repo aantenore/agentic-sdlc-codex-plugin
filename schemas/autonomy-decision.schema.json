@@ -36,8 +36,10 @@
       ]
     },
     "phase": {
-      "type": ["string", "null"],
-      "enum": [null, "discovery", "analysis", "design", "implementation", "validation", "release"]
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+      ]
     },
     "requested_level": { "$ref": "#/$defs/autonomy_level" },
     "effective_level": { "$ref": "#/$defs/autonomy_level" },
