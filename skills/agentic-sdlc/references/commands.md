@@ -449,6 +449,13 @@ One story should have one active claim. Release the claim before another chat cl
 
 `story complete-step` records a completed SDLC lane under `.sdlc/stories/<story-id>/steps/`, appends a trace, requires an approved fresh story contract, and validates linked output artifacts when `--type` is provided. `story prepare-handoff` creates a story handoff package containing story state, claim, completed steps, output links, dependency status, open handoffs, and recent traces. Use `--release-claim` when the receiving chat or developer should be able to claim the story after pulling the KB.
 
+For a current canonical story-bound workflow, `story complete-step` also seals
+the exact step-file hash in the append-only story trace. The workflow cannot
+leave that phase if the step is absent, predates phase entry, differs from its
+sealed attestation, or its trace integrity cannot be verified. Inspect
+`workflow instance status`; `current_phase_completion` explains the blocker and
+`ready_next_states` remains empty until it is repaired.
+
 ## Work Breakdown And Dependencies
 
 ```bash

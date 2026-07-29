@@ -144,6 +144,7 @@ function assertReleaseStrictGateBlocked({
   workflowInstanceId,
   requestId,
   issuePattern,
+  transitionPattern = issuePattern,
 }) {
   const projectStatus = mustRunJson([
     "status", "--root", project,
@@ -182,7 +183,7 @@ function assertReleaseStrictGateBlocked({
     "--actor", "workflow-e2e-ci",
     "--actor-type", "ci",
     "--actor-name", "Workflow E2E CI",
-  ], project, issuePattern);
+  ], project, transitionPattern);
 }
 
 function implementationIntent(storyId) {
@@ -606,12 +607,17 @@ function appendTrace(project, storyId, type, outcome, evidence) {
 
 test("task start rejects workflows already transitioned or stories already completed", () => {
   const startGovernedWorkflow = (project, storyId, definitionId, instanceId) => {
+    const boundaryDefinition =
+      customGovernedWorkflowDefinition("package-boundary-check");
+    boundaryDefinition.transitions = boundaryDefinition.transitions
+      .map((transition) => ({ ...transition, guards: [] }));
+    boundaryDefinition.metadata = { governance_binding: "story" };
     mustRun([
       "workflow", "definition", "propose",
       "--root", project,
       "--id", definitionId,
       "--definition-version", "1",
-      "--definition-json", JSON.stringify(customGovernedWorkflowDefinition("package-boundary-check")),
+      "--definition-json", JSON.stringify(boundaryDefinition),
     ], project);
     mustRun([
       "workflow", "definition", "approve",
@@ -702,6 +708,193 @@ test("task start rejects workflows already transitioned or stories already compl
     )),
     false,
   );
+});
+
+test("a canonical story workflow cannot leave the current phase before its story step is completed", () => {
+  const project = temporaryProject("workflow-phase-completion");
+  const workflowInstanceId = "delivery-phase-completion";
+  const fixture = createGovernedDeliveryStory(project, {
+    suffix: "WORKFLOW-PHASE-COMPLETION",
+    allowedWritePaths: ["docs"],
+    storyActionUses: 3,
+    beforeTaskStart: ({ storyId }) => {
+      mustRun([
+        "workflow", "instance", "start",
+        "--root", project,
+        "--id", workflowInstanceId,
+        "--definition", "software-project",
+        "--definition-version", "3",
+        "--story", storyId,
+        "--actor", "workflow-e2e-ci",
+        "--actor-type", "ci",
+      ], project);
+    },
+  });
+
+  const blocked = mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "analysis",
+    "--request-id", "phase-completion-analysis-blocked",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--json",
+  ], project, /cannot leave phase 'discovery'.*canonical story step/u);
+  assert.equal(blocked.stdout, "");
+
+  const beforeCompletion = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(beforeCompletion.current_state, "discovery");
+  assert.equal(beforeCompletion.event_count, 0);
+  assert.deepEqual(beforeCompletion.ready_next_states, []);
+  assert.equal(beforeCompletion.current_phase_completion.ready, false);
+  assert.match(
+    beforeCompletion.current_phase_completion.issues.join("\n"),
+    /no completed canonical story step/u,
+  );
+
+  mustRun([
+    "story", "complete-step",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--step", "discovery",
+    "--summary", "Discovery completed before the workflow leaves the phase.",
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
+
+  const discoveryStepPath =
+    `.sdlc/stories/${fixture.storyId}/steps/discovery.json`;
+  const discoveryStep = readJson(project, discoveryStepPath);
+  const completionEvents = fs.readFileSync(
+    path.join(project, `.sdlc/traces/${fixture.storyId}.jsonl`),
+    "utf8",
+  )
+    .trim()
+    .split(/\r?\n/u)
+    .map((line) => JSON.parse(line))
+    .filter((event) =>
+      event.action === "story.complete-step"
+      && event.related?.includes("discovery"));
+  assert.equal(completionEvents.length, 1);
+  assert.equal(
+    completionEvents[0].story_step_ref?.schema_version,
+    "story-step-completion-ref:v1",
+  );
+
+  writeProjectFile(
+    project,
+    discoveryStepPath,
+    `${JSON.stringify({
+      ...discoveryStep,
+      summary: "A well-formed but manually forged completion record.",
+    }, null, 2)}\n`,
+  );
+  const forgedStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(forgedStatus.current_phase_completion.ready, false);
+  assert.match(
+    forgedStatus.current_phase_completion.issues.join("\n"),
+    /does not match its sealed completion attestation/u,
+  );
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "analysis",
+    "--request-id", "phase-completion-analysis-forged",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+  ], project, /does not match its sealed completion attestation/u);
+  writeProjectFile(
+    project,
+    discoveryStepPath,
+    `${JSON.stringify(discoveryStep, null, 2)}\n`,
+  );
+
+  writeProjectFile(
+    project,
+    discoveryStepPath,
+    `${JSON.stringify({
+      ...discoveryStep,
+      completed_at: new Date(
+        Date.parse(beforeCompletion.current_phase_completion.entered_at) - 1,
+      ).toISOString(),
+    }, null, 2)}\n`,
+  );
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "analysis",
+    "--request-id", "phase-completion-analysis-stale",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+  ], project, /completed before the workflow entered that phase/u);
+  writeProjectFile(
+    project,
+    discoveryStepPath,
+    `${JSON.stringify(discoveryStep, null, 2)}\n`,
+  );
+
+  const transitioned = mustRunJson([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "analysis",
+    "--request-id", "phase-completion-analysis",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+  ], project);
+  assert.equal(transitioned.current_state, "analysis");
+  assert.equal(transitioned.event.sequence, 1);
+
+  const retried = mustRunJson([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "analysis",
+    "--request-id", "phase-completion-analysis",
+  ], project);
+  assert.equal(retried.status, "unchanged");
+  assert.equal(retried.event.event_hash, transitioned.event.event_hash);
+
+  const analysisStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(analysisStatus.current_state, "analysis");
+  assert.deepEqual(analysisStatus.ready_next_states, []);
+  assert.equal(analysisStatus.next_transition_checks[0].canonical, false);
+  assert.equal(analysisStatus.next_transition_checks[0].allowed, false);
+  assert.equal(analysisStatus.current_phase_completion.ready, false);
+
+  mustRun([
+    "story", "complete-step",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--step", "functional-analysis",
+    "--summary", "The supported legacy alias completes the canonical analysis phase.",
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
+  const aliasTransition = mustRunJson([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "design",
+    "--request-id", "phase-completion-design-from-alias",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+  ], project);
+  assert.equal(aliasTransition.current_state, "design");
+  assert.equal(aliasTransition.event.sequence, 2);
 });
 
 test("pre-task workflow binding tamper remains fail-closed across status, scheduling, claims, and task start", () => {
@@ -1724,6 +1917,8 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     requestId: "final-workflow-6-validation-step-tampered",
     issuePattern:
       /story step ST-FINAL\/validation evidence changed after step completion/iu,
+    transitionPattern:
+      /canonical story step for phase 'validation' does not match its sealed completion attestation/iu,
   });
 
   const changedPathScopeProject = cloneTemporaryProject(
@@ -2312,6 +2507,41 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   } = receipt;
   assert.equal(hashAlgorithm, "sha256:stable-json:v1");
   assert.equal(receiptHash, computeStableHash(receiptSubject));
+
+  const finalStepTamperProject = cloneTemporaryProject(
+    project,
+    "final-step-attestation-tamper",
+  );
+  const releaseStepRelativePath =
+    `.sdlc/stories/${fixture.storyId}/steps/release.json`;
+  const tamperedReleaseStep = readJson(
+    finalStepTamperProject,
+    releaseStepRelativePath,
+  );
+  tamperedReleaseStep.summary =
+    `${tamperedReleaseStep.summary} Manual post-certification mutation.`;
+  writeProjectFile(
+    finalStepTamperProject,
+    releaseStepRelativePath,
+    `${JSON.stringify(tamperedReleaseStep, null, 2)}\n`,
+  );
+  fs.rmSync(path.join(finalStepTamperProject, finalReceiptPath));
+  mustFail([
+    "gate", "check",
+    "--root", finalStepTamperProject,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], finalStepTamperProject, /phase 'release' completion is not currently attested.*sealed completion attestation/isu);
+  const tamperedTerminalStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", finalStepTamperProject,
+    "--id", workflowInstanceId,
+  ], finalStepTamperProject);
+  assert.equal(tamperedTerminalStatus.status, "blocked");
+  assert.equal(tamperedTerminalStatus.state_terminal, true);
+  assert.equal(tamperedTerminalStatus.terminal, false);
+  assert.equal(tamperedTerminalStatus.current_phase_completion.ready, false);
 
   const certifiedStatus = mustRunJson([
     "status", "--root", project,

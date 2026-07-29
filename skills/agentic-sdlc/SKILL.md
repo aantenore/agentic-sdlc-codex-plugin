@@ -462,7 +462,7 @@ The dedicated assessment journey remains the exception described above: it packa
      --summary "Functional analysis accepted for implementation"
    ```
 
-   After each non-terminal phase step is completed, transition the bound workflow to the next configured phase. The ordering is evidence: workflow start must be no later than task start, phase entry must be no later than that phase's completion, and the next phase entry must be no earlier than the previous phase completion:
+   After each non-terminal phase step is completed, transition the bound workflow to the next configured phase. The completion command seals an exact step-file attestation in the append-only story trace. A current canonical workflow refuses to leave the phase when that step is missing, stale, or manually changed; `workflow instance status` reports the blocker in `current_phase_completion` and keeps `ready_next_states` empty. The ordering is evidence: workflow start must be no later than task start, phase entry must be no later than that phase's completion, and the next phase entry must be no earlier than the previous phase completion:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs workflow instance transition \

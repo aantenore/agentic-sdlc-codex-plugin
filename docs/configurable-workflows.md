@@ -103,6 +103,14 @@ instance, and final certification requires the exact instance reference stored
 by task start. If the configured order differs from the six stock phases, use
 an approved custom story-bound definition with that exact order.
 
+For a current canonical story-bound workflow, a transition cannot leave its
+current phase until the matching `story complete-step` record exists. Completion
+is bound to its sealed story trace and exact file hash, so a missing, stale, or
+manually edited step blocks both transition and readiness. `workflow instance
+status` exposes `current_phase_completion`, its blockers, and an empty
+`ready_next_states` list until the phase is safe to leave. Idempotent retries of
+an already recorded transition remain no-ops.
+
 The technical-assessment preset complements the existing
 `assessment-proposal:v1` and `assessment-workflow:v1` records; it does not
 replace their files, commands, JSON fields, or two-checkpoint behavior.

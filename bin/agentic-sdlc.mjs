@@ -5103,6 +5103,348 @@ function workflowTargetUsesStrictGate(effectiveDefinition, targetState) {
       guard?.id === "strict-gate-passed"));
 }
 
+function workflowRequiresCurrentPhaseCompletion(instance, effectiveDefinition) {
+  return Boolean(instance?.metadata?.governance_binding?.story_id)
+    && effectiveDefinition?.metadata?.canonical_evidence_schema
+      === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA;
+}
+
+function workflowCurrentPhaseEntryAt(instance, events, currentState) {
+  let enteredAt = currentState === instance.initial_state
+    ? instance.created_at
+    : null;
+  for (const event of events || []) {
+    if (event?.to === currentState) {
+      enteredAt = event.timestamp;
+    }
+  }
+  return Number.isFinite(Date.parse(String(enteredAt || "")))
+    ? enteredAt
+    : null;
+}
+
+function storyPhaseCompletionTraceAttestation(
+  context,
+  storyId,
+  currentState,
+  stepName,
+  stepRef,
+  record,
+  stepSnapshot,
+) {
+  const tracePath = path.join(context.sdlcRoot, "traces", `${storyId}.jsonl`);
+  if (!fs.existsSync(tracePath)) {
+    return {
+      valid: false,
+      mode: null,
+      event_id: null,
+      event_hash: null,
+      issues: [`story step '${currentState}' has no sealed story trace`],
+    };
+  }
+
+  let snapshot;
+  try {
+    snapshot = withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+  } catch (error) {
+    return {
+      valid: false,
+      mode: null,
+      event_id: null,
+      event_hash: null,
+      issues: [
+        `story step '${currentState}' trace integrity cannot be verified: ${error.message}`,
+      ],
+    };
+  }
+  if (!snapshot.integrity.valid) {
+    return {
+      valid: false,
+      mode: null,
+      event_id: null,
+      event_hash: null,
+      issues: [
+        `story step '${currentState}' trace integrity is invalid: ${
+          (snapshot.integrity.errors || [])
+            .map((entry) => entry.code || "invalid")
+            .join(", ") || "invalid"
+        }`,
+      ],
+    };
+  }
+  if (snapshot.records.some((entry) => entry.valid !== true)) {
+    return {
+      valid: false,
+      mode: null,
+      event_id: null,
+      event_hash: null,
+      issues: [`story step '${currentState}' trace contains an invalid record`],
+    };
+  }
+
+  const candidates = snapshot.records
+    .map((entry) => entry.event)
+    .filter((event) =>
+      event?.action === "story.complete-step"
+      && event.story_id === storyId
+      && Array.isArray(event.related)
+      && event.related.includes(stepName)
+      && Array.isArray(event.evidence)
+      && event.evidence.includes(stepRef));
+  const event = candidates.at(-1) || null;
+  if (!event || event?._trace_integrity?.schema_version !== "trace-integrity-event:v1") {
+    return {
+      valid: false,
+      mode: null,
+      event_id: event?.id || null,
+      event_hash: event?._trace_integrity?.event_hash || null,
+      issues: [
+        `story step '${currentState}' has no matching sealed story.complete-step event`,
+      ],
+    };
+  }
+
+  const attestation = event.story_step_ref;
+  if (attestation !== undefined) {
+    const expectedKeys = [
+      "completed_at",
+      "hash_algorithm",
+      "path",
+      "phase",
+      "record_id",
+      "schema_version",
+      "sha256",
+      "step",
+      "story_id",
+    ].sort().join("\u0000");
+    const actualKeys = attestation
+      && typeof attestation === "object"
+      && !Array.isArray(attestation)
+      ? Object.keys(attestation).sort().join("\u0000")
+      : "";
+    const valid = actualKeys === expectedKeys
+      && attestation.schema_version === "story-step-completion-ref:v1"
+      && attestation.hash_algorithm === "sha256:file:v1"
+      && attestation.story_id === storyId
+      && attestation.step === stepName
+      && attestation.phase === currentState
+      && attestation.path === stepRef
+      && attestation.record_id === record.id
+      && attestation.completed_at === record.completed_at
+      && /^[a-f0-9]{64}$/u.test(String(attestation.sha256 || ""))
+      && attestation.sha256 === stepSnapshot.sha256;
+    return {
+      valid,
+      mode: "exact_file_hash",
+      event_id: event.id,
+      event_hash: event._trace_integrity.event_hash,
+      issues: valid
+        ? []
+        : [
+            `canonical story step for phase '${currentState}' does not match its sealed completion attestation`,
+          ],
+    };
+  }
+
+  const refs = (Array.isArray(event.evidence_refs) ? event.evidence_refs : [])
+    .filter((ref) => ref?.path === stepRef);
+  if (
+    refs.length !== 1
+    || refs[0].representation !== "redacted_utf8_v2"
+    || !refs[0].policy_source_ref
+  ) {
+    return {
+      valid: false,
+      mode: "legacy_evidence_ref",
+      event_id: event.id,
+      event_hash: event._trace_integrity.event_hash,
+      issues: [
+        `canonical story step for phase '${currentState}' has no verifiable sealed completion attestation; complete the step again`,
+      ],
+    };
+  }
+  try {
+    const policy = loadTraceEvidencePolicySource(context, refs[0].policy_source_ref, {
+      allowedAlgorithms: ["operational_v2"],
+    });
+    const presented = redactValueWithMetadata(record, policy);
+    if (presented.limited) {
+      throw new Error("redaction reached its safety limit");
+    }
+    const representation = `${JSON.stringify(presented.value)}\n`;
+    const valid = evidenceRepresentationMatchesRef(representation, refs[0]);
+    return {
+      valid,
+      mode: "legacy_evidence_ref",
+      event_id: event.id,
+      event_hash: event._trace_integrity.event_hash,
+      issues: valid
+        ? []
+        : [
+            `canonical story step for phase '${currentState}' does not match its sealed completion evidence`,
+          ],
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      mode: "legacy_evidence_ref",
+      event_id: event.id,
+      event_hash: event._trace_integrity.event_hash,
+      issues: [
+        `canonical story step for phase '${currentState}' completion evidence cannot be verified: ${error.message}`,
+      ],
+    };
+  }
+}
+
+function currentStoryPhaseCompletionReadiness(
+  context,
+  storyId,
+  instance,
+  effectiveDefinition,
+  events,
+  currentState,
+) {
+  const enteredAt = workflowCurrentPhaseEntryAt(instance, events, currentState);
+  const issues = [];
+  const stepNames = [
+    currentState,
+    ...Array.from(LEGACY_STORY_STEP_PHASE_ALIASES.entries())
+      .filter(([, phase]) => phase === currentState)
+      .map(([alias]) => alias),
+  ];
+  const candidates = [];
+
+  if (!(effectiveDefinition.phase_order || []).includes(currentState)) {
+    issues.push(`workflow state '${currentState}' is not a configured story phase`);
+  }
+  if (!enteredAt) {
+    issues.push(`workflow phase '${currentState}' has no valid entry timestamp`);
+  }
+  for (const stepName of stepNames) {
+    const stepPath = path.join(
+      context.sdlcRoot,
+      "stories",
+      storyId,
+      "steps",
+      `${stepName}.json`,
+    );
+    if (!fs.existsSync(stepPath)) continue;
+    const stepRef = toProjectPath(context, stepPath);
+    const candidate = {
+      stepName,
+      stepPath,
+      stepRef,
+      record: null,
+      stepSnapshot: null,
+      traceAttestation: null,
+      issues: [],
+    };
+    try {
+      candidate.stepSnapshot = readStableRegularFileBuffer(stepPath, context.root);
+      candidate.record = JSON.parse(candidate.stepSnapshot.content.toString("utf8"));
+      if (
+        !candidate.record
+        || typeof candidate.record !== "object"
+        || Array.isArray(candidate.record)
+      ) {
+        candidate.issues.push(
+          `canonical story step '${stepName}' for phase '${currentState}' must be a JSON object`,
+        );
+        candidate.record = null;
+        candidate.stepSnapshot = null;
+      }
+    } catch (error) {
+      candidate.issues.push(
+        `canonical story step '${stepName}' for phase '${currentState}' cannot be read: ${error.message}`,
+      );
+    }
+
+    const record = candidate.record;
+    if (record) {
+      if (record.story_id !== storyId) {
+        candidate.issues.push(
+          `canonical story step '${stepName}' story_id '${record.story_id || "(missing)"}' does not match '${storyId}'`,
+        );
+      }
+      if (record.step !== stepName || record.phase !== currentState) {
+        candidate.issues.push(
+          `canonical story step '${stepName}' does not match replay phase '${currentState}'`,
+        );
+      }
+      if (record.status !== "completed") {
+        candidate.issues.push(
+          `canonical story step '${stepName}' for phase '${currentState}' is '${record.status || "(missing)"}', not completed`,
+        );
+      }
+      const completedAt = Date.parse(String(record.completed_at || ""));
+      if (!Number.isFinite(completedAt)) {
+        candidate.issues.push(
+          `canonical story step '${stepName}' for phase '${currentState}' has no valid completed_at`,
+        );
+      } else if (enteredAt && completedAt < Date.parse(enteredAt)) {
+        candidate.issues.push(
+          `canonical story step '${stepName}' for phase '${currentState}' was completed before the workflow entered that phase`,
+        );
+      }
+      if (candidate.stepSnapshot) {
+        candidate.traceAttestation = storyPhaseCompletionTraceAttestation(
+          context,
+          storyId,
+          currentState,
+          stepName,
+          stepRef,
+          record,
+          candidate.stepSnapshot,
+        );
+        candidate.issues.push(...candidate.traceAttestation.issues);
+      }
+    }
+    candidates.push(candidate);
+  }
+
+  if (candidates.length === 0) {
+    const expected = stepNames.map((stepName) =>
+      toProjectPath(
+        context,
+        path.join(
+          context.sdlcRoot,
+          "stories",
+          storyId,
+          "steps",
+          `${stepName}.json`,
+        ),
+      ));
+    issues.push(
+      `no completed canonical story step exists for phase '${currentState}' at ${expected.join(" or ")}`,
+    );
+  }
+  issues.push(...candidates.flatMap((candidate) => candidate.issues));
+  const selected = candidates
+    .filter((candidate) => candidate.issues.length === 0)
+    .sort((left, right) =>
+      Date.parse(left.record.completed_at) - Date.parse(right.record.completed_at)
+      || left.stepName.localeCompare(right.stepName, "en"))
+    .at(-1) || null;
+
+  return {
+    required: true,
+    ready: issues.length === 0,
+    story_id: storyId,
+    phase: currentState,
+    entered_at: enteredAt,
+    step: selected?.stepName || null,
+    step_path: selected?.stepRef || null,
+    step_id: selected?.record?.id || null,
+    completed_at: selected?.record?.completed_at || null,
+    trace_attestation: selected?.traceAttestation || null,
+    issues,
+  };
+}
+
 function workflowScopeFromRuntime(instance, effectiveDefinition, integrity, currentPhase) {
   const checkpoint = integrity?.checkpoint;
   if (!checkpoint) {
@@ -5225,8 +5567,13 @@ function transitionWorkflowInstance(context, options) {
   const storyId = instance.metadata?.governance_binding?.story_id
     ? normalizeId(instance.metadata.governance_binding.story_id)
     : null;
+  const requiresCurrentPhaseCompletion =
+    workflowRequiresCurrentPhaseCompletion(instance, effectiveDefinition);
   const releaseLifecycleLock = storyId
-    && workflowTargetUsesStrictGate(effectiveDefinition, to)
+    && (
+      requiresCurrentPhaseCompletion
+      || workflowTargetUsesStrictGate(effectiveDefinition, to)
+    )
     ? acquireFileLock(storyLifecycleCertificationLockPath(context, storyId))
     : () => {};
   let releaseEventLock = () => {};
@@ -5254,6 +5601,31 @@ function transitionWorkflowInstance(context, options) {
         attribution = buildAttribution(context, options, "workflow.instance.transition");
         const currentState = workflowCurrentState(integrity.replay, instance, effectiveDefinition);
         const idempotentReplay = events.some((event) => event.idempotency_key === idempotencyKey);
+        const definedTransition = (effectiveDefinition.transitions || []).some((transition) =>
+          transition.from === currentState && transition.to === to);
+        if (
+          !idempotentReplay
+          && definedTransition
+          && requiresCurrentPhaseCompletion
+        ) {
+          const phaseCompletion = currentStoryPhaseCompletionReadiness(
+            context,
+            storyId,
+            instance,
+            effectiveDefinition,
+            events,
+            currentState,
+          );
+          if (!phaseCompletion.ready) {
+            fail(
+              `Workflow transition ${id} from ${currentState} to ${to} cannot leave phase `
+              + `'${currentState}' before its canonical story step is completed: `
+              + `${phaseCompletion.issues.join("; ")}. Complete the phase with `
+              + `'story complete-step --id ${storyId} --step ${currentState}' `
+              + "and its required evidence or authorization, then retry the transition.",
+            );
+          }
+        }
         const usesCanonicalEvidence = !idempotentReplay
           && workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, to);
         const usesStrictGate = !idempotentReplay
@@ -5410,21 +5782,45 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   const { instancePath, instance } = readCompletedWorkflowInstance(context, id);
   const { definitionEntry, overlayEntry, effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
   const eventsPath = workflowEventsPath(context, id);
-  const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+  const storyId = instance.metadata?.governance_binding?.story_id
+    ? normalizeId(instance.metadata.governance_binding.story_id)
+    : null;
+  const requiresCurrentPhaseCompletion =
+    workflowRequiresCurrentPhaseCompletion(instance, effectiveDefinition);
+  const releaseLifecycleLock = storyId && requiresCurrentPhaseCompletion
+    ? acquireFileLock(storyLifecycleCertificationLockPath(context, storyId))
+    : () => {};
+  let releaseLock = () => {};
   let events;
   let integrity;
+  let currentState;
+  let currentPhaseCompletion = null;
   try {
+    releaseLock = acquireFileLock(`${eventsPath}.lock`);
     events = readWorkflowEvents(context, id);
     integrity = inspectWorkflowRuntimeIntegrity(context, id, instance, effectiveDefinition, events);
+    if (integrity.valid) {
+      currentState = workflowCurrentState(integrity.replay, instance, effectiveDefinition);
+      currentPhaseCompletion = requiresCurrentPhaseCompletion
+        ? currentStoryPhaseCompletionReadiness(
+            context,
+            storyId,
+            instance,
+            effectiveDefinition,
+            events,
+            currentState,
+          )
+        : null;
+    }
   } finally {
     releaseLock();
+    releaseLifecycleLock();
   }
   if (!integrity.valid) {
     blockWorkflowOnIntegrityFailure(context, options, id, integrity, explain ? "explain" : "status");
     return;
   }
   const replay = integrity.replay;
-  const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
   const nextStates = workflowNextStates(effectiveDefinition, currentState);
   const outgoingTransitions = (effectiveDefinition.transitions || [])
     .filter((transition) => transition.from === currentState);
@@ -5456,9 +5852,6 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
           : null,
       )
     : null;
-  const storyId = instance.metadata?.governance_binding?.story_id
-    ? normalizeId(instance.metadata.governance_binding.story_id)
-    : null;
   const stateTerminal = (effectiveDefinition.states || [])
     .find((state) => state.id === currentState)?.terminal === true;
   const finalReceipt = storyId && stateTerminal
@@ -5478,12 +5871,17 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
       )
     : null;
   const nextTransitionChecks = outgoingTransitions.map((transition) => {
+    const phaseCompletionBlocked =
+      currentPhaseCompletion
+      && !currentPhaseCompletion.ready;
     if (!canonicalOutgoing.includes(transition)) {
       return {
         transition_id: transition.id,
         to: transition.to,
         canonical: false,
-        allowed: (transition.guards || []).length === 0 ? true : null,
+        allowed: phaseCompletionBlocked
+          ? false
+          : (transition.guards || []).length === 0 ? true : null,
         guard_results: [],
       };
     }
@@ -5515,16 +5913,20 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
       transition_id: transition.id,
       to: transition.to,
       canonical: true,
-      allowed: evaluated.allowed && !strictGateBlocked,
+      allowed: evaluated.allowed && !strictGateBlocked && !phaseCompletionBlocked,
       guard_results: guardResults,
     };
   });
   const readyNextStates = nextTransitionChecks
     .filter((transition) => transition.allowed === true)
     .map((transition) => transition.to);
+  const currentPhaseCompletionReady =
+    !currentPhaseCompletion || currentPhaseCompletion.ready;
   let instanceStatus;
   if (stateTerminal) {
-    if (!storyId || finalReceipt?.valid) {
+    if (!currentPhaseCompletionReady) {
+      instanceStatus = "blocked";
+    } else if (!storyId || finalReceipt?.valid) {
       instanceStatus = "terminal";
     } else if (finalReceipt?.exists) {
       instanceStatus = "blocked";
@@ -5541,12 +5943,16 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   outputWorkflowResult(options, {
     schema_version: explain ? "workflow-instance-explanation:v1" : "workflow-instance-status:v1",
     status: instanceStatus,
-    terminal: stateTerminal && (!storyId || finalReceipt?.valid === true),
+    terminal:
+      stateTerminal
+      && currentPhaseCompletionReady
+      && (!storyId || finalReceipt?.valid === true),
     state_terminal: stateTerminal,
     final_receipt_exists: finalReceipt?.exists ?? null,
     final_receipt_valid: finalReceipt?.valid ?? null,
     instance,
     current_state: currentState,
+    current_phase_completion: currentPhaseCompletion,
     next_states: nextStates,
     ready_next_states: readyNextStates,
     next_transition_checks: nextTransitionChecks,
@@ -5560,7 +5966,19 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   }, "instance_shown", [
     `Instance: ${id}`,
     `Current state: ${currentState}`,
-    `Terminal lifecycle: ${stateTerminal && (!storyId || finalReceipt?.valid === true) ? "yes" : "no"}`,
+    ...(currentPhaseCompletion
+      ? [
+          `Current phase completion: ${currentPhaseCompletion.ready ? "ready" : "blocked"}`,
+          ...currentPhaseCompletion.issues.map((issue) => `Phase completion blocker: ${issue}`),
+        ]
+      : []),
+    `Terminal lifecycle: ${
+      stateTerminal
+      && currentPhaseCompletionReady
+      && (!storyId || finalReceipt?.valid === true)
+        ? "yes"
+        : "no"
+    }`,
     ...(finalReceipt
       ? [
           `Final receipt exists: ${finalReceipt.exists ? "yes" : "no"}`,
@@ -31969,6 +32387,18 @@ function completeStoryStep(context, options) {
       },
     };
     writeJsonFile(stepPath, record, { force: true });
+    const stepSnapshot = readStableRegularFileBuffer(stepPath, context.root);
+    const storyStepRef = {
+      schema_version: "story-step-completion-ref:v1",
+      story_id: storyId,
+      step,
+      phase: stepPhase,
+      path: relativeStepPath,
+      record_id: record.id,
+      completed_at: record.completed_at,
+      sha256: stepSnapshot.sha256,
+      hash_algorithm: "sha256:file:v1",
+    };
     appendJsonLine(path.join(stepDir, "history.jsonl"), record);
     const traceEvent = appendTraceEvent(context, storyId, {
       type: "gate",
@@ -31984,6 +32414,7 @@ function completeStoryStep(context, options) {
         record.checkpoint_profile_ref?.path,
       ].filter(Boolean))),
       related: [storyId, step, ...record.output_links.map((item) => item.id)],
+      story_step_ref: storyStepRef,
       git: attribution.git,
       run: attribution.run,
     });
@@ -37451,6 +37882,7 @@ function appendTraceEvent(context, storyId, event) {
     evidence: event.evidence || [],
     related: event.related || [],
     ...(event.narrative ? { narrative: event.narrative } : {}),
+    ...(event.story_step_ref ? { story_step_ref: event.story_step_ref } : {}),
     git: event.git || buildGitMetadata(context.root),
     run: event.run || buildRunMetadata({}),
     correlation_id: event.correlation_id || CLI_OPERATION_CONTEXT.correlation_id,
@@ -43599,14 +44031,32 @@ function validateCurrentStoryWorkflowCompletion(
     }
 
     const requiredPhases = configuredPhaseOrder(context);
-    const phaseCompletions = readStoryStepRecords(context, storyId)
-      .filter((record) => record.status === "completed");
+    const phaseCompletionReadiness = requiredPhases.map((phase) =>
+      currentStoryPhaseCompletionReadiness(
+        context,
+        storyId,
+        instance,
+        effectiveDefinition,
+        events,
+        phase,
+      ));
+    for (const completion of phaseCompletionReadiness) {
+      if (!completion.ready) {
+        report.errors.push(
+          `${label} phase '${completion.phase}' completion is not currently attested: `
+          + `${completion.issues.join("; ")}`,
+        );
+      }
+    }
+    const completionByPhase = new Map(
+      phaseCompletionReadiness.map((completion) => [completion.phase, completion]),
+    );
     const firstTransitionAt = events.length > 0
       && Number.isFinite(Date.parse(String(events[0]?.timestamp || "")))
       ? events[0].timestamp
       : null;
-    const earliestPhaseCompletionAt = phaseCompletions
-      .map((record) => record.completed_at)
+    const earliestPhaseCompletionAt = phaseCompletionReadiness
+      .map((completion) => completion.completed_at)
       .filter((timestamp) => Number.isFinite(Date.parse(String(timestamp || ""))))
       .sort((left, right) => String(left).localeCompare(String(right), "en"))[0] || null;
     if (
@@ -43650,19 +44100,16 @@ function validateCurrentStoryWorkflowCompletion(
     }
     const phaseTimeline = requiredPhases.map((phase, index) => {
       const entry = entryByPhase.get(phase) || null;
-      const completion = phaseCompletions
-        .filter((record) => record.phase === phase)
-        .sort((left, right) =>
-          String(left.completed_at || "").localeCompare(String(right.completed_at || ""), "en"))[0] || null;
+      const completion = completionByPhase.get(phase) || null;
       if (!entry) {
         report.errors.push(`${label} has no verified entry into configured phase '${phase}'`);
       }
-      if (!completion) {
-        report.errors.push(`${label} has no completed story step for configured phase '${phase}'`);
+      if (!completion?.ready) {
+        report.errors.push(`${label} has no verified completed story step for configured phase '${phase}'`);
       }
       if (
         entry
-        && completion
+        && completion?.completed_at
         && Date.parse(entry.entered_at) > Date.parse(completion.completed_at)
       ) {
         report.errors.push(
@@ -43671,14 +44118,11 @@ function validateCurrentStoryWorkflowCompletion(
       }
       const previousPhase = requiredPhases[index - 1] || null;
       const previousCompletion = previousPhase
-        ? phaseCompletions
-          .filter((record) => record.phase === previousPhase)
-          .sort((left, right) =>
-            String(left.completed_at || "").localeCompare(String(right.completed_at || ""), "en"))[0] || null
+        ? completionByPhase.get(previousPhase) || null
         : null;
       if (
         entry
-        && previousCompletion
+        && previousCompletion?.completed_at
         && Date.parse(entry.entered_at) < Date.parse(previousCompletion.completed_at)
       ) {
         report.errors.push(
@@ -43690,7 +44134,7 @@ function validateCurrentStoryWorkflowCompletion(
         entered_at: entry?.entered_at || null,
         entry_event_hash: entry?.event_hash || null,
         completed_at: completion?.completed_at || null,
-        completion_record_id: completion?.id || null,
+        completion_record_id: completion?.step_id || null,
       };
     });
 
