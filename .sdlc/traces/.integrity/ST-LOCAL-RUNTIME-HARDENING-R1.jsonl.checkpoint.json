@@ -1,0 +1,23 @@
+{
+  "kind": "trace_integrity_checkpoint",
+  "schema_version": "trace-integrity-checkpoint:v1",
+  "mode": "local_tamper_evidence",
+  "authenticity_claimed": false,
+  "hash_algorithm": "sha256",
+  "trace_file": "ST-LOCAL-RUNTIME-HARDENING-R1.jsonl",
+  "legacy_prefix": {
+    "line_count": 0,
+    "byte_length": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "new_writes": {
+    "count": 11,
+    "first_sequence": 1,
+    "last_sequence": 11,
+    "last_event_hash": "8e34c0a6576492be76d821da8e233f786a9196dedce187842d8891a47d8b1fee",
+    "rolling_hash": "3ca12a21993d6c572e66519d7721bc209724734a9e4cc885d38a167ab7b87f14"
+  },
+  "committed_offset": 27756,
+  "updated_at": "2026-07-29T21:53:36.527Z",
+  "checkpoint_hash": "8b2918ace670665e091106778aa44b95c944761a3cabc2c705b3c0bf09d8b900"
+}

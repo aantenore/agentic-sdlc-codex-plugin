@@ -143,6 +143,40 @@ test("requirement and contract help include safe runnable examples and exact run
     /salvati relativi a Git.*rilascio locale.*destinazione assoluta/iu,
   );
 
+  const supersede = buildHelpModel(["requirement", "supersede"]);
+  const supersedeFlags = new Map(supersede.options.map((entry) => [entry.flag, entry]));
+  for (const flag of ["--id", "--new-id", "--reason", "--actor-type"]) {
+    assert.equal(supersedeFlags.get(flag)?.required, true, flag);
+  }
+  assert.match(supersedeFlags.get("--approval-source")?.required_when, /not supplied by CI/u);
+  for (const flag of ["--actor-name", "--actor-email"]) {
+    assert.equal(supersedeFlags.has(flag), true, flag);
+  }
+  for (const flag of ["--summary", "--approval-evidence"]) {
+    assert.match(supersedeFlags.get(flag)?.required_when, /explicit-user, automation, or bootstrap/u, flag);
+    assert.match(supersedeFlags.get(flag)?.required_one_of, /--summary or --approval-evidence/u, flag);
+  }
+  assert.match(supersedeFlags.get("--authorization")?.required_when, /--approval-source automation/u);
+  assert.match(supersedeFlags.get("--host-receipt-file")?.required_when, /trusted host or CI proof/u);
+  assert.match(
+    supersede.usage,
+    /^agentic-sdlc requirement supersede --id <current-id> --new-id <approved-direct-revision-id>/u,
+  );
+  assert.equal(supersede.examples.length, 1);
+  assert.doesNotMatch(supersede.examples[0], /<[^>]+>/u);
+  assert.match(
+    supersede.examples[0],
+    /^agentic-sdlc requirement supersede --id REQ-BOOKING-001 --new-id REQ-BOOKING-002 --reason/u,
+  );
+
+  const italianSupersede = buildHelpModel(["requirement", "supersede"], { locale: "it" });
+  const italianSupersedeFlags = new Map(italianSupersede.options.map((entry) => [entry.flag, entry]));
+  assert.match(italianSupersedeFlags.get("--approval-source")?.required_when, /non è indicato dalla CI/u);
+  assert.match(
+    italianSupersedeFlags.get("--approval-evidence")?.required_one_of,
+    /--summary oppure --approval-evidence/u,
+  );
+
   const approve = buildHelpModel(["requirement", "approve"]);
   assert.match(approve.examples[0], /--actor-type human --approval-source explicit-user --summary/u);
 

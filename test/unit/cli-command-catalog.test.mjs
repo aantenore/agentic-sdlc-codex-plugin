@@ -48,6 +48,7 @@ test("catalog covers the dispatch families and the self-service commands", () =>
     "budget meter record",
     "requirement propose",
     "requirement approve",
+    "requirement supersede",
     "autonomy requirement status",
     "autonomy delivery approve",
     "contract create",
@@ -186,6 +187,35 @@ test("requirement and contract help expose the runtime-required and conditional 
   }
   assert.match(findCommand("requirement revise").description.en, /inherited unless an explicit replacement/iu);
   assert.match(findCommand("requirement revise").description.it, /vengono ereditate.*elenco sostitutivo/iu);
+
+  const supersession = describe("requirement supersede");
+  for (const flag of ["--id", "--new-id", "--reason", "--actor-type"]) {
+    assert.equal(supersession.get(flag)?.required, true, `${flag} should be marked required`);
+  }
+  assert.match(supersession.get("--approval-source")?.required_when.en, /not supplied by CI/u);
+  assert.match(supersession.get("--approval-source")?.required_when.it, /non è indicato dalla CI/u);
+  for (const flag of ["--actor-name", "--actor-email"]) {
+    assert.equal(supersession.has(flag), true, `requirement supersede should expose ${flag}`);
+  }
+  for (const flag of ["--summary", "--approval-evidence"]) {
+    assert.match(supersession.get(flag)?.required_when.en, /explicit-user, automation, or bootstrap/u, flag);
+    assert.match(supersession.get(flag)?.required_one_of.en, /--summary or --approval-evidence/u, flag);
+    assert.match(supersession.get(flag)?.required_one_of.it, /--summary oppure --approval-evidence/u, flag);
+  }
+  assert.match(supersession.get("--authorization")?.required_when.en, /--approval-source automation/u);
+  assert.match(supersession.get("--host-receipt-file")?.required_when.en, /trusted host or CI proof/u);
+  const supersedeCommand = findCommand("requirement supersede");
+  assert.match(
+    supersedeCommand.usage,
+    /^requirement supersede --id <current-id> --new-id <approved-direct-revision-id> --reason <reason>/u,
+  );
+  assert.match(supersedeCommand.usage, /--actor-type <human\|ci\|agent\|system>/u);
+  assert.match(supersedeCommand.usage, /\(--summary <decision> \| --approval-evidence <path>\)$/u);
+  assert.equal(supersedeCommand.examples.length, 1);
+  assert.doesNotMatch(supersedeCommand.examples[0], /<[^>]+>/u);
+  for (const flag of ["--id", "--new-id", "--reason", "--actor-type", "--approval-source", "--summary"]) {
+    assert.match(supersedeCommand.examples[0], new RegExp(flag, "u"), `example should include ${flag}`);
+  }
 
   const approval = describe("requirement approve");
   assert.equal(approval.get("--id")?.required, true);

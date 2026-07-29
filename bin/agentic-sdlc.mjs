@@ -241,6 +241,12 @@ import {
   resolveCliPresets,
   showCliPreset,
 } from "../lib/cli/presets.mjs";
+import {
+  NODE_ENGINE_RANGE,
+  NODE_RUNTIME_REQUIREMENT,
+  isSupportedNodeRuntime,
+  unsupportedNodeRuntimeMessage,
+} from "../lib/runtime-support.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE_METADATA = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
@@ -1142,8 +1148,12 @@ function emitMutationAuditSinkWarning(governance, options) {
 async function main() {
   const rawArgs = process.argv.slice(2);
   const rawJsonRequested = rawBooleanOptionRequested(rawArgs, "json");
-  let parsed = { options: {} };
+  const rawLocale = rawStringOptionValue(rawArgs, "locale");
+  let parsed = { options: rawLocale === undefined ? {} : { locale: rawLocale } };
   try {
+    if (!isSupportedNodeRuntime(process.versions.node)) {
+      throw new UnsupportedNodeRuntimeError(process.versions.node, rawLocale);
+    }
     parsed = parseArgs(rawArgs);
     parsed = applyCliPresetOptions(parsed);
     if (parsed.options.locale !== undefined) humanGuidanceLocale(parsed.options);
@@ -1224,7 +1234,9 @@ async function main() {
     await dispatchWithMutationGovernance(registry, resolution, { ...invocation, context });
   } catch (error) {
     const jsonRequested = parsed.options?.json === true || rawJsonRequested;
-    const errorRedaction = resolveCliErrorRedactionPolicy(parsed.options);
+    const errorRedaction = error instanceof UnsupportedNodeRuntimeError
+      ? cliErrorRedactionResolution(OPERATIONAL_REDACTION_POLICY, false)
+      : resolveCliErrorRedactionPolicy(parsed.options);
     const errorRedactionPolicy = errorRedaction.policy;
     if (error instanceof UnknownCommandError) {
       if (jsonRequested) {
@@ -6814,10 +6826,37 @@ function rawBooleanOptionRequested(argv, optionName) {
   return requested;
 }
 
+function rawStringOptionValue(argv, optionName) {
+  const exact = `--${optionName}`;
+  const inlinePrefix = `${exact}=`;
+  let value;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === exact) {
+      const next = argv[index + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        value = next;
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith(inlinePrefix)) {
+      value = arg.slice(inlinePrefix.length);
+    }
+  }
+  return value;
+}
+
 class UserError extends Error {
   constructor(message, humanGuidance = null) {
     super(message);
     this.humanGuidance = humanGuidance;
+  }
+}
+
+class UnsupportedNodeRuntimeError extends UserError {
+  constructor(version, locale) {
+    super(unsupportedNodeRuntimeMessage(version, locale));
   }
 }
 
@@ -12534,15 +12573,25 @@ async function runDoctor(context, options) {
   const checks = [];
   const add = (id, status, details) => checks.push({ id, status, details });
   const nodeVersion = process.versions.node;
-  const [major, minor] = nodeVersion.split(".").map(Number);
-  add("node-runtime", major > 18 || (major === 18 && minor >= 18) ? "passed" : "failed", `Node ${nodeVersion}; requires >=18.18`);
+  add(
+    "node-runtime",
+    isSupportedNodeRuntime(nodeVersion) ? "passed" : "failed",
+    `Node ${nodeVersion}; requires ${NODE_RUNTIME_REQUIREMENT} (${NODE_ENGINE_RANGE})`,
+  );
 
   const packagePath = path.join(PLUGIN_ROOT, "package.json");
   const manifestPath = path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json");
   try {
     const pkg = readJson(packagePath);
     const manifest = readJson(manifestPath);
-    add("version-consistency", pkg.version === VERSION && manifest.version === VERSION ? "passed" : "failed", `CLI ${VERSION}, package ${pkg.version}, manifest ${manifest.version}`);
+    const metadataConsistent = pkg.version === VERSION
+      && manifest.version === VERSION
+      && pkg.engines?.node === NODE_ENGINE_RANGE;
+    add(
+      "version-consistency",
+      metadataConsistent ? "passed" : "failed",
+      `CLI ${VERSION}, package ${pkg.version}, manifest ${manifest.version}, Node engines ${pkg.engines?.node || "missing"}`,
+    );
     const firstPrompt = Array.isArray(manifest.interface?.defaultPrompt) ? manifest.interface.defaultPrompt[0] : manifest.interface?.defaultPrompt;
     add(
       "assessment-entry-point",
@@ -51744,7 +51793,10 @@ Usage:
       [--title title] [--summary outcome] [--acceptance criterion]
       [--autonomy-ceiling supervised|checkpointed|bounded-autonomous]
   agentic-sdlc requirement supersede --id REQ-001 --new-id REQ-001-R2 --reason text
-      --actor-type human|ci --approval-source explicit-user|ci --summary text
+      --actor-type human|ci|agent|system
+      [--approval-source explicit-user|ci|automation|bootstrap]
+      [--summary text | --approval-evidence path]
+      [--authorization id] [--host-receipt-file path]
   agentic-sdlc requirement status [--id REQ-001]
   agentic-sdlc autonomy requirement status --id REQ-001
   agentic-sdlc autonomy delivery propose --id AUT-PR-1 --delivery PR-1

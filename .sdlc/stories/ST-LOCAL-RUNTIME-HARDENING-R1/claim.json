@@ -1,0 +1,38 @@
+{
+  "story_id": "ST-LOCAL-RUNTIME-HARDENING-R1",
+  "agent": "codex",
+  "branch": "codex/local-project-hardening",
+  "status": "active",
+  "claimed_at": "2026-07-29T21:09:28.192Z",
+  "expires_at": "2026-07-30T21:09:28.192Z",
+  "notes": null,
+  "audit": {
+    "claimed_by": {
+      "id": "codex",
+      "type": "agent",
+      "name": "Codex",
+      "email": null,
+      "source": "cli"
+    },
+    "git": {
+      "is_git_repo": true,
+      "branch": "codex/local-project-hardening",
+      "head_sha": "1b53a836134158e6fa852b0330ab125b00e37a2d",
+      "is_dirty": true,
+      "user": {
+        "name": "Antonio Antenore",
+        "email": "ant_ant95@hotmail.it"
+      },
+      "remotes": [
+        "origin"
+      ]
+    },
+    "run": {
+      "run_id": null,
+      "thread_id": "019fa90d-8ff0-72e1-9bbd-739766a657cf",
+      "session_id": null,
+      "tool": "agentic-sdlc-cli",
+      "version": "0.13.5"
+    }
+  }
+}

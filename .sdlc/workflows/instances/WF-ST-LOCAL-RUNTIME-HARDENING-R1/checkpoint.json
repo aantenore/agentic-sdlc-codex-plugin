@@ -1,0 +1,14 @@
+{
+  "checkpoint_hash": "4c1bc461d4cebf0d4a32b40a40a070384d1426b50aa841cd186aee7cb6a6c8c4",
+  "current_state": "validation",
+  "effective_hash": "4854620848fb961de100094293c830742d15003b6d088422ea5664c4c2ac4f21",
+  "hash_algorithm": "sha256:stable-json:v1",
+  "instance_hash": "cc8cf649c948fd7f71337223cbabb43c6c2a741f7d944bdb35feec58339bd368",
+  "instance_id": "WF-ST-LOCAL-RUNTIME-HARDENING-R1",
+  "kind": "workflow_checkpoint",
+  "last_event_hash": "bdd59f5019ed3ccbd450b02584a8e6c6f8f0617722339e2edd1e263a0ed8b22d",
+  "schema_version": "workflow-checkpoint:v1",
+  "sequence": 4,
+  "trace_chain_hash": "ff4b7d48003d50836bcb05ca0e33c9227ee7d54e5f00f0b949e65864a69950ad",
+  "updated_at": "2026-07-29T21:53:41.188Z"
+}
