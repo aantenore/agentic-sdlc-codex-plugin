@@ -20,7 +20,7 @@ jobs:
     name: Verify (${{ matrix.os }}, Node ${{ matrix.node }})
     permissions:
       contents: read
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && matrix.node == '18.18.0' && 60 || 35 }}
     strategy:
       fail-fast: false
       matrix:

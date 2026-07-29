@@ -72,7 +72,9 @@ function ciContractErrors(source) {
   const correctness = jobs.get("test") ?? "";
 
   if ([...jobs.keys()].join(",") !== "test") errors.push("CI job boundary");
-  if (!/timeout-minutes: 35/u.test(correctness)) errors.push("CI job timeout");
+  if (!/timeout-minutes: \$\{\{ matrix\.os == 'macos-latest' && matrix\.node == '18\.18\.0' && 60 \|\| 35 \}\}/u.test(correctness)) {
+    errors.push("CI job timeout");
+  }
   if (/continue-on-error:/u.test(correctness)) errors.push("CI fail-open policy");
   if (!/os: \[ubuntu-latest, macos-latest, windows-latest\]/u.test(correctness)
     || !/node: \[18\.18\.0, 20, 24\]/u.test(correctness)) {
@@ -126,7 +128,7 @@ function releaseContractErrors(source) {
   if (/continue-on-error:/u.test(source)) errors.push("release fail-open policy");
   if (/workflow_dispatch|pull_request|schedule:/u.test(source)) errors.push("tag-only trigger");
   if (!/^    tags:\n      - "v\*"$/mu.test(source)) errors.push("release tag trigger");
-  if (!/timeout-minutes: 35/u.test(verify)
+  if (!/timeout-minutes: \$\{\{ matrix\.os == 'macos-latest' && matrix\.node == '18\.18\.0' && 60 \|\| 35 \}\}/u.test(verify)
     || !/timeout-minutes: 15/u.test(packageJob)
     || !/timeout-minutes: 15/u.test(publish)) errors.push("job timeouts");
   if (!/needs: verify/u.test(packageJob) || !/needs: package/u.test(publish)) errors.push("job dependencies");

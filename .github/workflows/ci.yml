@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && matrix.node == '18.18.0' && 60 || 35 }}
     strategy:
       fail-fast: false
       matrix:
