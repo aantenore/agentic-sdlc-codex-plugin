@@ -30,6 +30,13 @@ function mustRun(args, options) {
   return result;
 }
 
+function documentedExampleArguments(example) {
+  const tokens = [...example.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/gu)]
+    .map((match) => match[1] ?? match[2] ?? match[3]);
+  assert.equal(tokens.shift(), "agentic-sdlc");
+  return tokens;
+}
+
 function primaryText(stdout, locale = "en") {
   const marker = locale === "it"
     ? "Dettagli tecnici (facoltativi):"
@@ -67,6 +74,19 @@ test("direct focused help exposes the exact inputs for the core work sequence", 
     { command: ["story", "claim"], required: ["--id", "--agent"], present: ["--branch"] },
     { command: ["output", "resolve"], required: ["--story", "--type"], present: [] },
     { command: ["contract", "approve"], required: ["--id", "--actor-type"], present: ["--approval-source", "--approval-evidence"] },
+    {
+      command: ["requirement", "supersede"],
+      required: ["--id", "--new-id", "--reason", "--actor-type"],
+      present: [
+        "--approval-source",
+        "--actor-name",
+        "--actor-email",
+        "--summary",
+        "--approval-evidence",
+        "--authorization",
+        "--host-receipt-file",
+      ],
+    },
     { command: ["task", "start"], required: [], present: ["--intent-json", "--intent-file", "--contract-id", "--confirm-start"] },
   ];
 
@@ -120,6 +140,30 @@ test("requirement and contract help describe commands that run with the document
   assert.match(revisionHelp.human.result, /vengono ereditate.*elenco sostitutivo/iu);
   assert.match(revisionFlags.get("--write-path")?.description, /salvati relativi a Git/iu);
 
+  const supersedeHelp = JSON.parse(mustRun([
+    "help", "requirement", "supersede", "--json",
+  ], { cwd }).stdout);
+  const supersedeFlags = new Map(supersedeHelp.options.map((entry) => [entry.flag, entry]));
+  for (const flag of ["--id", "--new-id", "--reason", "--actor-type"]) {
+    assert.equal(supersedeFlags.get(flag)?.required, true, flag);
+  }
+  assert.match(supersedeFlags.get("--approval-source")?.required_when, /not supplied by CI/u);
+  for (const flag of ["--actor-name", "--actor-email"]) {
+    assert.equal(supersedeFlags.has(flag), true, flag);
+  }
+  for (const flag of ["--summary", "--approval-evidence"]) {
+    assert.match(supersedeFlags.get(flag)?.required_when, /explicit-user, automation, or bootstrap/u, flag);
+    assert.match(supersedeFlags.get(flag)?.required_one_of, /--summary or --approval-evidence/u, flag);
+  }
+  assert.match(supersedeFlags.get("--authorization")?.required_when, /--approval-source automation/u);
+  assert.match(supersedeFlags.get("--host-receipt-file")?.required_when, /trusted host or CI proof/u);
+  assert.match(
+    supersedeHelp.usage,
+    /^agentic-sdlc requirement supersede --id <current-id> --new-id <approved-direct-revision-id>/u,
+  );
+  assert.equal(supersedeHelp.examples.length, 1);
+  assert.doesNotMatch(supersedeHelp.examples[0], /<[^>]+>/u);
+
   const proposed = JSON.parse(mustRun([
     "requirement", "propose",
     "--root", cwd,
@@ -150,6 +194,36 @@ test("requirement and contract help describe commands that run with the document
     "--json",
   ], { cwd }).stdout);
   assert.equal(approved.status, "approved");
+
+  const revised = JSON.parse(mustRun([
+    "requirement", "revise",
+    "--root", cwd,
+    "--id", "REQ-BOOKING-001",
+    "--new-id", "REQ-BOOKING-002",
+    "--summary", "Confirm a booking once and expose recoverable failures",
+    "--json",
+  ], { cwd }).stdout);
+  assert.equal(revised.status, "proposed");
+
+  const approvedRevision = JSON.parse(mustRun([
+    "requirement", "approve",
+    "--root", cwd,
+    "--id", "REQ-BOOKING-002",
+    "--actor-type", "human",
+    "--approval-source", "explicit-user",
+    "--summary", "Approved the direct revision before replacing the active requirement",
+    "--json",
+  ], { cwd }).stdout);
+  assert.equal(approvedRevision.status, "approved");
+
+  const superseded = JSON.parse(mustRun([
+    ...documentedExampleArguments(supersedeHelp.examples[0]),
+    "--root", cwd,
+    "--json",
+  ], { cwd }).stdout);
+  assert.equal(superseded.status, "superseded");
+  assert.equal(superseded.event.requirement_ref.id, "REQ-BOOKING-001");
+  assert.equal(superseded.event.replacement_ref.id, "REQ-BOOKING-002");
 
   const contractHelp = JSON.parse(mustRun(["help", "contract", "create", "--json"], { cwd }).stdout);
   const contractFlags = new Set(contractHelp.options.map((entry) => entry.flag));

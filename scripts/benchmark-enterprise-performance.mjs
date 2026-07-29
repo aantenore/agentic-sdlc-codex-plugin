@@ -14,6 +14,7 @@ import {
 } from "./benchmark-foundation.mjs";
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { observatoryWorkerEnvironment } from "../lib/change-observatory/runtime.mjs";
+import { assertSupportedNodeRuntime } from "../lib/runtime-support.mjs";
 
 export const ENTERPRISE_PERFORMANCE_BENCHMARK_SCHEMA = "enterprise-performance-benchmark:v1";
 export const ENTERPRISE_CANONICAL_QUERY_WORKER_SCHEMA = "enterprise-performance-canonical-query-worker:v1";
@@ -3512,13 +3513,6 @@ function nonNegativeInteger(value, fallback, label) {
   return normalized;
 }
 
-function assertSupportedNodeRuntime() {
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 18 || (major === 18 && minor < 18)) {
-    throw new Error(`Node.js 18.18 or newer is required; found ${process.versions.node}`);
-  }
-}
-
 function parseArguments(argv) {
   const options = { scale: {} };
   const scaleFlags = new Map([
@@ -3767,6 +3761,7 @@ if (isMainModule()) {
   const argumentsList = process.argv.slice(2);
   if (argumentsList[0] === CANONICAL_QUERY_WORKER_FLAG) {
     try {
+      assertSupportedNodeRuntime();
       const workerOptions = parseCanonicalQueryWorkerArguments(argumentsList.slice(1));
       writeResult(await buildCanonicalQueryWorkerEnvelope(workerOptions));
     } catch (error) {
@@ -3775,6 +3770,7 @@ if (isMainModule()) {
     }
   } else if (argumentsList[0] === OBSERVATORY_WORKER_FLAG) {
     try {
+      assertSupportedNodeRuntime();
       const workerOptions = parseObservatoryWorkerArguments(argumentsList.slice(1));
       await runObservatoryServerWorker(workerOptions);
     } catch (error) {
@@ -3787,6 +3783,7 @@ if (isMainModule()) {
     }
   } else if (argumentsList[0] === OBSERVATORY_MODEL_VERIFIER_FLAG) {
     try {
+      assertSupportedNodeRuntime();
       const verifierOptions = parseObservatoryModelVerifierArguments(argumentsList.slice(1));
       writeResult(buildObservatoryModelVerifierEnvelope(verifierOptions));
     } catch (error) {
@@ -3796,6 +3793,7 @@ if (isMainModule()) {
   } else {
     let options = {};
     try {
+      assertSupportedNodeRuntime();
       options = parseArguments(argumentsList);
       const result = await runEnterprisePerformanceBenchmark(options);
       writeResult(result, options.outputPath);

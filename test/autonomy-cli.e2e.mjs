@@ -152,16 +152,15 @@ function createNativeProviderShim(fakeBin, command) {
   const executable = path.join(fakeBin, process.platform === "win32" ? `${command}.exe` : command);
   if (!fs.existsSync(executable)) {
     const nodeExecutable = fs.realpathSync.native(process.execPath);
-    if (process.platform === "win32") {
-      // A hard link still points at the node.exe image mapped by this test
-      // runner, so Windows may refuse to unlink it during the after hook.
-      fs.copyFileSync(nodeExecutable, executable);
-    } else {
-      try {
-        fs.linkSync(nodeExecutable, executable);
-      } catch {
-        fs.copyFileSync(nodeExecutable, executable);
-      }
+    // Never hard-link the host runtime into a fixture. Creating the link
+    // changes its link count/ctime, and chmod on that link mutates the original
+    // executable. A clone-capable copy stays fast without changing host state.
+    fs.copyFileSync(
+      nodeExecutable,
+      executable,
+      fs.constants.COPYFILE_FICLONE,
+    );
+    if (process.platform !== "win32") {
       fs.chmodSync(executable, 0o755);
     }
   }
@@ -596,6 +595,20 @@ function createApprovedImplementationContract(project, { storyId, contractId, pr
   ]).contract;
   assert.equal(approved.status, "approved");
 }
+
+test("native provider shims do not mutate the host Node executable", () => {
+  const nodeExecutable = fs.realpathSync.native(process.execPath);
+  const before = fs.statSync(nodeExecutable, { bigint: true });
+  const fakeBin = externalProviderBin(tmpProject("provider-shim-metadata"), "git");
+
+  const shim = createNativeProviderShim(fakeBin, "git");
+
+  const after = fs.statSync(nodeExecutable, { bigint: true });
+  assert.equal(fs.statSync(shim, { bigint: true }).size, before.size);
+  for (const field of ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"]) {
+    assert.equal(after[field], before[field], field);
+  }
+});
 
 test("task start blocks product work before preflight when approved requirement write scope is empty", () => {
   const project = tmpProject("empty-requirement-write-scope");

@@ -1,6 +1,6 @@
 # Portable Codex Install
 
-Agentic SDLC 0.13.4 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
+Agentic SDLC 0.13.5 is a self-contained Codex plugin. The repository root is the plugin root because it contains `.codex-plugin/plugin.json`; all manifest and agent-card paths are repository-relative.
 
 ## Package Surface
 
@@ -40,7 +40,7 @@ The npm `files` allowlist defines the package surface. Project-specific `.sdlc/`
 ## Prerequisites
 
 - Codex with the `codex plugin` command group.
-- Node.js 18.18 or newer for `bin/agentic-sdlc.mjs`.
+- Node.js 18.20.3–18.x, 20.12.0–20.x, or 21.6.0+ for `bin/agentic-sdlc.mjs`. Earlier releases in those lines contain a native shutdown livelock fixed upstream.
 - Python 3.8 or newer for the repository staging installer.
 - A source checkout outside the generated `~/plugins/agentic-sdlc-codex-plugin` destination.
 - Optional: RTK 0.43 or newer on `PATH` for the gateway's default automatic runtime route. The first candidate is canonicalized and must resolve outside the project root; project-local or configured custom providers require the explicit per-invocation trust switch described below.
@@ -122,7 +122,7 @@ A successful list result contains an installed, enabled entry with:
 ```json
 {
   "pluginId": "agentic-sdlc-codex-plugin@personal",
-  "version": "0.13.4",
+  "version": "0.13.5",
   "installed": true,
   "enabled": true
 }
@@ -161,7 +161,7 @@ Each result contains at least:
 
 ```json
 {
-  "package_version": "0.13.4",
+  "package_version": "0.13.5",
   "build_fingerprint": "<sha256-of-distributed-paths-and-bytes>",
   "git_commit": "<source-commit>",
   "git_dirty": false
@@ -290,7 +290,7 @@ Interpret the results as follows:
 
 | Check | Expected result | Recovery |
 | --- | --- | --- |
-| `codex plugin list --available --json` | Installed entry is enabled and reports `0.13.4` | Rerun staging, add again, then open a new task |
+| `codex plugin list --available --json` | Installed entry is enabled and reports `0.13.5` | Rerun staging, add again, then open a new task |
 | `npm run doctor` or CLI doctor | Reports runtime, version, assessment entry point, all four skills, Caveman/native-meter assets, Observatory launcher/UI, preset, optional RTK provider, and project KB checks as passed or not applicable | Repair a required failed item, restage, and open a new task |
 | `npm run check` | JavaScript syntax checks pass | Repair the reported source syntax before reinstalling |
 | Package dry run | Contains manifest, all four skills, agent cards, CLI, Observatory core/UI, schemas, and templates; excludes `.sdlc/` and `test/` | Repair `package.json` `files`, then restage |

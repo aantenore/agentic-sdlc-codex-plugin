@@ -20,12 +20,12 @@ jobs:
     name: Verify (${{ matrix.os }}, Node ${{ matrix.node }})
     permissions:
       contents: read
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && matrix.node == '18.18.0' && 60 || 35 }}
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [18.18.0, 20, 24]
+        node: ["18.20.3", "20.12.0", "21.6.0", 24]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out the tagged source
