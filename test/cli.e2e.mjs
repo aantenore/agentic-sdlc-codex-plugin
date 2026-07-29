@@ -11794,7 +11794,7 @@ test("parallel story contract creation is serialized per story", async () => {
   assert.equal(fs.readdirSync(contractsRoot).some((name) => name.startsWith(".story-") && name.endsWith(".lock")), false);
 });
 
-test("parallel contract revision and approval preserve the revised content", async () => {
+test("parallel contract revision and approval preserve one valid serialized outcome", async () => {
   const project = tmpProject("parallel-contract-revision");
   initProject(project);
   mustRun([
@@ -11831,15 +11831,29 @@ test("parallel contract revision and approval preserve the revised content", asy
     "contract-analysis",
     ...humanApproval("Concurrent approval"),
   ];
-  const results = await Promise.all([runAsync(revision), runAsync(approval)]);
-  assert.equal(results.find((result) => result.status !== 0), undefined, results.map((result) => result.stderr).join("\n"));
+  const [revisionResult, approvalResult] = await Promise.all([
+    runAsync(revision),
+    runAsync(approval),
+  ]);
+  assert.equal(revisionResult.signal, null, revisionResult.stderr);
+  assert.equal(approvalResult.signal, null, approvalResult.stderr);
+  assert.equal(approvalResult.status, 0, approvalResult.stderr);
   const contract = readJson(path.join(project, ".sdlc", "contracts", "contract-analysis.json"));
-  assert.equal(contract.contextualization.summary, "Revised contract content");
-  if (contract.status === "approved") {
-    assert.equal(contract.approvals.length, 1);
+  assert.equal(contract.status, "approved");
+  assert.equal(contract.approvals.length, 1);
+  assert.equal(
+    contract.approvals[0].approved_content_hash,
+    computeGovernedApprovalSubjectHash(contract),
+  );
+  if (revisionResult.status === 0) {
+    assert.equal(contract.contextualization.summary, "Revised contract content");
   } else {
-    assert.equal(contract.status, "draft");
-    assert.equal(contract.approvals.length, 0);
+    assert.equal(revisionResult.status, 1, revisionResult.stderr);
+    assert.match(
+      revisionResult.stderr,
+      /already reviewed or no longer a draft.*immutable/is,
+    );
+    assert.equal(contract.contextualization.summary, "Original contract content");
   }
 });
 
