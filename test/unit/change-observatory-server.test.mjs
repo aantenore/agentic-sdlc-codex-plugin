@@ -798,15 +798,20 @@ test("shutdown force-closes an active request after the bounded grace period", a
   const buildGate = new Promise((resolve) => {
     releaseBuild = resolve;
   });
+  let settleBuild;
+  const buildSettled = new Promise((resolve) => {
+    settleBuild = resolve;
+  });
   let builds = 0;
   const running = await startObservatoryServer({
     projectRoot: fixture.projectRoot,
     assetRoot: fixture.assetRoot,
     shutdownGraceMs: 25,
-    async buildViewModel(...args) {
+    async buildViewModel() {
       builds += 1;
       await buildGate;
-      return buildObservatoryViewModel(...args);
+      settleBuild();
+      throw new Error("test build released after forced shutdown");
     },
   });
 
@@ -820,7 +825,7 @@ test("shutdown force-closes an active request after the bounded grace period", a
   assert.equal(running.server.listening, false);
 
   releaseBuild();
-  await new Promise((resolve) => setImmediate(resolve));
+  await assertCompletesWithin(buildSettled, 500, "background build settlement");
 });
 
 test("refuses non-loopback bind configuration", async (t) => {
@@ -833,7 +838,12 @@ test("refuses non-loopback bind configuration", async (t) => {
 
 async function createServerFixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "change-observatory-server-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 50,
+  }));
   const projectRoot = path.join(root, "project");
   const assetRoot = path.join(root, "assets");
   await fs.mkdir(path.join(projectRoot, ".sdlc"), { recursive: true });
