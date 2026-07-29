@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { computeStableHash } from "../lib/canonical.mjs";
 
@@ -26,6 +26,16 @@ function temporaryProject(label) {
   return project;
 }
 
+function cloneTemporaryProject(source, label) {
+  const project = temporaryProject(label);
+  fs.cpSync(source, project, {
+    recursive: true,
+    force: true,
+    preserveTimestamps: true,
+  });
+  return project;
+}
+
 function run(args, project, options = {}) {
   const env = { ...process.env };
   for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) {
@@ -38,6 +48,32 @@ function run(args, project, options = {}) {
     env,
     timeout: options.timeout || 60_000,
     maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+function runConcurrently(args, project, envOverrides = {}) {
+  const env = { ...process.env, ...envOverrides };
+  for (const key of ["CI", "GITHUB_ACTIONS", "GITHUB_ACTOR", "CODEX_AGENT_NAME", "CODEX_USER_ID"]) {
+    delete env[key];
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      cwd: project,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 30_000);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status, signal) => {
+      clearTimeout(timeout);
+      resolve({ status, signal, stdout, stderr });
+    });
   });
 }
 
@@ -101,6 +137,52 @@ function humanApproval(summary) {
     "--approval-source", "explicit-user",
     "--summary", summary,
   ];
+}
+
+function assertReleaseStrictGateBlocked({
+  project,
+  workflowInstanceId,
+  requestId,
+  issuePattern,
+}) {
+  const projectStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(
+    projectStatus.next_action.kind,
+    "repair_strict_gate_evidence",
+  );
+  assert.equal(projectStatus.next_action.diagnostic, true);
+  assert.match(
+    projectStatus.next_action.strict_gate_issues.join("\n"),
+    issuePattern,
+  );
+
+  const workflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(workflowStatus.status, "blocked");
+  assert.deepEqual(workflowStatus.ready_next_states, []);
+  const releaseCheck = workflowStatus.next_transition_checks.find((check) =>
+    check.to === "release");
+  assert.equal(releaseCheck.allowed, false);
+  const strictGuard = releaseCheck.guard_results.find((result) =>
+    result.guard_id === "strict-gate-passed");
+  assert.equal(strictGuard.allowed, false);
+  assert.match(strictGuard.issues.join("\n"), issuePattern);
+
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "release",
+    "--request-id", requestId,
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow E2E CI",
+  ], project, issuePattern);
 }
 
 function implementationIntent(storyId) {
@@ -200,6 +282,16 @@ function initializeGitProject(project, branch, configureProject = null) {
   mustGit(project, ["config", "user.name", "Finalization E2E"]);
   mustGit(project, ["config", "user.email", "finalization-e2e@example.invalid"]);
   writeProjectFile(project, "src/index.mjs", "export const ready = true;\n");
+  writeProjectFile(
+    project,
+    "docs/untouched-runtime.md",
+    "# Untouched runtime input\n",
+  );
+  writeProjectFile(
+    project,
+    ".gitignore",
+    "docs/local-release/sibling-*\n",
+  );
   mustGit(project, ["add", "."]);
   mustGit(project, ["commit", "-m", "test: establish governed baseline"]);
   mustGit(project, ["branch", "-M", "main"]);
@@ -214,6 +306,7 @@ function createGovernedDeliveryStory(project, {
   outputType = "implementation-summary",
   outputPhase = null,
   additionalOutputRefs = [],
+  additionalRequirementWritePaths = [],
   configureProject = null,
   deliveryKind = "pull_request",
   storyActionUses = 1,
@@ -226,22 +319,31 @@ function createGovernedDeliveryStory(project, {
   const branch = `codex/${storyId}`;
   initializeGitProject(project, branch, configureProject);
 
-  mustRun([
-    "requirement", "propose",
-    "--root", project,
-    "--id", requirementId,
-    "--title", `Govern ${suffix}`,
-    "--summary", `Implement ${suffix} only inside its exact approved write scope.`,
-    "--acceptance", `The ${suffix} story has verified implementation and delivery evidence.`,
-    "--autonomy-ceiling", "supervised",
-    ...allowedWritePaths.flatMap((writePath) => ["--write-path", writePath]),
-  ], project);
-  mustRun([
-    "requirement", "approve",
-    "--root", project,
-    "--id", requirementId,
-    ...humanApproval(`Approve ${requirementId}`),
-  ], project);
+  const requirementScopes = [
+    { id: requirementId, writePaths: allowedWritePaths },
+    ...additionalRequirementWritePaths.map((writePaths, index) => ({
+      id: `${requirementId}-${index + 2}`,
+      writePaths,
+    })),
+  ];
+  for (const requirementScope of requirementScopes) {
+    mustRun([
+      "requirement", "propose",
+      "--root", project,
+      "--id", requirementScope.id,
+      "--title", `Govern ${suffix} ${requirementScope.id}`,
+      "--summary", `Implement ${suffix} only inside its exact approved write scope.`,
+      "--acceptance", `The ${suffix} story has verified implementation and delivery evidence.`,
+      "--autonomy-ceiling", "supervised",
+      ...requirementScope.writePaths.flatMap((writePath) => ["--write-path", writePath]),
+    ], project);
+    mustRun([
+      "requirement", "approve",
+      "--root", project,
+      "--id", requirementScope.id,
+      ...humanApproval(`Approve ${requirementScope.id}`),
+    ], project);
+  }
 
   const outputRefs = [
     ...(outputType ? [{ type: outputType, phase: outputPhase }] : []),
@@ -269,7 +371,7 @@ function createGovernedDeliveryStory(project, {
     "--title", `Implement ${suffix}`,
     "--phase", "implementation",
     "--status", "ready",
-    "--requirement", requirementId,
+    ...requirementScopes.flatMap((scope) => ["--requirement", scope.id]),
     "--acceptance", `Observable evidence exists for ${suffix}.`,
   ], project);
 
@@ -325,7 +427,7 @@ function createGovernedDeliveryStory(project, {
     "--kind", deliveryKind,
     "--story", storyId,
     "--contract", contractId,
-    "--requirement", requirementId,
+    ...requirementScopes.flatMap((scope) => ["--requirement", scope.id]),
     "--level", "supervised",
     ...deliveryTargetArgs,
     ...(deliveryKind === "pull_request"
@@ -343,6 +445,7 @@ function createGovernedDeliveryStory(project, {
   beforeTaskStart?.({
     project,
     requirementId,
+    requirementIds: requirementScopes.map((scope) => scope.id),
     storyId,
     contractId,
     profileId,
@@ -397,6 +500,26 @@ function createGovernedDeliveryStory(project, {
     localReleaseRoot,
     localReleaseOutput,
   };
+}
+
+function prepareGovernedDeliveryStoryBeforeTaskStart(project, {
+  suffix,
+  allowedWritePaths = ["docs"],
+}) {
+  let context;
+  assert.throws(
+    () => createGovernedDeliveryStory(project, {
+      suffix,
+      allowedWritePaths,
+      beforeTaskStart: (prepared) => {
+        context = prepared;
+        throw new Error(`prepared-before-task-start:${suffix}`);
+      },
+    }),
+    new RegExp(`prepared-before-task-start:${suffix}`, "u"),
+  );
+  assert.ok(context);
+  return context;
 }
 
 function createLegacyStrictStory(project, suffix) {
@@ -581,7 +704,741 @@ test("task start rejects workflows already transitioned or stories already compl
   );
 });
 
-test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", () => {
+test("pre-task workflow binding tamper remains fail-closed across status, scheduling, claims, and task start", () => {
+  const project = temporaryProject("pre-task-binding-tamper");
+  const workflowInstanceId = "delivery-pre-task-binding-tamper";
+  const storyId = "ST-PRE-TASK-BINDING-TAMPER";
+  const taskStartPath = `.sdlc/stories/${storyId}/task-start.json`;
+  const claimPath = `.sdlc/stories/${storyId}/claim.json`;
+  const tracePath = path.join(project, `.sdlc/traces/${storyId}.jsonl`);
+  let storyContext;
+  let currentInstancePath;
+  let currentInstance;
+  let traceBeforeTamperChecks;
+
+  assert.throws(
+    () => createGovernedDeliveryStory(project, {
+      suffix: "PRE-TASK-BINDING-TAMPER",
+      allowedWritePaths: ["docs"],
+      beforeTaskStart: ({ contractId, profileId }) => {
+        storyContext = { contractId, profileId };
+        mustRun([
+          "workflow", "instance", "start",
+          "--root", project,
+          "--id", workflowInstanceId,
+          "--definition", "software-project",
+          "--definition-version", "3",
+          "--story", storyId,
+          "--actor", "workflow-e2e-ci",
+          "--actor-type", "ci",
+        ], project);
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+
+        currentInstancePath =
+          `.sdlc/workflows/instances/${workflowInstanceId}/instance.json`;
+        currentInstance = readJson(project, currentInstancePath);
+        const mismatchedStoryBinding = structuredClone(currentInstance);
+        mismatchedStoryBinding.metadata.governance_binding.story_id = "ST-OTHER";
+        writeProjectFile(
+          project,
+          currentInstancePath,
+          `${JSON.stringify(mismatchedStoryBinding, null, 2)}\n`,
+        );
+        traceBeforeTamperChecks = fs.existsSync(tracePath)
+          ? fs.readFileSync(tracePath, "utf8")
+          : null;
+
+        const status = mustRunJson([
+          "status", "--root", project, "--full",
+        ], project);
+        assert.equal(status.summary.available_work, 0);
+        assert.ok(status.summary.blocked_work >= 1);
+        const statusStory = status.orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(statusStory.orchestration_state, "blocked");
+        assert.equal(statusStory.lifecycle_source, "invalid_story_workflow");
+
+        const orchestration = mustRunJson([
+          "orchestrate", "status", "--root", project,
+        ], project);
+        const orchestratedStory = orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(orchestratedStory.orchestration_state, "blocked");
+        assert.equal(orchestratedStory.lifecycle_source, "invalid_story_workflow");
+
+        const plan = mustRunJson([
+          "orchestrate", "plan", "--root", project,
+        ], project);
+        assert.equal(
+          plan.candidates.some((candidate) => candidate.story_id === storyId),
+          false,
+        );
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-tamper-agent",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-tamper-agent",
+          "--force",
+          "--actor-type", "human",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(
+          fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+          traceBeforeTamperChecks,
+        );
+      },
+    }),
+    /Cannot bind task start to the current story workflow:.*(?:workflow start trace no longer matches its immutable story binding|has a mismatched explicit story binding)/su,
+  );
+
+  assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+  assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+  assert.equal(
+    fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+    traceBeforeTamperChecks,
+  );
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(currentInstance, null, 2)}\n`,
+  );
+  const restoredStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(restoredStatus.next_action.kind, "start_available_work");
+  assert.equal(
+    restoredStatus.orchestration.stories
+      .find((story) => story.id === storyId)
+      .orchestration_state,
+    "available",
+  );
+
+  const healthyTaskStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+  ], project);
+  assert.equal(healthyTaskStart.execution_allowed, true);
+  assert.equal(fs.existsSync(path.join(project, taskStartPath)), true);
+});
+
+test("pre-task multi-run binding tamper cannot fall back to an older workflow", () => {
+  const project = temporaryProject("pre-task-multi-run-binding-tamper");
+  const storyId = "ST-PRE-TASK-MULTI-RUN-TAMPER";
+  const olderWorkflowId = "delivery-pre-task-multi-run-older";
+  const latestWorkflowId = "delivery-pre-task-multi-run-latest";
+  const taskStartPath = `.sdlc/stories/${storyId}/task-start.json`;
+  const claimPath = `.sdlc/stories/${storyId}/claim.json`;
+  const tracePath = path.join(project, `.sdlc/traces/${storyId}.jsonl`);
+  let storyContext;
+  let latestInstancePath;
+  let latestInstance;
+  let traceBeforeTamperChecks;
+
+  assert.throws(
+    () => createGovernedDeliveryStory(project, {
+      suffix: "PRE-TASK-MULTI-RUN-TAMPER",
+      allowedWritePaths: ["docs"],
+      beforeTaskStart: ({ contractId, profileId }) => {
+        storyContext = { contractId, profileId };
+        for (const workflowId of [olderWorkflowId, latestWorkflowId]) {
+          mustRun([
+            "workflow", "instance", "start",
+            "--root", project,
+            "--id", workflowId,
+            "--definition", "software-project",
+            "--definition-version", "3",
+            "--story", storyId,
+            "--actor", "workflow-e2e-ci",
+            "--actor-type", "ci",
+          ], project);
+        }
+        const olderInstancePath =
+          `.sdlc/workflows/instances/${olderWorkflowId}/instance.json`;
+        latestInstancePath =
+          `.sdlc/workflows/instances/${latestWorkflowId}/instance.json`;
+        const olderInstance = readJson(project, olderInstancePath);
+        latestInstance = readJson(project, latestInstancePath);
+        assert.ok(
+          Date.parse(olderInstance.created_at) < Date.parse(latestInstance.created_at),
+        );
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+
+        const mismatchedLatestBinding = structuredClone(latestInstance);
+        mismatchedLatestBinding.metadata.governance_binding.story_id = "ST-OTHER";
+        writeProjectFile(
+          project,
+          latestInstancePath,
+          `${JSON.stringify(mismatchedLatestBinding, null, 2)}\n`,
+        );
+        traceBeforeTamperChecks = fs.existsSync(tracePath)
+          ? fs.readFileSync(tracePath, "utf8")
+          : null;
+
+        const status = mustRunJson([
+          "status", "--root", project, "--full",
+        ], project);
+        assert.equal(status.summary.available_work, 0);
+        assert.ok(status.summary.blocked_work >= 1);
+        const statusStory = status.orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(statusStory.orchestration_state, "blocked");
+        assert.equal(statusStory.lifecycle_source, "invalid_story_workflow");
+
+        const orchestration = mustRunJson([
+          "orchestrate", "status", "--root", project,
+        ], project);
+        const orchestratedStory = orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(orchestratedStory.orchestration_state, "blocked");
+        assert.equal(orchestratedStory.lifecycle_source, "invalid_story_workflow");
+
+        const plan = mustRunJson([
+          "orchestrate", "plan", "--root", project,
+        ], project);
+        assert.equal(
+          plan.candidates.some((candidate) => candidate.story_id === storyId),
+          false,
+        );
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-multi-run-tamper-agent",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-multi-run-tamper-agent",
+          "--force",
+          "--actor-type", "human",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(
+          fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+          traceBeforeTamperChecks,
+        );
+      },
+    }),
+    /Cannot bind task start to the current story workflow:/su,
+  );
+
+  assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+  assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+  assert.equal(
+    fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+    traceBeforeTamperChecks,
+  );
+  writeProjectFile(
+    project,
+    latestInstancePath,
+    `${JSON.stringify(latestInstance, null, 2)}\n`,
+  );
+  const restoredStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(restoredStatus.next_action.kind, "start_available_work");
+  const restoredStory = restoredStatus.orchestration.stories
+    .find((story) => story.id === storyId);
+  assert.equal(restoredStory.orchestration_state, "available");
+  assert.equal(restoredStory.workflow_instance_id, latestWorkflowId);
+
+  const healthyTaskStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+  ], project);
+  assert.equal(healthyTaskStart.execution_allowed, true);
+  const taskStartReceipt = readJson(project, taskStartPath);
+  assert.equal(taskStartReceipt.workflow_instance_ref.id, latestWorkflowId);
+});
+
+test("workflow story ownership ignores a story id colliding with the software-project definition", () => {
+  const project = temporaryProject("workflow-story-definition-collision");
+  const targetStoryId = "ST-WORKFLOW-TRACE-TARGET";
+  const collisionStoryId = "software-project";
+  const workflowInstanceId = "delivery-workflow-trace-target";
+  const projectTracePath = path.join(project, ".sdlc/traces/project.jsonl");
+  const projectTraceCheckpointPath = path.join(
+    project,
+    ".sdlc/traces/.integrity/project.jsonl.checkpoint.json",
+  );
+
+  const fixture = createGovernedDeliveryStory(project, {
+    suffix: "WORKFLOW-TRACE-TARGET",
+    allowedWritePaths: ["docs"],
+    beforeTaskStart: ({ requirementId, storyId }) => {
+      assert.equal(storyId, targetStoryId);
+      mustRun([
+        "story", "create",
+        "--root", project,
+        "--id", collisionStoryId,
+        "--title", "Story whose id matches the built-in workflow definition",
+        "--phase", "implementation",
+        "--status", "ready",
+        "--requirement", requirementId,
+        "--acceptance", "Definition identifiers never imply workflow ownership.",
+      ], project);
+      mustRun([
+        "workflow", "instance", "start",
+        "--root", project,
+        "--id", workflowInstanceId,
+        "--definition", "software-project",
+        "--definition-version", "3",
+        "--story", targetStoryId,
+        "--actor", "workflow-e2e-ci",
+        "--actor-type", "ci",
+      ], project);
+
+      const orchestration = mustRunJson([
+        "orchestrate", "status", "--root", project,
+      ], project);
+      const collisionStory = orchestration.stories
+        .find((story) => story.id === collisionStoryId);
+      const targetStory = orchestration.stories
+        .find((story) => story.id === targetStoryId);
+      assert.equal(collisionStory.orchestration_state, "available");
+      assert.equal(collisionStory.workflow_instance_id, null);
+      assert.equal(collisionStory.lifecycle_source, "story_record");
+      assert.equal(targetStory.orchestration_state, "available");
+      assert.equal(targetStory.workflow_instance_id, workflowInstanceId);
+
+      const plan = mustRunJson([
+        "orchestrate", "plan", "--root", project,
+      ], project);
+      assert.equal(
+        plan.candidates.some((candidate) => candidate.story_id === collisionStoryId),
+        true,
+      );
+
+      const projectTraceEvents = fs.readFileSync(projectTracePath, "utf8")
+        .trim()
+        .split(/\r?\n/u)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const workflowStartTraces = projectTraceEvents.filter((event) =>
+        event.action === "workflow.instance.start"
+        && event.related?.[0] === workflowInstanceId);
+      assert.equal(workflowStartTraces.length, 1);
+      const [workflowStartTrace] = workflowStartTraces;
+      assert.equal(workflowStartTrace.story_id, null);
+      assert.equal(workflowStartTrace.workflow_story_id, targetStoryId);
+      assert.equal(
+        workflowStartTrace._trace_integrity.schema_version,
+        "trace-integrity-event:v1",
+      );
+      assert.equal(workflowStartTrace._trace_integrity.authenticity_claimed, false);
+      assert.match(workflowStartTrace._trace_integrity.event_hash, /^[a-f0-9]{64}$/u);
+
+      const checkpoint = readJson(
+        project,
+        ".sdlc/traces/.integrity/project.jsonl.checkpoint.json",
+      );
+      assert.equal(checkpoint.schema_version, "trace-integrity-checkpoint:v1");
+      assert.equal(checkpoint.authenticity_claimed, false);
+      assert.equal(
+        checkpoint.new_writes.last_event_hash,
+        workflowStartTrace._trace_integrity.event_hash,
+      );
+      assert.equal(fs.existsSync(projectTraceCheckpointPath), true);
+    },
+  });
+
+  assert.equal(fixture.storyId, targetStoryId);
+  const targetTaskStart = readJson(
+    project,
+    `.sdlc/stories/${targetStoryId}/task-start.json`,
+  );
+  assert.equal(targetTaskStart.workflow_instance_ref.id, workflowInstanceId);
+  assert.equal(
+    fs.existsSync(path.join(project, `.sdlc/stories/${collisionStoryId}/task-start.json`)),
+    false,
+  );
+  assert.equal(
+    fs.existsSync(path.join(project, `.sdlc/stories/${collisionStoryId}/claim.json`)),
+    false,
+  );
+  const finalOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const finalCollisionStory = finalOrchestration.stories
+    .find((story) => story.id === collisionStoryId);
+  assert.equal(finalCollisionStory.orchestration_state, "available");
+  assert.equal(finalCollisionStory.workflow_instance_id, null);
+});
+
+test("pre-task missing workflow instances root remains fail-closed and recovers after restoration", () => {
+  const project = temporaryProject("pre-task-instances-root-missing");
+  const storyId = "ST-PRE-TASK-INSTANCES-ROOT-MISSING";
+  const workflowInstanceId = "delivery-pre-task-instances-root-missing";
+  const instancesRoot = path.join(project, ".sdlc/workflows/instances");
+  const movedInstancesRoot = path.join(
+    project,
+    ".sdlc/workflows/instances-temporarily-missing",
+  );
+  const taskStartPath = `.sdlc/stories/${storyId}/task-start.json`;
+  const claimPath = `.sdlc/stories/${storyId}/claim.json`;
+  const tracePath = path.join(project, `.sdlc/traces/${storyId}.jsonl`);
+  let storyContext;
+  let traceBeforeMissingRootChecks;
+
+  assert.throws(
+    () => createGovernedDeliveryStory(project, {
+      suffix: "PRE-TASK-INSTANCES-ROOT-MISSING",
+      allowedWritePaths: ["docs"],
+      beforeTaskStart: ({ contractId, profileId }) => {
+        storyContext = { contractId, profileId };
+        mustRun([
+          "workflow", "instance", "start",
+          "--root", project,
+          "--id", workflowInstanceId,
+          "--definition", "software-project",
+          "--definition-version", "3",
+          "--story", storyId,
+          "--actor", "workflow-e2e-ci",
+          "--actor-type", "ci",
+        ], project);
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+
+        fs.renameSync(instancesRoot, movedInstancesRoot);
+        traceBeforeMissingRootChecks = fs.existsSync(tracePath)
+          ? fs.readFileSync(tracePath, "utf8")
+          : null;
+
+        const status = mustRunJson([
+          "status", "--root", project, "--full",
+        ], project);
+        assert.equal(status.summary.available_work, 0);
+        assert.ok(status.summary.blocked_work >= 1);
+        const statusStory = status.orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(statusStory.orchestration_state, "blocked");
+        assert.equal(statusStory.lifecycle_source, "invalid_story_workflow");
+
+        const orchestration = mustRunJson([
+          "orchestrate", "status", "--root", project,
+        ], project);
+        const orchestratedStory = orchestration.stories
+          .find((story) => story.id === storyId);
+        assert.equal(orchestratedStory.orchestration_state, "blocked");
+        assert.equal(orchestratedStory.lifecycle_source, "invalid_story_workflow");
+
+        const plan = mustRunJson([
+          "orchestrate", "plan", "--root", project,
+        ], project);
+        assert.equal(
+          plan.candidates.some((candidate) => candidate.story_id === storyId),
+          false,
+        );
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-missing-root-agent",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        mustFail([
+          "story", "claim",
+          "--root", project,
+          "--id", storyId,
+          "--agent", "pre-task-missing-root-agent",
+          "--force",
+          "--actor-type", "human",
+        ], project, /invalid or unreadable final lifecycle receipt/u);
+        assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+        assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+        assert.equal(
+          fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+          traceBeforeMissingRootChecks,
+        );
+      },
+    }),
+    /Cannot bind task start to the current story workflow:.*workflow start trace points to missing instance/su,
+  );
+
+  assert.equal(fs.existsSync(path.join(project, taskStartPath)), false);
+  assert.equal(fs.existsSync(path.join(project, claimPath)), false);
+  assert.equal(
+    fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8") : null,
+    traceBeforeMissingRootChecks,
+  );
+  fs.renameSync(movedInstancesRoot, instancesRoot);
+
+  const restoredStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(restoredStatus.next_action.kind, "start_available_work");
+  const restoredStory = restoredStatus.orchestration.stories
+    .find((story) => story.id === storyId);
+  assert.equal(restoredStory.orchestration_state, "available");
+  assert.equal(restoredStory.workflow_instance_id, workflowInstanceId);
+
+  const healthyTaskStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+  ], project);
+  assert.equal(healthyTaskStart.execution_allowed, true);
+  const taskStartReceipt = readJson(project, taskStartPath);
+  assert.equal(taskStartReceipt.workflow_instance_ref.id, workflowInstanceId);
+});
+
+test("an interrupted story-bound workflow start blocks status and task start until exact recovery", () => {
+  const project = temporaryProject("story-bound-start-journal-recovery");
+  const suffix = "STORY-BOUND-START-JOURNAL-RECOVERY";
+  const storyId = `ST-${suffix}`;
+  const workflowInstanceId = "delivery-story-bound-start-journal-recovery";
+  const storyContext = prepareGovernedDeliveryStoryBeforeTaskStart(project, {
+    suffix,
+  });
+  const workflowArgs = [
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--definition", "software-project",
+    "--definition-version", "3",
+    "--story", storyId,
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--json",
+  ];
+  const interrupted = run(workflowArgs, project, {
+    env: {
+      NODE_ENV: "test",
+      AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE: "after-publish-before-trace",
+    },
+  });
+  assert.notEqual(interrupted.status, 0);
+
+  const journalPath = path.join(
+    project,
+    ".sdlc/workflows/instances/.starts",
+    `${workflowInstanceId}.json`,
+  );
+  const instancePath = path.join(
+    project,
+    ".sdlc/workflows/instances",
+    workflowInstanceId,
+    "instance.json",
+  );
+  const taskStartPath = path.join(
+    project,
+    ".sdlc/stories",
+    storyId,
+    "task-start.json",
+  );
+  assert.equal(fs.existsSync(journalPath), true);
+  assert.equal(fs.existsSync(instancePath), true);
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  assert.equal(journal.kind, "workflow_instance_start_transaction");
+  assert.equal(journal.schema_version, "workflow-instance-start-transaction:v1");
+  assert.match(journal.transaction_hash, /^[a-f0-9]{64}$/u);
+
+  const instanceStatus = run([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--json",
+  ], project);
+  assert.notEqual(instanceStatus.status, 0);
+  assert.match(
+    `${instanceStatus.stdout}\n${instanceStatus.stderr}`,
+    /interrupted start.*repeat the exact start command/su,
+  );
+
+  const projectStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  const blockedStory = projectStatus.orchestration.stories
+    .find((story) => story.id === storyId);
+  assert.equal(blockedStory.orchestration_state, "blocked");
+  assert.equal(blockedStory.lifecycle_source, "invalid_story_workflow");
+  assert.equal(projectStatus.summary.available_work, 0);
+  assert.ok(projectStatus.summary.blocked_work >= 1);
+
+  const blockedTaskStart = run([
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+    "--json",
+  ], project);
+  assert.notEqual(blockedTaskStart.status, 0);
+  assert.match(
+    `${blockedTaskStart.stdout}\n${blockedTaskStart.stderr}`,
+    /Cannot bind task start to the current story workflow:.*interrupted workflow start/su,
+  );
+  assert.equal(fs.existsSync(taskStartPath), false);
+  assert.equal(fs.existsSync(journalPath), true);
+
+  const recovered = JSON.parse(mustRun(workflowArgs, project).stdout);
+  assert.equal(recovered.status, "started");
+  assert.equal(recovered.recovered, true);
+  assert.equal(fs.existsSync(journalPath), false);
+  const restoredStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(restoredStatus.next_action.kind, "start_available_work");
+  const restoredStory = restoredStatus.orchestration.stories
+    .find((story) => story.id === storyId);
+  assert.equal(restoredStory.orchestration_state, "available");
+  assert.equal(restoredStory.workflow_instance_id, workflowInstanceId);
+
+  const healthyTaskStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+  ], project);
+  assert.equal(healthyTaskStart.execution_allowed, true);
+  const taskStartReceipt = JSON.parse(fs.readFileSync(taskStartPath, "utf8"));
+  assert.equal(taskStartReceipt.workflow_instance_ref.id, workflowInstanceId);
+});
+
+test("concurrent workflow and task starts serialize on the story task-start boundary", async () => {
+  const project = temporaryProject("workflow-task-start-boundary-race");
+  const hookRoot = temporaryProject("workflow-task-start-boundary-hook");
+  const suffix = "WORKFLOW-TASK-START-BOUNDARY-RACE";
+  const storyId = `ST-${suffix}`;
+  const workflowInstanceId = "delivery-workflow-task-start-boundary-race";
+  const storyContext = prepareGovernedDeliveryStoryBeforeTaskStart(project, {
+    suffix,
+  });
+  const boundaryLockPath = path.join(
+    project,
+    ".sdlc/stories",
+    storyId,
+    "task-start-boundary.lock",
+  );
+  const hookMarkerPath = path.join(hookRoot, "workflow-boundary-delay.marker");
+  const hookPath = path.join(hookRoot, "delay-workflow-boundary.mjs");
+  fs.writeFileSync(hookPath, [
+    'import fs from "node:fs";',
+    "const originalOpenSync = fs.openSync;",
+    "let delayed = false;",
+    "fs.openSync = function delayedWorkflowBoundaryOpen(filePath, flags, ...rest) {",
+    "  if (!delayed",
+    "      && String(filePath) === process.env.AGENTIC_SDLC_TEST_BOUNDARY_LOCK_PATH",
+    '      && flags === "wx") {',
+    "    delayed = true;",
+    "    fs.writeFileSync(process.env.AGENTIC_SDLC_TEST_BOUNDARY_MARKER, String(filePath));",
+    "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 750);",
+    "  }",
+    "  return originalOpenSync.call(this, filePath, flags, ...rest);",
+    "};",
+    "",
+  ].join("\n"));
+
+  const taskArgs = [
+    "task", "start",
+    "--root", project,
+    "--intent-json", implementationIntent(storyId),
+    "--story", storyId,
+    "--phase", "implementation",
+    "--contract-id", storyContext.contractId,
+    "--delivery-profile", storyContext.profileId,
+    "--confirm-start",
+    "--actor-type", "human",
+    "--json",
+  ];
+  const workflowArgs = [
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--definition", "software-project",
+    "--definition-version", "3",
+    "--story", storyId,
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--json",
+  ];
+  const [taskResult, workflowResult] = await Promise.all([
+    runConcurrently(taskArgs, project),
+    runConcurrently(workflowArgs, project, {
+      NODE_OPTIONS: `--import=${pathToFileURL(hookPath).href}`,
+      AGENTIC_SDLC_TEST_BOUNDARY_LOCK_PATH: boundaryLockPath,
+      AGENTIC_SDLC_TEST_BOUNDARY_MARKER: hookMarkerPath,
+    }),
+  ]);
+
+  assert.equal(fs.readFileSync(hookMarkerPath, "utf8"), boundaryLockPath);
+  assert.equal(taskResult.status, 0, `${taskResult.stdout}\n${taskResult.stderr}`);
+  assert.notEqual(
+    workflowResult.status,
+    0,
+    "workflow start and task start both crossed the same pre-task boundary",
+  );
+  assert.match(
+    `${workflowResult.stdout}\n${workflowResult.stderr}`,
+    /already has a task-start receipt.*must start before task start/su,
+  );
+  assert.equal(
+    [taskResult, workflowResult].filter((result) => result.status === 0).length,
+    1,
+  );
+  const taskStartReceipt = readJson(
+    project,
+    `.sdlc/stories/${storyId}/task-start.json`,
+  );
+  assert.equal(taskStartReceipt.workflow_instance_ref ?? null, null);
+  assert.equal(
+    fs.existsSync(path.join(
+      project,
+      ".sdlc/workflows/instances",
+      workflowInstanceId,
+    )),
+    false,
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      project,
+      ".sdlc/workflows/instances/.starts",
+      `${workflowInstanceId}.json`,
+    )),
+    false,
+  );
+});
+
+test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", async () => {
   const project = temporaryProject("lifecycle");
   const customPhase = "package-boundary-check";
   const finalReceiptPath = ".sdlc/gates/ST-FINAL-final.json";
@@ -597,7 +1454,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     additionalOutputRefs: [{ type: "release-notes", phase: "release" }],
     configureProject: (target) => configureCustomPhase(target, customPhase),
     deliveryKind: "local_release",
-    storyActionUses: 10,
+    storyActionUses: 12,
     beforeTaskStart: ({ storyId }) => {
       mustRun([
         "workflow", "definition", "propose",
@@ -741,6 +1598,364 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   assert.equal(fs.existsSync(path.join(project, strictReceiptPath)), true);
   assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
 
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  appendTrace(project, fixture.storyId, "test", "passed", testEvidence);
+  const staleStrictGateStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(staleStrictGateStatus.next_action.kind, "seal_strict_gate");
+  assert.equal(
+    staleStrictGateStatus.next_action.reason,
+    "release_transition_strict_gate_stale",
+  );
+  assert.ok(staleStrictGateStatus.next_action.strict_gate_issues.some((issue) =>
+    issue.includes("predates current test evidence")));
+  assert.match(
+    staleStrictGateStatus.next_action.command,
+    /gate check --strict --story ST-FINAL$/u,
+  );
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "release",
+    "--request-id", "final-workflow-6-stale-strict-gate",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow E2E CI",
+  ], project, /cannot use the intermediate strict gate.*predates current test evidence.*Run .*gate check --strict --story ST-FINAL/su);
+  const refreshedStrictReport = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+  ], project);
+  assert.equal(refreshedStrictReport.kind, "workflow_strict_gate_receipt");
+  assert.ok(
+    Date.parse(refreshedStrictReport.checked_at)
+      > Date.parse(strictReport.checked_at),
+  );
+  const refreshedWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(refreshedWorkflowStatus.status, "ready");
+  assert.deepEqual(refreshedWorkflowStatus.ready_next_states, ["release"]);
+
+  const requirementTamperProject = cloneTemporaryProject(
+    project,
+    "strict-requirement-tamper",
+  );
+  const tamperedRequirementPath = path.join(
+    requirementTamperProject,
+    `.sdlc/requirements/${fixture.requirementId}.json`,
+  );
+  const tamperedRequirement = readJson(
+    requirementTamperProject,
+    `.sdlc/requirements/${fixture.requirementId}.json`,
+  );
+  tamperedRequirement.summary =
+    `${tamperedRequirement.summary} Unapproved mutation after the strict gate.`;
+  fs.writeFileSync(
+    tamperedRequirementPath,
+    `${JSON.stringify(tamperedRequirement, null, 2)}\n`,
+    "utf8",
+  );
+  assertReleaseStrictGateBlocked({
+    project: requirementTamperProject,
+    workflowInstanceId,
+    requestId: "final-workflow-6-requirement-tampered",
+    issuePattern: /requirement REQ-FINAL.*fresh formal approval/iu,
+  });
+
+  const supersededRequirementProject = cloneTemporaryProject(
+    project,
+    "strict-requirement-superseded",
+  );
+  mustRun([
+    "requirement", "revise",
+    "--root", supersededRequirementProject,
+    "--id", fixture.requirementId,
+    "--new-id", `${fixture.requirementId}-R2`,
+    "--title", "Revised governed lifecycle requirement",
+  ], supersededRequirementProject);
+  mustRun([
+    "requirement", "approve",
+    "--root", supersededRequirementProject,
+    "--id", `${fixture.requirementId}-R2`,
+    ...humanApproval("Approve the revised governed lifecycle requirement"),
+  ], supersededRequirementProject);
+  mustRun([
+    "requirement", "supersede",
+    "--root", supersededRequirementProject,
+    "--id", fixture.requirementId,
+    "--new-id", `${fixture.requirementId}-R2`,
+    "--reason", "Replace the original requirement with its approved revision",
+    ...humanApproval("Approve the exact requirement supersession"),
+  ], supersededRequirementProject);
+  assertReleaseStrictGateBlocked({
+    project: supersededRequirementProject,
+    workflowInstanceId,
+    requestId: "final-workflow-6-requirement-superseded",
+    issuePattern:
+      /requirement REQ-FINAL is superseded and cannot remain an active story input/iu,
+  });
+
+  const validationStepTamperProject = cloneTemporaryProject(
+    project,
+    "strict-validation-step-tamper",
+  );
+  const validationStepRelativePath =
+    `.sdlc/stories/${fixture.storyId}/steps/validation.json`;
+  const validationStep = readJson(
+    validationStepTamperProject,
+    validationStepRelativePath,
+  );
+  validationStep.evidence[0].sha256 = "0".repeat(64);
+  fs.writeFileSync(
+    path.join(validationStepTamperProject, validationStepRelativePath),
+    `${JSON.stringify(validationStep, null, 2)}\n`,
+    "utf8",
+  );
+  assertReleaseStrictGateBlocked({
+    project: validationStepTamperProject,
+    workflowInstanceId,
+    requestId: "final-workflow-6-validation-step-tampered",
+    issuePattern:
+      /story step ST-FINAL\/validation evidence changed after step completion/iu,
+  });
+
+  const changedPathScopeProject = cloneTemporaryProject(
+    project,
+    "strict-changed-path-scope",
+  );
+  const outsideScopePath = writeProjectFile(
+    changedPathScopeProject,
+    "src/out-of-scope-after-strict.mjs",
+    "export const outsideApprovedScope = true;\n",
+  );
+  mustGit(changedPathScopeProject, ["add", outsideScopePath]);
+  mustGit(changedPathScopeProject, [
+    "commit", "-m", "test: mutate outside approved strict scope",
+  ]);
+  assertReleaseStrictGateBlocked({
+    project: changedPathScopeProject,
+    workflowInstanceId,
+    requestId: "final-workflow-6-changed-path-scope",
+    issuePattern: /changed files outside the approved requirement write paths/iu,
+  });
+
+  const implementationArtifactPath = path.join(project, artifact);
+  fs.writeFileSync(
+    implementationArtifactPath,
+    "# Implementation summary\n\nThe deliverable changed after the strict receipt.\n",
+    "utf8",
+  );
+  const changedArtifactStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(changedArtifactStatus.next_action.kind, "repair_output_link");
+  assert.equal(
+    changedArtifactStatus.next_action.reason,
+    "output_link_evidence_changed",
+  );
+  assert.ok(changedArtifactStatus.next_action.strict_gate_issues.some((issue) =>
+    issue.includes(`artifact ${artifact} changed after it was linked`)));
+  const implementationLink = readJson(
+    project,
+    ".sdlc/output-contracts/registry.json",
+  ).links.find((link) =>
+    link.story_id === fixture.storyId
+    && link.artifact_type === "implementation-summary");
+  assert.equal(
+    changedArtifactStatus.next_action.output_link_id,
+    implementationLink.id,
+  );
+  assert.deepEqual(
+    changedArtifactStatus.next_action.repair_steps.map((step) => step.kind),
+    ["repair_output_link", "seal_strict_gate"],
+  );
+  assert.match(
+    changedArtifactStatus.next_action.command,
+    new RegExp(
+      `output link .*--story ${fixture.storyId} .*--id ${implementationLink.id} .*--authorization ${fixture.storyActionAuthorizationId}$`,
+      "u",
+    ),
+  );
+  const changedArtifactWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(changedArtifactWorkflowStatus.status, "blocked");
+  assert.deepEqual(changedArtifactWorkflowStatus.ready_next_states, []);
+  const changedArtifactReleaseCheck =
+    changedArtifactWorkflowStatus.next_transition_checks.find((check) =>
+      check.to === "release");
+  assert.equal(changedArtifactReleaseCheck.allowed, false);
+  const changedArtifactStrictGuard =
+    changedArtifactReleaseCheck.guard_results.find((result) =>
+      result.guard_id === "strict-gate-passed");
+  assert.equal(changedArtifactStrictGuard.allowed, false);
+  assert.deepEqual(
+    changedArtifactStrictGuard.issues,
+    changedArtifactStatus.next_action.strict_gate_issues,
+  );
+  assert.equal(
+    changedArtifactStrictGuard.repair_action.kind,
+    "repair_output_link",
+  );
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "release",
+    "--request-id", "final-workflow-6-artifact-mutated",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow E2E CI",
+  ], project, /cannot use the intermediate strict gate.*artifact docs\/implementation-summary\.md changed after it was linked/su);
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", implementationLink.artifact_type,
+    "--artifact", implementationLink.artifact_path,
+    "--template", implementationLink.template_id,
+    "--mode", implementationLink.mode,
+    "--id", implementationLink.id,
+    "--requirement", fixture.requirementId,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
+  const artifactRelinkedStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(artifactRelinkedStatus.next_action.kind, "seal_strict_gate");
+  const artifactRelinkedStrictReport = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+  ], project);
+  assert.equal(artifactRelinkedStrictReport.status, "passed");
+  assert.equal(
+    artifactRelinkedStrictReport.kind,
+    "workflow_strict_gate_receipt",
+  );
+
+  const implementationTemplatePath = path.join(
+    project,
+    ".sdlc/output-contracts/templates/implementation-summary-v1.md",
+  );
+  fs.appendFileSync(
+    implementationTemplatePath,
+    "\nUnapproved template mutation after the strict receipt.\n",
+    "utf8",
+  );
+  const changedTemplateStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(
+    changedTemplateStatus.next_action.kind,
+    "reapprove_output_template",
+  );
+  assert.equal(
+    changedTemplateStatus.next_action.reason,
+    "output_template_changed_after_approval",
+  );
+  assert.ok(changedTemplateStatus.next_action.strict_gate_issues.some((issue) =>
+    issue.includes("output template implementation-summary-v1 changed after approval")));
+  assert.deepEqual(
+    changedTemplateStatus.next_action.repair_steps.map((step) => step.kind),
+    [
+      "reapprove_output_template",
+      "repair_output_link",
+      "seal_strict_gate",
+    ],
+  );
+  assert.match(
+    changedTemplateStatus.next_action.command,
+    /output template approve --id implementation-summary-v1 .*--approval-source explicit-user/u,
+  );
+  const changedTemplateWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(changedTemplateWorkflowStatus.status, "blocked");
+  assert.deepEqual(changedTemplateWorkflowStatus.ready_next_states, []);
+  const changedTemplateReleaseCheck =
+    changedTemplateWorkflowStatus.next_transition_checks.find((check) =>
+      check.to === "release");
+  assert.equal(changedTemplateReleaseCheck.allowed, false);
+  const changedTemplateStrictGuard =
+    changedTemplateReleaseCheck.guard_results.find((result) =>
+      result.guard_id === "strict-gate-passed");
+  assert.equal(changedTemplateStrictGuard.allowed, false);
+  assert.deepEqual(
+    changedTemplateStrictGuard.issues,
+    changedTemplateStatus.next_action.strict_gate_issues,
+  );
+  assert.equal(
+    changedTemplateStrictGuard.repair_action.kind,
+    "reapprove_output_template",
+  );
+  mustFail([
+    "workflow", "instance", "transition",
+    "--root", project,
+    "--id", workflowInstanceId,
+    "--to", "release",
+    "--request-id", "final-workflow-6-template-mutated",
+    "--actor", "workflow-e2e-ci",
+    "--actor-type", "ci",
+    "--actor-name", "Workflow E2E CI",
+  ], project, /cannot use the intermediate strict gate.*output template implementation-summary-v1 changed after approval/su);
+  mustRun([
+    "output", "template", "approve",
+    "--root", project,
+    "--id", "implementation-summary-v1",
+    ...humanApproval("Approve the current implementation summary format"),
+  ], project);
+  const templateReapprovedStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(
+    templateReapprovedStatus.next_action.kind,
+    "repair_output_link",
+  );
+  assert.equal(
+    templateReapprovedStatus.next_action.output_link_id,
+    implementationLink.id,
+  );
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", implementationLink.artifact_type,
+    "--artifact", implementationLink.artifact_path,
+    "--template", implementationLink.template_id,
+    "--mode", implementationLink.mode,
+    "--id", implementationLink.id,
+    "--requirement", fixture.requirementId,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
+  const templateRelinkedStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(templateRelinkedStatus.next_action.kind, "seal_strict_gate");
+  const templateRelinkedStrictReport = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+  ], project);
+  assert.equal(templateRelinkedStrictReport.status, "passed");
+  assert.equal(
+    templateRelinkedStrictReport.kind,
+    "workflow_strict_gate_receipt",
+  );
+
   mustRun([
     "workflow", "instance", "transition",
     "--root", project,
@@ -861,9 +2076,178 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   const readyToCertifyStatus = mustRunJson([
     "status", "--root", project,
   ], project);
-  assert.equal(readyToCertifyStatus.next_action.kind, "certify_lifecycle");
+  assert.equal(readyToCertifyStatus.next_action.kind, "release_story_claim");
+  assert.equal(
+    readyToCertifyStatus.next_action.reason,
+    "final_certification_requires_released_claim",
+  );
   assert.match(readyToCertifyStatus.next_action.command, /^node /u);
   assert.doesNotMatch(readyToCertifyStatus.next_action.command, /^agentic-sdlc /u);
+
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], project, /active claim by codex.*Release the claim before final lifecycle certification/su);
+  assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
+  mustRun([
+    "story", "release",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "codex",
+    "--reason", "Release the completed lane before final lifecycle certification.",
+  ], project);
+  const claimReleasedStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(claimReleasedStatus.next_action.kind, "certify_lifecycle");
+  assert.equal(claimReleasedStatus.next_action.reason, "workflow_terminal");
+
+  const currentInstancePath =
+    `.sdlc/workflows/instances/${workflowInstanceId}/instance.json`;
+  const currentInstance = readJson(project, currentInstancePath);
+  const releasedClaimPath = `.sdlc/stories/${fixture.storyId}/claim.json`;
+  const releasedClaim = readJson(project, releasedClaimPath);
+  assert.equal(releasedClaim.status, "released");
+  const assertLifecycleBindingTamperBlocked = (label) => {
+    assert.equal(fs.existsSync(path.join(project, finalReceiptPath)), false);
+    const status = mustRunJson([
+      "status", "--root", project,
+    ], project);
+    assert.equal(status.summary.available_work, 0);
+    assert.ok(status.summary.blocked_work >= 1);
+
+    const orchestration = mustRunJson([
+      "orchestrate", "status", "--root", project,
+    ], project);
+    const storyState = orchestration.stories
+      .find((story) => story.id === fixture.storyId);
+    assert.equal(storyState.orchestration_state, "blocked");
+    assert.equal(storyState.lifecycle_source, "invalid_story_workflow");
+
+    const plan = mustRunJson([
+      "orchestrate", "plan", "--root", project,
+    ], project);
+    assert.equal(
+      plan.candidates.some((candidate) => candidate.story_id === fixture.storyId),
+      false,
+    );
+    mustFail([
+      "story", "claim",
+      "--root", project,
+      "--id", fixture.storyId,
+      "--agent", `${label}-agent`,
+    ], project, /invalid or unreadable final lifecycle receipt/u);
+    mustFail([
+      "story", "claim",
+      "--root", project,
+      "--id", fixture.storyId,
+      "--agent", `${label}-agent`,
+      "--force",
+      "--actor-type", "human",
+    ], project, /invalid or unreadable final lifecycle receipt/u);
+    assert.deepEqual(readJson(project, releasedClaimPath), releasedClaim);
+  };
+
+  const missingStrictGateBinding = structuredClone(currentInstance);
+  delete missingStrictGateBinding.metadata.governance_binding.strict_gate_receipt_path;
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(missingStrictGateBinding, null, 2)}\n`,
+  );
+  assertLifecycleBindingTamperBlocked("missing-strict-gate-binding");
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(currentInstance, null, 2)}\n`,
+  );
+  const restoredStrictGateBindingStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(restoredStrictGateBindingStatus.next_action.kind, "certify_lifecycle");
+
+  const mismatchedStoryBinding = structuredClone(currentInstance);
+  mismatchedStoryBinding.metadata.governance_binding.story_id = "ST-OTHER";
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(mismatchedStoryBinding, null, 2)}\n`,
+  );
+  assertLifecycleBindingTamperBlocked("mismatched-story-binding");
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(currentInstance, null, 2)}\n`,
+  );
+  const restoredStoryBindingStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(restoredStoryBindingStatus.next_action.kind, "certify_lifecycle");
+
+  const taskStartPath = `.sdlc/stories/${fixture.storyId}/task-start.json`;
+  const taskStartWithoutWorkflowRef = structuredClone(taskStartReceipt);
+  delete taskStartWithoutWorkflowRef.workflow_instance_ref;
+  const mismatchedStoryBindingWithoutTaskStartRef = structuredClone(currentInstance);
+  mismatchedStoryBindingWithoutTaskStartRef.metadata.governance_binding.story_id = "ST-OTHER";
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(taskStartWithoutWorkflowRef, null, 2)}\n`,
+  );
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(mismatchedStoryBindingWithoutTaskStartRef, null, 2)}\n`,
+  );
+  assertLifecycleBindingTamperBlocked("missing-task-start-workflow-ref");
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(taskStartReceipt, null, 2)}\n`,
+  );
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(currentInstance, null, 2)}\n`,
+  );
+  const restoredTaskStartBindingStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(restoredTaskStartBindingStatus.next_action.kind, "certify_lifecycle");
+
+  const legacyTaskStartWithoutWorkflowRef = structuredClone(taskStartReceipt);
+  legacyTaskStartWithoutWorkflowRef.schema_version = "profile-task-start-receipt:v1";
+  delete legacyTaskStartWithoutWorkflowRef.workflow_instance_ref;
+  const mismatchedStoryBindingWithLegacyTaskStart = structuredClone(currentInstance);
+  mismatchedStoryBindingWithLegacyTaskStart.metadata.governance_binding.story_id = "ST-OTHER";
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(legacyTaskStartWithoutWorkflowRef, null, 2)}\n`,
+  );
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(mismatchedStoryBindingWithLegacyTaskStart, null, 2)}\n`,
+  );
+  assertLifecycleBindingTamperBlocked("legacy-task-start-without-workflow-ref");
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(taskStartReceipt, null, 2)}\n`,
+  );
+  writeProjectFile(
+    project,
+    currentInstancePath,
+    `${JSON.stringify(currentInstance, null, 2)}\n`,
+  );
+  const restoredLegacyTaskStartStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(restoredLegacyTaskStartStatus.next_action.kind, "certify_lifecycle");
 
   const finalReport = mustRunJson([
     "gate", "check",
@@ -876,7 +2260,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   assert.equal(finalReport.lifecycle_complete, true);
   assert.equal(finalReport.certification_level, "lifecycle_complete");
   assert.equal(finalReport.kind, "workflow_final_gate_receipt");
-  assert.equal(finalReport.schema_version, "workflow-final-gate-receipt:v2");
+  assert.equal(finalReport.schema_version, "workflow-final-gate-receipt:v3");
   assert.equal(finalReport.final_receipt_path, finalReceiptPath);
   assert.equal(
     finalReport.lifecycle_workflow.selection_policy,
@@ -912,6 +2296,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
       >= Date.parse(finalReport.lifecycle_workflow.terminal_event_ref.timestamp),
   );
 
+  const receiptBytes = fs.readFileSync(path.join(project, finalReceiptPath));
   const receipt = readJson(project, finalReceiptPath);
   const {
     correlation_id: correlationId,
@@ -931,7 +2316,1169 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   const certifiedStatus = mustRunJson([
     "status", "--root", project,
   ], project);
-  assert.notEqual(certifiedStatus.next_action.kind, "certify_lifecycle");
+  assert.equal(certifiedStatus.next_action.kind, "onboard_project");
+  assert.equal(certifiedStatus.next_action.reason, "project_context_not_onboarded");
+  assert.notEqual(certifiedStatus.next_action.kind, "inspect_story_workflow");
+  assert.equal(certifiedStatus.summary.available_work, 0);
+  assert.equal(certifiedStatus.summary.active_work, 0);
+  assert.equal(certifiedStatus.summary.completed_work, 1);
+
+  const terminalOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const terminalStory = terminalOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(terminalOrchestration.summary.available, 0);
+  assert.equal(terminalOrchestration.summary.claimed, 0);
+  assert.equal(terminalOrchestration.summary.terminal, 1);
+  assert.equal(terminalStory.status, "done");
+  assert.equal(terminalStory.phase, "release");
+  assert.equal(
+    terminalStory.record_status,
+    readJson(project, `.sdlc/stories/${fixture.storyId}/story.json`).status,
+  );
+  assert.equal(terminalStory.lifecycle_source, "workflow_final_receipt");
+  assert.equal(terminalStory.orchestration_state, "terminal");
+
+  const certifiedWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(certifiedWorkflowStatus.status, "terminal");
+  assert.equal(certifiedWorkflowStatus.state_terminal, true);
+  assert.equal(certifiedWorkflowStatus.terminal, true);
+  assert.equal(certifiedWorkflowStatus.final_receipt_exists, true);
+  assert.equal(certifiedWorkflowStatus.final_receipt_valid, true);
+
+  const trackedInScopePath = path.join(
+    project,
+    "docs",
+    "untouched-runtime.md",
+  );
+  const trackedInScopeBytes = fs.readFileSync(trackedInScopePath);
+  fs.appendFileSync(trackedInScopePath, "changed after certification\n", "utf8");
+  assert.equal(mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project).final_receipt_valid, false);
+  fs.writeFileSync(trackedInScopePath, trackedInScopeBytes);
+
+  const newInScopePath = path.join(project, "docs", "new-runtime-file.md");
+  fs.writeFileSync(newInScopePath, "# New in-scope runtime file\n", "utf8");
+  assert.equal(mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project).final_receipt_valid, false);
+  fs.rmSync(newInScopePath);
+
+  const postFinalOutsideScopePath = path.join(project, "src", "index.mjs");
+  const outsideScopeBytes = fs.readFileSync(postFinalOutsideScopePath);
+  fs.appendFileSync(
+    postFinalOutsideScopePath,
+    "// unrelated outside story scope\n",
+    "utf8",
+  );
+  const outsideScopeStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(outsideScopeStatus.status, "terminal");
+  assert.equal(outsideScopeStatus.final_receipt_valid, true);
+  fs.writeFileSync(postFinalOutsideScopePath, outsideScopeBytes);
+
+  const unrelatedLocalReleaseSibling = path.join(
+    fixture.localReleaseRoot,
+    "sibling-unrelated.txt",
+  );
+  fs.writeFileSync(
+    unrelatedLocalReleaseSibling,
+    "This sibling is outside the approved local-release write path.\n",
+    "utf8",
+  );
+  const unrelatedLocalReleaseStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(unrelatedLocalReleaseStatus.status, "terminal");
+  assert.equal(unrelatedLocalReleaseStatus.final_receipt_valid, true);
+  fs.rmSync(unrelatedLocalReleaseSibling);
+
+  const certifiedLocalReleaseArtifactPath = path.join(
+    fixture.localReleaseOutput,
+    "release-proof.txt",
+  );
+  const certifiedLocalReleaseArtifactBytes = fs.readFileSync(
+    certifiedLocalReleaseArtifactPath,
+  );
+  fs.appendFileSync(
+    certifiedLocalReleaseArtifactPath,
+    "tampered after lifecycle certification\n",
+    "utf8",
+  );
+  const changedLocalReleaseStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(changedLocalReleaseStatus.status, "blocked");
+  assert.equal(changedLocalReleaseStatus.final_receipt_valid, false);
+  fs.writeFileSync(
+    certifiedLocalReleaseArtifactPath,
+    certifiedLocalReleaseArtifactBytes,
+  );
+  const restoredLocalReleaseStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(restoredLocalReleaseStatus.status, "terminal");
+  assert.equal(restoredLocalReleaseStatus.final_receipt_valid, true);
+
+  const originalLocalReleaseRoot = fixture.localReleaseRoot;
+  const localReleaseRootBackup = temporaryProject("local-release-root-backup");
+  const movedLocalReleaseRoot = path.join(
+    localReleaseRootBackup,
+    "original-root",
+  );
+  fs.renameSync(originalLocalReleaseRoot, movedLocalReleaseRoot);
+  fs.cpSync(movedLocalReleaseRoot, originalLocalReleaseRoot, {
+    recursive: true,
+    force: true,
+    preserveTimestamps: true,
+  });
+  const replacedLocalReleaseRootStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(replacedLocalReleaseRootStatus.status, "blocked");
+  assert.equal(replacedLocalReleaseRootStatus.final_receipt_valid, false);
+  fs.rmSync(originalLocalReleaseRoot, { recursive: true, force: true });
+  fs.renameSync(movedLocalReleaseRoot, originalLocalReleaseRoot);
+  const restoredLocalReleaseRootStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(restoredLocalReleaseRootStatus.status, "terminal");
+  assert.equal(restoredLocalReleaseRootStatus.final_receipt_valid, true);
+
+  const resurrectionProject = cloneTemporaryProject(
+    project,
+    "final-receipt-output-resurrection",
+  );
+  const resurrectionReceiptPath = path.join(
+    resurrectionProject,
+    finalReceiptPath,
+  );
+  const resurrectionReceiptBefore = fs.readFileSync(resurrectionReceiptPath);
+  const resurrectionReceiptRecordBefore = JSON.parse(
+    resurrectionReceiptBefore,
+  );
+  assert.equal(
+    resurrectionReceiptRecordBefore.freshness_proof.schema_version,
+    "workflow-final-freshness-proof:v1",
+  );
+  const independentProject = cloneTemporaryProject(
+    project,
+    "final-receipt-independent-commit",
+  );
+  writeProjectFile(
+    independentProject,
+    "src/independent-story-change.mjs",
+    "export const independentStoryChange = true;\n",
+  );
+  mustGit(independentProject, ["add", "src/independent-story-change.mjs"]);
+  mustGit(
+    independentProject,
+    ["commit", "-m", "test: independent story outside certified scope"],
+  );
+  const independentCommitStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", independentProject,
+    "--id", workflowInstanceId,
+  ], independentProject);
+  assert.equal(independentCommitStatus.status, "terminal");
+  assert.equal(independentCommitStatus.final_receipt_valid, true);
+  const resurrectionRegistry = readJson(
+    resurrectionProject,
+    ".sdlc/output-contracts/registry.json",
+  );
+  const resurrectionLink = resurrectionRegistry.links.find((link) =>
+    link.story_id === fixture.storyId
+    && link.artifact_type === "implementation-summary");
+  assert.ok(resurrectionLink);
+  const resurrectionArtifactPath = path.join(
+    resurrectionProject,
+    resurrectionLink.artifact_path,
+  );
+  fs.appendFileSync(
+    resurrectionArtifactPath,
+    "\nThis governed output was refreshed after final certification.\n",
+    "utf8",
+  );
+  const artifactChangedStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", resurrectionProject,
+    "--id", workflowInstanceId,
+  ], resurrectionProject);
+  assert.equal(artifactChangedStatus.status, "blocked");
+  assert.equal(artifactChangedStatus.final_receipt_exists, true);
+  assert.equal(artifactChangedStatus.final_receipt_valid, false);
+
+  mustRun([
+    "output", "link",
+    "--root", resurrectionProject,
+    "--story", fixture.storyId,
+    "--type", resurrectionLink.artifact_type,
+    "--artifact", resurrectionLink.artifact_path,
+    "--template", resurrectionLink.template_id,
+    "--mode", resurrectionLink.mode,
+    "--requirement", fixture.requirementId,
+    "--id", resurrectionLink.id,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], resurrectionProject);
+  assert.deepEqual(
+    fs.readFileSync(resurrectionReceiptPath),
+    resurrectionReceiptBefore,
+  );
+  const relinkedWithoutResealStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", resurrectionProject,
+    "--id", workflowInstanceId,
+  ], resurrectionProject);
+  assert.equal(relinkedWithoutResealStatus.status, "blocked");
+  assert.equal(relinkedWithoutResealStatus.final_receipt_exists, true);
+  assert.equal(relinkedWithoutResealStatus.final_receipt_valid, false);
+
+  const resealedResurrectionReport = mustRunJson([
+    "gate", "check",
+    "--root", resurrectionProject,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], resurrectionProject);
+  assert.equal(resealedResurrectionReport.status, "passed");
+  assert.notEqual(
+    resealedResurrectionReport.freshness_proof.proof_hash,
+    resurrectionReceiptRecordBefore.freshness_proof.proof_hash,
+  );
+  const resealedResurrectionStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", resurrectionProject,
+    "--id", workflowInstanceId,
+  ], resurrectionProject);
+  assert.equal(resealedResurrectionStatus.status, "terminal");
+  assert.equal(resealedResurrectionStatus.final_receipt_valid, true);
+
+  const statusReceiptAbsolutePath = path.join(project, finalReceiptPath);
+  const statusReceiptBackupPath = `${statusReceiptAbsolutePath}.status-missing`;
+  fs.renameSync(statusReceiptAbsolutePath, statusReceiptBackupPath);
+  try {
+    const awaitingCertificationWorkflowStatus = mustRunJson([
+      "workflow", "instance", "status",
+      "--root", project,
+      "--id", workflowInstanceId,
+    ], project);
+    assert.equal(
+      awaitingCertificationWorkflowStatus.status,
+      "awaiting_certification",
+    );
+    assert.equal(awaitingCertificationWorkflowStatus.state_terminal, true);
+    assert.equal(awaitingCertificationWorkflowStatus.terminal, false);
+    assert.equal(awaitingCertificationWorkflowStatus.final_receipt_exists, false);
+    assert.equal(awaitingCertificationWorkflowStatus.final_receipt_valid, false);
+  } finally {
+    fs.renameSync(statusReceiptBackupPath, statusReceiptAbsolutePath);
+  }
+
+  const terminalPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    terminalPlan.candidates.some((candidate) => candidate.story_id === fixture.storyId),
+    false,
+  );
+
+  const certifiedContractPath = path.join(
+    project,
+    `.sdlc/contracts/${fixture.contractId}.json`,
+  );
+  const certifiedContractBytes = fs.readFileSync(certifiedContractPath);
+  const changedCertifiedContract = JSON.parse(certifiedContractBytes);
+  changedCertifiedContract.purpose =
+    `${changedCertifiedContract.purpose} Changed after final certification.`;
+  fs.writeFileSync(
+    certifiedContractPath,
+    `${JSON.stringify(changedCertifiedContract, null, 2)}\n`,
+    "utf8",
+  );
+  const changedContractGate = mustFail([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+    "--json",
+  ], project, /contract CONTRACT-FINAL\.json approved human gate is stale|Delivery autonomy profile AUT-FINAL is stale for contract CONTRACT-FINAL/su);
+  const changedContractGateReport = JSON.parse(changedContractGate.stdout);
+  assert.equal(changedContractGateReport.status, "failed");
+  assert.deepEqual(fs.readFileSync(path.join(project, finalReceiptPath)), receiptBytes);
+
+  const changedContractStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(changedContractStatus.summary.completed_work, 0);
+  assert.ok(changedContractStatus.summary.blocked_work >= 1);
+
+  const changedContractOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const changedContractStory = changedContractOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(changedContractOrchestration.summary.terminal, 0);
+  assert.ok(changedContractOrchestration.summary.blocked >= 1);
+  assert.equal(changedContractStory.orchestration_state, "blocked");
+  assert.equal(
+    changedContractStory.lifecycle_source,
+    "invalid_workflow_final_receipt",
+  );
+  const changedContractWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(changedContractWorkflowStatus.status, "blocked");
+  assert.equal(changedContractWorkflowStatus.state_terminal, true);
+  assert.equal(changedContractWorkflowStatus.terminal, false);
+  assert.equal(changedContractWorkflowStatus.final_receipt_exists, true);
+  assert.equal(changedContractWorkflowStatus.final_receipt_valid, false);
+
+  const changedContractPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(changedContractPlan.summary.terminal, 0);
+  assert.ok(changedContractPlan.summary.blocked >= 1);
+  assert.equal(
+    changedContractPlan.candidates.some((candidate) =>
+      candidate.story_id === fixture.storyId),
+    false,
+  );
+
+  fs.writeFileSync(certifiedContractPath, certifiedContractBytes);
+  const restoredContractStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(restoredContractStatus.summary.completed_work, 1);
+  assert.equal(restoredContractStatus.summary.blocked_work, 0);
+  const restoredContractOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const restoredContractStory = restoredContractOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(restoredContractOrchestration.summary.terminal, 1);
+  assert.equal(restoredContractOrchestration.summary.blocked, 0);
+  assert.equal(restoredContractStory.orchestration_state, "terminal");
+  assert.equal(
+    restoredContractStory.lifecycle_source,
+    "workflow_final_receipt",
+  );
+  const restoredContractWorkflowStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(restoredContractWorkflowStatus.status, "terminal");
+  assert.equal(restoredContractWorkflowStatus.state_terminal, true);
+  assert.equal(restoredContractWorkflowStatus.terminal, true);
+  assert.equal(restoredContractWorkflowStatus.final_receipt_exists, true);
+  assert.equal(restoredContractWorkflowStatus.final_receipt_valid, true);
+
+  const claimPath = `.sdlc/stories/${fixture.storyId}/claim.json`;
+  const claimBeforeRejectedReplay = readJson(project, claimPath);
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "replay-agent",
+  ], project, /terminal status 'done'/u);
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "replay-agent",
+    "--force",
+    "--actor-type", "human",
+  ], project, /terminal status 'done'/u);
+  assert.deepEqual(readJson(project, claimPath), claimBeforeRejectedReplay);
+
+  const taskStartWithChangedSession = structuredClone(taskStartReceipt);
+  taskStartWithChangedSession.audit = {
+    ...(taskStartReceipt.audit || {}),
+    run: {
+      ...(taskStartReceipt.audit?.run || {}),
+      session_id: "tampered-post-final-session",
+    },
+  };
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(taskStartWithChangedSession, null, 2)}\n`,
+  );
+  const tamperedTaskStartStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(tamperedTaskStartStatus.summary.available_work, 0);
+  assert.ok(tamperedTaskStartStatus.summary.blocked_work >= 1);
+  assert.equal(
+    tamperedTaskStartStatus.next_action.reason,
+    "final_lifecycle_receipt_invalid",
+  );
+  const tamperedTaskStartOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const tamperedTaskStartStory = tamperedTaskStartOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(tamperedTaskStartStory.orchestration_state, "blocked");
+  assert.equal(
+    tamperedTaskStartStory.lifecycle_source,
+    "invalid_workflow_final_receipt",
+  );
+  const tamperedTaskStartPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    tamperedTaskStartPlan.candidates
+      .some((candidate) => candidate.story_id === fixture.storyId),
+    false,
+  );
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "task-start-tamper-agent",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "task-start-tamper-agent",
+    "--force",
+    "--actor-type", "human",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  assert.deepEqual(readJson(project, claimPath), claimBeforeRejectedReplay);
+  writeProjectFile(
+    project,
+    taskStartPath,
+    `${JSON.stringify(taskStartReceipt, null, 2)}\n`,
+  );
+  const restoredTaskStartOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  assert.equal(
+    restoredTaskStartOrchestration.stories
+      .find((story) => story.id === fixture.storyId)
+      .orchestration_state,
+    "terminal",
+  );
+
+  mustRun([
+    "story", "create",
+    "--root", project,
+    "--id", "ST-FINAL-DOWNSTREAM",
+    "--title", "Consume the certified upstream lifecycle",
+    "--acceptance", "The upstream lifecycle is certified as done.",
+  ], project);
+  mustRun([
+    "dependency", "propose",
+    "--root", project,
+    "--id", "DEP-FINAL-CERTIFICATION",
+    "--edge", `ST-FINAL-DOWNSTREAM:${fixture.storyId}:blocks:implementation:done`,
+  ], project);
+  mustRun([
+    "dependency", "approve",
+    "--root", project,
+    "--id", "DEP-FINAL-CERTIFICATION",
+    ...humanApproval("Approve the exact certified-lifecycle dependency"),
+  ], project);
+  const certifiedDependencyStatus = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  assert.equal(
+    certifiedDependencyStatus.stories
+      .find((story) => story.id === "ST-FINAL-DOWNSTREAM")
+      .orchestration_state,
+    "available",
+  );
+
+  fs.rmSync(path.join(project, finalReceiptPath));
+  const missingReceiptStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(missingReceiptStatus.next_action.kind, "certify_lifecycle");
+  assert.equal(missingReceiptStatus.next_action.reason, "workflow_terminal");
+  const missingReceiptOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  assert.equal(
+    missingReceiptOrchestration.stories
+      .find((story) => story.id === fixture.storyId)
+      .orchestration_state,
+    "blocked",
+  );
+  assert.equal(
+    missingReceiptOrchestration.stories
+      .find((story) => story.id === "ST-FINAL-DOWNSTREAM")
+      .orchestration_state,
+    "blocked",
+  );
+  const missingReceiptPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    missingReceiptPlan.candidates.some((candidate) => candidate.story_id === fixture.storyId),
+    false,
+  );
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "replay-agent",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "replay-agent",
+    "--force",
+    "--actor-type", "human",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  assert.deepEqual(readJson(project, claimPath), claimBeforeRejectedReplay);
+  writeProjectFile(
+    project,
+    finalReceiptPath,
+    `${JSON.stringify(receipt, null, 2)}\n`,
+  );
+
+  fs.writeFileSync(
+    path.join(project, finalReceiptPath),
+    `${JSON.stringify({
+      ...receipt,
+      checked_at: "2026-07-28T10:09:01.000Z",
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  const tamperedReceiptStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(tamperedReceiptStatus.next_action.kind, "recertify_lifecycle");
+  assert.equal(
+    tamperedReceiptStatus.next_action.reason,
+    "final_lifecycle_receipt_invalid",
+  );
+  assert.match(
+    tamperedReceiptStatus.next_action.command,
+    /gate check --strict --story ST-FINAL --lifecycle-complete$/u,
+  );
+  const tamperedOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const tamperedStory = tamperedOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(tamperedStory.orchestration_state, "blocked");
+  assert.match(tamperedStory.blockers.join("\n"), /final lifecycle receipt/u);
+  assert.equal(
+    tamperedOrchestration.stories
+      .find((story) => story.id === "ST-FINAL-DOWNSTREAM")
+      .orchestration_state,
+    "blocked",
+  );
+  const tamperedPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    tamperedPlan.candidates.some((candidate) => candidate.story_id === fixture.storyId),
+    false,
+  );
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "replay-agent",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+
+  const {
+    freshness_proof: ignoredFreshnessProof,
+    receipt_hash: ignoredProofBoundReceiptHash,
+    ...prooflessReceiptSubject
+  } = receipt;
+  assert.ok(ignoredFreshnessProof);
+  assert.match(ignoredProofBoundReceiptHash, /^[a-f0-9]{64}$/u);
+  const prooflessV2ReceiptSubject = {
+    ...prooflessReceiptSubject,
+    schema_version: "workflow-final-gate-receipt:v2",
+  };
+  const integritySealedProoflessReceipt = {
+    ...prooflessV2ReceiptSubject,
+    receipt_hash: computeStableHash(prooflessV2ReceiptSubject),
+  };
+  fs.writeFileSync(
+    path.join(project, finalReceiptPath),
+    `${JSON.stringify(integritySealedProoflessReceipt, null, 2)}\n`,
+    "utf8",
+  );
+  const prooflessReceiptStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", project,
+    "--id", workflowInstanceId,
+  ], project);
+  assert.equal(prooflessReceiptStatus.status, "blocked");
+  assert.equal(prooflessReceiptStatus.final_receipt_exists, true);
+  assert.equal(prooflessReceiptStatus.final_receipt_valid, false);
+  const prooflessProjectStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(prooflessProjectStatus.next_action.kind, "recertify_lifecycle");
+  assert.equal(
+    prooflessProjectStatus.next_action.reason,
+    "final_lifecycle_receipt_invalid",
+  );
+  assert.match(
+    prooflessProjectStatus.next_action.command,
+    /gate check --strict --story ST-FINAL --lifecycle-complete$/u,
+  );
+
+  const claimBeforeDowngradeReplay = readJson(project, claimPath);
+  assert.equal(claimBeforeDowngradeReplay.status, "released");
+  fs.writeFileSync(
+    path.join(project, finalReceiptPath),
+    `${JSON.stringify({
+      ...receipt,
+      schema_version: "workflow-final-gate-receipt:v1",
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  const downgradedReceiptStatus = mustRunJson([
+    "status", "--root", project,
+  ], project);
+  assert.equal(downgradedReceiptStatus.summary.available_work, 0);
+  const downgradedReceiptOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const downgradedReceiptStory = downgradedReceiptOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(downgradedReceiptStory.orchestration_state, "blocked");
+  assert.equal(
+    downgradedReceiptStory.lifecycle_source,
+    "invalid_workflow_final_receipt",
+  );
+  const downgradedReceiptPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    downgradedReceiptPlan.candidates
+      .some((candidate) => candidate.story_id === fixture.storyId),
+    false,
+  );
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "downgrade-replay-agent",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  mustFail([
+    "story", "claim",
+    "--root", project,
+    "--id", fixture.storyId,
+    "--agent", "downgrade-replay-agent",
+    "--force",
+    "--actor-type", "human",
+  ], project, /invalid or unreadable final lifecycle receipt/u);
+  assert.deepEqual(readJson(project, claimPath), claimBeforeDowngradeReplay);
+
+  const finalReceiptAbsolutePath = path.join(project, finalReceiptPath);
+  fs.writeFileSync(finalReceiptAbsolutePath, receiptBytes);
+  const certifiedStoryTracePath = path.join(
+    project,
+    `.sdlc/traces/${fixture.storyId}.jsonl`,
+  );
+  const certifiedStoryTraceCheckpointPath = path.join(
+    project,
+    `.sdlc/traces/.integrity/${fixture.storyId}.jsonl.checkpoint.json`,
+  );
+  const certifiedTraceBytes = fs.readFileSync(certifiedStoryTracePath);
+  const certifiedTraceCheckpointBytes = fs.readFileSync(
+    certifiedStoryTraceCheckpointPath,
+  );
+  const certifiedOutputRegistryPath = path.join(
+    project,
+    ".sdlc/output-contracts/registry.json",
+  );
+  const certifiedOutputRegistry = readJson(
+    project,
+    ".sdlc/output-contracts/registry.json",
+  );
+  const certifiedImplementationOutput = certifiedOutputRegistry.links.find(
+    (link) =>
+      link.story_id === fixture.storyId
+      && link.artifact_type === "implementation-summary",
+  );
+  assert.ok(certifiedImplementationOutput);
+  const certifiedOutputRegistryBytes = fs.readFileSync(
+    certifiedOutputRegistryPath,
+  );
+  const replacementImplementationOutput = writeProjectFile(
+    project,
+    "docs/implementation-summary-v2.md",
+    "# Replacement implementation summary\n\nThis output belongs to a later governed story.\n",
+  );
+  mustFail([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", "implementation-summary",
+    "--artifact", replacementImplementationOutput,
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", fixture.requirementId,
+    "--id", certifiedImplementationOutput.id,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project, /already has (?:a valid terminal lifecycle certification|a terminal lifecycle receipt)/u);
+  assert.deepEqual(
+    fs.readFileSync(certifiedOutputRegistryPath),
+    certifiedOutputRegistryBytes,
+  );
+  assert.deepEqual(fs.readFileSync(finalReceiptAbsolutePath), receiptBytes);
+  assert.deepEqual(fs.readFileSync(certifiedStoryTracePath), certifiedTraceBytes);
+  assert.deepEqual(
+    fs.readFileSync(certifiedStoryTraceCheckpointPath),
+    certifiedTraceCheckpointBytes,
+  );
+  for (const [type, evidence] of [
+    ["test", testEvidence],
+    ["release", releaseEvidence],
+  ]) {
+    mustFail([
+      "trace", "append",
+      "--root", project,
+      "--story", fixture.storyId,
+      "--type", type,
+      "--outcome", "failed",
+      "--summary", `Reject post-certification ${type} evidence`,
+      "--evidence", evidence,
+      "--actor", "codex",
+      "--actor-type", "agent",
+    ], project, /already has (?:a valid terminal lifecycle certification|a terminal lifecycle receipt)/u);
+    assert.deepEqual(fs.readFileSync(finalReceiptAbsolutePath), receiptBytes);
+    assert.deepEqual(fs.readFileSync(certifiedStoryTracePath), certifiedTraceBytes);
+    assert.deepEqual(
+      fs.readFileSync(certifiedStoryTraceCheckpointPath),
+      certifiedTraceCheckpointBytes,
+    );
+  }
+
+  const freshnessRoot = temporaryProject("final-receipt-freshness");
+  const temporarilyMovedReceiptPath = path.join(
+    freshnessRoot,
+    "temporarily-moved-final-receipt.json",
+  );
+  fs.renameSync(finalReceiptAbsolutePath, temporarilyMovedReceiptPath);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  appendTrace(project, fixture.storyId, "test", "failed", testEvidence);
+  assert.equal(fs.existsSync(finalReceiptAbsolutePath), false);
+  const failedFreshnessTrace = fs.readFileSync(certifiedStoryTracePath, "utf8")
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .at(-1);
+  const failedFreshnessCheckpoint = readJson(
+    project,
+    `.sdlc/traces/.integrity/${fixture.storyId}.jsonl.checkpoint.json`,
+  );
+  assert.equal(failedFreshnessTrace.type, "test");
+  assert.equal(failedFreshnessTrace.outcome, "failed");
+  assert.equal(
+    failedFreshnessTrace._trace_integrity.schema_version,
+    "trace-integrity-event:v1",
+  );
+  assert.equal(
+    failedFreshnessCheckpoint.new_writes.last_event_hash,
+    failedFreshnessTrace._trace_integrity.event_hash,
+  );
+  fs.renameSync(temporarilyMovedReceiptPath, finalReceiptAbsolutePath);
+  assert.deepEqual(fs.readFileSync(finalReceiptAbsolutePath), receiptBytes);
+
+  const staleReceiptStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(staleReceiptStatus.summary.available_work, 0);
+  assert.ok(staleReceiptStatus.summary.blocked_work >= 1);
+  assert.equal(
+    staleReceiptStatus.next_action.reason,
+    "final_lifecycle_receipt_invalid",
+  );
+  const staleReceiptOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  const staleReceiptStory = staleReceiptOrchestration.stories
+    .find((story) => story.id === fixture.storyId);
+  const staleReceiptDownstream = staleReceiptOrchestration.stories
+    .find((story) => story.id === "ST-FINAL-DOWNSTREAM");
+  assert.equal(staleReceiptStory.orchestration_state, "blocked");
+  assert.equal(
+    staleReceiptStory.lifecycle_source,
+    "invalid_workflow_final_receipt",
+  );
+  assert.equal(staleReceiptDownstream.orchestration_state, "blocked");
+  const staleDependencyStatus = mustRunJson([
+    "dependency", "status",
+    "--root", project,
+    "--story", "ST-FINAL-DOWNSTREAM",
+  ], project);
+  assert.ok(staleDependencyStatus.blockers.some((blocker) =>
+    blocker.includes(fixture.storyId)));
+  const staleReceiptPlan = mustRunJson([
+    "orchestrate", "plan", "--root", project,
+  ], project);
+  assert.equal(
+    staleReceiptPlan.candidates.some((candidate) =>
+      [fixture.storyId, "ST-FINAL-DOWNSTREAM"].includes(candidate.story_id)),
+    false,
+  );
+  for (const forceArgs of [
+    [],
+    ["--force", "--actor-type", "human"],
+  ]) {
+    mustFail([
+      "story", "claim",
+      "--root", project,
+      "--id", fixture.storyId,
+      "--agent", "post-certification-freshness-agent",
+      ...forceArgs,
+    ], project, /invalid or unreadable final lifecycle receipt/u);
+  }
+  assert.deepEqual(readJson(project, claimPath), claimBeforeDowngradeReplay);
+
+  appendTrace(project, fixture.storyId, "test", "passed", testEvidence);
+  const recoveredFreshnessReport = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], project);
+  assert.equal(recoveredFreshnessReport.status, "passed");
+  assert.equal(recoveredFreshnessReport.kind, "workflow_final_gate_receipt");
+  const recoveredFreshnessReceiptBytes = fs.readFileSync(finalReceiptAbsolutePath);
+  assert.notDeepEqual(recoveredFreshnessReceiptBytes, receiptBytes);
+  const recoveredFreshnessReceipt = JSON.parse(recoveredFreshnessReceiptBytes);
+  assert.ok(
+    Date.parse(recoveredFreshnessReceipt.checked_at)
+      > Date.parse(receipt.checked_at),
+  );
+  const recoveredFreshnessOrchestration = mustRunJson([
+    "orchestrate", "status", "--root", project,
+  ], project);
+  assert.equal(
+    recoveredFreshnessOrchestration.stories
+      .find((story) => story.id === fixture.storyId)
+      .orchestration_state,
+    "terminal",
+  );
+  assert.equal(
+    recoveredFreshnessOrchestration.stories
+      .find((story) => story.id === "ST-FINAL-DOWNSTREAM")
+      .orchestration_state,
+    "available",
+  );
+  const recoveredDependencyStatus = mustRunJson([
+    "dependency", "status",
+    "--root", project,
+    "--story", "ST-FINAL-DOWNSTREAM",
+  ], project);
+  assert.equal(recoveredDependencyStatus.blockers.length, 0);
+
+  const raceHookRoot = temporaryProject("final-gate-trace-race-hook");
+  const raceReceiptBackupPath = path.join(
+    raceHookRoot,
+    "pre-race-final-receipt.json",
+  );
+  const lifecycleLockPath = path.join(
+    project,
+    `.sdlc/stories/${fixture.storyId}/lifecycle-certification.lock`,
+  );
+  const raceMarkerPath = path.join(raceHookRoot, "gate-lock-delay.marker");
+  const raceHookPath = path.join(raceHookRoot, "delay-final-gate-lock.mjs");
+  fs.writeFileSync(raceHookPath, [
+    'import fs from "node:fs";',
+    "const originalOpenSync = fs.openSync;",
+    "let delayed = false;",
+    "fs.openSync = function delayedFinalGateLock(filePath, flags, ...rest) {",
+    "  if (!delayed",
+    "      && String(filePath) === process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH",
+    '      && flags === "wx") {',
+    "    delayed = true;",
+    "    fs.writeFileSync(process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER, String(filePath));",
+    "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);",
+    "  }",
+    "  return originalOpenSync.call(this, filePath, flags, ...rest);",
+    "};",
+    "",
+  ].join("\n"));
+  fs.renameSync(finalReceiptAbsolutePath, raceReceiptBackupPath);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const finalGateArgs = [
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+    "--json",
+  ];
+  const failedTraceArgs = [
+    "trace", "append",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", "test",
+    "--outcome", "failed",
+    "--summary", "Concurrent failed validation after certification",
+    "--evidence", testEvidence,
+    "--actor", "codex",
+    "--actor-type", "agent",
+    "--json",
+  ];
+  const racedGatePromise = runConcurrently(finalGateArgs, project, {
+    NODE_OPTIONS: `--import=${pathToFileURL(raceHookPath).href}`,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: raceMarkerPath,
+  });
+  for (let attempt = 0; attempt < 200 && !fs.existsSync(raceMarkerPath); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(fs.readFileSync(raceMarkerPath, "utf8"), lifecycleLockPath);
+  const racedFailedTracePromise = runConcurrently(failedTraceArgs, project);
+  const [racedGate, racedFailedTrace] = await Promise.all([
+    racedGatePromise,
+    racedFailedTracePromise,
+  ]);
+  assert.equal(
+    [racedGate, racedFailedTrace].filter((result) => result.status === 0).length,
+    1,
+  );
+  assert.equal(
+    racedFailedTrace.status,
+    0,
+    `${racedFailedTrace.stdout}\n${racedFailedTrace.stderr}`,
+  );
+  assert.notEqual(
+    racedGate.status,
+    0,
+    "final certification and a later failed trace both crossed the lifecycle lock",
+  );
+  assert.match(
+    `${racedGate.stdout}\n${racedGate.stderr}`,
+    /changed while final lifecycle certification was being prepared|latest test trace to have outcome passed/su,
+  );
+  assert.equal(fs.existsSync(finalReceiptAbsolutePath), false);
+  assert.equal(fs.existsSync(lifecycleLockPath), false);
+  const racedFailedEvent = fs.readFileSync(certifiedStoryTracePath, "utf8")
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .at(-1);
+  const racedFailedCheckpoint = readJson(
+    project,
+    `.sdlc/traces/.integrity/${fixture.storyId}.jsonl.checkpoint.json`,
+  );
+  assert.equal(racedFailedEvent.type, "test");
+  assert.equal(racedFailedEvent.outcome, "failed");
+  assert.equal(
+    racedFailedCheckpoint.new_writes.last_event_hash,
+    racedFailedEvent._trace_integrity.event_hash,
+  );
+  fs.renameSync(raceReceiptBackupPath, finalReceiptAbsolutePath);
+
+  const racedStaleReceiptStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.ok(racedStaleReceiptStatus.summary.blocked_work >= 1);
+  assert.equal(
+    racedStaleReceiptStatus.next_action.reason,
+    "final_lifecycle_receipt_invalid",
+  );
+  appendTrace(project, fixture.storyId, "test", "passed", testEvidence);
+  const postRaceRecovery = mustRunJson(finalGateArgs.slice(0, -1), project);
+  assert.equal(postRaceRecovery.status, "passed");
+  assert.equal(postRaceRecovery.kind, "workflow_final_gate_receipt");
+
+  const outputRaceHookRoot = temporaryProject("final-gate-output-link-race-hook");
+  const outputRaceReceiptBackupPath = path.join(
+    outputRaceHookRoot,
+    "pre-output-race-final-receipt.json",
+  );
+  const outputRaceMarkerPath = path.join(
+    outputRaceHookRoot,
+    "gate-lock-held.marker",
+  );
+  const outputRaceHookPath = path.join(
+    outputRaceHookRoot,
+    "hold-final-gate-lock.mjs",
+  );
+  fs.writeFileSync(outputRaceHookPath, [
+    'import fs from "node:fs";',
+    "const originalOpenSync = fs.openSync;",
+    "let delayed = false;",
+    "fs.openSync = function holdFinalGateLifecycleLock(filePath, flags, ...rest) {",
+    "  const descriptor = originalOpenSync.call(this, filePath, flags, ...rest);",
+    "  if (!delayed",
+    "      && String(filePath) === process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH",
+    '      && flags === "wx") {',
+    "    delayed = true;",
+    "    fs.writeFileSync(process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER, String(filePath));",
+    "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);",
+    "  }",
+    "  return descriptor;",
+    "};",
+    "",
+  ].join("\n"));
+  fs.renameSync(finalReceiptAbsolutePath, outputRaceReceiptBackupPath);
+  const outputRaceRegistryBytes = fs.readFileSync(certifiedOutputRegistryPath);
+  const outputRaceGatePromise = runConcurrently(finalGateArgs, project, {
+    NODE_OPTIONS: `--import=${pathToFileURL(outputRaceHookPath).href}`,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: outputRaceMarkerPath,
+  });
+  for (
+    let attempt = 0;
+    attempt < 200 && !fs.existsSync(outputRaceMarkerPath);
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(
+    fs.readFileSync(outputRaceMarkerPath, "utf8"),
+    lifecycleLockPath,
+  );
+  const outputRaceLinkPromise = runConcurrently([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", "implementation-summary",
+    "--artifact", replacementImplementationOutput,
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", fixture.requirementId,
+    "--id", certifiedImplementationOutput.id,
+    "--authorization", fixture.storyActionAuthorizationId,
+    "--json",
+  ], project);
+  const [outputRaceGate, outputRaceLink] = await Promise.all([
+    outputRaceGatePromise,
+    outputRaceLinkPromise,
+  ]);
+  assert.equal(
+    outputRaceGate.status,
+    0,
+    `${outputRaceGate.stdout}\n${outputRaceGate.stderr}`,
+  );
+  assert.notEqual(
+    outputRaceLink.status,
+    0,
+    "output link crossed a terminal final certification while it held the lifecycle lock",
+  );
+  assert.match(
+    `${outputRaceLink.stdout}\n${outputRaceLink.stderr}`,
+    /already has (?:a valid terminal lifecycle certification|a terminal lifecycle receipt)/u,
+  );
+  assert.deepEqual(
+    fs.readFileSync(certifiedOutputRegistryPath),
+    outputRaceRegistryBytes,
+  );
+  assert.equal(fs.existsSync(finalReceiptAbsolutePath), true);
+  assert.equal(fs.existsSync(lifecycleLockPath), false);
+  const postRaceStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(postRaceStatus.summary.completed_work, 1);
+  assert.equal(postRaceStatus.summary.blocked_work, 0);
+
+  const contractRaceHookRoot = temporaryProject("final-gate-contract-race-hook");
+  const contractRaceReceiptBackupPath = path.join(
+    contractRaceHookRoot,
+    "pre-contract-race-final-receipt.json",
+  );
+  const contractRaceMarkerPath = path.join(
+    contractRaceHookRoot,
+    "gate-before-lock.marker",
+  );
+  const contractRaceHookPath = path.join(
+    contractRaceHookRoot,
+    "delay-final-gate-before-lock.mjs",
+  );
+  fs.writeFileSync(contractRaceHookPath, [
+    'import fs from "node:fs";',
+    "const originalOpenSync = fs.openSync;",
+    "let delayed = false;",
+    "fs.openSync = function delayFinalGateBeforeLifecycleLock(filePath, flags, ...rest) {",
+    "  if (!delayed",
+    "      && String(filePath) === process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH",
+    '      && flags === "wx") {',
+    "    delayed = true;",
+    "    fs.writeFileSync(process.env.AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER, String(filePath));",
+    "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);",
+    "  }",
+    "  return originalOpenSync.call(this, filePath, flags, ...rest);",
+    "};",
+    "",
+  ].join("\n"));
+  fs.renameSync(finalReceiptAbsolutePath, contractRaceReceiptBackupPath);
+  const contractRaceGatePromise = runConcurrently(finalGateArgs, project, {
+    NODE_OPTIONS: `--import=${pathToFileURL(contractRaceHookPath).href}`,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
+    AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: contractRaceMarkerPath,
+  });
+  for (
+    let attempt = 0;
+    attempt < 200 && !fs.existsSync(contractRaceMarkerPath);
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(
+    fs.readFileSync(contractRaceMarkerPath, "utf8"),
+    lifecycleLockPath,
+  );
+  fs.writeFileSync(
+    certifiedContractPath,
+    `${JSON.stringify(changedCertifiedContract, null, 2)}\n`,
+    "utf8",
+  );
+  const contractRaceGate = await contractRaceGatePromise;
+  assert.notEqual(
+    contractRaceGate.status,
+    0,
+    "final certification accepted a contract changed after its initial validation",
+  );
+  assert.match(
+    `${contractRaceGate.stdout}\n${contractRaceGate.stderr}`,
+    /changed while final lifecycle certification was being prepared.*contract CONTRACT-FINAL\.json approved human gate is stale|Delivery autonomy profile AUT-FINAL is stale for contract CONTRACT-FINAL/su,
+  );
+  assert.equal(fs.existsSync(finalReceiptAbsolutePath), false);
+  assert.equal(fs.existsSync(lifecycleLockPath), false);
+  fs.writeFileSync(certifiedContractPath, certifiedContractBytes);
+  fs.renameSync(contractRaceReceiptBackupPath, finalReceiptAbsolutePath);
+  const restoredContractRaceStatus = mustRunJson([
+    "status", "--root", project, "--full",
+  ], project);
+  assert.equal(restoredContractRaceStatus.summary.completed_work, 1);
+  assert.equal(restoredContractRaceStatus.summary.blocked_work, 0);
 });
 
 test("a formally closed pull request remains terminal but cannot certify lifecycle success", () => {
@@ -989,6 +3536,51 @@ test("strict story gate detects an out-of-scope file committed after task start"
   const report = JSON.parse(failedGate.stdout);
   assert.ok(report.errors.some((error) =>
     error.includes("outside the approved requirement write paths: outside-approved-scope.md")));
+});
+
+test("multiple requirement write scopes form the story-scoped union", () => {
+  const project = temporaryProject("write-scope-union");
+  const fixture = createGovernedDeliveryStory(project, {
+    suffix: "SCOPE-UNION",
+    allowedWritePaths: ["src/one"],
+    additionalRequirementWritePaths: [["src/two"]],
+    storyActionUses: 2,
+  });
+  writeProjectFile(
+    project,
+    "src/two/implementation.mjs",
+    "export const governedBySecondRequirement = true;\n",
+  );
+  mustGit(project, ["add", "src/two/implementation.mjs"]);
+  mustGit(project, ["commit", "-m", "test: change second requirement scope"]);
+  writeProjectFile(
+    project,
+    "src/two/implementation-summary.md",
+    "# Implementation summary\n\nThe second requirement scope is governed.\n",
+  );
+  mustRun([
+    "output", "link",
+    "--root", project,
+    "--story", fixture.storyId,
+    "--type", "implementation-summary",
+    "--artifact", "src/two/implementation-summary.md",
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", fixture.requirementId,
+    "--authorization", fixture.storyActionAuthorizationId,
+  ], project);
+  const report = mustRunJson([
+    "gate", "check",
+    "--root", project,
+    "--strict",
+    "--story", fixture.storyId,
+  ], project);
+  assert.equal(report.status, "passed");
+  assert.equal(
+    report.errors.some((error) =>
+      error.includes("outside the approved requirement write paths")),
+    false,
+  );
 });
 
 test("the latest failed test or release trace overrides an older passing attempt for steps and final gate", () => {

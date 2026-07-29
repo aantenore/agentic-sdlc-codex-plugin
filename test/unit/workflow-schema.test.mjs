@@ -4,7 +4,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { validateAgainstSchema } from "../../lib/json-schema-validator.mjs";
-import { STABLE_JSON_HASH_ALGORITHM } from "../../lib/canonical.mjs";
+import {
+  STABLE_JSON_HASH_ALGORITHM,
+  computeStableHash,
+} from "../../lib/canonical.mjs";
 import {
   applyWorkflowOverlay,
   approveWorkflowOverlay,
@@ -27,6 +30,32 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const SCHEMA_DIR = path.join(ROOT, "schemas");
 const AT = "2026-07-18T09:00:00.000Z";
 const ACTOR = Object.freeze({ id: "schema-test", type: "agent", name: "Schema test" });
+
+function finalFreshnessProof(storyId, instanceId) {
+  const subject = {
+    schema_version: "workflow-final-freshness-proof:v1",
+    story_id: storyId,
+    workflow_instance_id: instanceId,
+    governed_files: [],
+    output_registry_projection: {
+      path: `.sdlc/output-contracts/registry.json#story=${storyId}`,
+      sha256: "a".repeat(64),
+    },
+    local_release_root: null,
+    local_release_scope: [],
+    git_scope: {
+      available: false,
+      baseline_head_sha: null,
+      scoped_head_tree_hash: null,
+      scoped_changes: [],
+    },
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  return {
+    ...subject,
+    proof_hash: computeStableHash(subject),
+  };
+}
 
 function validate(schema, value) {
   return validateAgainstSchema(value, schema, { schemaDir: SCHEMA_DIR });
@@ -158,6 +187,7 @@ test("workflow domain records conform to their published JSON schemas", () => {
       release_trace_at: AT,
       delivery_closed_at: AT,
     },
+    freshness_proof: finalFreshnessProof("ST-SCHEMA", instance.id),
     story_id: "ST-SCHEMA",
     checked_at: AT,
     errors: [],

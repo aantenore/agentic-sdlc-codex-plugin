@@ -1,4 +1,4 @@
-# How Agentic SDLC 0.13.2 Works
+# How Agentic SDLC 0.13.3 Works
 
 Agentic SDLC turns a natural-language request into a bounded, reproducible execution tranche. Codex handles conversation and reasoning; the CLI handles deterministic validation and state changes; the target repository keeps the evidence under `.sdlc/`.
 
@@ -39,7 +39,8 @@ The technical chain for `ST-TRIP-POLICY-001` is:
    the passing release trace, and completes the release step after build, smoke
    test, destination, and rollback evidence agree. Repository publication and
    production remain separate.
-8. **Final certification** evaluates the complete story after that release:
+8. **Final certification** releases the completed story claim, then evaluates
+   the complete story after that release:
 
    ```bash
    agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete
@@ -99,7 +100,7 @@ node "$CODEX_STATE_HOME/plugins/cache/personal/agentic-sdlc-codex-plugin/$VERSIO
 
 An npm installation may additionally create an npm bin shim. From a source
 checkout, use `node /path/to/agentic-sdlc-codex-plugin/bin/agentic-sdlc.mjs`.
-All examples below use commands exposed by the `Agentic SDLC 0.13.2` help output and assume the shell is in the target project:
+All examples below use commands exposed by the `Agentic SDLC 0.13.3` help output and assume the shell is in the target project:
 
 ```bash
 cd /path/to/target-project

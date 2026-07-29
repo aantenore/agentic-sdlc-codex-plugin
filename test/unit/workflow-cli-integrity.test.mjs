@@ -354,19 +354,20 @@ test("a pending 0.11 raw trace with later records is preserved and blocked", () 
   assert.match(JSON.parse(retry.stderr).error.message, /later audit records must be preserved/u);
 });
 
-test("start refuses a pre-existing audit trace that already claims the instance id", () => {
+test("start refuses an orphaned legitimate audit trace that already claims the instance id", () => {
   const project = temporaryProject("start-trace-ownership-conflict");
   const instanceId = "reserved-workflow-instance";
   mustRun(["init", "--root", project, "--project-name", "Start trace ownership conflict"], project);
-  mustRun([
-    "trace", "append",
+  mustRunJson([
+    "workflow", "instance", "start",
     "--root", project,
-    "--type", "decision",
-    "--summary", "Conflicting ownership",
-    "--action", "workflow.instance.start",
-    "--related", instanceId,
-    "--actor-type", "agent",
+    "--id", instanceId,
+    "--definition", "change-request",
+    "--definition-version", "1",
   ], project);
+  const files = instanceFiles(project, instanceId);
+  const traceBytes = fs.readFileSync(files.trace);
+  fs.rmSync(files.root, { recursive: true });
 
   const start = run([
     "workflow", "instance", "start",
@@ -377,9 +378,10 @@ test("start refuses a pre-existing audit trace that already claims the instance 
     "--json",
   ], project);
   assert.equal(start.status, 1, `${start.stdout}\n${start.stderr}`);
-  const files = instanceFiles(project, instanceId);
+  assert.match(`${start.stdout}\n${start.stderr}`, /conflicting audit ownership/u);
   assert.equal(fs.existsSync(files.root), false);
   assert.equal(fs.existsSync(files.startTransaction), false);
+  assert.deepEqual(fs.readFileSync(files.trace), traceBytes);
 });
 
 test("a start trace failure exposes no usable partial instance and the same start can be retried", () => {

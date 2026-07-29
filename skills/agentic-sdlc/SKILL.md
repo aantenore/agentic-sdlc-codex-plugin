@@ -45,7 +45,7 @@ For generic implementation and release work, follow this order:
 6. **Start the story workflow, then start once** — bind the exact configured phase order to the story before any completed step, then make one logical `task start` decision. Never use an early speculative start as routing or discovery, and never reconstruct the workflow after work has begun.
 7. **Implement, test, and advance phases** — claim the story, change only approved paths, run the agreed checks, record evidence, complete each phase, and enter the next phase only after the previous one is complete.
 8. **Validate, then enter release** — after validation and the latest passing test evidence, seal the intermediate strict receipt and use it to move the task-bound workflow into `release`.
-9. **Finish and certify at the named destination** — only after entering `release`, create/update and verify the one pull request or complete the local release, record release evidence, complete the release step, and run the distinct lifecycle-complete gate. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
+9. **Finish and certify at the named destination** — only after entering `release`, create/update and verify the one pull request or complete the local release, record release evidence, complete the release step, release the completed story claim, and run the distinct lifecycle-complete gate. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
 
 For a **new pull request**, the displayed boundary must include the repository, base and new head branch, `pull_request.create`, allowed writes, tests, push, and whether later PR updates are included. For an **existing pull request**, resolve and show the exact PR, repository, base, head, current SHA, and allowed update actions; do not create another PR. For a **local-only result**, exclude Git push, pull-request actions, remote deployment, and production access, and require the exact local target, smoke test, and rollback.
 
@@ -501,7 +501,7 @@ The dedicated assessment journey remains the exception described above: it packa
      --request-id <unique-release-transition-id>
    ```
 
-   Only after entering `release`, authorize and complete the exact local release or PR delivery, append the passing release trace, and complete the `release` story step. Entry into `release` must precede both the release trace and terminal delivery close. Then run the lifecycle-complete gate. It replays the task-bound workflow's immutable instance, event history, checkpoint, audit trace, and alternating phase timeline, and requires every configured phase to have a completed canonical step. Do not claim that the story or discovery-to-release lifecycle is complete unless this stronger command passes and seals its separate final receipt:
+   Only after entering `release`, authorize and complete the exact local release or PR delivery, append the passing release trace, and complete the `release` story step. Entry into `release` must precede both the release trace and terminal delivery close. When those results are complete, release the story claim so no active worker can race final certification. Then run the lifecycle-complete gate. It replays the task-bound workflow's immutable instance, event history, checkpoint, audit trace, and alternating phase timeline, and requires every configured phase to have a completed canonical step. Do not claim that the story or discovery-to-release lifecycle is complete unless this stronger command passes and seals its separate final receipt:
 
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs gate check \
@@ -512,7 +512,7 @@ The dedicated assessment journey remains the exception described above: it packa
      --out .sdlc/reports/ST-001-lifecycle-complete.json
    ```
 
-19. Release claims and locks when work is complete or handed off.
+19. Release any remaining phase locks when work is complete or handed off. A completed story claim must already be released before the lifecycle-complete gate in step 18.
 
 20. Rebuild/search the local cache and KB index when context retrieval is needed. For large KBs, rebuild the shared manifest and use non-destructive trace compaction before relying on long raw trace history:
 
@@ -615,5 +615,5 @@ Before claiming the SDLC is complete or a story is ready to merge:
 - verify completed story lanes have step records under `.sdlc/stories/<story-id>/steps/` when work is handed off;
 - verify activity reports, manifests, and trace compactions cite canonical source paths and do not use cache/index as evidence;
 - verify approvals include `approval_source` and do not treat implementation permission as artifact approval;
-- start the exact story-bound workflow before task start, complete each phase before entering the next, use ordinary strict `gate check` after validation, enter `release` before release evidence or terminal delivery, and require `gate check --strict --story <story-id> --lifecycle-complete` before claiming the SDLC complete;
+- start the exact story-bound workflow before task start, complete each phase before entering the next, use ordinary strict `gate check` after validation, enter `release` before release evidence or terminal delivery, release the completed story claim before final certification, and require `gate check --strict --story <story-id> --lifecycle-complete` before claiming the SDLC complete;
 - report any errors or warnings instead of hiding them.

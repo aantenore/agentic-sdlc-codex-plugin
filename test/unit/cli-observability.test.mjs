@@ -407,24 +407,46 @@ test("manual test traces bind an immutable redacted evidence snapshot", () => {
   ).evidence[0], payload.event.evidence[0]);
 });
 
-test("manual trace append cannot impersonate protected delivery actions", () => {
+test("manual trace append cannot impersonate protected delivery or workflow actions", () => {
   const project = initializedProject("trace-protected-action");
-  const result = mustFail([
+  mustRun([
     "trace", "append",
     "--root", project,
-    "--type", "release",
-    "--outcome", "passed",
-    "--action", "release.local",
-    "--summary", "Claim that a local release completed",
+    "--type", "decision",
+    "--summary", "Establish an immutable trace prefix",
     "--json",
   ]);
-  const payload = JSON.parse(result.stderr);
-  assert.equal(payload.status, "error");
-  assert.match(payload.error.message, /cannot be appended manually/u);
-  assert.equal(
-    fs.existsSync(path.join(project, ".sdlc", "traces", "project.jsonl")),
-    false,
+  const tracePath = path.join(project, ".sdlc", "traces", "project.jsonl");
+  const checkpointPath = path.join(
+    project,
+    ".sdlc",
+    "traces",
+    ".integrity",
+    "project.jsonl.checkpoint.json",
   );
+  const traceBefore = fs.readFileSync(tracePath);
+  const checkpointBefore = fs.readFileSync(checkpointPath);
+
+  for (const action of [
+    "release.local",
+    "workflow.instance.start",
+    "workflow.instance.transition",
+  ]) {
+    const result = mustFail([
+      "trace", "append",
+      "--root", project,
+      "--type", action === "release.local" ? "release" : "implementation",
+      "--outcome", "passed",
+      "--action", action,
+      "--summary", `Claim that protected action ${action} completed`,
+      "--json",
+    ]);
+    const payload = JSON.parse(result.stderr);
+    assert.equal(payload.status, "error");
+    assert.match(payload.error.message, /cannot be appended manually/u);
+    assert.deepEqual(fs.readFileSync(tracePath), traceBefore);
+    assert.deepEqual(fs.readFileSync(checkpointPath), checkpointBefore);
+  }
 });
 
 test("explicit CI attribution does not inherit the local Git user identity", () => {

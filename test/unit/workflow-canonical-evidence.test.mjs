@@ -14,11 +14,38 @@ import {
   buildWorkflowStrictGateReceipt,
   canonicalWorkflowGuardResult,
   computeGovernedApprovalSubjectHash,
+  hasValidWorkflowReceiptHash,
   selectRequiredOutputRefsForPhase,
   validateWorkflowCanonicalEvidence,
 } from "../../lib/workflow-canonical-evidence.mjs";
 
 const OBSERVED_AT = "2026-07-28T10:10:00.000Z";
+
+function finalFreshnessProof(storyId, instanceId = "delivery-42") {
+  const subject = {
+    schema_version: "workflow-final-freshness-proof:v1",
+    story_id: storyId,
+    workflow_instance_id: instanceId,
+    governed_files: [],
+    output_registry_projection: {
+      path: `.sdlc/output-contracts/registry.json#story=${storyId}`,
+      sha256: "a".repeat(64),
+    },
+    local_release_root: null,
+    local_release_scope: [],
+    git_scope: {
+      available: false,
+      baseline_head_sha: null,
+      scoped_head_tree_hash: null,
+      scoped_changes: [],
+    },
+    hash_algorithm: STABLE_JSON_HASH_ALGORITHM,
+  };
+  return {
+    ...subject,
+    proof_hash: computeStableHash(subject),
+  };
+}
 
 test("canonical evidence binds one workflow instance to fresh lifecycle records", () => {
   const bundle = canonicalBundle();
@@ -346,6 +373,7 @@ test("only one passing strict lifecycle gate can become the governed final recei
     lifecycle_complete: true,
     certification_level: "lifecycle_complete",
     lifecycle_workflow: lifecycleWorkflowEvidence("ST-42"),
+    freshness_proof: finalFreshnessProof("ST-42"),
     story_id: "ST-42",
     checked_at: "2026-07-28T10:09:00.000Z",
     errors: [],
@@ -357,6 +385,11 @@ test("only one passing strict lifecycle gate can become the governed final recei
   assert.equal(receipt.kind, "workflow_final_gate_receipt");
   assert.equal(receipt.schema_version, WORKFLOW_FINAL_GATE_RECEIPT_SCHEMA);
   assert.match(receipt.receipt_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(hasValidWorkflowReceiptHash(receipt), true);
+  assert.equal(
+    hasValidWorkflowReceiptHash({ ...receipt, checked_at: "2026-07-28T10:09:01.000Z" }),
+    false,
+  );
   assert.throws(
     () => buildWorkflowFinalGateReceipt(
       { ...report, status: "failed", errors: ["blocked"] },
@@ -498,7 +531,7 @@ test("strict gate chronology is bounded by its workflow checkpoint and evidence 
   );
 });
 
-test("an integrity-sealed but incomplete final v2 receipt cannot satisfy the strict workflow guard", () => {
+test("an integrity-sealed but incomplete final v3 receipt cannot satisfy the strict workflow guard", () => {
   const bundle = canonicalBundle();
   const validFinal = buildWorkflowFinalGateReceipt({
     status: "passed",
@@ -507,6 +540,7 @@ test("an integrity-sealed but incomplete final v2 receipt cannot satisfy the str
     lifecycle_complete: true,
     certification_level: "lifecycle_complete",
     lifecycle_workflow: lifecycleWorkflowEvidence("ST-42"),
+    freshness_proof: finalFreshnessProof("ST-42"),
     story_id: "ST-42",
     checked_at: "2026-07-28T10:09:00.000Z",
     errors: [],

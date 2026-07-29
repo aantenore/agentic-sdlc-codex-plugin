@@ -45,11 +45,14 @@ import {
 import {
   CANONICAL_WORKFLOW_GUARD_CHECKS,
   WORKFLOW_CANONICAL_EVIDENCE_SCHEMA,
+  WORKFLOW_FINAL_GATE_RECEIPT_SCHEMA,
   WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA,
+  WORKFLOW_LEGACY_FINAL_GATE_RECEIPT_SCHEMA,
   buildLegacyWorkflowCanonicalEvidence,
   buildWorkflowCanonicalEvidence,
   buildWorkflowFinalGateReceipt,
   buildWorkflowStrictGateReceipt,
+  hasValidWorkflowReceiptHash,
   selectRequiredOutputRefsForPhase,
 } from "../lib/workflow-canonical-evidence.mjs";
 import {
@@ -245,6 +248,8 @@ const VERSION = String(PACKAGE_METADATA.version);
 const DEFAULT_TEMPLATE_DIR = path.join(PLUGIN_ROOT, "templates");
 const SDLC_DIR = ".sdlc";
 const CACHE_FILE_NAME = "kb-cache.json";
+const workflowStartTraceIndexCache = new WeakMap();
+const workflowStartTransactionIndexCache = new WeakMap();
 const PROJECT_CONFIG_FILE_NAME = "config.json";
 const MAX_CLI_ERROR_CONFIG_BYTES = 2 * 1024 * 1024;
 const MAX_TEMPLATE_ASSET_BYTES = 2 * 1024 * 1024;
@@ -1324,6 +1329,566 @@ function workflowStrictGateReceiptPath(context, storyId) {
   return path.join(workflowFinalGatesRoot(context), `${normalizeId(storyId)}-strict.json`);
 }
 
+function storyLifecycleCertificationLockPath(context, storyId) {
+  return path.join(
+    context.sdlcRoot,
+    "stories",
+    normalizeId(storyId),
+    "lifecycle-certification.lock",
+  );
+}
+
+const WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA =
+  "workflow-final-freshness-proof:v1";
+
+function workflowFinalFreshnessFileRef(context, category, filePath) {
+  const resolved = path.resolve(filePath);
+  assertPathInsideRoot(context, resolved, filePath);
+  if (!fs.existsSync(resolved)) {
+    return {
+      category,
+      path: toProjectPath(context, resolved),
+      present: false,
+      file_type: "missing",
+      mode: null,
+      sha256: null,
+    };
+  }
+  const snapshot = readStableRegularFileBuffer(resolved, context.root);
+  return {
+    category,
+    path: toProjectPath(context, resolved),
+    present: true,
+    file_type: snapshot.file_type,
+    mode: snapshot.mode,
+    sha256: snapshot.sha256,
+  };
+}
+
+function workflowFinalFreshnessRecordContains(value, ids) {
+  if (typeof value === "string") return ids.has(value);
+  if (Array.isArray(value)) {
+    return value.some((item) => workflowFinalFreshnessRecordContains(item, ids));
+  }
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value)
+    .some((item) => workflowFinalFreshnessRecordContains(item, ids));
+}
+
+function workflowFinalFreshnessReferencedPaths(
+  value,
+  paths = new Set(),
+  {
+    field = null,
+    scopeDeclaration = false,
+  } = {},
+) {
+  const scopeFields = new Set([
+    "allowed_write_paths",
+    "kb_writes",
+    "read_paths",
+    "scope_paths",
+    "write_paths",
+  ]);
+  if (typeof value === "string") {
+    const pathField = field === "path"
+      || field === "source_paths"
+      || field === "evidence"
+      || field === "evidence_paths"
+      || String(field || "").endsWith("_path")
+      || String(field || "").endsWith("_ref");
+    if (
+      !scopeDeclaration
+      && pathField
+      && value.startsWith(`${SDLC_DIR}/`)
+    ) {
+      paths.add(value);
+    }
+    return paths;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      workflowFinalFreshnessReferencedPaths(item, paths, {
+        field,
+        scopeDeclaration,
+      });
+    }
+    return paths;
+  }
+  if (!value || typeof value !== "object") return paths;
+  for (const [key, item] of Object.entries(value)) {
+    workflowFinalFreshnessReferencedPaths(item, paths, {
+      field: key,
+      scopeDeclaration: scopeDeclaration || scopeFields.has(key),
+    });
+  }
+  return paths;
+}
+
+function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
+  const targetPath = path.resolve(String(rawPath));
+  if (!fs.existsSync(targetPath)) {
+    return {
+      path: targetPath,
+      present: false,
+      kind: "missing",
+      file_count: 0,
+      entry_count: 0,
+      total_bytes: 0,
+      tree_hash: computeStableHash([]),
+    };
+  }
+  const stat = fs.lstatSync(targetPath);
+  if (stat.isSymbolicLink()) {
+    fail(`Local release freshness target cannot be a symlink: ${targetPath}`);
+  }
+  const boundaryRoot = stat.isDirectory()
+    ? targetPath
+    : path.dirname(targetPath);
+  const collectStructure = () => {
+    const entries = [];
+    const visit = (entryPath, relativePath) => {
+      const entryStat = fs.lstatSync(entryPath);
+      if (entryStat.isSymbolicLink()) {
+        fail(`Local release freshness target contains a symlink: ${entryPath}`);
+      }
+      if (entryStat.isDirectory()) {
+        entries.push({
+          path: relativePath || ".",
+          kind: "directory",
+          mode: entryStat.mode & 0o7777,
+          filePath: entryPath,
+        });
+        for (const name of fs.readdirSync(entryPath).sort()) {
+          visit(
+            path.join(entryPath, name),
+            relativePath ? `${relativePath}/${name}` : name,
+          );
+        }
+        return;
+      }
+      if (!entryStat.isFile()) {
+        fail(`Local release freshness target contains a non-regular entry: ${entryPath}`);
+      }
+      entries.push({
+        path: relativePath || path.basename(entryPath),
+        kind: "regular",
+        mode: entryStat.mode & 0o7777,
+        filePath: entryPath,
+      });
+    };
+    visit(targetPath, "");
+    return entries;
+  };
+  const snapshotOnce = () => {
+    const structure = collectStructure();
+    if (structure.length > 10_000) {
+      fail(`Local release freshness target exceeds 10000 entries: ${targetPath}`);
+    }
+    const entries = [];
+    let totalBytes = 0;
+    for (const entry of structure) {
+      if (entry.kind === "directory") {
+        entries.push({
+          path: entry.path,
+          kind: entry.kind,
+          mode: entry.mode,
+          size_bytes: null,
+          sha256: null,
+        });
+        continue;
+      }
+      const snapshot = readStableRegularFileBuffer(entry.filePath, boundaryRoot);
+      totalBytes += snapshot.size_bytes;
+      if (totalBytes > 512 * 1024 * 1024) {
+        fail(`Local release freshness target exceeds 512 MiB: ${targetPath}`);
+      }
+      entries.push({
+        path: entry.path,
+        kind: entry.kind,
+        mode: snapshot.mode,
+        size_bytes: snapshot.size_bytes,
+        sha256: snapshot.sha256,
+      });
+    }
+    return { entries, totalBytes };
+  };
+  const firstSnapshot = snapshotOnce();
+  const secondSnapshot = snapshotOnce();
+  if (stableJson(firstSnapshot) !== stableJson(secondSnapshot)) {
+    fail(`Local release target changed while being snapshotted: ${targetPath}`);
+  }
+  return {
+    path: targetPath,
+    present: true,
+    kind: stat.isDirectory() ? "directory" : "regular",
+    file_count: firstSnapshot.entries
+      .filter((entry) => entry.kind === "regular").length,
+    entry_count: firstSnapshot.entries.length,
+    total_bytes: firstSnapshot.totalBytes,
+    tree_hash: computeStableHash(firstSnapshot.entries),
+  };
+}
+
+function workflowFinalFreshnessLocalRootIdentity(rawPath) {
+  const rootPath = path.resolve(String(rawPath));
+  if (!fs.existsSync(rootPath)) {
+    return {
+      path: rootPath,
+      present: false,
+      kind: "missing",
+      real_path: null,
+      device: null,
+      inode: null,
+      mode: null,
+    };
+  }
+  const snapshot = () => {
+    const stat = fs.lstatSync(rootPath);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      fail(`Local release root must remain a real directory: ${rootPath}`);
+    }
+    return {
+      path: rootPath,
+      present: true,
+      kind: "directory",
+      real_path: fs.realpathSync.native(rootPath),
+      device: String(stat.dev),
+      inode: String(stat.ino),
+      mode: stat.mode & 0o7777,
+    };
+  };
+  const first = snapshot();
+  const second = snapshot();
+  if (stableJson(first) !== stableJson(second)) {
+    fail(`Local release root identity changed while being snapshotted: ${rootPath}`);
+  }
+  return first;
+}
+
+function workflowFinalFreshnessGitScope(
+  context,
+  storyId,
+  requirementProfiles,
+  {
+    certifiedGitScope = null,
+  } = {},
+) {
+  if (execGit(context.root, ["rev-parse", "--is-inside-work-tree"]) !== "true") {
+    return {
+      available: false,
+      baseline_head_sha: null,
+      scoped_head_tree_hash: null,
+      scoped_changes: [],
+    };
+  }
+  const taskStartPath = path.join(
+    context.sdlcRoot,
+    "stories",
+    storyId,
+    "task-start.json",
+  );
+  const taskStart = fs.existsSync(taskStartPath)
+    ? readProjectJson(context, taskStartPath)
+    : null;
+  const baselineSha = taskStart?.audit?.git?.head_sha || null;
+  const allowedByStoryRequirements = (filePath) =>
+    requirementProfiles.length > 0
+    && requirementProfiles.some((profile) => {
+      const allowed = profile.constraints?.allowed_write_paths || [];
+      return allowed.length > 0
+        && pathMatchesApprovedWriteScope(filePath, allowed);
+    });
+  const committedPaths = (
+    baselineSha
+    && /^[a-f0-9]{40,64}$/iu.test(baselineSha)
+    && gitCommandSucceeds(context.root, ["cat-file", "-e", `${baselineSha}^{commit}`])
+    && gitCommandSucceeds(context.root, ["merge-base", "--is-ancestor", baselineSha, "HEAD"])
+  )
+    ? String(
+      execGit(
+        context.root,
+        ["diff", "--name-only", "--no-renames", `${baselineSha}..HEAD`, "--"],
+      ) || "",
+    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean)
+    : [];
+  const workspace = currentWorkspaceChanges(context);
+  const workspaceByPath = new Map(workspace.map((entry) => [entry.path, entry]));
+  const certifiedPaths = new Set(
+    (certifiedGitScope?.scoped_changes || []).map((entry) => entry.path),
+  );
+  const workspacePaths = certifiedGitScope
+    ? [
+        ...certifiedPaths,
+        ...workspace.map((entry) => entry.path),
+      ]
+    : workspace.map((entry) => entry.path);
+  const scopedPaths = [...new Set([
+    ...committedPaths,
+    ...workspacePaths,
+  ])]
+    .filter((filePath) => allowedByStoryRequirements(filePath))
+    .sort();
+  const committedSet = new Set(committedPaths);
+  const scopedChanges = scopedPaths.map((filePath) => {
+    const workspaceEntry = workspaceByPath.get(filePath);
+    const snapshot = stableWorkspacePathSnapshot(context, {
+      path: filePath,
+      status: workspaceEntry?.status || "  ",
+    });
+    return {
+      ...snapshot,
+      committed_since_task_start: committedSet.has(filePath),
+      workspace_status: workspaceEntry?.status || null,
+    };
+  });
+  return {
+    available: true,
+    baseline_head_sha: baselineSha,
+    scoped_head_tree_hash: computeStableHash(
+      scopedChanges.map((entry) => ({
+        path: entry.path,
+        file_type: entry.file_type,
+        mode: entry.mode,
+        content_sha256: entry.content_sha256,
+        committed_since_task_start: entry.committed_since_task_start,
+      })),
+    ),
+    scoped_changes: scopedChanges,
+  };
+}
+
+function buildWorkflowFinalFreshnessProof(
+  context,
+  storyId,
+  instanceId,
+  certifiedProof = null,
+) {
+  const story = readStory(context, storyId);
+  const contract = story?.contract_id
+    ? readContractById(context, story.contract_id, { missingOk: true })
+    : null;
+  const requirementIds = [...new Set([
+    ...(story?.links?.requirements || []),
+    ...((contract?.requirement_refs || []).map((ref) => ref.id)),
+  ].filter(Boolean))].sort();
+  const requirements = requirementIds
+    .map((id) => readRequirement(context, id, { missingOk: true }))
+    .filter(Boolean);
+  const requirementProfiles = requirements
+    .map((requirement) => requirement.autonomy_profile_id)
+    .filter(Boolean)
+    .map((id) => readRequirementAutonomyProfile(context, id));
+  const deliveryProfileId = contract?.delivery_execution_profile_id || null;
+  const deliveryProfile = deliveryProfileId
+    ? readDeliveryAutonomyProfile(context, deliveryProfileId)
+    : null;
+  const registry = readOutputRegistry(context, { missingOk: true });
+  const storyLinks = (registry?.links || [])
+    .filter((link) => link.story_id === storyId)
+    .sort((left, right) => String(left.id).localeCompare(String(right.id), "en"));
+  const templateIds = new Set([
+    ...((contract?.output_contract_refs || []).map((ref) => ref.template_id)),
+    ...storyLinks.map((link) => link.template_id),
+  ].filter(Boolean));
+  const linkDecisionIds = new Set(storyLinks.map((link) => link.decision_id).filter(Boolean));
+  const templates = (registry?.templates || [])
+    .filter((template) => templateIds.has(template.id))
+    .sort((left, right) => String(left.id).localeCompare(String(right.id), "en"));
+  const decisions = (registry?.decisions || [])
+    .filter((decision) =>
+      decision.story_id === storyId
+      || templateIds.has(decision.template_id)
+      || linkDecisionIds.has(decision.id))
+    .sort((left, right) => String(left.id).localeCompare(String(right.id), "en"));
+  const outputProjection = {
+    schema_version: registry?.schema_version || null,
+    project_id: registry?.project_id || null,
+    templates,
+    links: storyLinks,
+    decisions,
+  };
+  const scopedIds = new Set([
+    storyId,
+    story?.contract_id,
+    ...requirementIds,
+    ...requirementProfiles.map((profile) => profile.id),
+    deliveryProfileId,
+    ...storyLinks.map((link) => link.id),
+    ...templateIds,
+  ].filter(Boolean));
+  const files = new Map();
+  const addFile = (category, filePath) => {
+    const ref = workflowFinalFreshnessFileRef(context, category, filePath);
+    files.set(`${category}:${ref.path}`, ref);
+  };
+  const addExistingProjectRef = (category, projectPath) => {
+    if (!projectPath || !String(projectPath).startsWith(`${SDLC_DIR}/`)) return;
+    const resolved = path.resolve(context.root, ...String(projectPath).split("/"));
+    if (isInsidePath(context.root, resolved) && fs.existsSync(resolved)) {
+      const stat = fs.lstatSync(resolved);
+      if (stat.isDirectory()) {
+        const snapshot = workflowFinalFreshnessLocalPathSnapshot(resolved);
+        const ref = {
+          category,
+          path: toProjectPath(context, resolved),
+          present: true,
+          file_type: "directory",
+          mode: stat.mode & 0o7777,
+          sha256: snapshot.tree_hash,
+        };
+        files.set(`${category}:${ref.path}`, ref);
+      } else {
+        addFile(category, resolved);
+      }
+    }
+  };
+
+  for (const [category, filePath] of [
+    ["project", path.join(context.sdlcRoot, "project.json")],
+    ["config", path.join(context.sdlcRoot, "config.json")],
+    ["config_lock", path.join(context.sdlcRoot, "config.lock.json")],
+    ["contract", contract
+      ? path.join(context.sdlcRoot, "contracts", `${contract.id}.json`)
+      : path.join(context.sdlcRoot, "contracts", "missing.json")],
+    ["story_trace", path.join(context.sdlcRoot, "traces", `${storyId}.jsonl`)],
+    [
+      "story_trace_checkpoint",
+      path.join(
+        context.sdlcRoot,
+        "traces",
+        ".integrity",
+        `${storyId}.jsonl.checkpoint.json`,
+      ),
+    ],
+    ["workflow_instance", workflowInstancePath(context, instanceId)],
+    ["workflow_events", workflowEventsPath(context, instanceId)],
+    ["workflow_checkpoint", workflowCheckpointPath(context, instanceId)],
+  ]) {
+    addFile(category, filePath);
+  }
+  const storyRoot = path.join(context.sdlcRoot, "stories", storyId);
+  for (const filePath of walkFiles(storyRoot)) {
+    if (
+      filePath.endsWith(".lock")
+      || path.basename(filePath).includes(".tmp")
+    ) continue;
+    addFile("story_record", filePath);
+  }
+  for (const requirement of requirements) {
+    addFile("requirement", requirementPath(context, requirement.id));
+  }
+  for (const profile of requirementProfiles) {
+    addFile("requirement_profile", requirementAutonomyPath(context, profile.id));
+  }
+  if (deliveryProfile) {
+    addFile("delivery_profile", deliveryAutonomyPath(context, deliveryProfile.id));
+    for (const filePath of walkFiles(deliveryExecutionRoot(context, deliveryProfile.id))) {
+      if (!filePath.endsWith(".lock")) addFile("delivery_execution", filePath);
+    }
+  }
+  for (const root of [
+    requirementLifecycleRoot(context),
+    autonomyApprovalsRoot(context),
+    autonomyDecisionsRoot(context),
+    autonomyRevocationsRoot(context),
+    autonomyActionsRoot(context),
+  ]) {
+    for (const name of safeReadDir(root).filter((entry) => entry.endsWith(".json"))) {
+      const filePath = path.join(root, name);
+      const record = readProjectJson(context, filePath);
+      if (workflowFinalFreshnessRecordContains(record, scopedIds)) {
+        addFile("related_governance", filePath);
+      }
+    }
+  }
+  const instance = readProjectJson(context, workflowInstancePath(context, instanceId));
+  addFile(
+    "workflow_definition",
+    path.join(
+      workflowDefinitionsRoot(context),
+      instance.definition_ref.id,
+      `v${instance.definition_ref.version}.json`,
+    ),
+  );
+  const referencedPaths = new Set();
+  for (const record of [
+    story,
+    contract,
+    ...requirements,
+    ...requirementProfiles,
+    deliveryProfile,
+    ...storyLinks,
+    ...templates,
+    ...decisions,
+  ]) {
+    workflowFinalFreshnessReferencedPaths(record, referencedPaths);
+  }
+  for (const link of storyLinks) {
+    for (const projectPath of [
+      link.artifact_path,
+      link.base_artifact,
+      link.verification_receipt_ref?.path,
+      ...(link.source_paths || []),
+    ]) {
+      if (!projectPath) continue;
+      const resolved = path.resolve(context.root, ...String(projectPath).split("/"));
+      if (isInsidePath(context.root, resolved) && fs.existsSync(resolved)) {
+        addFile("output_source", resolved);
+      }
+    }
+  }
+  for (const projectPath of referencedPaths) {
+    addExistingProjectRef("referenced_governance", projectPath);
+  }
+  for (const name of safeReadDir(path.join(context.sdlcRoot, "tests"))) {
+    if (name.startsWith(`${storyId}-`) && name.endsWith(".json")) {
+      addFile("story_test_record", path.join(context.sdlcRoot, "tests", name));
+    }
+  }
+  const governedFiles = [...files.values()]
+    .sort((left, right) =>
+      left.category.localeCompare(right.category, "en")
+      || left.path.localeCompare(right.path, "en"));
+  const localReleasePaths = deliveryProfile?.delivery_kind === "local_release"
+    ? [...new Set(
+        (deliveryProfile.local_release_target?.allowed_write_paths || [])
+          .filter(Boolean)
+          .map((item) => path.resolve(String(item))),
+      )].sort()
+    : [];
+  const subject = {
+    schema_version: WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA,
+    story_id: storyId,
+    workflow_instance_id: instanceId,
+    governed_files: governedFiles,
+    output_registry_projection: {
+      path: `${toProjectPath(context, outputRegistryPath(context))}#story=${storyId}`,
+      sha256: computeStableHash(outputProjection),
+    },
+    local_release_root: deliveryProfile?.delivery_kind === "local_release"
+      ? workflowFinalFreshnessLocalRootIdentity(
+          deliveryProfile.local_release_target.root_path,
+        )
+      : null,
+    local_release_scope: localReleasePaths
+      .map((targetPath) => workflowFinalFreshnessLocalPathSnapshot(targetPath)),
+    git_scope: workflowFinalFreshnessGitScope(
+      context,
+      storyId,
+      requirementProfiles,
+      {
+        certifiedGitScope: certifiedProof?.git_scope || null,
+      },
+    ),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  return {
+    ...subject,
+    proof_hash: computeStableHash(subject),
+  };
+}
+
 function sealWorkflowFinalGateReceipt(context, report) {
   const filePath = workflowFinalGateReceiptPath(context, report.story_id);
   const receipt = buildWorkflowFinalGateReceipt(report, {
@@ -1335,6 +1900,73 @@ function sealWorkflowFinalGateReceipt(context, report) {
     `Final workflow gate receipt ${report.story_id}`,
   );
   return receipt;
+}
+
+function persistWorkflowFinalGateReceipt(context, report) {
+  const storyId = normalizeId(report.story_id);
+  const storyDir = path.join(context.sdlcRoot, "stories", storyId);
+  const claimPath = path.join(storyDir, "claim.json");
+  const releaseLifecycleLock = acquireFileLock(
+    storyLifecycleCertificationLockPath(context, storyId),
+  );
+  let releaseClaimLock = () => {};
+  let releaseOutputRegistryLock = () => {};
+  try {
+    releaseClaimLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+    releaseOutputRegistryLock = acquireFileLock(
+      path.join(outputContractsRoot(context), "registry.lock"),
+    );
+    if (fs.existsSync(claimPath)) {
+      const claim = readProjectJson(context, claimPath);
+      if (claim.status === "active") {
+        fail(
+          `Story ${storyId} has an active claim by ${claim.agent || "an unknown agent"}. `
+          + "Release the claim before final lifecycle certification.",
+        );
+      }
+    }
+    const freshness = {
+      status: "passed",
+      strict: true,
+      scope: "story",
+      lifecycle_complete: true,
+      story_id: storyId,
+      errors: [],
+      warnings: [],
+      checked: [],
+    };
+    validateCurrentStrictStory(
+      context,
+      storyId,
+      freshness,
+      { includeProject: true },
+    );
+    if (freshness.errors.length > 0 || !freshness.lifecycle_workflow) {
+      fail(
+        `Story ${storyId} changed while final lifecycle certification was being prepared: `
+        + `${freshness.errors.join("; ") || "current lifecycle proof is unavailable"}. `
+        + "Resolve the current evidence and run the final gate again.",
+      );
+    }
+    report.lifecycle_workflow = freshness.lifecycle_workflow;
+    report.checked_at = now();
+    report.freshness_proof = buildWorkflowFinalFreshnessProof(
+      context,
+      storyId,
+      freshness.lifecycle_workflow.instance_id,
+    );
+    const receipt = sealWorkflowFinalGateReceipt(context, report);
+    writeWorkflowJsonDurably(
+      workflowFinalGateReceiptPath(context, storyId),
+      receipt,
+      { force: true },
+    );
+    return receipt;
+  } finally {
+    releaseOutputRegistryLock();
+    releaseClaimLock();
+    releaseLifecycleLock();
+  }
 }
 
 function sealWorkflowStrictGateReceipt(context, report) {
@@ -2593,6 +3225,35 @@ function assertStoryBoundWorkflowPhaseOrder(context, definition) {
   );
 }
 
+function assertStoryWorkflowStartBoundary(context, storyId) {
+  if (!readStory(context, storyId)) {
+    fail(`Story ${storyId} does not exist and cannot be bound to this workflow instance.`);
+  }
+  const taskStartPath = path.join(
+    context.sdlcRoot,
+    "stories",
+    storyId,
+    "task-start.json",
+  );
+  if (fs.existsSync(taskStartPath)) {
+    fail(
+      `Story ${storyId} already has a task-start receipt. `
+      + "A story-bound workflow must start before task start; post-hoc workflow replay cannot certify lifecycle completion.",
+    );
+  }
+  const completedSteps = readStoryStepRecords(context, storyId)
+    .filter((record) => record.status === "completed");
+  if (completedSteps.length > 0) {
+    fail(
+      `Story ${storyId} already has completed lifecycle steps (${completedSteps
+        .map((record) => record.phase || record.step)
+        .filter(Boolean)
+        .join(", ")}). `
+      + "A story-bound workflow must start before the first completed step; post-hoc workflow replay is not allowed.",
+    );
+  }
+}
+
 function startWorkflowInstance(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
@@ -2631,28 +3292,11 @@ function startWorkflowInstance(context, options) {
     );
   }
   let governanceBinding = null;
+  let storyId = null;
   if (storyOption) {
-    const storyId = normalizeId(storyOption);
+    storyId = normalizeId(storyOption);
     if (!readStory(context, storyId)) {
       fail(`Story ${storyId} does not exist and cannot be bound to this workflow instance.`);
-    }
-    const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
-    if (fs.existsSync(taskStartPath)) {
-      fail(
-        `Story ${storyId} already has a task-start receipt. `
-        + "A story-bound workflow must start before task start; post-hoc workflow replay cannot certify lifecycle completion.",
-      );
-    }
-    const completedSteps = readStoryStepRecords(context, storyId)
-      .filter((record) => record.status === "completed");
-    if (completedSteps.length > 0) {
-      fail(
-        `Story ${storyId} already has completed lifecycle steps (${completedSteps
-          .map((record) => record.phase || record.step)
-          .filter(Boolean)
-          .join(", ")}). `
-        + "A story-bound workflow must start before the first completed step; post-hoc workflow replay is not allowed.",
-      );
     }
     assertStoryBoundWorkflowPhaseOrder(context, effectiveDefinition);
     governanceBinding = {
@@ -2684,11 +3328,21 @@ function startWorkflowInstance(context, options) {
     summary,
     governanceBinding,
   );
-  const releaseCreationLock = acquireFileLock(creationLockPath);
+  const releaseTaskStartBoundaryLock = storyId
+    ? acquireFileLock(path.join(
+        context.sdlcRoot,
+        "stories",
+        storyId,
+        "task-start-boundary.lock",
+      ))
+    : () => {};
+  let releaseCreationLock = () => {};
   let instance;
   let checkpoint;
   let recovered = false;
   try {
+    if (storyId) assertStoryWorkflowStartBoundary(context, storyId);
+    releaseCreationLock = acquireFileLock(creationLockPath);
     const pending = readWorkflowStartTransaction(context, id);
     let journal;
     if (pending.exists) {
@@ -2775,6 +3429,7 @@ function startWorkflowInstance(context, options) {
     }
   } finally {
     releaseCreationLock();
+    releaseTaskStartBoundaryLock();
   }
   outputWorkflowResult(options, {
     schema_version: "workflow-instance-start:v1",
@@ -2869,9 +3524,12 @@ function workflowTransitionJournalHash(journal) {
 }
 
 function buildWorkflowStartTraceRecord(context, instance, definition, overlayEntry, attribution, paths) {
+  const workflowStoryId =
+    instance.metadata?.governance_binding?.story_id || null;
   return {
     id: `TR-WF-START-${instance.instance_hash.slice(0, 24)}`,
     story_id: null,
+    workflow_story_id: workflowStoryId,
     type: "implementation",
     summary: `Started workflow instance ${instance.id}`,
     outcome: "ready",
@@ -2886,9 +3544,7 @@ function buildWorkflowStartTraceRecord(context, instance, definition, overlayEnt
       instance.id,
       definition.id,
       ...(overlayEntry ? [overlayEntry.record.id] : []),
-      ...(instance.metadata?.governance_binding?.story_id
-        ? [instance.metadata.governance_binding.story_id]
-        : []),
+      ...(workflowStoryId ? [workflowStoryId] : []),
     ],
     git: attribution.git,
     run: attribution.run,
@@ -3041,6 +3697,12 @@ function workflowStartTransactionErrors(journal, expectedRequest, effectiveDefin
   ) {
     errors.push("start transaction instance does not match the requested process");
   }
+  if (
+    stableJson(journal.instance?.metadata?.governance_binding || null)
+    !== stableJson(expectedRequest.governance_binding || null)
+  ) {
+    errors.push("start transaction story binding does not match its immutable instance");
+  }
   try {
     const checkpointValidation = validateWorkflowCheckpoint(journal.checkpoint, {
       instance: journal.instance,
@@ -3067,6 +3729,22 @@ function workflowStartTransactionErrors(journal, expectedRequest, effectiveDefin
     || journal.trace_event.related[0] !== expectedRequest.instance_id
   ) {
     errors.push("start trace intent does not describe the pinned instance");
+  }
+  const expectedStoryId = expectedRequest.governance_binding?.story_id || null;
+  const expectedRelated = [
+    expectedRequest.instance_id,
+    expectedRequest.definition_ref?.id,
+    ...(expectedRequest.overlay_ref?.id ? [expectedRequest.overlay_ref.id] : []),
+    ...(expectedStoryId ? [expectedStoryId] : []),
+  ];
+  if (
+    stableJson(journal.trace_event?.related || []) !== stableJson(expectedRelated)
+    || (
+      journal.trace_event?.workflow_story_id !== undefined
+      && (journal.trace_event.workflow_story_id || null) !== expectedStoryId
+    )
+  ) {
+    errors.push("start trace intent does not match the immutable definition, overlay, and story binding");
   }
   try {
     if (journal.checkpoint?.trace_chain_hash !== extendWorkflowTraceChain(null, journal.trace_event)) {
@@ -4411,6 +5089,20 @@ function workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentSta
     Object.hasOwn(CANONICAL_WORKFLOW_GUARD_CHECKS, guard?.id));
 }
 
+function workflowTransitionUsesStrictGate(effectiveDefinition, currentState, targetState) {
+  const transition = (effectiveDefinition?.transitions || []).find((candidate) =>
+    candidate.from === currentState && candidate.to === targetState);
+  return (transition?.guards || []).some((guard) =>
+    guard?.id === "strict-gate-passed");
+}
+
+function workflowTargetUsesStrictGate(effectiveDefinition, targetState) {
+  return (effectiveDefinition?.transitions || []).some((transition) =>
+    transition.to === targetState
+    && (transition.guards || []).some((guard) =>
+      guard?.id === "strict-gate-passed"));
+}
+
 function workflowScopeFromRuntime(instance, effectiveDefinition, integrity, currentPhase) {
   const checkpoint = integrity?.checkpoint;
   if (!checkpoint) {
@@ -4530,12 +5222,20 @@ function transitionWorkflowInstance(context, options) {
   const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
   const eventsPath = workflowEventsPath(context, id);
   const checkpointPath = workflowCheckpointPath(context, id);
-  const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+  const storyId = instance.metadata?.governance_binding?.story_id
+    ? normalizeId(instance.metadata.governance_binding.story_id)
+    : null;
+  const releaseLifecycleLock = storyId
+    && workflowTargetUsesStrictGate(effectiveDefinition, to)
+    ? acquireFileLock(storyLifecycleCertificationLockPath(context, storyId))
+    : () => {};
+  let releaseEventLock = () => {};
   let result;
   let events;
   let integrityFailure = null;
   let attribution;
   try {
+    releaseEventLock = acquireFileLock(`${eventsPath}.lock`);
     const recovery = recoverPendingWorkflowTransition(context, id, instance, effectiveDefinition, {
       requestId: idempotencyKey,
       targetState: to,
@@ -4556,6 +5256,34 @@ function transitionWorkflowInstance(context, options) {
         const idempotentReplay = events.some((event) => event.idempotency_key === idempotencyKey);
         const usesCanonicalEvidence = !idempotentReplay
           && workflowTransitionUsesCanonicalEvidence(effectiveDefinition, currentState, to);
+        const usesStrictGate = !idempotentReplay
+          && storyId
+          && workflowTransitionUsesStrictGate(effectiveDefinition, currentState, to);
+        if (usesStrictGate) {
+          const strictGate = currentStoryStrictGateReadiness(
+            context,
+            storyId,
+            instance,
+            effectiveDefinition,
+            integrity,
+            currentState,
+          );
+          if (!strictGate.ready) {
+            const recoveryCommand = strictGate.repair?.command
+              || statusCliCommand(
+                "gate", "check", "--strict", "--story", storyId,
+              );
+            fail(
+              `Workflow transition ${id} from ${currentState} to ${to} cannot use the intermediate strict gate: `
+              + `${strictGate.issues.join("; ")} `
+              + (
+                strictGate.repair?.diagnostic === true
+                  ? `Run '${recoveryCommand}' to inspect the blockers, repair them, and then retry the transition.`
+                  : `Run '${recoveryCommand}' and retry the transition.`
+              ),
+            );
+          }
+        }
         const canonicalEvidenceSchema = usesCanonicalEvidence
           ? workflowCanonicalEvidenceSchema(effectiveDefinition)
           : null;
@@ -4612,7 +5340,8 @@ function transitionWorkflowInstance(context, options) {
       }
     }
   } finally {
-    releaseLock();
+    releaseEventLock();
+    releaseLifecycleLock();
   }
   if (integrityFailure) {
     blockWorkflowOnIntegrityFailure(context, options, id, integrityFailure, "transition");
@@ -4727,6 +5456,27 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
           : null,
       )
     : null;
+  const storyId = instance.metadata?.governance_binding?.story_id
+    ? normalizeId(instance.metadata.governance_binding.story_id)
+    : null;
+  const stateTerminal = (effectiveDefinition.states || [])
+    .find((state) => state.id === currentState)?.terminal === true;
+  const finalReceipt = storyId && stateTerminal
+    ? validCurrentWorkflowFinalReceipt(context, storyId, instance)
+    : null;
+  const hasStrictGateOutgoing = outgoingTransitions.some((transition) =>
+    (transition.guards || []).some((guard) =>
+      guard?.id === "strict-gate-passed"));
+  const strictGateReadiness = storyId && hasStrictGateOutgoing
+    ? currentStoryStrictGateReadiness(
+        context,
+        storyId,
+        instance,
+        effectiveDefinition,
+        integrity,
+        currentState,
+      )
+    : null;
   const nextTransitionChecks = outgoingTransitions.map((transition) => {
     if (!canonicalOutgoing.includes(transition)) {
       return {
@@ -4743,23 +5493,62 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
       undefined,
       canonicalEvidence,
     );
+    const usesStrictGate = (transition.guards || []).some((guard) =>
+      guard?.id === "strict-gate-passed");
+    const strictGateBlocked =
+      usesStrictGate
+      && strictGateReadiness
+      && !strictGateReadiness.ready;
+    const guardResults = strictGateBlocked
+      ? evaluated.results.map((result) =>
+          result.guard_id === "strict-gate-passed"
+            ? {
+                ...result,
+                allowed: false,
+                reason: "The intermediate strict gate is invalid or stale for the current workflow state",
+                issues: strictGateReadiness.issues,
+                repair_action: strictGateReadiness.repair || null,
+              }
+            : result)
+      : evaluated.results;
     return {
       transition_id: transition.id,
       to: transition.to,
       canonical: true,
-      allowed: evaluated.allowed,
-      guard_results: evaluated.results,
+      allowed: evaluated.allowed && !strictGateBlocked,
+      guard_results: guardResults,
     };
   });
+  const readyNextStates = nextTransitionChecks
+    .filter((transition) => transition.allowed === true)
+    .map((transition) => transition.to);
+  let instanceStatus;
+  if (stateTerminal) {
+    if (!storyId || finalReceipt?.valid) {
+      instanceStatus = "terminal";
+    } else if (finalReceipt?.exists) {
+      instanceStatus = "blocked";
+    } else {
+      instanceStatus = "awaiting_certification";
+    }
+  } else {
+    instanceStatus =
+      nextTransitionChecks.length > 0
+      && nextTransitionChecks.every((transition) => transition.allowed === false)
+        ? "blocked"
+        : "ready";
+  }
   outputWorkflowResult(options, {
     schema_version: explain ? "workflow-instance-explanation:v1" : "workflow-instance-status:v1",
-    status: "ready",
+    status: instanceStatus,
+    terminal: stateTerminal && (!storyId || finalReceipt?.valid === true),
+    state_terminal: stateTerminal,
+    final_receipt_exists: finalReceipt?.exists ?? null,
+    final_receipt_valid: finalReceipt?.valid ?? null,
     instance,
     current_state: currentState,
     next_states: nextStates,
-    ready_next_states: nextTransitionChecks
-      .filter((transition) => transition.allowed === true)
-      .map((transition) => transition.to),
+    ready_next_states: readyNextStates,
     next_transition_checks: nextTransitionChecks,
     canonical_evidence_hash: canonicalEvidence?.evidence_hash ?? null,
     event_count: events.length,
@@ -4771,6 +5560,13 @@ function showWorkflowInstance(context, options, { explain = false } = {}) {
   }, "instance_shown", [
     `Instance: ${id}`,
     `Current state: ${currentState}`,
+    `Terminal lifecycle: ${stateTerminal && (!storyId || finalReceipt?.valid === true) ? "yes" : "no"}`,
+    ...(finalReceipt
+      ? [
+          `Final receipt exists: ${finalReceipt.exists ? "yes" : "no"}`,
+          `Final receipt valid: ${finalReceipt.valid ? "yes" : "no"}`,
+        ]
+      : []),
     `Next states: ${nextStates.join(", ") || "none"}`,
     ...nextTransitionChecks
       .filter((transition) => transition.canonical)
@@ -6272,6 +7068,8 @@ function startTaskLocked(context, options) {
       decision.authorization_ref = authorization?.id || null;
       decision.authorization_use_ref = authorization?.__use_receipt?.path || null;
       if (decision.story_id) {
+        workflowStartTraceIndexCache.delete(context);
+        workflowStartTransactionIndexCache.delete(context);
         const workflowProbe = { errors: [] };
         const selectedWorkflow = currentStoryBoundWorkflowInstance(
           context,
@@ -20478,10 +21276,34 @@ async function applyAssessmentProposal(context, options) {
     : {
         plan: readTemplateFile(context, "story-plan.md"),
         implementation_log: readTemplateFile(context, "implementation-log.md"),
-      };
+  };
   const attribution = buildAttribution(context, options, "assessment.proposal.apply");
   const releaseLock = acquireFileLock(`${assessmentProposalPath(context, id)}.lock`);
+  let releaseTaskStartBoundaryLock = () => {};
   try {
+    const assessmentStoryId = proposal.story_reservation.id;
+    releaseTaskStartBoundaryLock = acquireFileLock(path.join(
+      context.sdlcRoot,
+      "stories",
+      assessmentStoryId,
+      "task-start-boundary.lock",
+    ));
+    if (readStory(context, assessmentStoryId)) {
+      workflowStartTraceIndexCache.delete(context);
+      workflowStartTransactionIndexCache.delete(context);
+      const workflowProbe = { errors: [] };
+      const selectedWorkflow = currentStoryBoundWorkflowInstance(
+        context,
+        assessmentStoryId,
+        workflowProbe,
+      );
+      if (workflowProbe.errors.length > 0 || selectedWorkflow) {
+        fail(
+          `Assessment story ${assessmentStoryId} cannot start its generic assessment task while a configurable story workflow exists or is interrupted: `
+          + `${workflowProbe.errors.join("; ") || selectedWorkflow.entry}.`,
+        );
+      }
+    }
     // Re-read immediately before the first durable authorization/canonical
     // write so an existing contract can never fail only after partial
     // proposal materialization.
@@ -20602,6 +21424,7 @@ async function applyAssessmentProposal(context, options) {
       `Context optimization: ${optimization.status}; budget usage adjustment 0.`,
     ]);
   } finally {
+    releaseTaskStartBoundaryLock();
     releaseLock();
   }
 }
@@ -30604,7 +31427,8 @@ function buildDependencyStatus(context, storyId = null, query = null) {
 }
 
 function inspectDependencyEdge(context, edge, story = null, query = null) {
-  const blocking = isHardDependencyEdge(edge) && shouldDependencyBlockStory(edge, story);
+  const blocking = isHardDependencyEdge(edge)
+    && shouldDependencyBlockStory(context, edge, story);
   const satisfied = isDependencySatisfied(context, edge, query);
   const message = `${edge.from} depends on ${edge.to} (${edge.type}, ${edge.blocks}, requires ${edge.required_state})`;
   if (!satisfied) {
@@ -30625,15 +31449,16 @@ function isHardDependencyEdge(edge) {
   return edge.blocks !== "none" && ["blocks", "requires_artifact", "requires_contract"].includes(edge.type);
 }
 
-function shouldDependencyBlockStory(edge, story) {
+function shouldDependencyBlockStory(context, edge, story) {
   if (!story || edge.blocks === "none") {
     return true;
   }
-  return storyPhaseRank(story) >= phaseRank(edge.blocks);
+  return storyPhaseRank(context, story) >= phaseRank(edge.blocks);
 }
 
-function storyPhaseRank(story) {
-  const value = String(story.phase || story.status || "").toLowerCase();
+function storyPhaseRank(context, story) {
+  const lifecycle = effectiveStoryLifecycleProjection(context, story);
+  const value = String(lifecycle.phase || lifecycle.status || "").toLowerCase();
   return phaseRank(value);
 }
 
@@ -30654,7 +31479,14 @@ function isDependencySatisfied(context, edge, query = null) {
   if (!upstream) {
     return false;
   }
+  const lifecycle = query?.lifecycle_by_story?.get(edge.to)
+    || effectiveStoryLifecycleProjection(context, upstream);
+  const effectiveStatus = lifecycle.status;
+  const effectivePhase = lifecycle.phase;
   const state = String(edge.required_state || "").toLowerCase();
+  if (lifecycle.blocked && isHardDependencyEdge(edge)) {
+    return false;
+  }
   if (edge.type === "requires_contract" || state === "contract_approved") {
     let contractState = query?.contract_state_by_story?.get(upstream.id);
     if (!contractState) {
@@ -30669,16 +31501,22 @@ function isDependencySatisfied(context, edge, query = null) {
   if (["exists", "none"].includes(state)) {
     return true;
   }
+  if (lifecycle.blocked) {
+    return false;
+  }
   if (state === "ready") {
-    return ["ready", "implementation", "in_progress", "review", "validation", "release", "done"].includes(String(upstream.status));
+    return ["ready", "implementation", "in_progress", "review", "validation", "release", "done"]
+      .includes(String(effectiveStatus));
   }
   if (state === "validated") {
-    return ["validation", "release", "done"].includes(String(upstream.status)) || upstream.phase === "validation" || upstream.phase === "release";
+    return ["validation", "release", "done"].includes(String(effectiveStatus))
+      || effectivePhase === "validation"
+      || effectivePhase === "release";
   }
   if (state === "done") {
-    return upstream.status === "done";
+    return lifecycle.terminal;
   }
-  return upstream.status === state || upstream.phase === state;
+  return effectiveStatus === state || effectivePhase === state;
 }
 
 function storyHasOutputLink(context, storyId, query = null) {
@@ -30782,6 +31620,11 @@ function buildDependencyQuery(context, { stories = [], traceEvents = [], session
     tracesByStory.set(event.story_id, events);
   }
   const registry = readOutputRegistry(context, { missingOk: true });
+  const lifecycleByStory = new Map(
+    stories
+      .filter((story) => story?.id && story.__folder_id === story.id)
+      .map((story) => [story.id, effectiveStoryLifecycleProjection(context, story)]),
+  );
   return {
     graph,
     edges_by_story: edgesByStory,
@@ -30791,6 +31634,7 @@ function buildDependencyQuery(context, { stories = [], traceEvents = [], session
         .filter((story) => story?.id && story.__folder_id === story.id)
         .map((story) => [story.id, story]),
     ),
+    lifecycle_by_story: lifecycleByStory,
     traces_by_story: tracesByStory,
     registry,
     registry_index: createOutputRegistryQueryIndex(registry),
@@ -30818,8 +31662,15 @@ function claimStory(context, options) {
   const attribution = buildAttribution(context, options, "story.claim");
   try {
     const story = readStory(context, id);
-    if (isTerminalStory(context, story)) {
-      fail(`Story ${id} is in terminal status '${story.status}' and cannot be claimed.`);
+    const lifecycle = effectiveStoryLifecycleProjection(context, story);
+    if (lifecycle.blocked) {
+      fail(
+        `Story ${id} has an invalid or unreadable final lifecycle receipt and cannot be claimed. `
+        + "Inspect the bound workflow and restore valid certification evidence first.",
+      );
+    }
+    if (lifecycle.terminal) {
+      fail(`Story ${id} is in terminal status '${lifecycle.status}' and cannot be claimed.`);
     }
     const claimExists = fs.existsSync(claimPath);
     if (claimExists && !options.force) {
@@ -30983,7 +31834,18 @@ function completeStoryStep(context, options) {
   const releaseTaskStartBoundaryLock = acquireFileLock(
     path.join(context.sdlcRoot, "stories", storyId, "task-start-boundary.lock"),
   );
+  let releaseLifecycleLock = () => {};
   try {
+    releaseLifecycleLock = acquireFileLock(
+      storyLifecycleCertificationLockPath(context, storyId),
+    );
+    const lifecycle = effectiveStoryLifecycleProjection(context, story);
+    if (lifecycle.terminal) {
+      fail(
+        `Story ${storyId} lifecycle is already certified `
+        + `(${lifecycle.source}); its completed steps cannot be changed.`,
+      );
+    }
     assertReleaseClaimPrecondition(context, storyId, options);
     const step = normalizeStoryStep(context, requireOption(options, "step"));
     const stepPhase = storyStepPhase(context, step);
@@ -31145,6 +32007,7 @@ function completeStoryStep(context, options) {
       ].filter(Boolean),
     );
   } finally {
+    releaseLifecycleLock();
     releaseTaskStartBoundaryLock();
   }
 }
@@ -31344,6 +32207,42 @@ function appendTrace(context, options) {
   if (storyId && !readStory(context, storyId)) {
     fail(`Story ${storyId} does not exist`);
   }
+  const releaseLifecycleLock = storyId && ["test", "release"].includes(type)
+    ? acquireFileLock(storyLifecycleCertificationLockPath(context, storyId))
+    : () => {};
+  try {
+    appendTraceLocked(context, options, type, summary, storyId);
+  } finally {
+    releaseLifecycleLock();
+  }
+}
+
+function appendTraceLocked(context, options, type, summary, storyId) {
+  if (storyId && ["test", "release"].includes(type)) {
+    const finalReceiptExists = fs.existsSync(
+      workflowFinalGateReceiptPath(context, storyId),
+    );
+    const lifecycle = effectiveStoryLifecycleProjection(
+      context,
+      readStory(context, storyId),
+    );
+    const repairOutcome = type === "test"
+      ? options.outcome === "passed"
+      : ["passed", "ready"].includes(options.outcome);
+    if (
+      (
+        lifecycle.terminal
+        && lifecycle.source === "workflow_final_receipt"
+      )
+      || (finalReceiptExists && !repairOutcome)
+    ) {
+      fail(
+        `Story ${storyId} already has a terminal lifecycle receipt. `
+        + "An invalidated receipt permits only passing in-place repair evidence before recertification; "
+        + "create a new governed story for later failed attempts or different lifecycle evidence.",
+      );
+    }
+  }
   const traceFile = storyId ? `${storyId}.jsonl` : "project.jsonl";
   const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
   const attribution = buildAttribution(context, options, `trace.${type}`);
@@ -31391,6 +32290,8 @@ function assertManualTraceActionIsSafe(event) {
     "sync.commit": "sync record",
     "sync.merge": "sync record",
     "sync.push": "sync record",
+    "workflow.instance.start": "workflow instance start",
+    "workflow.instance.transition": "workflow instance transition",
   };
   const command = generatedBy[event.action];
   if (!command) return;
@@ -31981,7 +32882,21 @@ function linkOutputArtifact(context, options) {
   if (!story) {
     fail(`Story ${storyId} does not exist`);
   }
-  return withOutputRegistryLock(context, () => {
+  const releaseLifecycleLock = acquireFileLock(
+    storyLifecycleCertificationLockPath(context, storyId),
+  );
+  try {
+    return withOutputRegistryLock(context, () => {
+  const finalReceiptExists = fs.existsSync(
+    workflowFinalGateReceiptPath(context, storyId),
+  );
+  const lifecycle = effectiveStoryLifecycleProjection(context, story);
+  if (lifecycle.terminal && lifecycle.source === "workflow_final_receipt") {
+    fail(
+      `Story ${storyId} already has a valid terminal lifecycle certification. `
+      + "Create a new governed story for later output changes instead of changing the certified run.",
+    );
+  }
   const artifactType = normalizeArtifactType(requireOption(options, "type"));
   const mode = normalizeOutputMode(requireOption(options, "mode"));
   const templateId = normalizeId(requireOption(options, "template"));
@@ -32016,6 +32931,24 @@ function linkOutputArtifact(context, options) {
   const id = normalizeId(
     options.id || `OUT-${storyId}-${artifactType}-${shortHash(`${relativeArtifactPath}:${mode}`)}`,
   );
+  const existingStoryLink = (registry.links || [])
+    .find((link) => link.story_id === storyId && link.id === id);
+  if (
+    finalReceiptExists
+    && (
+      !existingStoryLink
+      || existingStoryLink.artifact_type !== artifactType
+      || existingStoryLink.artifact_path !== relativeArtifactPath
+      || existingStoryLink.template_id !== templateId
+      || existingStoryLink.mode !== mode
+    )
+  ) {
+    fail(
+      `Story ${storyId} already has a terminal lifecycle receipt. `
+      + "An invalidated receipt permits only an in-place refresh of the exact existing output link; "
+      + "create a new governed story for replacement or additional outputs.",
+    );
+  }
   let verificationReceipt = verifyOutputArtifact(context, artifactPath, delivery, {
     evidence: normalizeListOption(options.evidence),
     requireVisualEvidence: true,
@@ -32308,7 +33241,10 @@ function linkOutputArtifact(context, options) {
         : "No related outputs found",
     ],
   );
-  });
+    });
+  } finally {
+    releaseLifecycleLock();
+  }
 }
 
 function showOutputStatus(context, options) {
@@ -36630,6 +37566,57 @@ function humanReadableGateBlocker(error, locale = "en") {
     : "A required project record is missing, outdated, or inconsistent; technical details are shown below.";
 }
 
+function validateCurrentStrictStory(
+  context,
+  storyId,
+  report,
+  {
+    includeProject = false,
+    workflow = null,
+    skipChangedPathScope = false,
+  } = {},
+) {
+  if (includeProject) {
+    validateProject(context, report);
+  }
+  validateAuthorizations(context, report);
+  validateBaselines(context, report, storyId);
+  validateLocks(context, report);
+  validateAutonomyRecords(context, report, storyId);
+
+  let currentWorkflow = workflow;
+  const story = readStory(context, storyId);
+  validateDependencyProposals(context, report, storyId);
+  if (story?.contract_id) {
+    validateContracts(
+      context,
+      report,
+      new Set([story.contract_id]),
+      { workflow: currentWorkflow },
+    );
+  }
+  validateCapabilityDiscovery(context, report, storyId);
+  validateTraces(context, report, storyId);
+  validateHandoffs(context, report, storyId);
+  validateStory(context, storyId, report, { skipChangedPathScope });
+  validateOutputContracts(context, report, storyId);
+  if (report.lifecycle_complete === true) {
+    validateStoryLifecycleCompletion(context, storyId, report);
+  }
+  if (
+    report.lifecycle_complete !== true
+    && !currentWorkflow
+    && report.errors.length === 0
+  ) {
+    currentWorkflow = deriveCurrentStoryWorkflowScope(
+      context,
+      storyId,
+      report,
+    );
+  }
+  return { workflow: currentWorkflow };
+}
+
 function gateCheck(context, options) {
   ensureInitialized(context);
   const attribution = buildAttribution(context, options, "gate.check");
@@ -36656,6 +37643,11 @@ function gateCheck(context, options) {
     warnings: [],
     checked: [],
   };
+  const strictStoryScope =
+    report.strict === true
+    && scope === "story"
+    && Boolean(storyId);
+  let strictStoryWorkflow = null;
 
   if (!["story", "all", "release-manifest"].includes(scope)) {
     fail("Gate scope must be 'story', 'release-manifest', or 'all'.");
@@ -36731,7 +37723,7 @@ function gateCheck(context, options) {
     validateTraces(context, report, null, { projectOnly: true });
     for (const artifact of manifest.artifacts || []) report.checked.push(`artifact ${artifact.id}`);
     report.warnings.push("Historical records outside this release manifest are logically archived out of the active release scope and were not used to decide this gate.");
-  } else {
+  } else if (!strictStoryScope) {
     validateAuthorizations(context, report);
     validateBaselines(context, report, storyId && scope === "story" ? storyId : null);
     validateLocks(context, report);
@@ -36739,18 +37731,23 @@ function gateCheck(context, options) {
   }
 
   if (storyId && scope === "story") {
-    const story = readStory(context, storyId);
-    validateDependencyProposals(context, report, storyId);
-    if (story?.contract_id) {
-      validateContracts(context, report, new Set([story.contract_id]));
-    }
-    validateCapabilityDiscovery(context, report, storyId);
-    validateTraces(context, report, storyId);
-    validateHandoffs(context, report, storyId);
-    validateStory(context, storyId, report);
-    validateOutputContracts(context, report, storyId);
-    if (report.strict && options["lifecycle-complete"]) {
-      validateStoryLifecycleCompletion(context, storyId, report);
+    if (strictStoryScope) {
+      ({ workflow: strictStoryWorkflow } = validateCurrentStrictStory(
+        context,
+        storyId,
+        report,
+      ));
+    } else {
+      const story = readStory(context, storyId);
+      validateDependencyProposals(context, report, storyId);
+      if (story?.contract_id) {
+        validateContracts(context, report, new Set([story.contract_id]));
+      }
+      validateCapabilityDiscovery(context, report, storyId);
+      validateTraces(context, report, storyId);
+      validateHandoffs(context, report, storyId);
+      validateStory(context, storyId, report);
+      validateOutputContracts(context, report, storyId);
     }
   } else if (scope === "all") {
     validateDependencyProposals(context, report);
@@ -36783,15 +37780,8 @@ function gateCheck(context, options) {
     && scope === "story"
     && options["lifecycle-complete"] !== true
   ) {
-    const workflowScopeReport = { errors: [] };
-    const workflow = deriveCurrentStoryWorkflowScope(
-      context,
-      storyId,
-      workflowScopeReport,
-    );
-    if (workflowScopeReport.errors.length > 0) {
-      report.errors.push(...workflowScopeReport.errors);
-    } else if (
+    const workflow = strictStoryWorkflow;
+    if (
       workflow
       && workflowCanonicalEvidenceSchema(workflow.effective_definition)
         === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA
@@ -36821,9 +37811,7 @@ function gateCheck(context, options) {
     && scope === "story"
   ) {
     if (options["lifecycle-complete"] === true) {
-      const finalReceipt = sealWorkflowFinalGateReceipt(context, report);
-      const finalReceiptPath = workflowFinalGateReceiptPath(context, storyId);
-      writeWorkflowJsonDurably(finalReceiptPath, finalReceipt, { force: true });
+      const finalReceipt = persistWorkflowFinalGateReceipt(context, report);
       Object.assign(report, finalReceipt);
     } else {
       const strictReceipt = sealWorkflowStrictGateReceipt(context, report);
@@ -37045,6 +38033,53 @@ function matchingApprovedStoryWorkflowDefinition(context) {
     .at(-1) || null;
 }
 
+function currentCertifiedLifecycleEvidenceMatches(
+  context,
+  storyId,
+  proof,
+  checkedAt,
+  { workflow = null } = {},
+) {
+  const checkedAtMs = Date.parse(String(checkedAt || ""));
+  if (!Number.isFinite(checkedAtMs)) return false;
+  try {
+    const lifecycleEvents = readTraceEvents(context, storyId)
+      .filter((event) => ["test", "release"].includes(event.type));
+    if (lifecycleEvents.some((event) => {
+      const createdAt = Date.parse(String(event.created_at || ""));
+      return !Number.isFinite(createdAt) || createdAt > checkedAtMs;
+    })) {
+      return false;
+    }
+    const freshness = {
+      status: "passed",
+      strict: true,
+      scope: "story",
+      lifecycle_complete: true,
+      story_id: storyId,
+      errors: [],
+      warnings: [],
+      checked: [],
+    };
+    validateCurrentStrictStory(
+      context,
+      storyId,
+      freshness,
+      {
+        includeProject: true,
+        workflow,
+        skipChangedPathScope: true,
+      },
+    );
+    return (
+      freshness.errors.length === 0
+      && stableJson(freshness.lifecycle_workflow) === stableJson(proof)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function validCurrentWorkflowFinalReceipt(context, storyId, instance) {
   const receiptPath = workflowFinalGateReceiptPath(context, storyId);
   if (!fs.existsSync(receiptPath)) return { exists: false, valid: false };
@@ -37055,14 +38090,101 @@ function validCurrentWorkflowFinalReceipt(context, storyId, instance) {
       "workflow-final-gate-receipt.schema.json",
       `Final workflow gate receipt ${storyId}`,
     );
-    const { receipt_hash: receiptHash, ...subject } = receipt;
+    const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+    const eventsPath = workflowEventsPath(context, instance.id);
+    const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+    let events;
+    let integrity;
+    try {
+      events = readWorkflowEvents(context, instance.id);
+      integrity = inspectWorkflowRuntimeIntegrity(
+        context,
+        instance.id,
+        instance,
+        effectiveDefinition,
+        events,
+      );
+    } finally {
+      releaseLock();
+    }
+    const currentPhase = integrity.valid
+      ? workflowCurrentState(integrity.replay, instance, effectiveDefinition)
+      : null;
+    const terminalState = (effectiveDefinition.states || [])
+      .find((state) => state.id === currentPhase);
+    const terminalEvent = events.at(-1) || null;
+    const proof = receipt.lifecycle_workflow || {};
+    const checkpoint = integrity.checkpoint || {};
+    const taskStartBinding = inspectModernWorkflowTaskStartBinding(
+      context,
+      storyId,
+      instance,
+    );
+    const taskStart = taskStartBinding.task_start;
+    const currentFreshnessProof = buildWorkflowFinalFreshnessProof(
+      context,
+      storyId,
+      instance.id,
+      receipt.freshness_proof,
+    );
     return {
       exists: true,
       valid:
-        receiptHash === computeStableHash(subject)
+        hasValidWorkflowReceiptHash(receipt)
+        && receipt.freshness_proof?.schema_version
+          === WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA
+        && receipt.freshness_proof?.story_id === storyId
+        && receipt.freshness_proof?.workflow_instance_id === instance.id
+        && receipt.freshness_proof?.proof_hash
+          === computeStableHash((({ proof_hash: ignored, ...subject }) => subject)(
+            receipt.freshness_proof,
+          ))
+        && stableJson(receipt.freshness_proof) === stableJson(currentFreshnessProof)
+        && integrity.valid
         && receipt.story_id === storyId
         && receipt.lifecycle_workflow?.instance_id === instance.id
-        && receipt.lifecycle_workflow?.instance_hash === instance.instance_hash,
+        && receipt.lifecycle_workflow?.instance_hash === instance.instance_hash
+        && proof.story_id === storyId
+        && terminalState?.terminal === true
+        && currentPhase === configuredPhaseOrder(context).at(-1)
+        && proof.effective_hash === effectiveDefinition.effective_hash
+        && proof.terminal_state === currentPhase
+        && proof.event_count === events.length
+        && proof.checkpoint_ref?.path
+          === toProjectPath(context, workflowCheckpointPath(context, instance.id))
+        && proof.checkpoint_ref?.checkpoint_hash === checkpoint.checkpoint_hash
+        && proof.checkpoint_ref?.sequence === checkpoint.sequence
+        && proof.checkpoint_ref?.last_event_hash === checkpoint.last_event_hash
+        && proof.checkpoint_ref?.trace_chain_hash === checkpoint.trace_chain_hash
+        && proof.terminal_event_ref?.event_hash === terminalEvent?.event_hash
+        && proof.terminal_event_ref?.sequence === terminalEvent?.sequence
+        && proof.terminal_event_ref?.timestamp === terminalEvent?.timestamp
+        && taskStartBinding.valid
+        && proof.task_start_ref?.id === taskStart?.id
+        && proof.task_start_ref?.path === toProjectPath(context, taskStartBinding.path)
+        && proof.task_start_ref?.hash === taskStartBinding.hash
+        && proof.task_start_ref?.confirmed_at === taskStart?.confirmed_at
+        && currentCertifiedLifecycleEvidenceMatches(
+          context,
+          storyId,
+          proof,
+          receipt.checked_at,
+          {
+            workflow: {
+              instance,
+              effective_definition: effectiveDefinition,
+              integrity,
+              scope: workflowScopeFromRuntime(
+                instance,
+                effectiveDefinition,
+                integrity,
+                currentPhase,
+              ),
+            },
+          },
+        ),
+      current_phase: currentPhase,
+      workflow_instance_id: instance.id,
     };
   } catch {
     return { exists: true, valid: false };
@@ -37100,6 +38222,292 @@ function storyReleaseReadiness(context, storyId) {
   };
 }
 
+function outputLinkAuthorizationId(link) {
+  if (link?.authorization_ref) {
+    return link.authorization_ref;
+  }
+  for (const sourcePath of link?.source_paths || []) {
+    const match = String(sourcePath)
+      .match(/^\.sdlc\/authorization-uses\/([^/]+)\//u);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function outputLinkRepairCommand(link) {
+  const args = [
+    "output", "link",
+    "--story", link.story_id,
+    "--type", link.artifact_type,
+    "--artifact", link.artifact_path,
+    "--template", link.template_id,
+    "--mode", link.mode,
+    "--id", link.id,
+  ];
+  if (link.base_artifact) {
+    args.push("--base-artifact", link.base_artifact);
+  }
+  for (const requirementId of link.requirements || []) {
+    args.push("--requirement", requirementId);
+  }
+  for (const evidence of link.verification_receipt?.evidence || []) {
+    const evidencePath = evidence?.path || evidence;
+    if (evidencePath) args.push("--evidence", evidencePath);
+  }
+  const generatorReceiptPath =
+    link.verification_receipt?.generator_receipt?.path;
+  if (generatorReceiptPath) {
+    args.push("--receipt-file", generatorReceiptPath);
+  }
+  const authorizationId = outputLinkAuthorizationId(link);
+  if (authorizationId) {
+    args.push("--authorization", authorizationId);
+  }
+  if (link.decision_id) {
+    args.push("--decision-id", link.decision_id);
+  }
+  if (link.rationale) {
+    args.push("--rationale", link.rationale);
+  }
+  return statusCliCommand(...args);
+}
+
+function strictGateOutputRepair(context, storyId, issues) {
+  const registry = readOutputRegistry(context, { missingOk: true });
+  if (!registry) return null;
+  const templates = Array.isArray(registry.templates)
+    ? registry.templates
+    : [];
+  const links = Array.isArray(registry.links)
+    ? registry.links.filter((link) => link.story_id === storyId)
+    : [];
+  const gateCommand = statusCliCommand(
+    "gate", "check", "--strict", "--story", storyId,
+  );
+  const template = templates.find((candidate) =>
+    candidate?.id
+    && issues.some((issue) =>
+      String(issue).includes(`template ${candidate.id}`)
+      && /changed after approval|delivery format changed after approval|structure or delivery approval is stale/iu
+        .test(String(issue))));
+  if (template) {
+    const approvalCommand = statusCliCommand(
+      "output", "template", "approve",
+      "--id", template.id,
+      "--actor-type", "human",
+      "--approval-source", "explicit-user",
+      "--summary", "<user-approved output format>",
+    );
+    const affectedLinks = links
+      .filter((link) => link.template_id === template.id)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id), "en"));
+    return {
+      kind: "reapprove_output_template",
+      reason: "output_template_changed_after_approval",
+      label:
+        `Review and re-approve output template ${template.id}, then refresh its linked artifact before re-running the strict gate.`,
+      command: approvalCommand,
+      template_id: template.id,
+      affected_output_link_ids: affectedLinks.map((link) => link.id),
+      repair_steps: [
+        {
+          kind: "reapprove_output_template",
+          command: approvalCommand,
+        },
+        ...affectedLinks.map((link) => ({
+          kind: "repair_output_link",
+          output_link_id: link.id,
+          command: outputLinkRepairCommand(link),
+        })),
+        {
+          kind: "seal_strict_gate",
+          command: gateCommand,
+        },
+      ],
+    };
+  }
+  const link = links.find((candidate) =>
+    candidate?.id
+    && issues.some((issue) =>
+      String(issue).includes(`output link ${candidate.id}`)
+      && /artifact|verification receipt|fingerprint|changed after the artifact was linked/iu
+        .test(String(issue))));
+  if (!link) return null;
+  const repairCommand = outputLinkRepairCommand(link);
+  return {
+    kind: "repair_output_link",
+    reason: "output_link_evidence_changed",
+    label:
+      `Refresh output link ${link.id} against the current artifact and approved template before re-running the strict gate.`,
+    command: repairCommand,
+    output_link_id: link.id,
+    artifact_path: link.artifact_path,
+    template_id: link.template_id,
+    repair_steps: [
+      {
+        kind: "repair_output_link",
+        output_link_id: link.id,
+        command: repairCommand,
+      },
+      {
+        kind: "seal_strict_gate",
+        command: gateCommand,
+      },
+    ],
+  };
+}
+
+function currentStoryStrictGateReadiness(
+  context,
+  storyId,
+  instance,
+  effectiveDefinition,
+  integrity,
+  currentState,
+) {
+  const strictPath = workflowStrictGateReceiptPath(context, storyId);
+  if (!fs.existsSync(strictPath)) {
+    return {
+      ready: false,
+      reason: "missing",
+      issues: [`Intermediate strict gate receipt ${toProjectPath(context, strictPath)} is missing.`],
+    };
+  }
+  try {
+    return withOutputRegistryLock(context, () => {
+    const canonicalEvidenceSchema =
+      workflowCanonicalEvidenceSchema(effectiveDefinition)
+      || WORKFLOW_LEGACY_CANONICAL_EVIDENCE_SCHEMA;
+    const modern =
+      canonicalEvidenceSchema === WORKFLOW_CANONICAL_EVIDENCE_SCHEMA;
+    const evidence = buildCanonicalEvidenceForWorkflowInstance(
+      context,
+      instance,
+      canonicalEvidenceSchema,
+      modern
+        ? {
+            current_phase: currentState,
+            phase_order: effectiveDefinition.phase_order,
+            require_all: false,
+          }
+        : null,
+      modern
+        ? workflowScopeFromRuntime(
+            instance,
+            effectiveDefinition,
+            integrity,
+            currentState,
+          )
+        : null,
+    );
+    const check = evidence.checks?.strict_gate_passed;
+    const issues = check?.satisfied === true
+      ? []
+      : Array.isArray(check?.issues) && check.issues.length > 0
+        ? check.issues.map((issue) => String(issue))
+        : ["The intermediate strict gate receipt is not valid for the current workflow state."];
+    const receipt = readProjectJson(context, strictPath);
+    const checkedAt = Date.parse(String(receipt.checked_at || ""));
+    if (!Number.isFinite(checkedAt)) {
+      issues.push("The intermediate strict gate receipt has no valid checked_at timestamp.");
+    } else {
+      const currentStepCompletedAt = readStoryStepRecords(context, storyId)
+        .filter((record) =>
+          record.status === "completed"
+          && record.phase === currentState
+          && Number.isFinite(Date.parse(String(record.completed_at || ""))))
+        .map((record) => Date.parse(record.completed_at))
+        .sort((left, right) => right - left)[0] || null;
+      if (currentStepCompletedAt && currentStepCompletedAt > checkedAt) {
+        issues.push(
+          `The intermediate strict gate predates completion of the current '${currentState}' step.`,
+        );
+      }
+      const newerLifecycleTrace = readTraceEvents(context, storyId)
+        .filter((event) => ["test", "release"].includes(event.type))
+        .find((event) => {
+          const createdAt = Date.parse(String(event.created_at || ""));
+          return !Number.isFinite(createdAt) || createdAt > checkedAt;
+        });
+      if (newerLifecycleTrace) {
+        issues.push(
+          `The intermediate strict gate predates current ${newerLifecycleTrace.type} evidence.`,
+        );
+      }
+    }
+    const currentValidation = {
+      status: "passed",
+      strict: true,
+      scope: "story",
+      lifecycle_complete: false,
+      story_id: storyId,
+      errors: [],
+      warnings: [],
+      checked: [],
+    };
+    validateCurrentStrictStory(
+      context,
+      storyId,
+      currentValidation,
+      {
+        includeProject: true,
+        workflow: {
+          instance,
+          effective_definition: effectiveDefinition,
+          integrity,
+          scope: workflowScopeFromRuntime(
+            instance,
+            effectiveDefinition,
+            integrity,
+            currentState,
+          ),
+        },
+      },
+    );
+    issues.push(...currentValidation.errors.map((issue) => String(issue)));
+    const uniqueIssues = Array.from(new Set(issues));
+    let repair = uniqueIssues.length > 0
+      ? strictGateOutputRepair(context, storyId, uniqueIssues)
+      : null;
+    if (!repair && currentValidation.errors.length > 0) {
+      const diagnosticCommand = statusCliCommand(
+        "gate", "check", "--strict", "--story", storyId,
+      );
+      repair = {
+        kind: "repair_strict_gate_evidence",
+        reason: "current_strict_gate_evidence_invalid",
+        label:
+          "Inspect the strict-gate blockers, repair the invalid current project evidence, then run the strict gate again.",
+        command: diagnosticCommand,
+        diagnostic: true,
+        repair_steps: [
+          {
+            kind: "diagnose_strict_gate_blockers",
+            command: diagnosticCommand,
+          },
+        ],
+      };
+    }
+    return {
+      ready: uniqueIssues.length === 0,
+      reason: uniqueIssues.length === 0 ? "current" : "stale",
+      issues: uniqueIssues,
+      repair,
+    };
+    });
+  } catch (error) {
+    return {
+      ready: false,
+      reason: "invalid",
+      issues: [
+        error.message
+          || "The intermediate strict gate receipt cannot be verified.",
+      ],
+      repair: null,
+    };
+  }
+}
+
 function buildStoryWorkflowNextAction(context, story) {
   if (!story?.id) return null;
   const taskStartPath = path.join(context.sdlcRoot, "stories", story.id, "task-start.json");
@@ -37118,6 +38526,41 @@ function buildStoryWorkflowNextAction(context, story) {
     };
   }
   if (!selected) {
+    if (fs.existsSync(taskStartPath)) {
+      const taskStart = readProjectJson(context, taskStartPath);
+      if (
+        taskStart.kind === "task_start_receipt"
+        && taskStart.schema_version === "task-start-receipt:v2"
+        && taskStart.story_id === story.id
+        && taskStart.proposal_ref?.id
+      ) {
+        const assessmentId = normalizeId(taskStart.proposal_ref.id);
+        let assessmentState = "missing_workflow";
+        try {
+          const assessmentWorkflow = readAssessmentWorkflow(
+            context,
+            assessmentId,
+            { missingOk: true },
+          );
+          assessmentState = assessmentWorkflow?.state || "missing_workflow";
+        } catch {
+          assessmentState = "unreadable";
+        }
+        return {
+          kind: "continue_assessment",
+          reason: `assessment_${assessmentState}`,
+          label:
+            `Continue assessment ${assessmentId}: ${assessmentNextAction(assessmentState, assessmentId)}.`,
+          command: statusCliCommand(
+            "assessment", "proposal", "status", "--id", assessmentId,
+          ),
+          protected: true,
+          story_id: story.id,
+          assessment_id: assessmentId,
+          assessment_state: assessmentState,
+        };
+      }
+    }
     if (fs.existsSync(taskStartPath) || completedSteps.length > 0) {
       return {
         kind: "lifecycle_not_certifiable",
@@ -37146,7 +38589,7 @@ function buildStoryWorkflowNextAction(context, story) {
       };
     }
     const definitionId = stock ? "software-project" : definition.id;
-    const definitionVersion = stock ? "2" : definition.version;
+    const definitionVersion = stock ? "3" : definition.version;
     return {
       kind: "start_story_workflow",
       reason: "story_workflow_not_started",
@@ -37168,10 +38611,24 @@ function buildStoryWorkflowNextAction(context, story) {
   let instance;
   let effectiveDefinition;
   let events;
+  let integrity;
   try {
     ({ instance } = readCompletedWorkflowInstance(context, selected.entry));
     ({ effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance));
-    events = readWorkflowEvents(context, selected.entry);
+    const eventsPath = workflowEventsPath(context, selected.entry);
+    const releaseEventLock = acquireFileLock(`${eventsPath}.lock`);
+    try {
+      events = readWorkflowEvents(context, selected.entry);
+      integrity = inspectWorkflowRuntimeIntegrity(
+        context,
+        selected.entry,
+        instance,
+        effectiveDefinition,
+        events,
+      );
+    } finally {
+      releaseEventLock();
+    }
   } catch {
     return {
       kind: "inspect_story_workflow",
@@ -37183,12 +38640,7 @@ function buildStoryWorkflowNextAction(context, story) {
       workflow_instance_id: selected.entry,
     };
   }
-  const replay = replayWorkflowEvents({
-    instance,
-    effective_definition: effectiveDefinition,
-    events,
-  });
-  if (!replay.valid) {
+  if (!integrity.valid) {
     return {
       kind: "inspect_story_workflow",
       reason: "workflow_state_unreadable",
@@ -37199,7 +38651,11 @@ function buildStoryWorkflowNextAction(context, story) {
       workflow_instance_id: selected.entry,
     };
   }
-  const currentState = workflowCurrentState(replay, instance, effectiveDefinition);
+  const currentState = workflowCurrentState(
+    integrity.replay,
+    instance,
+    effectiveDefinition,
+  );
   if (!fs.existsSync(taskStartPath)) {
     return {
       kind: "start_available_work",
@@ -37218,10 +38674,16 @@ function buildStoryWorkflowNextAction(context, story) {
     if (finalReceipt.valid) return null;
     if (finalReceipt.exists) {
       return {
-        kind: "inspect_story_workflow",
+        kind: "recertify_lifecycle",
         reason: "final_lifecycle_receipt_invalid",
-        label: "The existing final lifecycle receipt is invalid or belongs to another workflow run.",
-        command: statusCliCommand("workflow", "instance", "status", "--id", selected.entry),
+        label:
+          "The final lifecycle receipt no longer matches current governed evidence; repair any reported evidence drift and reseal this exact story lifecycle.",
+        command: statusCliCommand(
+          "gate", "check",
+          "--strict",
+          "--story", story.id,
+          "--lifecycle-complete",
+        ),
         protected: true,
         story_id: story.id,
         workflow_instance_id: selected.entry,
@@ -37243,6 +38705,22 @@ function buildStoryWorkflowNextAction(context, story) {
         missing_release_evidence: releaseReadiness.missing,
       };
     }
+    const claimPath = path.join(context.sdlcRoot, "stories", story.id, "claim.json");
+    if (fs.existsSync(claimPath)) {
+      const claim = readProjectJson(context, claimPath);
+      if (claim.status === "active") {
+        return {
+          kind: "release_story_claim",
+          reason: "final_certification_requires_released_claim",
+          label: "Release the completed story claim before final lifecycle certification.",
+          command: statusCliCommand("story", "release", "--id", story.id),
+          protected: true,
+          story_id: story.id,
+          workflow_instance_id: selected.entry,
+          claimed_by: claim.agent || null,
+        };
+      }
+    }
     return {
       kind: "certify_lifecycle",
       reason: "workflow_terminal",
@@ -37259,16 +38737,37 @@ function buildStoryWorkflowNextAction(context, story) {
   const nextState = (effectiveDefinition.transitions || [])
     .find((transition) => transition.from === currentState)?.to || null;
   if (currentStepCompleted && nextState === configuredPhaseOrder(context).at(-1)) {
-    const strictPath = workflowStrictGateReceiptPath(context, story.id);
-    if (!fs.existsSync(strictPath)) {
+    const strictGate = currentStoryStrictGateReadiness(
+      context,
+      story.id,
+      instance,
+      effectiveDefinition,
+      integrity,
+      currentState,
+    );
+    if (!strictGate.ready) {
+      if (strictGate.repair) {
+        return {
+          ...strictGate.repair,
+          protected: true,
+          story_id: story.id,
+          workflow_instance_id: selected.entry,
+          strict_gate_issues: strictGate.issues,
+        };
+      }
       return {
         kind: "seal_strict_gate",
-        reason: "release_transition_needs_strict_gate",
-        label: "Seal the intermediate strict receipt before entering the release phase.",
+        reason: strictGate.reason === "missing"
+          ? "release_transition_needs_strict_gate"
+          : "release_transition_strict_gate_stale",
+        label: strictGate.reason === "missing"
+          ? "Seal the intermediate strict receipt before entering the release phase."
+          : "Re-run the intermediate strict gate because its receipt is invalid or older than current evidence.",
         command: statusCliCommand("gate", "check", "--strict", "--story", story.id),
         protected: true,
         story_id: story.id,
         workflow_instance_id: selected.entry,
+        strict_gate_issues: strictGate.issues,
       };
     }
   }
@@ -37304,6 +38803,18 @@ function buildStoryWorkflowNextAction(context, story) {
 
 function buildStatusNextAction(context, summary, orchestration, counts, project) {
   if (summary.pending_decisions > 0) {
+    for (const story of orchestration.stories.filter((item) =>
+      ["available", "claimed"].includes(item.orchestration_state))) {
+      const workflowNextAction = buildStoryWorkflowNextAction(context, story);
+      if ([
+        "seal_strict_gate",
+        "repair_strict_gate_evidence",
+        "repair_output_link",
+        "reapprove_output_template",
+      ].includes(workflowNextAction?.kind)) {
+        return workflowNextAction;
+      }
+    }
     return {
       kind: "review_decision",
       reason: "pending_human_decision",
@@ -37314,6 +38825,15 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
   }
   if (summary.blocked_work > 0) {
     const story = orchestration.stories.find((item) => item.orchestration_state === "blocked");
+    const workflowNextAction = story
+      ? buildStoryWorkflowNextAction(context, story)
+      : null;
+    if (
+      story?.lifecycle_source !== "story_record"
+      && workflowNextAction
+    ) {
+      return workflowNextAction;
+    }
     return {
       kind: "resolve_blocker",
       reason: "blocked_story",
@@ -37338,14 +38858,9 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
       story_id: story?.id || null,
     };
   }
-  const terminalWorkflowStories = orchestration.stories.filter((item) => {
-    if (item.orchestration_state !== "terminal") return false;
-    const probe = { errors: [] };
-    return Boolean(currentStoryBoundWorkflowInstance(context, item.id, probe));
-  });
   const operationalStories = orchestration.stories.filter((item) =>
     ["available", "claimed"].includes(item.orchestration_state));
-  for (const story of [...terminalWorkflowStories, ...operationalStories]) {
+  for (const story of operationalStories) {
     const workflowNextAction = buildStoryWorkflowNextAction(context, story);
     if (workflowNextAction) return workflowNextAction;
   }
@@ -37426,6 +38941,24 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Non serve ampliare l’ambito; esegui soltanto la transizione indicata.",
           next: "Avanza alla fase successiva.",
         },
+        repair_output_link: {
+          result: "Il risultato collegato non corrisponde più al file o alla prova corrente.",
+          impact: "Il gate strict resta bloccato finché il collegamento non viene rigenerato con fingerprint e verifica aggiornati.",
+          decision: "Conferma che il file corrente è quello da consegnare; non cambia l’ambito approvato.",
+          next: "Rigenera il collegamento indicato, poi riesegui il gate strict.",
+        },
+        repair_strict_gate_evidence: {
+          result: "Una o più prove correnti del progetto non superano più la validazione strict.",
+          impact: "Il workflow resta bloccato prima del release; il comando suggerito è diagnostico e mostrerà i blocker senza superarli.",
+          decision: "Correggi soltanto i record o i file indicati, senza ampliare l’ambito approvato.",
+          next: "Esegui la diagnosi strict, correggi i blocker elencati e solo dopo riesegui il gate.",
+        },
+        reapprove_output_template: {
+          result: "Il formato di output approvato è cambiato.",
+          impact: "La vecchia approvazione e i collegamenti basati su quel formato non sono più validi.",
+          decision: "Rivedi il formato corrente e approvalo esplicitamente solo se è quello desiderato.",
+          next: "Approva il template corrente, rigenera i collegamenti elencati e poi riesegui il gate strict.",
+        },
         seal_strict_gate: {
           result: "La validazione è completata; manca il controllo intermedio prima del release.",
           impact: "La ricevuta strict consente l’ingresso governato nella fase release.",
@@ -37438,11 +38971,29 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Eseguila solo quando release e rollback risultano verificati.",
           next: "Esegui la certificazione lifecycle-complete.",
         },
+        recertify_lifecycle: {
+          result: "La ricevuta finale esiste, ma non corrisponde più alle evidenze governate correnti.",
+          impact: "La story resta bloccata e non torna terminale finché un nuovo gate non verifica e sigilla lo stato attuale.",
+          decision: "Ripara soltanto le evidenze indicate dal gate; non ampliare l’ambito e non sostituire output certificati.",
+          next: "Esegui il gate lifecycle-complete mostrato: diagnosticherà eventuali problemi e risigillerà solo se tutto è valido.",
+        },
         complete_release_evidence: {
           result: "Il workflow è entrato in release, ma le prove finali non sono complete.",
           impact: "Il gate finale resta intenzionalmente bloccato finché delivery, trace e step di release non concordano.",
           decision: "Completa soltanto la consegna locale e le prove già approvate.",
           next: "Completa gli elementi di release indicati prima della certificazione.",
+        },
+        release_story_claim: {
+          result: "La consegna e le prove di release sono complete; resta aperta la prenotazione della story.",
+          impact: "La certificazione finale resta bloccata finché il lavoro completato risulta ancora assegnato come attivo.",
+          decision: "Rilascia soltanto la prenotazione della story; non cambia l’ambito e non pubblica nulla.",
+          next: "Rilascia la prenotazione, poi esegui la certificazione finale.",
+        },
+        continue_assessment: {
+          result: "Questa attività appartiene a una assessment governata.",
+          impact: "Scope, budget, verifiche e chiusura restano nel workflow della proposta approvata.",
+          decision: "Non creare un workflow software retroattivo; continua soltanto la assessment già autorizzata.",
+          next: "Controlla lo stato della proposta e segui il suo prossimo checkpoint.",
         },
         lifecycle_not_certifiable: {
           result: "Questo task legacy non ha un workflow collegato prima dell’avvio.",
@@ -37524,6 +39075,24 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "No scope expansion is needed; run only the indicated transition.",
           next: "Advance to the next phase.",
         },
+        repair_output_link: {
+          result: "The linked deliverable no longer matches the current file or verification evidence.",
+          impact: "The strict gate remains blocked until the link is regenerated with current fingerprints and verification.",
+          decision: "Confirm that the current file is the intended deliverable; this does not expand the approved scope.",
+          next: "Refresh the indicated output link, then run the strict gate again.",
+        },
+        repair_strict_gate_evidence: {
+          result: "One or more current project records no longer pass strict validation.",
+          impact: "The workflow remains blocked before release; the suggested command is diagnostic and will show blockers rather than pass them.",
+          decision: "Repair only the listed records or files without expanding the approved scope.",
+          next: "Run the strict diagnostic, repair the listed blockers, and only then run the gate again.",
+        },
+        reapprove_output_template: {
+          result: "The approved output format has changed.",
+          impact: "The prior approval and links bound to that format are no longer current.",
+          decision: "Review the current format and explicitly approve it only if it is the intended one.",
+          next: "Approve the current template, refresh the listed links, then run the strict gate again.",
+        },
         seal_strict_gate: {
           result: "Validation is complete; the intermediate release-entry check is pending.",
           impact: "Its strict receipt permits a governed transition into release.",
@@ -37536,11 +39105,29 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Run it only after release and rollback evidence are verified.",
           next: "Run lifecycle-complete certification.",
         },
+        recertify_lifecycle: {
+          result: "The final receipt exists, but it no longer matches the current governed evidence.",
+          impact: "The story remains blocked and cannot become terminal again until a new gate verifies and seals the current state.",
+          decision: "Repair only the evidence reported by the gate; do not expand scope or replace certified outputs.",
+          next: "Run the displayed lifecycle-complete gate; it diagnoses remaining issues and reseals only when everything is valid.",
+        },
         complete_release_evidence: {
           result: "The workflow has entered release, but final evidence is incomplete.",
           impact: "The final gate remains intentionally blocked until delivery, release trace, and release step agree.",
           decision: "Complete only the already approved local delivery and evidence.",
           next: "Complete the listed release evidence before certification.",
+        },
+        release_story_claim: {
+          result: "The delivery and release evidence are complete; the story reservation is still active.",
+          impact: "Final certification remains blocked while completed work is still claimed as active.",
+          decision: "Release only the story reservation; this does not change scope or publish anything.",
+          next: "Release the reservation, then run final certification.",
+        },
+        continue_assessment: {
+          result: "This work belongs to a governed assessment.",
+          impact: "Scope, budget, verification, and completion remain in the approved proposal workflow.",
+          decision: "Do not create a retroactive software workflow; continue only the already authorized assessment.",
+          next: "Inspect the proposal status and follow its next checkpoint.",
         },
         lifecycle_not_certifiable: {
           result: "This legacy task has no workflow bound before start.",
@@ -37684,21 +39271,44 @@ function buildOrchestrationSnapshot(context) {
   const stories = storyRecords
     .map((story) => {
       const entry = story.__folder_id;
+      const lifecycle = dependencyQuery.lifecycle_by_story.get(story.id || entry)
+        || effectiveStoryLifecycleProjection(context, story);
+      const projectedStory = {
+        ...story,
+        status: lifecycle.status,
+        phase: lifecycle.phase,
+      };
       const claim = claimByStory.get(entry) || null;
       const lastTrace = lastTraceByStory.get(story.id || entry) || null;
       const dependencyStatus = buildDependencyStatus(context, story.id || entry, dependencyQuery);
-      const blockers = inferStoryBlockers(context, story, claim, dependencyStatus);
+      const blockers = inferStoryBlockers(
+        context,
+        projectedStory,
+        claim,
+        dependencyStatus,
+        lifecycle,
+      );
       return {
         id: story.id || entry,
         title: story.title || entry,
-        status: story.status || "unknown",
-        phase: story.phase || "unknown",
+        status: lifecycle.status,
+        phase: lifecycle.phase,
+        record_status: story.status || "unknown",
+        record_phase: story.phase || "unknown",
+        lifecycle_source: lifecycle.source,
+        workflow_instance_id: lifecycle.workflow_instance_id,
         contract_id: story.contract_id || null,
         claim,
         last_trace: lastTrace,
         dependency_edges: dependencyStatus.edges,
         warnings: dependencyStatus.warnings,
-        orchestration_state: inferStoryOrchestrationState(context, story, claim, blockers),
+        orchestration_state: inferStoryOrchestrationState(
+          context,
+          projectedStory,
+          claim,
+          blockers,
+          lifecycle,
+        ),
         blockers,
       };
     })
@@ -37727,18 +39337,45 @@ function buildOrchestrationSnapshot(context) {
   };
 }
 
-function inferStoryOrchestrationState(context, story, claim, blockers = null) {
-  if (isTerminalStory(context, story)) {
+function inferStoryOrchestrationState(
+  context,
+  story,
+  claim,
+  blockers = null,
+  lifecycle = null,
+) {
+  const effectiveLifecycle = lifecycle
+    || effectiveStoryLifecycleProjection(context, story);
+  if (effectiveLifecycle.terminal) {
     return "terminal";
+  }
+  if (effectiveLifecycle.blocked) {
+    return "blocked";
   }
   if (claim && claim.status === "active") {
     return isClaimExpired(context, claim) ? "stale" : "claimed";
   }
-  return (blockers || inferStoryBlockers(context, story, claim)).length > 0 ? "blocked" : "available";
+  return (
+    blockers
+    || inferStoryBlockers(context, story, claim, null, effectiveLifecycle)
+  ).length > 0
+    ? "blocked"
+    : "available";
 }
 
-function inferStoryBlockers(context, story, claim, dependencyStatus = null) {
+function inferStoryBlockers(
+  context,
+  story,
+  claim,
+  dependencyStatus = null,
+  lifecycle = null,
+) {
   const blockers = [];
+  const effectiveLifecycle = lifecycle
+    || effectiveStoryLifecycleProjection(context, story);
+  if (effectiveLifecycle.blocked) {
+    blockers.push("invalid or unreadable final lifecycle receipt");
+  }
   if (story.id && story.__folder_id && story.id !== story.__folder_id) {
     blockers.push(`story id ${story.id} does not match folder ${story.__folder_id}`);
   }
@@ -38021,14 +39658,356 @@ function effectiveStoryLifecyclePolicy(context) {
   };
 }
 
-function isTerminalStory(context, story) {
-  const status = String(story?.status || "").toLowerCase();
+function terminalStoryStatuses(context) {
   return normalizeListValue(
     effectiveStoryLifecyclePolicy(context).terminal_statuses,
     Array.from(TERMINAL_STORY_STATUSES),
   )
     .map((item) => String(item).toLowerCase())
-    .includes(status);
+    .filter(Boolean);
+}
+
+function storyRecordLifecycleProjection(rawStatus, rawPhase, rawTerminal, workflowInstanceId = null) {
+  return {
+    status: rawStatus,
+    phase: rawPhase,
+    terminal: rawTerminal,
+    blocked: false,
+    source: "story_record",
+    workflow_instance_id: workflowInstanceId,
+  };
+}
+
+function blockedWorkflowLifecycleProjection(
+  rawStatus,
+  rawPhase,
+  source,
+  workflowInstanceId = null,
+) {
+  return {
+    status: rawStatus,
+    phase: rawPhase,
+    terminal: false,
+    blocked: true,
+    source,
+    workflow_instance_id: workflowInstanceId,
+  };
+}
+
+function validLegacyWorkflowFinalReceipt(context, storyId, receipt) {
+  try {
+    assertRecordSchema(
+      receipt,
+      "workflow-final-gate-receipt-v1.schema.json",
+      `Legacy final workflow gate receipt ${storyId}`,
+    );
+    const {
+      receipt_hash: receiptHash,
+      ...legacyHashSubject
+    } = receipt;
+    return (
+      hasValidWorkflowReceiptHash(receipt)
+      || receiptHash === computeStableHash(legacyHashSubject)
+    )
+      && receipt.story_id === storyId
+      && receipt.final_receipt_path
+        === toProjectPath(context, workflowFinalGateReceiptPath(context, storyId));
+  } catch {
+    return false;
+  }
+}
+
+function inspectModernWorkflowTaskStartBinding(context, storyId, instance) {
+  const taskStartPath = path.join(
+    context.sdlcRoot,
+    "stories",
+    storyId,
+    "task-start.json",
+  );
+  if (!fs.existsSync(taskStartPath)) {
+    return { valid: false, task_start: null, path: taskStartPath, hash: null };
+  }
+  try {
+    const taskStart = readProjectJson(context, taskStartPath);
+    assertRecordSchema(
+      taskStart,
+      "profile-task-start-receipt.schema.json",
+      `Task-start receipt for story ${storyId}`,
+    );
+    const workflowRef = taskStart.workflow_instance_ref;
+    const expectedInstancePath = toProjectPath(
+      context,
+      workflowInstancePath(context, instance.id),
+    );
+    return {
+      valid:
+        taskStart.kind === "profile_task_start_receipt"
+        && taskStart.schema_version === "profile-task-start-receipt:v2"
+        && taskStart.story_id === storyId
+        && workflowRef?.id === instance.id
+        && workflowRef?.path === expectedInstancePath
+        && workflowRef?.hash === instance.instance_hash,
+      task_start: taskStart,
+      path: taskStartPath,
+      hash: hashJsonFileValue(taskStart),
+    };
+  } catch {
+    return { valid: false, task_start: null, path: taskStartPath, hash: null };
+  }
+}
+
+function inspectStoryWorkflowLifecycleRuntime(context, selected, storyId) {
+  const { instance } = readCompletedWorkflowInstance(context, selected.entry);
+  if (instance.id !== selected.entry) {
+    return {
+      valid: false,
+      modern: false,
+      instance,
+      current_phase: null,
+      terminal: false,
+      event_count: null,
+    };
+  }
+  const binding = instance.metadata?.governance_binding || {};
+  const modern = Boolean(binding.strict_gate_receipt_path);
+  const expectedStrictPath = workflowStrictGateReceiptPath(context, storyId);
+  const expectedFinalPath = workflowFinalGateReceiptPath(context, storyId);
+  const strictPath = modern
+    ? resolveProjectFilePath(context, binding.strict_gate_receipt_path, {
+        mustExist: false,
+      })
+    : null;
+  const finalPath = binding.final_gate_receipt_path
+    ? resolveProjectFilePath(context, binding.final_gate_receipt_path, {
+        mustExist: false,
+      })
+    : null;
+  if (
+    binding.story_id !== storyId
+    || !finalPath
+    || path.resolve(finalPath) !== path.resolve(expectedFinalPath)
+    || (modern && path.resolve(strictPath) !== path.resolve(expectedStrictPath))
+  ) {
+    return {
+      valid: false,
+      modern: true,
+      instance,
+      current_phase: null,
+      terminal: false,
+      event_count: null,
+    };
+  }
+  const { effectiveDefinition } = loadEffectiveDefinitionForInstance(context, instance);
+  const eventsPath = workflowEventsPath(context, instance.id);
+  const releaseLock = acquireFileLock(`${eventsPath}.lock`);
+  let events;
+  let integrity;
+  try {
+    events = readWorkflowEvents(context, instance.id);
+    integrity = inspectWorkflowRuntimeIntegrity(
+      context,
+      instance.id,
+      instance,
+      effectiveDefinition,
+      events,
+    );
+  } finally {
+    releaseLock();
+  }
+  const currentPhase = integrity.valid
+    ? workflowCurrentState(integrity.replay, instance, effectiveDefinition)
+    : null;
+  const terminalState = (effectiveDefinition.states || [])
+    .find((state) => state.id === currentPhase);
+  return {
+    valid: integrity.valid,
+    modern,
+    instance,
+    current_phase: currentPhase,
+    event_count: events.length,
+    terminal:
+      terminalState?.terminal === true
+      && currentPhase === configuredPhaseOrder(context).at(-1),
+  };
+}
+
+function effectiveStoryLifecycleProjection(context, story) {
+  const rawStatus = String(story?.status || "unknown").toLowerCase();
+  const rawPhase = String(story?.phase || "unknown").toLowerCase();
+  const terminalStatuses = terminalStoryStatuses(context);
+  const rawTerminal = terminalStatuses.includes(rawStatus);
+  const storyId = String(story?.id || "").trim();
+  if (!storyId) {
+    return storyRecordLifecycleProjection(rawStatus, rawPhase, rawTerminal);
+  }
+
+  const receiptPath = workflowFinalGateReceiptPath(context, storyId);
+  const receiptExists = fs.existsSync(receiptPath);
+  let receipt = null;
+  if (receiptExists) {
+    try {
+      receipt = readProjectJson(context, receiptPath);
+    } catch {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "invalid_workflow_final_receipt",
+      );
+    }
+  }
+
+  const probe = { errors: [] };
+  const selected = currentStoryBoundWorkflowInstance(context, storyId, probe);
+  if (probe.errors.length > 0) {
+    return blockedWorkflowLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      "invalid_story_workflow",
+      selected?.entry || null,
+    );
+  }
+  let runtime = null;
+  try {
+    if (selected) runtime = inspectStoryWorkflowLifecycleRuntime(context, selected, storyId);
+  } catch {
+    return blockedWorkflowLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      "invalid_story_workflow",
+      selected?.entry || null,
+    );
+  }
+  if (runtime && !runtime.valid) {
+    return blockedWorkflowLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      "invalid_story_workflow",
+      selected.entry,
+    );
+  }
+  if (
+    runtime?.modern
+    && (
+      receiptExists
+      || runtime.event_count > 0
+      || fs.existsSync(path.join(context.sdlcRoot, "stories", storyId, "task-start.json"))
+    )
+  ) {
+    const taskStartBinding = inspectModernWorkflowTaskStartBinding(
+      context,
+      storyId,
+      runtime.instance,
+    );
+    if (!taskStartBinding.valid) {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "invalid_story_workflow",
+        selected.entry,
+      );
+    }
+    runtime.task_start_binding = taskStartBinding;
+  }
+
+  if (!receiptExists) {
+    if (!runtime?.modern) {
+      return storyRecordLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        rawTerminal,
+        selected?.entry || null,
+      );
+    }
+    if (runtime.terminal) {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "missing_workflow_final_receipt",
+        selected.entry,
+      );
+    }
+    if (rawTerminal) {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "story_workflow_lifecycle_conflict",
+        selected.entry,
+      );
+    }
+    return storyRecordLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      rawTerminal,
+      selected.entry,
+    );
+  }
+
+  if (receipt.schema_version === WORKFLOW_LEGACY_FINAL_GATE_RECEIPT_SCHEMA) {
+    if (
+      runtime?.modern
+      || !validLegacyWorkflowFinalReceipt(context, storyId, receipt)
+    ) {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "invalid_workflow_final_receipt",
+        selected?.entry || null,
+      );
+    }
+    return storyRecordLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      rawTerminal,
+      selected?.entry || null,
+    );
+  }
+  if (
+    receipt.schema_version !== WORKFLOW_FINAL_GATE_RECEIPT_SCHEMA
+    || !selected
+    || !runtime?.modern
+  ) {
+    return blockedWorkflowLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      "invalid_workflow_final_receipt",
+      selected?.entry || null,
+    );
+  }
+
+  try {
+    const finalReceipt = validCurrentWorkflowFinalReceipt(
+      context,
+      storyId,
+      runtime.instance,
+    );
+    if (!finalReceipt.valid) {
+      return blockedWorkflowLifecycleProjection(
+        rawStatus,
+        rawPhase,
+        "invalid_workflow_final_receipt",
+        runtime.instance.id,
+      );
+    }
+    return {
+      status: terminalStatuses.includes("done")
+        ? "done"
+        : terminalStatuses[0] || "done",
+      phase: finalReceipt.current_phase
+        || configuredPhaseOrder(context).at(-1)
+        || rawPhase,
+      terminal: true,
+      blocked: false,
+      source: "workflow_final_receipt",
+      workflow_instance_id: runtime.instance.id,
+    };
+  } catch {
+    return blockedWorkflowLifecycleProjection(
+      rawStatus,
+      rawPhase,
+      "invalid_workflow_final_receipt",
+      selected.entry,
+    );
+  }
 }
 
 function effectiveClaimPolicy(context) {
@@ -39885,7 +41864,12 @@ function validateRequirementLineage(context, report, storyId = null) {
   }
 }
 
-function validateContracts(context, report, contractIds = null) {
+function validateContracts(
+  context,
+  report,
+  contractIds = null,
+  validationContext = {},
+) {
   const contractsRoot = path.join(context.sdlcRoot, "contracts");
   const files = safeReadDir(contractsRoot).filter((name) => {
     if (!name.endsWith(".json")) {
@@ -39949,7 +41933,13 @@ function validateContracts(context, report, contractIds = null) {
     if (report.strict && contract.human_gate === true && !hasFreshApprovedContractApproval(contract)) {
       report.errors.push(`${label} approved human gate is stale or missing approved_content_hash; re-approve the contract`);
     }
-    validateContractOutputRefs(context, report, contract, label);
+    validateContractOutputRefs(
+      context,
+      report,
+      contract,
+      label,
+      validationContext,
+    );
     validateExecutionPolicy(context, contract, label, report);
     validateCapabilityBindings(context, contract, label, report);
     validateContractCapabilityRecommendations(context, report, contract, label);
@@ -40082,7 +42072,13 @@ function latestContractApproval(contract) {
     .at(-1);
 }
 
-function validateContractOutputRefs(context, report, contract, label) {
+function validateContractOutputRefs(
+  context,
+  report,
+  contract,
+  label,
+  validationContext = {},
+) {
   const refs = Array.isArray(contract.output_contract_refs) ? contract.output_contract_refs : [];
   const requiresCoverage = context.config.gate_policy?.strict_mode?.requires_output_contract_coverage !== false;
   if (report.strict && requiresCoverage && contract.story_id && refs.length === 0) {
@@ -40113,7 +42109,12 @@ function validateContractOutputRefs(context, report, contract, label) {
     }
   }
   const coverageScope = report.strict && requiresCoverage && contract.story_id
-    ? storyOutputCoverageScope(context, report, contract.story_id)
+    ? storyOutputCoverageScope(
+        context,
+        report,
+        contract.story_id,
+        validationContext.workflow || null,
+      )
     : null;
   const coverageSelection = selectRequiredOutputRefsForPhase(refs, coverageScope);
   for (const issue of coverageSelection.issues) {
@@ -40175,7 +42176,12 @@ function validateContractOutputRefs(context, report, contract, label) {
   }
 }
 
-function storyOutputCoverageScope(context, report, storyId) {
+function storyOutputCoverageScope(
+  context,
+  report,
+  storyId,
+  currentWorkflow = null,
+) {
   if (report.lifecycle_complete === true) {
     return {
       current_phase: configuredPhaseOrder(context).at(-1) || null,
@@ -40183,7 +42189,9 @@ function storyOutputCoverageScope(context, report, storyId) {
       require_all: true,
     };
   }
-  const workflow = deriveCurrentStoryWorkflowScope(context, storyId, report);
+  const workflow =
+    currentWorkflow
+    || deriveCurrentStoryWorkflowScope(context, storyId, report);
   if (!workflow) {
     // Legacy stories have no trustworthy phase cutoff. Keep every output due.
     return null;
@@ -40806,7 +42814,12 @@ function hasActorAttribution(actor) {
   return Boolean(actor && typeof actor === "object" && String(actor.id || "").trim());
 }
 
-function validateStory(context, storyId, report) {
+function validateStory(
+  context,
+  storyId,
+  report,
+  { skipChangedPathScope = false } = {},
+) {
   const storyDir = path.join(context.sdlcRoot, "stories", storyId);
   const storyPath = path.join(storyDir, "story.json");
   if (!fs.existsSync(storyPath)) {
@@ -40940,6 +42953,7 @@ function validateStory(context, storyId, report) {
   }
   if (
     report.strict
+    && !skipChangedPathScope
     && context.config.gate_policy?.strict_mode?.requires_write_scope_integrity !== false
     && storyRequirementProfiles.length > 0
   ) {
@@ -40990,10 +43004,11 @@ function validateStoryChangedPathsWithinRequirementScope(context, storyId, requi
   const committedPaths = String(
     execGit(context.root, ["diff", "--name-only", "--no-renames", `${baselineSha}..HEAD`, "--"]) || "",
   ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
-  const outsideApprovedScope = (filePath) => requirementProfiles.some((profile) => {
-    const allowedPaths = profile.constraints?.allowed_write_paths || [];
-    return allowedPaths.length === 0 || !pathMatchesApprovedWriteScope(filePath, allowedPaths);
-  });
+  const allowedWritePaths = [...new Set(requirementProfiles.flatMap((profile) =>
+    profile.constraints?.allowed_write_paths || []))];
+  const outsideApprovedScope = (filePath) =>
+    allowedWritePaths.length === 0
+    || !pathMatchesApprovedWriteScope(filePath, allowedWritePaths);
   const committedOutside = committedPaths
     .filter((filePath) => filePath !== SDLC_DIR && !filePath.startsWith(`${SDLC_DIR}/`))
     .filter(outsideApprovedScope);
@@ -41028,7 +43043,366 @@ function validateStoryChangedPathsWithinRequirementScope(context, storyId, requi
   report.checked.push(`story ${storyId} changed-path scope`);
 }
 
+function workflowStartTraceIndex(context) {
+  const cached = workflowStartTraceIndexCache.get(context);
+  if (cached) return cached;
+  const tracePath = path.join(context.sdlcRoot, "traces", "project.jsonl");
+  if (!fs.existsSync(tracePath)) {
+    const empty = { valid: true, error: null, by_story: new Map() };
+    workflowStartTraceIndexCache.set(context, empty);
+    return empty;
+  }
+  let snapshot;
+  try {
+    snapshot = withTraceIntegritySnapshot(
+      traceIntegrityOptions(context, tracePath),
+      ({ integrity, records }) => ({ integrity, records }),
+    );
+  } catch (error) {
+    const failed = { valid: false, error: error.message, by_story: new Map() };
+    workflowStartTraceIndexCache.set(context, failed);
+    return failed;
+  }
+  if (!snapshot.integrity.valid) {
+    const failed = {
+      valid: false,
+      error: "the project audit trace is invalid",
+      by_story: new Map(),
+    };
+    workflowStartTraceIndexCache.set(context, failed);
+    return failed;
+  }
+  const byStory = new Map();
+  const addStoryStart = (storyId, instanceId) => {
+    const normalizedStoryId = normalizeId(storyId);
+    const storyPath = path.join(
+      context.sdlcRoot,
+      "stories",
+      normalizedStoryId,
+      "story.json",
+    );
+    if (!fs.existsSync(storyPath)) return;
+    const instanceIds = byStory.get(normalizedStoryId) || new Set();
+    instanceIds.add(instanceId);
+    byStory.set(normalizedStoryId, instanceIds);
+  };
+  for (const entry of snapshot.records) {
+    const event = entry.valid === true ? entry.event : null;
+    if (
+      event?.action !== "workflow.instance.start"
+      || !Array.isArray(event.related)
+    ) {
+      continue;
+    }
+    try {
+      const instanceId = normalizeId(event.related[0]);
+      const explicitStoryId = event.workflow_story_id;
+      const instancePath = workflowInstancePath(context, instanceId);
+      const expectedEvidence = [
+        toProjectPath(context, instancePath),
+        toProjectPath(context, workflowEventsPath(context, instanceId)),
+        toProjectPath(context, workflowCheckpointPath(context, instanceId)),
+      ];
+      if (
+        event.story_id !== null
+        || event.type !== "implementation"
+        || event.outcome !== "ready"
+        || stableJson(event.evidence || []) !== stableJson(expectedEvidence)
+        || !Number.isFinite(Date.parse(String(event.created_at || "")))
+      ) {
+        throw new Error(
+          `workflow start trace ${event.id || instanceId} is not a canonical workflow start record`,
+        );
+      }
+
+      if (fs.existsSync(instancePath)) {
+        const instance = readProjectJson(context, instancePath);
+        if (
+          event.id !== `TR-WF-START-${String(instance.instance_hash || "").slice(0, 24)}`
+          || event.created_at !== instance.created_at
+        ) {
+          throw new Error(
+            `workflow start trace ${event.id || instanceId} does not match its immutable instance header`,
+          );
+        }
+        const definitionRef = instanceDefinitionReference(instance);
+        const definitionId = normalizeId(referenceId(definitionRef, "definition"));
+        const overlayRef = instanceOverlayReference(instance);
+        const overlayId = overlayRef
+          ? normalizeId(referenceId(overlayRef, "overlay"))
+          : null;
+        const expectedPrefix = [
+          instanceId,
+          definitionId,
+          ...(overlayId ? [overlayId] : []),
+        ];
+        if (
+          event.related.length < expectedPrefix.length
+          || expectedPrefix.some(
+            (relatedId, index) => event.related[index] !== relatedId,
+          )
+          || event.related.length > expectedPrefix.length + 1
+        ) {
+          throw new Error(
+            `workflow start trace ${event.id || instanceId} does not match its immutable instance references`,
+          );
+        }
+        const relatedStoryId = event.related.length === expectedPrefix.length + 1
+          ? normalizeId(event.related.at(-1))
+          : null;
+        if (explicitStoryId !== undefined && explicitStoryId !== null) {
+          const normalizedStoryId = normalizeId(explicitStoryId);
+          if (
+            relatedStoryId !== normalizedStoryId
+            || instance.metadata?.governance_binding?.story_id !== normalizedStoryId
+          ) {
+            throw new Error(
+              `workflow start trace ${event.id || instanceId} has a mismatched explicit story binding`,
+            );
+          }
+          addStoryStart(normalizedStoryId, instanceId);
+        } else if (relatedStoryId) {
+          addStoryStart(relatedStoryId, instanceId);
+        }
+        continue;
+      }
+
+      if (!/^TR-WF-START-[a-f0-9]{24}$/u.test(String(event.id || ""))) {
+        throw new Error(
+          `workflow start trace ${event.id || instanceId} has no canonical immutable identity`,
+        );
+      }
+      if (explicitStoryId !== undefined && explicitStoryId !== null) {
+        const normalizedStoryId = normalizeId(explicitStoryId);
+        if (event.related.at(-1) !== normalizedStoryId) {
+          throw new Error(
+            `workflow start trace ${event.id || instanceId} has a mismatched explicit story binding`,
+          );
+        }
+        addStoryStart(normalizedStoryId, instanceId);
+        continue;
+      }
+
+      // Trace records created before workflow_story_id was introduced still
+      // place a story binding last. When the instance itself is missing, that
+      // final relation is the only durable recovery evidence left.
+      if (event.related.length >= 3) {
+        addStoryStart(event.related.at(-1), instanceId);
+      }
+    } catch (error) {
+      const failed = {
+        valid: false,
+        error: error.message || "a workflow start trace has invalid binding metadata",
+        by_story: new Map(),
+      };
+      workflowStartTraceIndexCache.set(context, failed);
+      return failed;
+    }
+  }
+  const result = { valid: true, error: null, by_story: byStory };
+  workflowStartTraceIndexCache.set(context, result);
+  return result;
+}
+
+function workflowStartTraceCandidatesForStory(context, storyId, report) {
+  const traceIndex = workflowStartTraceIndex(context);
+  if (!traceIndex.valid) {
+    report.errors.push(
+      `Story ${storyId} cannot recover its workflow binding from the audit trace: ${traceIndex.error}`,
+    );
+    return [];
+  }
+  const instanceIds = traceIndex.by_story.get(storyId) || new Set();
+  const candidates = [];
+  for (const instanceId of instanceIds) {
+    const instancePath = workflowInstancePath(context, instanceId);
+    if (!fs.existsSync(instancePath)) {
+      report.errors.push(
+        `Story ${storyId} workflow start trace points to missing instance ${instanceId}`,
+      );
+      continue;
+    }
+    try {
+      candidates.push({
+        entry: instanceId,
+        instance: readProjectJson(context, instancePath),
+        selected_by: "workflow_start_trace",
+      });
+    } catch (error) {
+      report.errors.push(
+        `Story ${storyId} workflow start trace points to unreadable instance ${instanceId}: ${error.message}`,
+      );
+    }
+  }
+  return candidates;
+}
+
+function workflowStartTransactionIndex(context) {
+  const cached = workflowStartTransactionIndexCache.get(context);
+  if (cached) return cached;
+  const result = { global_errors: [], by_story: new Map() };
+  for (const fileName of safeReadDir(workflowInstanceStartTransactionsRoot(context))) {
+    if (!fileName.endsWith(".json")) continue;
+    const transactionPath = path.join(
+      workflowInstanceStartTransactionsRoot(context),
+      fileName,
+    );
+    let journal;
+    try {
+      journal = readProjectJson(context, transactionPath);
+      if (
+        journal?.transaction_hash !== workflowStartTransactionHash(journal)
+        || journal?.request?.intent_hash
+          !== workflowStartRequestHash(journal?.request || {})
+      ) {
+        throw new Error("its immutable transaction hash is invalid");
+      }
+    } catch (error) {
+      result.global_errors.push(
+        `interrupted workflow start ${fileName} is unreadable: ${error.message}`,
+      );
+      continue;
+    }
+    let effectiveDefinition;
+    try {
+      ({ effectiveDefinition } = loadEffectiveDefinitionForInstance(
+        context,
+        journal.instance,
+      ));
+      const errors = workflowStartTransactionErrors(
+        journal,
+        journal.request,
+        effectiveDefinition,
+      );
+      if (errors.length > 0) {
+        throw new Error(errors.join("; "));
+      }
+    } catch (caught) {
+      result.global_errors.push(
+        `interrupted workflow start ${fileName} is invalid: ${caught.message}`,
+      );
+      continue;
+    }
+    const storyId =
+      journal.instance?.metadata?.governance_binding?.story_id || null;
+    if (!storyId) continue;
+    const entries = result.by_story.get(storyId) || [];
+    entries.push({
+      instance_id: journal.request?.instance_id || fileName,
+      error: null,
+    });
+    result.by_story.set(storyId, entries);
+  }
+  workflowStartTransactionIndexCache.set(context, result);
+  return result;
+}
+
+function inspectInterruptedWorkflowStartsForStory(context, storyId, report) {
+  const index = workflowStartTransactionIndex(context);
+  for (const error of index.global_errors) {
+    report.errors.push(`Story ${storyId} cannot proceed while ${error}`);
+  }
+  for (const entry of index.by_story.get(storyId) || []) {
+    report.errors.push(
+      entry.error
+        ? `Story ${storyId} interrupted workflow start ${entry.instance_id} ${entry.error}`
+        : `Story ${storyId} has interrupted workflow start ${entry.instance_id}; repeat the exact workflow instance start command before task start or scheduling.`,
+    );
+  }
+}
+
 function currentStoryBoundWorkflowInstance(context, storyId, report) {
+  inspectInterruptedWorkflowStartsForStory(context, storyId, report);
+  let taskBoundCandidate = null;
+  let taskStart = null;
+  const taskStartPath = path.join(
+    context.sdlcRoot,
+    "stories",
+    storyId,
+    "task-start.json",
+  );
+  if (fs.existsSync(taskStartPath)) {
+    try {
+      taskStart = readProjectJson(context, taskStartPath);
+    } catch (error) {
+      report.errors.push(
+        `Story ${storyId} cannot select its task-bound workflow because task start is unreadable: ${error.message}`,
+      );
+      return null;
+    }
+    const profileTaskStart = taskStart?.kind === "profile_task_start_receipt";
+    const assessmentTaskStart = taskStart?.kind === "task_start_receipt";
+    try {
+      if (profileTaskStart) {
+        assertRecordSchema(
+          taskStart,
+          profileTaskStartReceiptSchemaName(taskStart),
+          `Task-start receipt for story ${storyId}`,
+        );
+      } else if (assessmentTaskStart) {
+        assertRecordSchema(
+          taskStart,
+          "task-start-receipt.schema.json",
+          `Assessment task-start receipt for story ${storyId}`,
+        );
+      } else {
+        fail(`Story ${storyId} has an unsupported task-start receipt kind.`);
+      }
+    } catch (error) {
+      report.errors.push(
+        `Story ${storyId} task-start receipt is invalid: ${error.message}`,
+      );
+      return null;
+    }
+    const taskWorkflowRef = profileTaskStart
+      ? taskStart.workflow_instance_ref || null
+      : null;
+    if (
+      profileTaskStart
+      && taskStart.schema_version === "profile-task-start-receipt:v2"
+      && !taskWorkflowRef
+    ) {
+      report.errors.push(
+        `Story ${storyId} task start is missing its required immutable workflow reference`,
+      );
+      return null;
+    }
+    if (taskWorkflowRef) {
+      try {
+        const instanceId = normalizeId(taskWorkflowRef.id);
+        const expectedPath = workflowInstancePath(context, instanceId);
+        if (
+          taskWorkflowRef.path !== toProjectPath(context, expectedPath)
+          || !fs.existsSync(expectedPath)
+        ) {
+          report.errors.push(
+            `Story ${storyId} task start points to a missing or non-canonical workflow instance`,
+          );
+          return null;
+        }
+        const instance = readProjectJson(context, expectedPath);
+        if (
+          instance.id !== instanceId
+          || taskWorkflowRef.hash !== instance.instance_hash
+        ) {
+          report.errors.push(
+            `Story ${storyId} task-bound workflow reference does not match its immutable instance`,
+          );
+          return null;
+        }
+        taskBoundCandidate = {
+          entry: instanceId,
+          instance,
+          selected_by: "task_start",
+        };
+      } catch (error) {
+        report.errors.push(
+          `Story ${storyId} task-bound workflow reference is invalid: ${error.message}`,
+        );
+        return null;
+      }
+    }
+  }
   const candidates = [];
   for (const entry of safeReadDir(workflowInstancesRoot(context))
     .sort((left, right) => left.localeCompare(right, "en"))) {
@@ -41053,13 +43427,43 @@ function currentStoryBoundWorkflowInstance(context, storyId, report) {
     }
     candidates.push({ entry, instance });
   }
-  if (candidates.length === 0) return null;
+  const tracedCandidates = workflowStartTraceCandidatesForStory(
+    context,
+    storyId,
+    report,
+  );
+  if (tracedCandidates.length > 0) {
+    const boundInstanceIds = new Set(candidates.map((candidate) => candidate.entry));
+    const traceOnlyCandidates = tracedCandidates.filter(
+      (candidate) => !boundInstanceIds.has(candidate.entry),
+    );
+    if (traceOnlyCandidates.length > 0) {
+      report.errors.push(
+        `Story ${storyId} workflow start trace no longer matches its immutable story binding`,
+      );
+      candidates.push(...traceOnlyCandidates);
+    }
+  }
+  if (candidates.length === 0) {
+    if (taskBoundCandidate) {
+      report.errors.push(
+        `Story ${storyId} task-bound workflow no longer has its immutable story binding`,
+      );
+    }
+    return taskBoundCandidate;
+  }
   // One story may retain older immutable runs. The current run is the newest
   // immutable instance; the stable id is the deterministic tie-breaker.
   candidates.sort((left, right) =>
     String(left.instance.created_at).localeCompare(String(right.instance.created_at), "en")
     || String(left.instance.id || left.entry).localeCompare(String(right.instance.id || right.entry), "en"));
-  return candidates.at(-1);
+  const selected = candidates.at(-1);
+  if (taskBoundCandidate && selected.entry !== taskBoundCandidate.entry) {
+    report.errors.push(
+      `Story ${storyId} current workflow does not match the exact instance bound by task start`,
+    );
+  }
+  return selected;
 }
 
 function validateCurrentStoryWorkflowCompletion(

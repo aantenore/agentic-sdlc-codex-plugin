@@ -18,7 +18,7 @@
 
 ## Technical summary
 
-Agentic SDLC 0.13.2 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.13.3 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -120,7 +120,7 @@ For implementation work, the order is deliberately linear:
 6. start the exact story-bound workflow before the task, then start the task once;
 7. implement and test, completing each phase before entering the next;
 8. after validation, seal the intermediate strict gate and enter `release`;
-9. complete the named PR or local release, record release evidence, then seal the final lifecycle gate.
+9. complete the named PR or local release, record release evidence, release the completed story claim, then seal the final lifecycle gate.
 
 Before showing the autonomy choices, Codex explains whether the most independent option can really be used. If this installation cannot digitally verify who approved the delivery, option 3 is reduced to **autonomy with checkpoints**; this is disclosed before you choose.
 
@@ -160,8 +160,8 @@ stages:
    append passing release evidence, complete the release step, smoke-test that exact result,
    and retain the declared rollback procedure. Push, PR creation, deployment,
    and production remain excluded.
-9. **Final lifecycle certification** — only after the release evidence and
-   terminal delivery close, run:
+9. **Final lifecycle certification** — only after the release evidence,
+   terminal delivery close, and release of the completed story claim, run:
 
    ```bash
    agentic-sdlc gate check --strict --story ST-TRIP-POLICY-001 --lifecycle-complete

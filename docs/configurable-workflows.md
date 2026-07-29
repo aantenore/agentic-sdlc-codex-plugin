@@ -65,7 +65,8 @@ transition guard. The intermediate receipt proves that current validation
 evidence is ready for its guarded transition, but it is not a final lifecycle
 certificate.
 After that transition, complete the exact delivery,
-append its passing release trace, and complete the release step. The lifecycle-complete
+append its passing release trace, complete the release step, and release the
+completed story claim. The lifecycle-complete
 gate replays the selected workflow instance, verifies its immutable header,
 event hashes, durable checkpoint, and matching audit-trace chain, and requires
 workflow start before task start, each phase entry before that phase's
@@ -73,8 +74,10 @@ completion, and each next entry after the prior completion. Entry into the
 configured final state must precede both release evidence and terminal
 delivery. Only then does it write
 `.sdlc/gates/<story-id>-final.json` as
-`workflow-final-gate-receipt:v2`. Historical v1 receipts remain readable for
-an already pinned legacy run, but only v2 carries the terminal workflow proof.
+`workflow-final-gate-receipt:v3`. Historical v1 receipts remain readable for
+an already pinned legacy run. Pre-freshness v2 receipts require explicit
+recertification; only v3 binds the terminal workflow and its current
+story-scoped freshness proof.
 
 The examples in this guide use the npm/package bin shim `agentic-sdlc`. A Codex
 plugin installation does not create that global executable; use

@@ -1548,6 +1548,23 @@ test("terminal stories cannot be claimed or scheduled and status counts story re
   const donePath = path.join(project, ".sdlc", "stories", "ST-DONE", "story.json");
   const doneStory = readJson(donePath);
   writeJson(donePath, { ...doneStory, status: "done", phase: "release" });
+  const legacyReceiptSubject = {
+    kind: "workflow_final_gate_receipt",
+    schema_version: "workflow-final-gate-receipt:v1",
+    status: "passed",
+    strict: true,
+    scope: "story",
+    story_id: "ST-DONE",
+    checked_at: new Date().toISOString(),
+    errors: [],
+    final_receipt_path: ".sdlc/gates/ST-DONE-final.json",
+  };
+  fs.mkdirSync(path.join(project, ".sdlc", "gates"), { recursive: true });
+  writeJson(path.join(project, legacyReceiptSubject.final_receipt_path), {
+    ...legacyReceiptSubject,
+    hash_algorithm: "sha256:stable-json:v1",
+    receipt_hash: computeStableHash(legacyReceiptSubject),
+  });
 
   mustFail(
     ["story", "claim", "--root", project, "--id", "ST-DONE", "--agent", "codex"],
@@ -1583,9 +1600,14 @@ test("status starts the stock story workflow and routes custom phases to an exac
   ]).stdout);
   assert.equal(stockStatus.next_action.kind, "start_story_workflow");
   assert.equal(stockStatus.next_action.definition_id, "software-project");
-  assert.equal(stockStatus.next_action.definition_version, "2");
+  assert.equal(stockStatus.next_action.definition_version, "3");
   assert.match(stockStatus.next_action.command, /^node /u);
   assert.match(stockStatus.next_action.command, /workflow instance start/u);
+  assert.match(
+    stockStatus.next_action.command,
+    /--definition software-project --definition-version 3/u,
+  );
+  assert.match(stockStatus.next_action.command, /--story ST-STOCK/u);
   assert.doesNotMatch(stockStatus.next_action.command, /^agentic-sdlc /u);
 
   const customProject = tmpProject("status-custom-workflow");
@@ -1608,6 +1630,47 @@ test("status starts the stock story workflow and routes custom phases to an exac
   assert.deepEqual(customStatus.next_action.configured_phase_order, config.phase_order);
   assert.match(customStatus.next_action.command, /^node /u);
   assert.match(customStatus.next_action.command, /workflow definition propose --help/u);
+});
+
+test("status continues an applied assessment instead of proposing an uncertifiable lifecycle", () => {
+  const project = tmpProject("status-applied-assessment");
+  initProject(project);
+  const assessmentId = "ASSESS-STATUS-CONTINUE";
+  prepareAssessmentApplyFixture(project, assessmentId);
+  mustRun([
+    "assessment",
+    "proposal",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    assessmentId,
+    ...humanApproval("Approve the exact status continuation fixture"),
+  ]);
+  mustRun([
+    "assessment",
+    "proposal",
+    "apply",
+    "--root",
+    project,
+    "--id",
+    assessmentId,
+    "--actor-type",
+    "agent",
+  ]);
+
+  const status = JSON.parse(mustRun([
+    "status", "--root", project, "--full", "--json",
+  ]).stdout);
+  assert.equal(status.next_action.kind, "continue_assessment");
+  assert.equal(status.next_action.assessment_id, assessmentId);
+  assert.equal(status.next_action.assessment_state, "running");
+  assert.equal(status.next_action.story_id, `ST-${assessmentId}`);
+  assert.match(
+    status.next_action.command,
+    new RegExp(`assessment proposal status --id ${assessmentId}`, "u"),
+  );
+  assert.notEqual(status.next_action.kind, "lifecycle_not_certifiable");
 });
 
 test("claim TTL is config-driven and legacy unbounded claims become stale", () => {
@@ -3010,6 +3073,25 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
   assert.equal(applied.application.proposal_hash, prepared.proposal.proposal_hash);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "requirements", "REQ-ASSESS-E2E.json")), true);
   assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-ASSESS-E2E", "task-start.json")), true);
+  const assessmentTaskStart = readJson(
+    path.join(project, ".sdlc", "stories", "ST-ASSESS-E2E", "task-start.json"),
+  );
+  assert.equal(assessmentTaskStart.kind, "task_start_receipt");
+  assert.equal(assessmentTaskStart.schema_version, "task-start-receipt:v2");
+  const projectStatusAfterApply = JSON.parse(mustRun([
+    "status", "--root", project, "--full", "--json",
+  ]).stdout);
+  const statusStoryAfterApply = projectStatusAfterApply.orchestration.stories
+    .find((item) => item.id === "ST-ASSESS-E2E");
+  assert.ok(statusStoryAfterApply);
+  assert.notEqual(statusStoryAfterApply.lifecycle_source, "invalid_story_workflow");
+  const orchestrationAfterApply = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  const orchestratedStoryAfterApply = orchestrationAfterApply.stories
+    .find((item) => item.id === "ST-ASSESS-E2E");
+  assert.ok(orchestratedStoryAfterApply);
+  assert.notEqual(orchestratedStoryAfterApply.lifecycle_source, "invalid_story_workflow");
   assert.equal(applied.context_optimization.observation.phase, "apply");
   assert.equal(applied.context_optimization.observation.budget_effect.usage_adjustment_applied, 0);
 
@@ -4623,7 +4705,7 @@ test("onboard rejects removing both the manifest and its marker from a new proje
     project,
     "--project-name",
     "Bootstrap Downgrade",
-  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.2.*require the completed bootstrap record.*No files were changed/s);
+  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.3.*require the completed bootstrap record.*No files were changed/s);
 
   assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
   assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
@@ -6888,15 +6970,31 @@ test("strict output validation does not read workflow phase scope when coverage 
     "contract-ST-NO-OUTPUT-COVERAGE-analysis",
     ...humanApproval("Approve the no-output-coverage brief"),
   ]);
+  const workflowInstanceId = "DELIVERY-ST-NO-OUTPUT-COVERAGE";
+  mustRun([
+    "workflow",
+    "instance",
+    "start",
+    "--root",
+    project,
+    "--id",
+    workflowInstanceId,
+    "--definition",
+    "software-project",
+    "--definition-version",
+    "3",
+    "--story",
+    "ST-NO-OUTPUT-COVERAGE",
+  ]);
   const brokenInstancePath = path.join(
     project,
     ".sdlc",
     "workflows",
     "instances",
-    "BROKEN-PHASE-SCOPE",
+    workflowInstanceId,
     "instance.json",
   );
-  fs.mkdirSync(path.dirname(brokenInstancePath), { recursive: true });
+  const intactInstance = fs.readFileSync(brokenInstancePath);
   fs.writeFileSync(brokenInstancePath, "{not-json\n");
   const storyPath = path.join(
     project,
@@ -6922,8 +7020,52 @@ test("strict output validation does not read workflow phase scope when coverage 
   ], /failed|blocking|requires/iu);
   assert.doesNotMatch(
     `${gate.stdout}\n${gate.stderr}`,
-    /cannot select its current workflow while instance BROKEN-PHASE-SCOPE/iu,
+    new RegExp(`cannot select its current workflow while instance ${workflowInstanceId}`, "iu"),
   );
+
+  fs.writeFileSync(brokenInstancePath, intactInstance);
+  const readyStory = readJson(storyPath);
+  readyStory.phase = "discovery";
+  readyStory.status = "ready";
+  writeJson(storyPath, readyStory);
+  const strictReceiptPath = path.join(
+    project,
+    ".sdlc",
+    "gates",
+    "ST-NO-OUTPUT-COVERAGE-strict.json",
+  );
+  const passedGate = JSON.parse(mustRun([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--strict",
+    "--story",
+    "ST-NO-OUTPUT-COVERAGE",
+    "--json",
+  ]).stdout);
+  assert.equal(passedGate.schema_version, "workflow-strict-gate-receipt:v2");
+  assert.equal(passedGate.workflow_scope.instance_id, workflowInstanceId);
+  assert.equal(passedGate.workflow_scope.current_phase, "discovery");
+  assert.equal(fs.existsSync(strictReceiptPath), true);
+
+  fs.unlinkSync(strictReceiptPath);
+  fs.writeFileSync(brokenInstancePath, "{not-json\n");
+  const corruptWorkflowGate = mustFail([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--strict",
+    "--story",
+    "ST-NO-OUTPUT-COVERAGE",
+    "--json",
+  ], new RegExp(`cannot select its current workflow while instance ${workflowInstanceId}`, "iu"));
+  assert.match(
+    `${corruptWorkflowGate.stdout}\n${corruptWorkflowGate.stderr}`,
+    new RegExp(`cannot select its current workflow while instance ${workflowInstanceId}`, "iu"),
+  );
+  assert.equal(fs.existsSync(strictReceiptPath), false);
 });
 
 test("capability binding files cannot come from derived cache directories", () => {
@@ -7676,6 +7818,140 @@ test("dependency graph blocks orchestration and strict gate until upstream is sa
   const storyData = readJson(storyPath);
   writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation" });
   mustFail(["gate", "check", "--root", project, "--story", "ST-002", "--strict"], /depends on ST-001/);
+});
+
+test("invalid lifecycle receipt cannot satisfy a lifecycle dependency from raw story state", () => {
+  const project = tmpProject("dependency-invalid-lifecycle");
+  initProject(project);
+  story(project, "ST-UPSTREAM");
+  story(project, "ST-DOWNSTREAM");
+
+  const upstreamPath = path.join(project, ".sdlc", "stories", "ST-UPSTREAM", "story.json");
+  writeJson(upstreamPath, {
+    ...readJson(upstreamPath),
+    status: "validation",
+    phase: "validation",
+  });
+  const gatesRoot = path.join(project, ".sdlc", "gates");
+  fs.mkdirSync(gatesRoot, { recursive: true });
+  writeJson(path.join(gatesRoot, "ST-UPSTREAM-final.json"), {
+    kind: "workflow_final_gate_receipt",
+    schema_version: "workflow-final-gate-receipt:v2",
+    status: "passed",
+    strict: true,
+    scope: "story",
+    story_id: "ST-UPSTREAM",
+  });
+
+  mustRun([
+    "dependency",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "DEP-INVALID-LIFECYCLE",
+    "--edge",
+    "ST-DOWNSTREAM:ST-UPSTREAM:blocks:implementation:validated",
+  ]);
+  mustRun([
+    "dependency",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "DEP-INVALID-LIFECYCLE",
+    ...humanApproval("Approved invalid lifecycle dependency regression"),
+  ]);
+
+  const status = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  const upstream = status.stories.find((item) => item.id === "ST-UPSTREAM");
+  const downstream = status.stories.find((item) => item.id === "ST-DOWNSTREAM");
+  assert.equal(upstream.orchestration_state, "blocked");
+  assert.match(upstream.blockers.join("\n"), /final lifecycle receipt/u);
+  assert.equal(downstream.orchestration_state, "blocked");
+  assert.ok(downstream.blockers.some((blocker) => blocker.includes("depends on ST-UPSTREAM")));
+});
+
+test("blocked upstream lifecycle invalidates hard artifact and contract dependencies", () => {
+  const project = tmpProject("dependency-blocked-hard-evidence");
+  initProject(project);
+  createStrictReadyStory(project, "ST-UPSTREAM");
+  const dependencies = [
+    {
+      id: "DEP-BLOCKED-ARTIFACT",
+      storyId: "ST-ARTIFACT-CONSUMER",
+      type: "requires_artifact",
+      state: "artifact_linked",
+    },
+    {
+      id: "DEP-BLOCKED-CONTRACT",
+      storyId: "ST-CONTRACT-CONSUMER",
+      type: "requires_contract",
+      state: "contract_approved",
+    },
+  ];
+  for (const dependency of dependencies) {
+    story(project, dependency.storyId);
+    mustRun([
+      "dependency",
+      "propose",
+      "--root",
+      project,
+      "--id",
+      dependency.id,
+      "--edge",
+      `${dependency.storyId}:ST-UPSTREAM:${dependency.type}:design:${dependency.state}`,
+    ]);
+    mustRun([
+      "dependency",
+      "approve",
+      "--root",
+      project,
+      "--id",
+      dependency.id,
+      ...humanApproval(`Approved ${dependency.type} blocked-upstream regression`),
+    ]);
+  }
+
+  const ready = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  for (const dependency of dependencies) {
+    assert.equal(
+      ready.stories.find((item) => item.id === dependency.storyId)
+        .orchestration_state,
+      "available",
+    );
+  }
+
+  const gatesRoot = path.join(project, ".sdlc", "gates");
+  fs.mkdirSync(gatesRoot, { recursive: true });
+  writeJson(path.join(gatesRoot, "ST-UPSTREAM-final.json"), {
+    kind: "workflow_final_gate_receipt",
+    schema_version: "workflow-final-gate-receipt:v2",
+    status: "passed",
+    strict: true,
+    scope: "story",
+    story_id: "ST-UPSTREAM",
+  });
+
+  const blocked = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  const upstream = blocked.stories.find((item) => item.id === "ST-UPSTREAM");
+  assert.equal(upstream.orchestration_state, "blocked");
+  assert.match(upstream.blockers.join("\n"), /final lifecycle receipt/u);
+  for (const dependency of dependencies) {
+    const consumer = blocked.stories.find((item) =>
+      item.id === dependency.storyId);
+    assert.equal(consumer.orchestration_state, "blocked");
+    assert.ok(consumer.blockers.some((blocker) =>
+      blocker.includes(
+        `(${dependency.type}, design, requires ${dependency.state})`,
+      )));
+  }
 });
 
 test("orchestration never satisfies a dependency from a story whose folder and ID differ", () => {

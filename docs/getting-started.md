@@ -65,7 +65,8 @@ For implementation work, Codex follows one visible order:
 9. **Finish and certify at the named destination**
    Only after entering `release`, Codex creates or updates the one approved PR,
    or completes the local-only release, release trace, release step, and smoke
-   test. It then runs the distinct lifecycle-complete gate. Merge, remote
+   test. It releases the completed story claim, then runs the distinct
+   lifecycle-complete gate. Merge, remote
    deployment, and production remain separate unless explicitly included and
    approved.
 
@@ -97,14 +98,14 @@ stage understandable before moving to the next:
 | Implementation | Only the approved source, configuration, test, and documentation changes | The implementation matches the requirement and contract |
 | Test and validation | The exact test command, latest outcome, evidence location, and any failed or skipped check | The latest required test and output verification pass; an older success cannot hide a newer failure |
 | Release entry | The ordinary strict validation receipt and the transition into `release` | Validation is complete before release entry; no release trace or delivery close exists yet |
-| Local release | Exact local destination, passing release trace, completed release step, terminal `released` status, successful smoke evidence, and usable rollback | All release evidence occurs after entry into `release`; push, PR, deployment, and production remain excluded |
+| Local release | Exact local destination, passing release trace, completed release step, terminal `released` status, successful smoke evidence, usable rollback, and released story claim | All release evidence occurs after entry into `release`; no active claim can race final certification; push, PR, deployment, and production remain excluded |
 | Final certification | One strict lifecycle result bound to this story and its terminal delivery | Every configured phase and current canonical record passes together |
 
 After validation is complete, Codex runs the ordinary strict check and uses its
 distinct intermediate receipt to move the story-bound workflow into its
 terminal `release` phase. Only then does it perform the local release, append
 the passing release trace, complete the release step, and close the delivery.
-After those records exist, it runs:
+After those records exist, Codex releases the completed story claim and runs:
 
 ```bash
 node <plugin-root>/bin/agentic-sdlc.mjs gate check \

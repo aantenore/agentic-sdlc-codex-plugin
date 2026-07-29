@@ -12,6 +12,7 @@
     "lifecycle_complete",
     "certification_level",
     "lifecycle_workflow",
+    "freshness_proof",
     "story_id",
     "checked_at",
     "errors",
@@ -21,7 +22,7 @@
   ],
   "properties": {
     "kind": { "const": "workflow_final_gate_receipt" },
-    "schema_version": { "const": "workflow-final-gate-receipt:v2" },
+    "schema_version": { "const": "workflow-final-gate-receipt:v3" },
     "status": { "const": "passed" },
     "strict": { "const": true },
     "scope": { "const": "story" },
@@ -129,6 +130,184 @@
         "delivery_closed_at": { "type": "string", "format": "date-time" }
       }
     },
+    "freshness_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "story_id",
+        "workflow_instance_id",
+        "governed_files",
+        "output_registry_projection",
+        "local_release_root",
+        "local_release_scope",
+        "git_scope",
+        "hash_algorithm",
+        "proof_hash"
+      ],
+      "properties": {
+        "schema_version": { "const": "workflow-final-freshness-proof:v1" },
+        "story_id": { "type": "string", "minLength": 1 },
+        "workflow_instance_id": { "type": "string", "minLength": 1 },
+        "governed_files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/file_ref" }
+        },
+        "output_registry_projection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^\\.sdlc/output-contracts/registry\\.json#story=[A-Za-z0-9._-]+$"
+            },
+            "sha256": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "local_release_scope": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "present",
+              "kind",
+              "file_count",
+              "entry_count",
+              "total_bytes",
+              "tree_hash"
+            ],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "present": { "type": "boolean" },
+              "kind": { "enum": ["missing", "regular", "directory"] },
+              "file_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+              "entry_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+              "total_bytes": { "type": "integer", "minimum": 0, "maximum": 536870912 },
+              "tree_hash": { "$ref": "#/$defs/hash" }
+            }
+          }
+        },
+        "local_release_root": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "present",
+                "kind",
+                "real_path",
+                "device",
+                "inode",
+                "mode"
+              ],
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "present": { "type": "boolean" },
+                "kind": { "enum": ["missing", "directory"] },
+                "real_path": {
+                  "oneOf": [
+                    { "type": "null" },
+                    { "type": "string", "minLength": 1 }
+                  ]
+                },
+                "device": {
+                  "oneOf": [
+                    { "type": "null" },
+                    { "type": "string", "minLength": 1 }
+                  ]
+                },
+                "inode": {
+                  "oneOf": [
+                    { "type": "null" },
+                    { "type": "string", "minLength": 1 }
+                  ]
+                },
+                "mode": {
+                  "oneOf": [
+                    { "type": "null" },
+                    { "type": "integer", "minimum": 0 }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "git_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "available",
+            "baseline_head_sha",
+            "scoped_head_tree_hash",
+            "scoped_changes"
+          ],
+          "properties": {
+            "available": { "type": "boolean" },
+            "baseline_head_sha": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^[a-f0-9]{40,64}$" }
+              ]
+            },
+            "scoped_head_tree_hash": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/hash" }
+              ]
+            },
+            "scoped_changes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "status",
+                  "file_type",
+                  "mode",
+                  "content_sha256",
+                  "committed_since_task_start",
+                  "workspace_status"
+                ],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "status": { "type": "string" },
+                  "file_type": {
+                    "enum": ["regular", "symlink", "missing"]
+                  },
+                  "mode": {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "type": "integer", "minimum": 0 }
+                    ]
+                  },
+                  "content_sha256": {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "#/$defs/hash" }
+                    ]
+                  },
+                  "committed_since_task_start": { "type": "boolean" },
+                  "workspace_status": {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "type": "string" }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "hash_algorithm": { "const": "sha256:stable-json:v1" },
+        "proof_hash": { "$ref": "#/$defs/hash" }
+      }
+    },
     "story_id": { "type": "string", "minLength": 1 },
     "checked_at": { "type": "string", "format": "date-time" },
     "errors": {
@@ -146,6 +325,36 @@
     "hash": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "file_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "path",
+        "present",
+        "file_type",
+        "mode",
+        "sha256"
+      ],
+      "properties": {
+        "category": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "present": { "type": "boolean" },
+        "file_type": { "enum": ["regular", "directory", "missing"] },
+        "mode": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/hash" }
+          ]
+        }
+      }
     }
   },
   "additionalProperties": true
