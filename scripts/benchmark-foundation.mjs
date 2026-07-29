@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { discoverBaselineSourcePaths } from "../lib/baseline-source-discovery.mjs";
 import { openCanonicalStore } from "../lib/canonical-store.mjs";
+import { assertSupportedNodeRuntime } from "../lib/runtime-support.mjs";
 
 export const ENTERPRISE_FOUNDATION_FIXTURE_SCHEMA = "enterprise-foundation-fixture:v1";
 export const ENTERPRISE_FOUNDATION_BENCHMARK_SCHEMA = "enterprise-foundation-benchmark:v1";
@@ -512,13 +513,6 @@ function roundMilliseconds(value) {
   return Number(value.toFixed(3));
 }
 
-function assertSupportedNodeRuntime() {
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 18 || (major === 18 && minor < 18)) {
-    throw new Error(`Node.js 18.18 or newer is required; found ${process.versions.node}`);
-  }
-}
-
 function parseArguments(argv) {
   const options = { scale: {} };
   const scaleFlags = new Map([
@@ -578,6 +572,7 @@ function isMainModule() {
 
 if (isMainModule()) {
   try {
+    assertSupportedNodeRuntime();
     const options = parseArguments(process.argv.slice(2));
     const result = runFoundationBenchmark(options);
     writeResult(result);

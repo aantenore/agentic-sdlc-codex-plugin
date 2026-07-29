@@ -13,6 +13,7 @@ import {
   main,
   parseTestConcurrency,
 } from "../../scripts/run-test-suite.mjs";
+import { NODE_ENGINE_RANGE } from "../../lib/runtime-support.mjs";
 
 const PROJECT_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -45,12 +46,12 @@ test("test concurrency rejects malformed or non-positive values", () => {
   );
 });
 
-test("npm test uses the Node 18.18-compatible programmatic runner", () => {
+test("npm test uses the supported bounded programmatic runner", () => {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(PROJECT_ROOT, "package.json"), "utf8"),
   );
 
-  assert.equal(packageJson.engines.node, ">=18.18");
+  assert.equal(packageJson.engines.node, NODE_ENGINE_RANGE);
   assert.equal(packageJson.scripts.test, "node scripts/run-test-suite.mjs");
   assert.doesNotMatch(JSON.stringify(packageJson.scripts), /--test-concurrency(?:=|\s)/u);
 });

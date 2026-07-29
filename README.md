@@ -18,7 +18,7 @@
 
 ## Technical summary
 
-Agentic SDLC 0.13.4 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
+Agentic SDLC 0.13.5 gives Codex a guided way to understand an existing software project, deliver verified work, and explain its recorded lineage visually. The normal experience is intentionally simple: Codex explains what it inferred, proposes the work in plain language, creates the requested real file, verifies it, and returns an auditable result.
 
 Project state stays in the target repository under `.sdlc/`. The plugin installation contains reusable skills, templates, schemas, the cross-platform Node.js CLI, and the build-free Change Observatory UI.
 
@@ -40,6 +40,9 @@ You talk to Codex in normal language. Codex turns that request into structured i
 - [Configurable Workflows](docs/configurable-workflows.md) — select a governed process, customize labels safely, and keep running history pinned and append-only.
 
 ## Quick Start
+
+Runtime prerequisite: **Node.js 18.20.3–18.x, 20.12.0–20.x, or 21.6.0+**.
+Earlier releases in those lines contain an upstream native shutdown livelock.
 
 Install from the `aantenore` source repository. Keep this checkout separate from the generated personal-plugin directory:
 
