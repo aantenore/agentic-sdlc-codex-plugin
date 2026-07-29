@@ -1427,7 +1427,11 @@ function workflowFinalFreshnessReferencedPaths(
 
 function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
   const targetPath = path.resolve(String(rawPath));
-  if (!fs.existsSync(targetPath)) {
+  let stat;
+  try {
+    stat = fs.lstatSync(targetPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
     return {
       path: targetPath,
       present: false,
@@ -1438,7 +1442,6 @@ function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
       tree_hash: computeStableHash([]),
     };
   }
-  const stat = fs.lstatSync(targetPath);
   if (stat.isSymbolicLink()) {
     fail(`Local release freshness target cannot be a symlink: ${targetPath}`);
   }
@@ -1459,7 +1462,23 @@ function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
           mode: entryStat.mode & 0o7777,
           filePath: entryPath,
         });
-        for (const name of fs.readdirSync(entryPath).sort()) {
+        if (entries.length > 10_000) {
+          fail(`Local release freshness target exceeds 10000 entries: ${targetPath}`);
+        }
+        const names = [];
+        const directory = fs.opendirSync(entryPath);
+        try {
+          let child;
+          while ((child = directory.readSync()) !== null) {
+            names.push(child.name);
+            if (entries.length + names.length > 10_000) {
+              fail(`Local release freshness target exceeds 10000 entries: ${targetPath}`);
+            }
+          }
+        } finally {
+          directory.closeSync();
+        }
+        for (const name of names.sort()) {
           visit(
             path.join(entryPath, name),
             relativePath ? `${relativePath}/${name}` : name,
@@ -1476,15 +1495,15 @@ function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
         mode: entryStat.mode & 0o7777,
         filePath: entryPath,
       });
+      if (entries.length > 10_000) {
+        fail(`Local release freshness target exceeds 10000 entries: ${targetPath}`);
+      }
     };
     visit(targetPath, "");
     return entries;
   };
   const snapshotOnce = () => {
     const structure = collectStructure();
-    if (structure.length > 10_000) {
-      fail(`Local release freshness target exceeds 10000 entries: ${targetPath}`);
-    }
     const entries = [];
     let totalBytes = 0;
     for (const entry of structure) {
@@ -1498,7 +1517,8 @@ function workflowFinalFreshnessLocalPathSnapshot(rawPath) {
         });
         continue;
       }
-      const snapshot = readStableRegularFileBuffer(entry.filePath, boundaryRoot);
+      const remainingBytes = (512 * 1024 * 1024) - totalBytes;
+      const snapshot = readStableRegularFileDigest(entry.filePath, boundaryRoot, remainingBytes);
       totalBytes += snapshot.size_bytes;
       if (totalBytes > 512 * 1024 * 1024) {
         fail(`Local release freshness target exceeds 512 MiB: ${targetPath}`);
@@ -13588,6 +13608,17 @@ function deliveryExecutionRoot(context, profileId) {
   return path.join(autonomyExecutionsRoot(context), normalizeId(profileId));
 }
 
+function deliveryActionAttemptsRoot(context, profileId) {
+  return path.join(deliveryExecutionRoot(context, profileId), "attempts");
+}
+
+function deliveryActionAttemptPath(context, profileId, attemptId) {
+  return path.join(
+    deliveryActionAttemptsRoot(context, profileId),
+    `${normalizeId(attemptId)}.json`,
+  );
+}
+
 function deliveryStartReceiptPath(context, profileId) {
   return path.join(deliveryExecutionRoot(context, profileId), "start.json");
 }
@@ -15086,6 +15117,9 @@ function buildDeliveryActionDetails(context, profile, action, runtimeTarget, opt
     if (action === "release.local" && profile.local_release_target.data_migration) {
       details.data_migration_sequence = requireReversibleDataReleaseSequence(context, profile);
     }
+    if (action === "release.local") {
+      details.local_release_integrity = localReleaseIntegrityAttestation(context, profile);
+    }
     return details;
   }
   const observedPaths = pullRequestChangedPaths(context, runtimeTarget, action);
@@ -15800,12 +15834,64 @@ function normalizeSmokeTestCommand(value) {
     fail("Smoke test JSON must be a non-empty array of non-empty strings.");
   }
   const executable = path.basename(argv[0]).toLowerCase();
-  if (["sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"].includes(executable)) {
+  if ([
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "fish",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+  ].includes(executable)) {
     fail(`Smoke test shell executable '${argv[0]}' is not allowed; use a direct argv command.`);
   }
-  if (["node", "python", "python3", "ruby", "perl"].includes(executable)
-      && argv.slice(1).some((item) => ["-e", "--eval", "-c"].includes(item))) {
+  if (["env", "xargs", "nice", "nohup", "arch", "xcrun"].includes(executable)) {
+    fail(
+      `Smoke test dispatcher '${argv[0]}' is not allowed; invoke the reviewed executable directly.`,
+    );
+  }
+  if (
+    /^(?:node(?:js)?|python(?:\d+(?:\.\d+)*)?|ruby|perl|php)(?:[-.]\d.*)?$/u.test(executable)
+    && argv.slice(1).some((item) =>
+      /^(?:-e|--eval|-c|--print|-p)(?:=|.+)?$/u.test(String(item)))
+  ) {
     fail(`Smoke test inline code execution is not allowed for ${argv[0]}.`);
+  }
+  if (["npx", "npx.cmd", "npx.exe", "bunx"].includes(executable)) {
+    fail(
+      `Smoke test package dispatcher '${argv[0]}' is not allowed; run a reviewed package script instead.`,
+    );
+  }
+  if ([
+    "npm",
+    "npm.cmd",
+    "npm.exe",
+    "pnpm",
+    "pnpm.cmd",
+    "pnpm.exe",
+    "yarn",
+    "yarn.cmd",
+    "yarn.exe",
+    "bun",
+  ].includes(executable)) {
+    const operation = String(argv[1] || "").toLowerCase();
+    if (
+      !(
+        operation === "test"
+        || (operation === "run" && typeof argv[2] === "string" && !argv[2].startsWith("-"))
+      )
+    ) {
+      fail(
+        `Package-manager smoke test '${argv[0]}' must use 'test' or 'run <reviewed-script>'.`,
+      );
+    }
   }
   return stableJson(argv);
 }
@@ -15911,20 +15997,63 @@ function validateLocalSmokeCommandBoundary(cwd, argv) {
   }
 }
 
-function runApprovedLocalSmokeTests(profile) {
+function stableLocalSmokeExecutableSnapshot(filePath) {
+  const firstDigest = readStableRegularFileDigest(
+    filePath,
+    path.dirname(filePath),
+    512 * 1024 * 1024,
+  );
+  const prefix = readStableRegularFilePrefix(filePath, path.dirname(filePath), 4096);
+  const secondDigest = readStableRegularFileDigest(
+    filePath,
+    path.dirname(filePath),
+    512 * 1024 * 1024,
+  );
+  if (stableJson(firstDigest) !== stableJson(secondDigest)) {
+    fail(`Local smoke executable changed while being attested: ${filePath}.`);
+  }
+  const firstLine = prefix.toString("utf8").split(/\r?\n/u, 1)[0] || "";
+  return {
+    ...firstDigest,
+    shebang: firstLine.startsWith("#!") ? firstLine.slice(2).trim() : null,
+  };
+}
+
+function runApprovedLocalSmokeTests(profile, authorizedPolicy) {
   const cwd = approvedLocalSmokeCwd(profile);
-  return (profile.local_release_target.smoke_tests || []).map((canonicalCommand) => {
-    const argv = JSON.parse(canonicalCommand);
+  const currentPolicy = localSmokeSandboxPolicyAttestation(profile);
+  if (
+    !hashBoundRecordIsValid(authorizedPolicy, "policy_hash")
+    || stableJson(currentPolicy) !== stableJson(authorizedPolicy)
+  ) {
+    fail(
+      "The exact smoke launcher, runtime executable, sandbox, environment, plugin build, or host "
+      + "capability changed after release.local authorization; request a fresh release checkpoint.",
+    );
+  }
+  return authorizedPolicy.launchers.map((launcher) => {
+    const argv = launcher.command;
     validateLocalSmokeCommandBoundary(cwd, argv);
-    const sandbox = localSmokeSandboxCommand(cwd, argv);
+    validateLocalSmokePayloadBindingsBeforeSpawn(launcher);
+    if (
+      !hashBoundRecordIsValid(launcher, "launcher_hash")
+      || stableLocalSmokeExecutableSnapshot(launcher.wrapper_executable).sha256
+        !== launcher.wrapper_executable_sha256
+      || stableLocalSmokeExecutableSnapshot(launcher.command_executable).sha256
+        !== launcher.command_executable_sha256
+      || stableLocalSmokeExecutableSnapshot(launcher.runtime_executable).sha256
+        !== launcher.runtime_executable_sha256
+    ) {
+      fail("An authorized local smoke launcher changed immediately before execution.");
+    }
     const startedAt = now();
-    const result = childProcess.spawnSync(sandbox.executable, sandbox.args, {
+    const result = childProcess.spawnSync(launcher.wrapper_executable, launcher.wrapper_args, {
       cwd,
       encoding: "utf8",
       shell: false,
       timeout: 60_000,
       maxBuffer: 10 * 1024 * 1024,
-      env: sandbox.env,
+      env: launcher.environment,
     });
     const finishedAt = now();
     const stdout = result.stdout || "";
@@ -15932,7 +16061,7 @@ function runApprovedLocalSmokeTests(profile) {
     return {
       command: argv,
       cwd,
-      sandbox: sandbox.kind,
+      sandbox: launcher.sandbox,
       exit_code: Number.isInteger(result.status) ? result.status : null,
       signal: result.signal || null,
       error_code: result.error?.code || null,
@@ -15945,9 +16074,792 @@ function runApprovedLocalSmokeTests(profile) {
   });
 }
 
+function localSmokeExecutionBoundary() {
+  const common = {
+    schema_version: "local-smoke-execution-boundary:v1",
+    filesystem_writes: "denied",
+    readable_files: "host_account_scope",
+    confidentiality_isolation: "not_provided",
+    transitive_code_attestation: "not_provided",
+    external_network: "denied",
+    reviewed_code_required: true,
+    explicit_entrypoint_binding: "artifact_manifest_bound",
+    portable_recommendation: "do_not_depend_on_network_or_listeners",
+    recommended_patterns: [
+      "exercise an exported API handler in-process",
+      "validate built artifact files without opening sockets",
+    ],
+  };
+  if (process.platform === "darwin") {
+    return {
+      ...common,
+      provider: "macos-sandbox-exec-readonly-no-network",
+      provider_available: fs.existsSync("/usr/bin/sandbox-exec"),
+      loopback_network: "denied",
+      listener_based_smoke: "unsupported",
+    };
+  }
+  if (process.platform === "linux") {
+    return {
+      ...common,
+      provider: "linux-bwrap-readonly-no-network",
+      provider_available: fs.existsSync("/usr/bin/bwrap"),
+      loopback_network: "isolated_namespace_only",
+      listener_based_smoke: "namespace_local_only",
+    };
+  }
+  return {
+    ...common,
+    provider: "unavailable",
+    provider_available: false,
+    loopback_network: "unavailable",
+    listener_based_smoke: "unsupported",
+  };
+}
+
+function resolveLocalSmokeExecutable(command, cwd) {
+  const rawExecutable = String(command?.[0] || "");
+  const hasPathSeparator = rawExecutable.includes("/") || rawExecutable.includes("\\");
+  let resolved;
+  if (path.isAbsolute(rawExecutable) || hasPathSeparator) {
+    const candidate = path.isAbsolute(rawExecutable)
+      ? path.resolve(rawExecutable)
+      : path.resolve(cwd, rawExecutable);
+    try {
+      const stat = fs.statSync(candidate);
+      if (!stat.isFile()) {
+        fail(`Local smoke executable is not a regular file: ${candidate}.`);
+      }
+      fs.accessSync(candidate, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+      resolved = {
+        candidate,
+        realpath: fs.realpathSync.native(candidate),
+      };
+    } catch (error) {
+      if (error instanceof UserError) throw error;
+      fail(`Local smoke executable is not available: ${candidate}.`);
+    }
+  } else {
+    resolved = resolveExecutableFromPath(rawExecutable, cwd);
+  }
+  if (!resolved) {
+    fail(
+      `Local smoke executable '${rawExecutable}' is not available from the governed PATH. `
+      + "Install it or choose a smoke command that is present before authorizing release.local.",
+    );
+  }
+  return resolved;
+}
+
+function localSmokeExecutableBase(value) {
+  return path.basename(String(value || "")).toLowerCase();
+}
+
+function localSmokePackageManager(command) {
+  const executable = localSmokeExecutableBase(command?.[0]);
+  if (["npm", "npm.cmd", "npm.exe"].includes(executable)) return "npm";
+  if (["pnpm", "pnpm.cmd", "pnpm.exe"].includes(executable)) return "pnpm";
+  if (["yarn", "yarn.cmd", "yarn.exe"].includes(executable)) return "yarn";
+  if (executable === "bun") return "bun";
+  return null;
+}
+
+function validateLocalSmokePackageManagerForm(command) {
+  const manager = localSmokePackageManager(command);
+  if (!manager) return null;
+  const operation = String(command[1] || "").toLowerCase();
+  if (
+    !(
+      operation === "test"
+      || (operation === "run" && typeof command[2] === "string" && !command[2].startsWith("-"))
+    )
+  ) {
+    fail(
+      `Package-manager smoke test '${command[0]}' must use 'test' or `
+      + "'run <reviewed-script>' from the governed package.json.",
+    );
+  }
+  return manager;
+}
+
+function validateResolvedLocalSmokeExecutable(resolvedCommand) {
+  const executable = localSmokeExecutableBase(resolvedCommand.realpath);
+  if ([
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "fish",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+  ].includes(executable)) {
+    fail(
+      `Local smoke executable resolves to shell '${resolvedCommand.realpath}'. `
+      + "Invoke a reviewed artifact entrypoint directly.",
+    );
+  }
+  if (["env", "xargs", "nice", "nohup", "time", "arch", "xcrun"].includes(executable)) {
+    fail(
+      `Local smoke executable resolves to indirect dispatcher '${resolvedCommand.realpath}'. `
+      + "Invoke the reviewed runtime or artifact entrypoint directly.",
+    );
+  }
+}
+
+function localSmokeRuntimeDescriptor(resolvedCommand, command, cwd) {
+  validateResolvedLocalSmokeExecutable(resolvedCommand);
+  const commandSnapshot = stableLocalSmokeExecutableSnapshot(resolvedCommand.realpath);
+  if (!commandSnapshot.shebang) {
+    return {
+      command_executable: resolvedCommand.realpath,
+      command_executable_sha256: commandSnapshot.sha256,
+      runtime_executable: resolvedCommand.realpath,
+      runtime_executable_sha256: commandSnapshot.sha256,
+      interpreter: null,
+      execution_argv: [resolvedCommand.realpath, ...command.slice(1)],
+    };
+  }
+  const tokens = commandSnapshot.shebang.split(/\s+/u).filter(Boolean);
+  let interpreterName;
+  let interpreterSource;
+  if (tokens[0] === "/usr/bin/env") {
+    if (
+      tokens.length !== 2
+      || tokens[1].startsWith("-")
+      || tokens[1].includes("=")
+    ) {
+      fail(
+        `Local smoke script ${resolvedCommand.realpath} uses an ambiguous /usr/bin/env shebang. `
+        + "Use '#!/usr/bin/env <runtime>' without flags or environment assignments.",
+      );
+    }
+    interpreterName = tokens[1];
+    interpreterSource = "env-path";
+  } else {
+    if (tokens.length !== 1 || !path.isAbsolute(tokens[0])) {
+      fail(
+        `Local smoke script ${resolvedCommand.realpath} must use one absolute interpreter `
+        + "or '#!/usr/bin/env <runtime>'.",
+      );
+    }
+    interpreterName = tokens[0];
+    interpreterSource = "absolute";
+  }
+  const interpreter = resolveLocalSmokeExecutable([interpreterName], cwd);
+  validateResolvedLocalSmokeExecutable(interpreter);
+  const interpreterSnapshot = stableLocalSmokeExecutableSnapshot(interpreter.realpath);
+  if (interpreterSnapshot.shebang) {
+    fail(
+      `Local smoke script ${resolvedCommand.realpath} resolves to nested script interpreter `
+      + `${interpreter.realpath}. Choose a native runtime executable so the full launch chain can be attested.`,
+    );
+  }
+  return {
+    command_executable: resolvedCommand.realpath,
+    command_executable_sha256: commandSnapshot.sha256,
+    runtime_executable: interpreter.realpath,
+    runtime_executable_sha256: interpreterSnapshot.sha256,
+    interpreter: {
+      source: interpreterSource,
+      requested: interpreterName,
+      resolved: interpreter.realpath,
+      shebang_sha256: hashBuffer(Buffer.from(commandSnapshot.shebang, "utf8")),
+    },
+    execution_argv: [
+      interpreter.realpath,
+      resolvedCommand.realpath,
+      ...command.slice(1),
+    ],
+  };
+}
+
+function localSmokeArgumentPathCandidate(rawArgument, cwd) {
+  const raw = String(rawArgument || "");
+  let value = raw;
+  let source = "argument";
+  if (raw.startsWith("file:")) {
+    try {
+      return {
+        resolvedPath: path.resolve(fileURLToPath(raw)),
+        source: "file-url",
+      };
+    } catch {
+      fail(`Local smoke payload uses an invalid file URL: ${raw}.`);
+    }
+  }
+  if (raw.startsWith("-")) {
+    const separator = raw.indexOf("=");
+    if (separator < 0) return null;
+    value = raw.slice(separator + 1);
+    source = "option-value";
+  }
+  if (value.startsWith("file:")) {
+    try {
+      return {
+        resolvedPath: path.resolve(fileURLToPath(value)),
+        source: `${source}:file-url`,
+      };
+    } catch {
+      fail(`Local smoke payload uses an invalid file URL: ${value}.`);
+    }
+  }
+  const resolvedCandidate = path.resolve(cwd, value);
+  const looksLikePath = (
+    path.isAbsolute(value)
+    || path.win32.isAbsolute(value)
+    || value.startsWith(".")
+    || value.includes("/")
+    || value.includes("\\")
+    || fs.existsSync(resolvedCandidate)
+    || /\.(?:cjs|cts|js|json|mjs|mts|py|pyw|rb|pl|php|ts|tsx|jsx|wasm|jar|dll|exe)$/iu.test(value)
+  );
+  return looksLikePath
+    ? { resolvedPath: resolvedCandidate, source }
+    : null;
+}
+
+function governedLocalSmokePayloadBinding(profile, cwd, rawArgument, {
+  argumentIndex,
+  origin,
+  forcePath = false,
+} = {}) {
+  const candidate = forcePath
+    ? {
+        resolvedPath: String(rawArgument).startsWith("file:")
+          ? path.resolve(fileURLToPath(String(rawArgument)))
+          : path.resolve(cwd, String(rawArgument)),
+        source: "interpreter-entrypoint",
+      }
+    : localSmokeArgumentPathCandidate(rawArgument, cwd);
+  if (!candidate) return null;
+  const allowedWritePaths = [...new Set(
+    (profile.local_release_target?.allowed_write_paths || [])
+      .map((item) => path.resolve(String(item))),
+  )].sort();
+  const governedWritePath = allowedWritePaths.find((writePath) => {
+    if (isInsidePath(writePath, candidate.resolvedPath)) return true;
+    if (!fs.existsSync(writePath) || !fs.existsSync(candidate.resolvedPath)) return false;
+    return isInsidePath(
+      fs.realpathSync.native(writePath),
+      fs.realpathSync.native(candidate.resolvedPath),
+    );
+  });
+  if (!governedWritePath) {
+    fail(
+      `Local smoke payload '${rawArgument}' resolves outside the released artifact: `
+      + `${candidate.resolvedPath}. Put the reviewed entrypoint inside an allowed write path.`,
+    );
+  }
+  if (fs.existsSync(candidate.resolvedPath)) {
+    const candidateLstat = fs.lstatSync(candidate.resolvedPath);
+    if (candidateLstat.isSymbolicLink()) {
+      fail(`Local smoke payload cannot be a symlink: ${candidate.resolvedPath}.`);
+    }
+    if (!candidateLstat.isFile() && !candidateLstat.isDirectory()) {
+      fail(`Local smoke payload must be a regular artifact path: ${candidate.resolvedPath}.`);
+    }
+    if (fs.existsSync(governedWritePath)) {
+      const realGovernedWritePath = fs.realpathSync.native(governedWritePath);
+      const realCandidate = fs.realpathSync.native(candidate.resolvedPath);
+      if (!isInsidePath(realGovernedWritePath, realCandidate)) {
+        fail(
+          `Local smoke payload resolves outside its governed artifact path: `
+          + `${candidate.resolvedPath}.`,
+        );
+      }
+    }
+  }
+  return {
+    argument_index: argumentIndex,
+    argument: String(rawArgument),
+    origin,
+    source: candidate.source,
+    resolved_path: candidate.resolvedPath,
+    governed_write_path: governedWritePath,
+    binding: "artifact-manifest-bound",
+  };
+}
+
+function localSmokePayloadBindings(profile, command, resolvedCommand, runtime, cwd) {
+  const packageManager = validateLocalSmokePackageManagerForm(command);
+  const bindings = [];
+  const commandSnapshot = stableLocalSmokeExecutableSnapshot(resolvedCommand.realpath);
+  const directRuntimeBase = localSmokeExecutableBase(runtime.runtime_executable);
+  const directInterpreter = runtime.interpreter === null
+    && /^(?:node(?:js)?|python(?:\d+(?:\.\d+)*)?|ruby|perl|php|deno|bun)(?:[-.]\d.*)?$/u
+      .test(directRuntimeBase);
+  if (directInterpreter && command.slice(1).some((item) =>
+    /^(?:-e|--eval|-c|--print|-p)(?:=|.+)?$/u.test(String(item)))) {
+    fail(
+      `Local smoke runtime ${runtime.runtime_executable} cannot execute inline code. `
+      + "Use a reviewed entrypoint stored in the released artifact.",
+    );
+  }
+  const nodeLikeRuntime = /^(?:node(?:js)?|bun|deno)(?:[-.]\d.*)?$/u.test(directRuntimeBase);
+  const pythonRuntime = /^python(?:\d+(?:\.\d+)*)?(?:[-.]\d.*)?$/u.test(directRuntimeBase);
+  const rubyRuntime = /^ruby(?:[-.]\d.*)?$/u.test(directRuntimeBase);
+  const perlRuntime = /^perl(?:[-.]\d.*)?$/u.test(directRuntimeBase);
+  const ambiguousLoader = directInterpreter
+    ? command.slice(1).find((item) => {
+        const value = String(item);
+        return (
+          (
+            nodeLikeRuntime
+            && (
+              /^(?:--require|--import|--loader|--experimental-loader|--env-file|--openssl-config|--icu-data-dir|--snapshot-blob)(?:=|$)/u
+                .test(value)
+              || /^-r(?:=|.+|$)/u.test(value)
+            )
+          )
+          || (pythonRuntime && /^-m(?:.+)?$/u.test(value))
+          || (rubyRuntime && /^-(?:r|I)(?:=|.+|$)/u.test(value))
+          || (perlRuntime && /^-(?:I|M)(?:=|.+|$)/u.test(value))
+        );
+      })
+    : null;
+  if (ambiguousLoader) {
+    fail(
+      `Local smoke loader option '${ambiguousLoader}' is not allowed. `
+      + "Use one explicit reviewed entrypoint inside the released artifact.",
+    );
+  }
+  if (commandSnapshot.shebang && !packageManager) {
+    bindings.push(governedLocalSmokePayloadBinding(
+      profile,
+      cwd,
+      resolvedCommand.realpath,
+      {
+        argumentIndex: 0,
+        origin: "command-script",
+        forcePath: true,
+      },
+    ));
+  }
+  let interpreterEntrypointBound = false;
+  let interpreterOptionValueKindPending = null;
+  for (let index = 1; index < command.length; index += 1) {
+    const argument = command[index];
+    const isInterpreterEntrypoint = directInterpreter
+      && !interpreterEntrypointBound
+      && !interpreterOptionValueKindPending
+      && !String(argument).startsWith("-");
+    const binding = interpreterOptionValueKindPending === "scalar"
+      ? null
+      : governedLocalSmokePayloadBinding(
+          profile,
+          cwd,
+          argument,
+          {
+            argumentIndex: index,
+            origin: isInterpreterEntrypoint ? "interpreter-entrypoint" : "argument-path",
+            forcePath: isInterpreterEntrypoint,
+          },
+        );
+    if (binding) {
+      bindings.push(binding);
+      if (isInterpreterEntrypoint) interpreterEntrypointBound = true;
+    }
+    if (interpreterOptionValueKindPending) {
+      interpreterOptionValueKindPending = null;
+    } else if (directInterpreter) {
+      interpreterOptionValueKindPending = localSmokeInterpreterOptionValueKind(
+        directRuntimeBase,
+        argument,
+      );
+    }
+  }
+  return {
+    launcherKind: packageManager
+      ? "governed-package-script"
+      : commandSnapshot.shebang
+        ? "governed-artifact-script"
+        : directInterpreter
+          ? "direct-interpreter"
+          : "attested-native-executable",
+    payloadBindings: bindings.filter(Boolean),
+  };
+}
+
+function validateLocalSmokePayloadBindingsBeforeSpawn(launcher) {
+  for (const binding of launcher.payload_bindings || []) {
+    const candidate = path.resolve(binding.resolved_path);
+    const governedWritePath = path.resolve(binding.governed_write_path);
+    const realPathsExist = fs.existsSync(candidate) && fs.existsSync(governedWritePath);
+    const containedLexically = isInsidePath(governedWritePath, candidate);
+    const containedByIdentity = realPathsExist && isInsidePath(
+      fs.realpathSync.native(governedWritePath),
+      fs.realpathSync.native(candidate),
+    );
+    if (
+      binding.binding !== "artifact-manifest-bound"
+      || (!containedLexically && !containedByIdentity)
+      || !fs.existsSync(candidate)
+      || fs.lstatSync(candidate).isSymbolicLink()
+      || (!fs.lstatSync(candidate).isFile() && !fs.lstatSync(candidate).isDirectory())
+      || !fs.existsSync(governedWritePath)
+      || !containedByIdentity
+    ) {
+      fail(
+        `Authorized local smoke payload is no longer a real path inside the released artifact: `
+        + `${binding.resolved_path}. Request a fresh release checkpoint after correcting it.`,
+      );
+    }
+  }
+}
+
+function localSmokeInterpreterOptionValueKind(runtimeBase, argument) {
+  const value = String(argument);
+  if (/^(?:node(?:js)?|bun|deno)(?:[-.]\d.*)?$/u.test(runtimeBase)) {
+    if (new Set([
+      "--conditions",
+      "--dns-result-order",
+      "--input-type",
+      "--inspect-port",
+      "--stack-trace-limit",
+      "--test-concurrency",
+      "--test-name-pattern",
+      "--title",
+      "--unhandled-rejections",
+    ]).has(value)) return "scalar";
+    if (new Set([
+      "--test-reporter",
+      "--test-reporter-destination",
+    ]).has(value)) return "artifact-path-if-explicit";
+  }
+  if (/^python(?:\d+(?:\.\d+)*)?(?:[-.]\d.*)?$/u.test(runtimeBase)) {
+    if (new Set([
+      "-W",
+      "-X",
+      "--check-hash-based-pycs",
+    ]).has(value)) return "scalar";
+  }
+  return null;
+}
+
+function localSmokeSandboxPolicyAttestation(profile) {
+  const cwd = governedLocalSmokeCwd(profile).smokeCwd;
+  const pluginIdentity = inspectBuildIdentity(PLUGIN_ROOT);
+  const launchers = (profile.local_release_target.smoke_tests || []).map((canonicalCommand) => {
+    const command = JSON.parse(canonicalCommand);
+    const resolvedCommand = resolveLocalSmokeExecutable(command, cwd);
+    const runtime = localSmokeRuntimeDescriptor(resolvedCommand, command, cwd);
+    const payload = localSmokePayloadBindings(
+      profile,
+      command,
+      resolvedCommand,
+      runtime,
+      cwd,
+    );
+    const sandbox = localSmokeSandboxCommand(
+      cwd,
+      runtime.execution_argv,
+    );
+    const wrapperExecutable = fs.realpathSync.native(sandbox.executable);
+    const wrapperSnapshot = stableLocalSmokeExecutableSnapshot(wrapperExecutable);
+    const launcherSubject = {
+      command,
+      sandbox: sandbox.kind,
+      wrapper_executable: wrapperExecutable,
+      wrapper_executable_sha256: wrapperSnapshot.sha256,
+      wrapper_args: sandbox.args,
+      wrapper_args_sha256: computeStableHash(sandbox.args),
+      environment: sandbox.env,
+      environment_sha256: computeStableHash(sandbox.env),
+      command_executable: runtime.command_executable,
+      command_executable_sha256: runtime.command_executable_sha256,
+      runtime_executable: runtime.runtime_executable,
+      runtime_executable_sha256: runtime.runtime_executable_sha256,
+      interpreter: runtime.interpreter,
+      launcher_kind: payload.launcherKind,
+      payload_bindings: payload.payloadBindings,
+      hash_algorithm: "sha256:stable-json:v1",
+    };
+    return {
+      ...launcherSubject,
+      launcher_hash: computeStableHash(launcherSubject),
+    };
+  });
+  const subject = {
+    schema_version: "local-smoke-sandbox-policy:v2",
+    host: {
+      platform: process.platform,
+      arch: process.arch,
+    },
+    plugin_build: {
+      package_version: pluginIdentity.package_version,
+      build_fingerprint: pluginIdentity.build_fingerprint,
+      git_commit: pluginIdentity.git_commit || null,
+      provenance: pluginIdentity.provenance || null,
+    },
+    boundary: localSmokeExecutionBoundary(),
+    smoke_cwd: cwd,
+    launchers,
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  return {
+    ...subject,
+    policy_hash: computeStableHash(subject),
+  };
+}
+
+function localReleaseArtifactManifestPolicy(context, profile) {
+  const target = profile.local_release_target;
+  const governanceRoot = path.resolve(context.sdlcRoot);
+  for (const targetPath of target.allowed_write_paths) {
+    const resolved = path.resolve(targetPath);
+    if (isInsidePath(resolved, governanceRoot) || isInsidePath(governanceRoot, resolved)) {
+      fail(
+        `Local release artifact path ${resolved} overlaps governed .sdlc records. `
+        + "Choose a narrower release directory outside .sdlc.",
+      );
+    }
+  }
+  const sortedPaths = [...target.allowed_write_paths].map((item) => path.resolve(item)).sort();
+  for (let index = 0; index < sortedPaths.length; index += 1) {
+    for (let candidate = index + 1; candidate < sortedPaths.length; candidate += 1) {
+      if (isInsidePath(sortedPaths[index], sortedPaths[candidate])) {
+        fail(
+          `Local release artifact paths must not overlap: ${sortedPaths[index]} and ${sortedPaths[candidate]}.`,
+        );
+      }
+    }
+  }
+  const subject = {
+    schema_version: "local-release-artifact-manifest-policy:v1",
+    root_path: path.resolve(target.root_path),
+    smoke_cwd: governedLocalSmokeCwd(profile).smokeCwd,
+    allowed_write_paths: sortedPaths,
+    symlinks: "rejected",
+    special_files: "rejected",
+    maximum_entries_per_path: 10_000,
+    maximum_bytes_per_path: 512 * 1024 * 1024,
+    snapshot_passes: 2,
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  return {
+    ...subject,
+    policy_hash: computeStableHash(subject),
+  };
+}
+
+function localReleaseArtifactManifest(context, profile) {
+  const policy = localReleaseArtifactManifestPolicy(context, profile);
+  approvedLocalSmokeCwd(profile);
+  const snapshotSetOnce = () => ({
+    root_identity: workflowFinalFreshnessLocalRootIdentity(policy.root_path),
+    paths: policy.allowed_write_paths
+      .map((targetPath) => workflowFinalFreshnessLocalPathSnapshot(targetPath)),
+  });
+  const firstSnapshot = snapshotSetOnce();
+  const secondSnapshot = snapshotSetOnce();
+  if (stableJson(firstSnapshot) !== stableJson(secondSnapshot)) {
+    fail("Local release artifact set changed while being snapshotted.");
+  }
+  const subject = {
+    schema_version: "local-release-artifact-manifest:v1",
+    policy,
+    ...firstSnapshot,
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  return {
+    ...subject,
+    manifest_hash: computeStableHash(subject),
+  };
+}
+
+function localReleaseIntegrityAttestation(context, profile) {
+  const subject = {
+    schema_version: "local-release-integrity:v2",
+    smoke_execution_policy: localSmokeSandboxPolicyAttestation(profile),
+    artifact_manifest_policy: localReleaseArtifactManifestPolicy(context, profile),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  return {
+    ...subject,
+    integrity_hash: computeStableHash(subject),
+  };
+}
+
+function hashBoundRecordIsValid(record, hashField) {
+  if (!record || typeof record !== "object" || !/^[a-f0-9]{64}$/u.test(String(record[hashField] || ""))) {
+    return false;
+  }
+  const subject = { ...record };
+  delete subject[hashField];
+  return record[hashField] === computeStableHash(subject);
+}
+
+function localReleaseCompletionIntegrityErrors(context, profile, receipt, authorization, {
+  revalidateArtifact = false,
+  attempt = null,
+} = {}) {
+  const errors = [];
+  const authorized = authorization?.action_details?.local_release_integrity;
+  const completion = receipt?.local_release_verification?.integrity;
+  if (!authorized) {
+    const legacy = authorization?.schema_version !== "delivery-action-receipt:v3"
+      && receipt?.schema_version !== "delivery-action-receipt:v3";
+    if (legacy) return { errors, legacy: true };
+    errors.push("current release authorization is missing its required local-release integrity policy");
+    return { errors, legacy: false };
+  }
+  if (!completion) {
+    errors.push("completion is missing the required smoke-bound artifact integrity proof");
+    return { errors, legacy: false };
+  }
+  if (
+    authorized.schema_version !== "local-release-integrity:v2"
+    || authorized.smoke_execution_policy?.schema_version !== "local-smoke-sandbox-policy:v2"
+    || !hashBoundRecordIsValid(authorized, "integrity_hash")
+    || !hashBoundRecordIsValid(authorized.smoke_execution_policy, "policy_hash")
+    || !hashBoundRecordIsValid(authorized.artifact_manifest_policy, "policy_hash")
+  ) {
+    errors.push("authorized local-release integrity policy is invalid");
+  }
+  if (stableJson(completion.authorized_policy) !== stableJson(authorized)) {
+    errors.push("completion does not bind the exact authorized smoke and artifact policy");
+  }
+  if (completion.schema_version !== "local-release-completion-integrity:v2") {
+    errors.push("completion uses an unsupported local-release integrity proof version");
+  }
+  const verification = receipt.local_release_verification;
+  const authorizedLaunchers = authorized.smoke_execution_policy?.launchers || [];
+  const smokeReceipts = verification?.smoke_test_receipts || [];
+  if (
+    verification?.target_root !== profile.local_release_target?.root_path
+    || stableJson(verification?.allowed_write_paths)
+      !== stableJson(profile.local_release_target?.allowed_write_paths)
+    || verification?.smoke_cwd !== authorized.smoke_execution_policy?.smoke_cwd
+    || stableJson(verification?.smoke_tests)
+      !== stableJson(profile.local_release_target?.smoke_tests)
+    || smokeReceipts.length !== authorizedLaunchers.length
+  ) {
+    errors.push("completion does not prove the exact authorized local target and smoke-test set");
+  }
+  let priorFinishedAt = null;
+  const attemptStartedAt = Date.parse(attempt?.started_at || "");
+  for (let index = 0; index < smokeReceipts.length; index += 1) {
+    const smoke = smokeReceipts[index];
+    const launcher = authorizedLaunchers[index];
+    const startedAt = Date.parse(smoke?.started_at || "");
+    const finishedAt = Date.parse(smoke?.finished_at || "");
+    const derivedPassed = smoke?.exit_code === 0
+      && smoke?.error_code === null
+      && smoke?.signal === null;
+    if (
+      !launcher
+      || stableJson(smoke?.command) !== stableJson(launcher.command)
+      || smoke?.cwd !== authorized.smoke_execution_policy?.smoke_cwd
+      || smoke?.sandbox !== launcher.sandbox
+      || !Number.isFinite(startedAt)
+      || !Number.isFinite(finishedAt)
+      || finishedAt < startedAt
+      || (Number.isFinite(attemptStartedAt) && startedAt < attemptStartedAt)
+      || (priorFinishedAt !== null && startedAt < priorFinishedAt)
+      || (smoke?.outcome === "passed") !== derivedPassed
+    ) {
+      errors.push(`smoke receipt ${index + 1} is not an ordered result of its exact authorized launcher`);
+    }
+    priorFinishedAt = Number.isFinite(finishedAt) ? finishedAt : priorFinishedAt;
+  }
+  if (!attempt) {
+    errors.push("completion does not reference its durable write-ahead local release attempt");
+  } else {
+    errors.push(...localReleaseAttemptReceiptErrors(
+      context,
+      profile,
+      attempt,
+      authorization,
+    ));
+    if (
+      stableJson(receipt.attempt_receipt_ref)
+        !== stableJson(deliveryActionAttemptReceiptRef(context, profile, attempt))
+    ) {
+      errors.push("completion does not bind the exact write-ahead attempt receipt");
+    }
+    if (
+      stableJson(attempt.artifact_before_smoke)
+        !== stableJson(completion.pre_smoke_artifact_manifest)
+    ) {
+      errors.push("completion pre-smoke manifest differs from its write-ahead attempt");
+    }
+    if (
+      stableJson(completionRequestExecutionProjection(attempt.completion_request))
+        !== stableJson(completionRequestExecutionProjection(receipt.completion_request))
+    ) {
+      errors.push("completion operation or evidence differs from its write-ahead attempt");
+    }
+    if (
+      receipt.outcome === "passed"
+      && stableJson(attempt.completion_request) !== stableJson(receipt.completion_request)
+    ) {
+      errors.push("passing completion request differs from its requested write-ahead operation");
+    }
+  }
+  const preManifest = completion.pre_smoke_artifact_manifest;
+  const postManifest = completion.post_smoke_artifact_manifest;
+  if (
+    !hashBoundRecordIsValid(preManifest, "manifest_hash")
+    || stableJson(preManifest?.policy) !== stableJson(authorized.artifact_manifest_policy)
+  ) {
+    errors.push("pre-smoke artifact manifest is invalid or uses another policy");
+  }
+  if (postManifest && (
+    !hashBoundRecordIsValid(postManifest, "manifest_hash")
+    || stableJson(postManifest.policy) !== stableJson(authorized.artifact_manifest_policy)
+  )) {
+    errors.push("post-smoke artifact manifest is invalid or uses another policy");
+  }
+  if (receipt.outcome === "passed") {
+    if (
+      completion.artifact_stable_during_smoke !== true
+      || !postManifest
+      || stableJson(preManifest) !== stableJson(postManifest)
+    ) {
+      errors.push("passing release does not prove one unchanged artifact before and after smoke");
+    }
+    if (receipt.local_release_verification?.outcome !== "passed") {
+      errors.push("passing release verification has a non-passing outcome");
+    }
+    if (revalidateArtifact && postManifest) {
+      try {
+        const currentManifest = localReleaseArtifactManifest(context, profile);
+        if (stableJson(currentManifest) !== stableJson(postManifest)) {
+          errors.push("released artifact changed after its smoke-tested completion");
+        }
+      } catch {
+        errors.push("released artifact can no longer be snapshotted safely");
+      }
+    }
+  } else if (receipt.outcome === "failed") {
+    const failedSmoke = (receipt.local_release_verification?.smoke_test_receipts || [])
+      .some((item) => item.outcome !== "passed" || item.exit_code !== 0);
+    if (
+      receipt.local_release_verification?.outcome !== "failed"
+      || (!failedSmoke && completion.artifact_stable_during_smoke !== false)
+    ) {
+      errors.push("failed release attempt does not prove a smoke or artifact-stability failure");
+    }
+  }
+  return { errors, legacy: false };
+}
+
 function localSmokeSandboxCommand(cwd, argv) {
+  const governedPathEntries = [
+    path.dirname(path.resolve(argv[0])),
+    ...(process.platform === "win32"
+      ? []
+      : ["/usr/bin", "/bin"]),
+  ].filter((entry, index, values) => values.indexOf(entry) === index);
   const minimalEnv = Object.fromEntries([
-    ["PATH", process.env.PATH || "/usr/bin:/bin"],
+    ["PATH", governedPathEntries.join(path.delimiter)],
     ["TMPDIR", process.env.TMPDIR || os.tmpdir()],
     ["SYSTEMROOT", process.env.SYSTEMROOT],
     ["WINDIR", process.env.WINDIR],
@@ -16504,6 +17416,9 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     proposal_authority_mode: profile.authority_assurance.mode,
     provider_bindings: profile.provider_bindings,
     non_reusable: true,
+    ...(kind === "local_release"
+      ? { smoke_execution_boundary: localSmokeExecutionBoundary() }
+      : {}),
   };
   const projectName = readProjectSafe(context)?.project_name || path.basename(context.root);
   const guidance = deliveryAutonomyProposalGuidance({
@@ -16518,6 +17433,7 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
     head_branch: profile.pull_request_target?.head_branch,
     target_root: profile.local_release_target?.root_path,
     smoke_cwd: profile.local_release_target?.smoke_cwd || null,
+    smoke_execution_boundary: kind === "local_release" ? localSmokeExecutionBoundary() : null,
     allowed_write_paths: review.allowed_write_paths,
     review_moments: review.checkpoints,
     expires_at: profile.expires_at,
@@ -16552,7 +17468,14 @@ function proposeDeliveryAutonomyLocked(context, options, profileId, deliveryId, 
       `Allowed actions: ${review.allowed_actions.join(", ")}`,
       `Allowed write paths: ${review.allowed_write_paths.join(", ")}`,
       ...(kind === "local_release"
-        ? [`Smoke working directory: ${profile.local_release_target.smoke_cwd}`]
+        ? [
+            `Smoke working directory: ${profile.local_release_target.smoke_cwd}`,
+            `Smoke execution provider: ${review.smoke_execution_boundary.provider}; `
+              + `external network ${review.smoke_execution_boundary.external_network}; `
+              + `loopback ${review.smoke_execution_boundary.loopback_network}.`,
+            "Smoke trust boundary: writes are denied, but host-file confidentiality is not provided; "
+              + "run reviewed project code only.",
+          ]
         : []),
       `Checkpoints: ${review.checkpoints.join(", ") || "global exceptions only"}`,
       `Expires at: ${profile.expires_at || "delivery lifecycle only"}`,
@@ -17484,6 +18407,32 @@ function deliveryActionReceipts(context, profileId) {
     .filter((record) => record.profile_ref?.id === profileId);
 }
 
+function deliveryActionAttemptReceipts(context, profileId) {
+  return safeReadDir(deliveryActionAttemptsRoot(context, profileId))
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => {
+      const record = readDeliveryLifecycleReceipt(
+        context,
+        path.join(deliveryActionAttemptsRoot(context, profileId), name),
+        "delivery-action-attempt-receipt.schema.json",
+      );
+      if (name !== `${normalizeId(record.id)}.json`) {
+        fail(`Local release attempt receipt filename is non-canonical: ${name}.`);
+      }
+      if (record.profile_ref?.id !== profileId) {
+        fail(
+          `Local release attempt ${record.id} is stored under ${profileId} but references `
+          + `${record.profile_ref?.id || "no profile"}.`,
+        );
+      }
+      return record;
+    })
+    .sort((left, right) => (
+      String(left.started_at).localeCompare(String(right.started_at))
+      || String(left.id).localeCompare(String(right.id))
+    ));
+}
+
 function compareDeliveryAuthorizationOrder(left, right) {
   return String(left.authorized_at).localeCompare(String(right.authorized_at))
     || String(left.id).localeCompare(String(right.id));
@@ -18197,6 +19146,17 @@ function deliveryActionReceiptRef(context, receipt) {
   };
 }
 
+function deliveryActionAttemptReceiptRef(context, profile, receipt) {
+  return {
+    id: receipt.id,
+    path: toProjectPath(
+      context,
+      deliveryActionAttemptPath(context, profile.id, receipt.id),
+    ),
+    hash: receipt.receipt_hash,
+  };
+}
+
 function deliveryStartReceiptRef(context, profile, receipt) {
   return {
     id: receipt.id,
@@ -18862,7 +19822,7 @@ function deliveryCompletionOperationArgs(profile, action, options = {}) {
       ? path.isAbsolute(smokeCwdOption)
         ? path.resolve(smokeCwdOption)
         : path.resolve(profile.local_release_target.root_path, smokeCwdOption)
-      : null;
+      : governedLocalSmokeCwd(profile).smokeCwd;
     operationArgs.smoke_tests = normalizeListOption(options["smoke-test"])
       .map(normalizeSmokeTestCommand)
       .sort();
@@ -18900,6 +19860,189 @@ function buildDeliveryCompletionRequest(
   };
 }
 
+function localReleaseAttemptId(authorization, completionRequest) {
+  const identityHash = shortHashFull(stableJson({
+    authorization_id: authorization.id,
+    authorization_hash: authorization.receipt_hash,
+    completion_request_hash: completionRequest.request_hash,
+  }));
+  return `AUT-TRY-${identityHash.slice(0, 32)}`;
+}
+
+function buildLocalReleaseActionAttempt(
+  context,
+  profile,
+  authorization,
+  completionRequest,
+  authorizedIntegrity,
+  artifactBeforeSmoke,
+) {
+  const attemptBase = {
+    id: localReleaseAttemptId(authorization, completionRequest),
+    kind: "delivery_action_attempt_receipt",
+    schema_version: "delivery-action-attempt-receipt:v1",
+    profile_ref: {
+      id: profile.id,
+      path: toProjectPath(context, deliveryAutonomyPath(context, profile.id)),
+      hash: profile.profile_hash,
+    },
+    delivery: {
+      id: profile.delivery_id,
+      kind: profile.delivery_kind,
+    },
+    action: "release.local",
+    authorization_receipt_ref: deliveryActionReceiptRef(context, authorization),
+    completion_request: completionRequest,
+    smoke_execution_policy_ref: {
+      policy_hash: authorizedIntegrity.smoke_execution_policy.policy_hash,
+    },
+    artifact_before_smoke: artifactBeforeSmoke,
+    started_at: now(),
+  };
+  const attempt = {
+    ...attemptBase,
+    receipt_hash: autonomyLifecycleReceiptHash(attemptBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+  assertRecordSchema(
+    attempt,
+    "delivery-action-attempt-receipt.schema.json",
+    `Delivery action attempt receipt ${attempt.id}`,
+  );
+  return attempt;
+}
+
+function persistLocalReleaseActionAttempt(context, profile, attempt) {
+  const attemptPath = deliveryActionAttemptPath(context, profile.id, attempt.id);
+  if (fs.existsSync(attemptPath)) {
+    const existing = readDeliveryLifecycleReceipt(
+      context,
+      attemptPath,
+      "delivery-action-attempt-receipt.schema.json",
+    );
+    if (stableJson(existing) !== stableJson(attempt)) {
+      fail(
+        `Local release attempt ${attempt.id} conflicts with an existing write-ahead receipt. `
+        + "The authorization remains consumed; use a fresh authorization after reviewing the prior attempt.",
+      );
+    }
+    fail(
+      `Local release attempt ${attempt.id} was already started. The authorization is consumed and `
+      + "the smoke command will not be executed again; use a fresh authorization or explicit recovery.",
+    );
+  }
+  ensureWorkflowDirectoryDurably(path.dirname(attemptPath));
+  writeJsonFile(attemptPath, attempt, { atomicCreate: true, durable: true });
+  return {
+    receipt: readDeliveryLifecycleReceipt(
+      context,
+      attemptPath,
+      "delivery-action-attempt-receipt.schema.json",
+    ),
+    path: toProjectPath(context, attemptPath),
+  };
+}
+
+function completionRequestExecutionProjection(request) {
+  if (!request || typeof request !== "object") return null;
+  const projection = { ...request };
+  delete projection.outcome;
+  delete projection.request_hash;
+  return projection;
+}
+
+function localReleaseAttemptReceiptErrors(context, profile, attempt, authorization) {
+  const errors = [];
+  if (
+    attempt.profile_ref?.id !== profile.id
+    || attempt.profile_ref?.path !== toProjectPath(context, deliveryAutonomyPath(context, profile.id))
+    || attempt.profile_ref?.hash !== profile.profile_hash
+    || attempt.delivery?.id !== profile.delivery_id
+    || attempt.delivery?.kind !== "local_release"
+    || attempt.action !== "release.local"
+  ) {
+    errors.push("attempt does not bind the exact local delivery profile");
+  }
+  if (
+    !authorization
+    || authorization.status !== "authorized"
+    || authorization.action !== "release.local"
+    || stableJson(attempt.authorization_receipt_ref)
+      !== stableJson(deliveryActionReceiptRef(context, authorization))
+  ) {
+    errors.push("attempt does not reference its exact release.local authorization");
+    return errors;
+  }
+  if (attempt.id !== localReleaseAttemptId(authorization, attempt.completion_request)) {
+    errors.push("attempt id is not the deterministic identity of its authorization and request");
+  }
+  const authorizedAt = Date.parse(authorization.authorized_at || "");
+  const startedAt = Date.parse(attempt.started_at || "");
+  if (
+    !Number.isFinite(authorizedAt)
+    || !Number.isFinite(startedAt)
+    || startedAt < authorizedAt
+  ) {
+    errors.push("attempt start time predates or cannot be ordered after authorization");
+  }
+  const pseudoCompletion = {
+    profile_ref: attempt.profile_ref,
+    action: attempt.action,
+    outcome: "passed",
+    authorization_receipt_ref: attempt.authorization_receipt_ref,
+    evidence: attempt.completion_request?.evidence || [],
+    completion_request: attempt.completion_request,
+  };
+  const requestValidation = validateDeliveryCompletionRequest(
+    context,
+    pseudoCompletion,
+    authorization,
+  );
+  if (!requestValidation.valid) {
+    errors.push(`attempt completion request is invalid: ${requestValidation.errors.join("; ")}`);
+  }
+  const authorizedIntegrity = authorization.action_details?.local_release_integrity;
+  if (
+    !authorizedIntegrity
+    || authorizedIntegrity.schema_version !== "local-release-integrity:v2"
+    || authorizedIntegrity.smoke_execution_policy?.schema_version
+      !== "local-smoke-sandbox-policy:v2"
+    || !hashBoundRecordIsValid(authorizedIntegrity, "integrity_hash")
+    || !hashBoundRecordIsValid(authorizedIntegrity.smoke_execution_policy, "policy_hash")
+    || !hashBoundRecordIsValid(authorizedIntegrity.artifact_manifest_policy, "policy_hash")
+  ) {
+    errors.push("attempt authorization lacks a valid local-release integrity policy");
+    return errors;
+  }
+  if (
+    attempt.smoke_execution_policy_ref?.policy_hash
+      !== authorizedIntegrity.smoke_execution_policy.policy_hash
+  ) {
+    errors.push("attempt references a different smoke execution policy");
+  }
+  if (
+    !hashBoundRecordIsValid(attempt.artifact_before_smoke, "manifest_hash")
+    || stableJson(attempt.artifact_before_smoke?.policy)
+      !== stableJson(authorizedIntegrity.artifact_manifest_policy)
+  ) {
+    errors.push("attempt pre-smoke artifact manifest is invalid or uses another policy");
+  }
+  const expectedOperation = {
+    smoke_cwd: governedLocalSmokeCwd(profile).smokeCwd,
+    smoke_tests: [...(profile.local_release_target?.smoke_tests || [])].sort(),
+    rollback: profile.local_release_target?.rollback?.procedure || null,
+  };
+  const recordedOperation = attempt.completion_request?.operation_args || {};
+  if (
+    recordedOperation.smoke_cwd !== expectedOperation.smoke_cwd
+    || stableJson(recordedOperation.smoke_tests) !== stableJson(expectedOperation.smoke_tests)
+    || recordedOperation.rollback !== expectedOperation.rollback
+  ) {
+    errors.push("attempt operation differs from the exact approved smoke target, commands, or rollback");
+  }
+  return errors;
+}
+
 function validateDeliveryCompletionRequest(context, receipt, authorization) {
   const request = receipt?.completion_request;
   if (!request) {
@@ -18909,7 +20052,7 @@ function validateDeliveryCompletionRequest(context, receipt, authorization) {
       legacy,
       errors: legacy
         ? []
-        : ["delivery-action-receipt:v2 completion requires a completion request"],
+        : [`${receipt?.schema_version || "current delivery action receipt"} completion requires a completion request`],
     };
   }
   const {
@@ -19011,6 +20154,10 @@ function matchingPersistedDeliveryCompletion(context, profile, action, outcome, 
   const selectorOption = getOptionString(options, "authorization-receipt");
   const selector = selectorOption ? normalizeId(selectorOption) : null;
   const actions = deliveryActionReceipts(context, profile.id);
+  const attemptsById = new Map(
+    (action === "release.local" ? deliveryActionAttemptReceipts(context, profile.id) : [])
+      .map((attempt) => [attempt.id, attempt]),
+  );
   const authorizationsById = new Map(
     actions
       .filter((receipt) => receipt.status === "authorized")
@@ -19047,7 +20194,43 @@ function matchingPersistedDeliveryCompletion(context, profile, action, outcome, 
       completion.completion_request.request_hash === expected.request_hash
       && stableJson(completion.completion_request) === stableJson(expected)
     ) {
-      matches.push({ completion, authorization, evidence });
+      matches.push({ completion, authorization, evidence, derivedFailure: false });
+      continue;
+    }
+    if (
+      action === "release.local"
+      && outcome === "passed"
+      && completion.outcome === "failed"
+      && completion.local_release_verification
+    ) {
+      const attempt = attemptsById.get(completion.attempt_receipt_ref?.id);
+      if (
+        attempt
+        && stableJson(completion.attempt_receipt_ref)
+          === stableJson(deliveryActionAttemptReceiptRef(context, profile, attempt))
+        && stableJson(attempt.completion_request) === stableJson(expected)
+      ) {
+        const integrity = localReleaseCompletionIntegrityErrors(
+          context,
+          profile,
+          completion,
+          authorization,
+          { attempt },
+        );
+        if (integrity.legacy || integrity.errors.length > 0) {
+          fail(
+            `Persisted failed completion ${completion.id} has invalid local release integrity: `
+            + `${integrity.errors.join("; ") || "missing write-ahead proof"}.`,
+          );
+        }
+        matches.push({
+          completion,
+          authorization,
+          evidence,
+          attempt,
+          derivedFailure: true,
+        });
+      }
     }
   }
   if (matches.length > 1) {
@@ -19081,7 +20264,7 @@ function recoverPersistedDeliveryCompletion(
   );
   let state = executionState;
   let autoClose = null;
-  if (outcome === "passed" && terminalStatusForDeliveryAction(action)) {
+  if (match.completion.outcome === "passed" && terminalStatusForDeliveryAction(action)) {
     if (state.lifecycle_status === "started") {
       autoClose = repairTerminalDeliveryClose(context, profile, state);
       state = currentDeliveryExecutionState(context, profile);
@@ -19102,6 +20285,16 @@ function recoverPersistedDeliveryCompletion(
         ),
       );
     }
+  }
+  if (match.completion.outcome === "failed") {
+    fail(
+      `Completion ${match.completion.id} was already recorded as failed for ${action}; `
+      + (completionTrace.appended
+        ? "its missing lifecycle trace was repaired. "
+        : "its lifecycle trace was already consistent. ")
+      + "No smoke command was executed again and the prior authorization remains consumed. "
+      + "Correct the cause and use a fresh authorization.",
+    );
   }
   output(options, {
     status: "completed",
@@ -19137,10 +20330,21 @@ function selectPendingDeliveryActionAuthorization(
   actions,
   options,
 ) {
+  const attempts = action === "release.local"
+    ? deliveryActionAttemptReceipts(context, profile.id)
+    : [];
+  const attemptedAuthorizationIds = new Set(
+    attempts
+      .map((receipt) => receipt.authorization_receipt_ref?.id)
+      .filter(Boolean),
+  );
   const consumedAuthorizationIds = new Set(actions
     .filter((receipt) => receipt.status === "completed")
     .map((receipt) => receipt.authorization_receipt_ref?.id)
     .filter(Boolean));
+  for (const authorizationId of attemptedAuthorizationIds) {
+    consumedAuthorizationIds.add(authorizationId);
+  }
   const matchingAuthorizations = actions
     .filter((receipt) =>
       receipt.action === action
@@ -19158,9 +20362,15 @@ function selectPendingDeliveryActionAuthorization(
       );
     }
     if (consumedAuthorizationIds.has(selected.id)) {
+      const writeAheadAttempt = attempts.find((attempt) =>
+        attempt.authorization_receipt_ref?.id === selected.id);
       fail(
         `Delivery action authorization receipt ${selector} is already consumed, and this completion `
-        + "request does not match its persisted result. Use a different unconsumed receipt for a new operation.",
+        + "request does not match its persisted result. "
+        + (writeAheadAttempt
+          ? `Write-ahead attempt ${writeAheadAttempt.id} prevents silent re-execution after a crash or failed smoke. `
+          : "")
+        + "Use a different unconsumed receipt for a new operation.",
       );
     }
     return selected;
@@ -19271,6 +20481,8 @@ function evaluateDeliveryAction(context, options) {
     const action = normalizeDeliveryAction(profile.delivery_kind, requestedAction);
     const executionState = currentDeliveryExecutionState(context, profile);
     const reportedOutcome = getOptionString(options, "outcome");
+    let completionOutcome = reportedOutcome;
+    let deferredCompletionFailure = null;
     const completingAction = Boolean(reportedOutcome);
     if (completingAction && !["passed", "failed"].includes(reportedOutcome)) {
       fail("Delivery action completion --outcome must be passed or failed.");
@@ -19384,10 +20596,20 @@ function evaluateDeliveryAction(context, options) {
           && candidate.authorization_receipt_ref?.hash
             === pendingActionIntent.action_receipt.receipt_hash)
       : null;
-    if (consumedIntentCompletion) {
+    const consumedIntentAttempt = pendingActionIntent && action === "release.local"
+      ? deliveryActionAttemptReceipts(context, profile.id).find((candidate) =>
+          candidate.authorization_receipt_ref?.id
+            === pendingActionIntent.action_receipt.id
+          && candidate.authorization_receipt_ref?.hash
+            === pendingActionIntent.action_receipt.receipt_hash)
+      : null;
+    if (consumedIntentCompletion || consumedIntentAttempt) {
       fail(
         `Delivery action authorization intent ${pendingActionIntent.id} was already consumed by `
-        + `completion ${consumedIntentCompletion.id}. Create a new delegated authorization for a new action attempt.`,
+        + (consumedIntentCompletion
+          ? `completion ${consumedIntentCompletion.id}. `
+          : `write-ahead attempt ${consumedIntentAttempt.id}. `)
+        + "Create a new delegated authorization for a new action attempt.",
       );
     }
     const actionReceiptId = pendingActionIntent?.action_receipt?.id
@@ -19599,6 +20821,23 @@ function evaluateDeliveryAction(context, options) {
         ? buildCompletedGitCommitDetails(context, priorAuthorization, runtimeTarget)
         : priorAuthorization.action_details;
     }
+    let currentLocalReleaseIntegrity = null;
+    if (completingAction && action === "release.local") {
+      const authorizedIntegrity = priorAuthorization.action_details?.local_release_integrity;
+      if (!authorizedIntegrity) {
+        fail(
+          "This historical release.local authorization does not bind the current smoke runner and "
+          + "artifact-manifest policy; request a fresh release checkpoint.",
+        );
+      }
+      currentLocalReleaseIntegrity = localReleaseIntegrityAttestation(context, profile);
+      if (stableJson(currentLocalReleaseIntegrity) !== stableJson(authorizedIntegrity)) {
+        fail(
+          "The smoke runner, plugin build, host capability, executable, environment, or artifact-manifest "
+          + "policy changed after release.local authorization; request a fresh release checkpoint.",
+        );
+      }
+    }
     if (completingAction && DELIVERY_PROVIDER_ACTIONS.has(action) && reportedOutcome === "passed") {
       const providerOperation = priorAuthorization.action_details?.provider_operation;
       if (providerOperation?.precondition_receipt) {
@@ -19674,6 +20913,7 @@ function evaluateDeliveryAction(context, options) {
       );
     }
     let localReleaseVerification = null;
+    let localReleaseAttempt = null;
     if (action === "release.local" && completingAction) {
       const dataMigrationSequence = profile.local_release_target?.data_migration
         ? requireReversibleDataReleaseSequence(context, profile, priorAuthorization)
@@ -19703,48 +20943,132 @@ function evaluateDeliveryAction(context, options) {
       if (reportedSmokeCwd !== approvedSmokeCwd) {
         fail("release.local --smoke-cwd must match the exact approved smoke working directory.");
       }
-      if (reportedOutcome !== "passed") {
-        fail("release.local completion must report --outcome passed before the delivery can be released.");
-      }
       if (getOptionString(options, "rollback") !== profile.local_release_target?.rollback?.procedure) {
         fail("release.local must confirm the exact approved rollback procedure with --rollback.");
       }
-      validateLocalReleaseFilesystemBoundary(profile.local_release_target);
-      const smokeTestReceipts = runApprovedLocalSmokeTests(profile);
-      if (smokeTestReceipts.some((item) => item.outcome !== "passed")) {
-        fail("release.local smoke-test execution failed; the delivery remains started and is not released.");
-      }
-      const requiredRollbackVerification = profile.local_release_target?.rollback
-        ?.verification_required === true
-        ? latestPassingRollbackVerification(context, profile, priorAuthorization)
-        : null;
-      if (requiredRollbackVerification && !requiredRollbackVerification.receipt) {
-        fail(
-          "release.local requires a passing rollback.verify receipt for the exact local target, "
-          + `procedure, and immutable evidence before successful completion: ${requiredRollbackVerification.errors.join("; ")}.`,
+      if (reportedOutcome === "passed") {
+        validateLocalReleaseFilesystemBoundary(profile.local_release_target);
+        const exactSmokeCwd = approvedLocalSmokeCwd(profile);
+        for (const canonicalCommand of approvedSmokeTests) {
+          validateLocalSmokeCommandBoundary(exactSmokeCwd, JSON.parse(canonicalCommand));
+        }
+        const requiredRollbackVerification = profile.local_release_target?.rollback
+          ?.verification_required === true
+          ? latestPassingRollbackVerification(context, profile, priorAuthorization)
+          : null;
+        if (requiredRollbackVerification && !requiredRollbackVerification.receipt) {
+          fail(
+            "release.local requires a passing rollback.verify receipt for the exact local target, "
+            + `procedure, and immutable evidence before starting smoke: ${requiredRollbackVerification.errors.join("; ")}.`,
+          );
+        }
+        const preSmokeArtifactManifest = localReleaseArtifactManifest(context, profile);
+        const requestedCompletion = buildDeliveryCompletionRequest(
+          context,
+          profile,
+          action,
+          "passed",
+          evidence,
+          options,
+          priorAuthorization,
         );
+        const attemptCandidate = buildLocalReleaseActionAttempt(
+          context,
+          profile,
+          priorAuthorization,
+          requestedCompletion,
+          currentLocalReleaseIntegrity,
+          preSmokeArtifactManifest,
+        );
+        localReleaseAttempt = persistLocalReleaseActionAttempt(
+          context,
+          profile,
+          attemptCandidate,
+        ).receipt;
+        if (
+          process.env.NODE_ENV === "test"
+          && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE
+            === "after-local-release-attempt-before-smoke"
+        ) {
+          fail(
+            "Simulated interruption after local release attempt persistence and before smoke execution.",
+          );
+        }
+        const smokeTestReceipts = runApprovedLocalSmokeTests(
+          profile,
+          currentLocalReleaseIntegrity.smoke_execution_policy,
+        );
+        let postSmokeArtifactManifest = null;
+        let artifactStable = false;
+        try {
+          postSmokeArtifactManifest = localReleaseArtifactManifest(context, profile);
+          artifactStable = stableJson(postSmokeArtifactManifest) === stableJson(preSmokeArtifactManifest);
+        } catch {
+          artifactStable = false;
+        }
+        if (
+          process.env.NODE_ENV === "test"
+          && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE
+            === "after-local-release-smoke-before-completion-receipt"
+        ) {
+          fail(
+            "Simulated interruption after local release smoke and before completion receipt persistence.",
+          );
+        }
+        const failedSmokeTestReceipts = smokeTestReceipts.filter((item) => item.outcome !== "passed");
+        const attemptPassed = failedSmokeTestReceipts.length === 0 && artifactStable;
+        completionOutcome = attemptPassed ? "passed" : "failed";
+        localReleaseVerification = {
+          target_root: profile.local_release_target.root_path,
+          allowed_write_paths: profile.local_release_target.allowed_write_paths,
+          smoke_tests: approvedSmokeTests,
+          smoke_cwd: approvedSmokeCwd,
+          smoke_test_receipts: smokeTestReceipts,
+          outcome: completionOutcome,
+          evidence,
+          rollback: profile.local_release_target.rollback,
+          integrity: {
+            schema_version: "local-release-completion-integrity:v2",
+            authorized_policy: currentLocalReleaseIntegrity,
+            pre_smoke_artifact_manifest: preSmokeArtifactManifest,
+            post_smoke_artifact_manifest: postSmokeArtifactManifest,
+            artifact_stable_during_smoke: artifactStable,
+          },
+          ...(requiredRollbackVerification?.receipt
+            ? {
+                rollback_verification_receipt_ref: deliveryActionReceiptRef(
+                  context,
+                  requiredRollbackVerification.receipt,
+                ),
+              }
+            : {}),
+          ...(dataMigrationSequence
+            ? { data_migration_sequence: dataMigrationSequence }
+            : {}),
+        };
+        if (!attemptPassed) {
+          const smokeBoundary = localSmokeExecutionBoundary();
+          const safeDiagnostics = failedSmokeTestReceipts.map((item) => ({
+            command: item.command,
+            sandbox: item.sandbox,
+            exit_code: item.exit_code,
+            signal: item.signal,
+            error_code: item.error_code,
+            stdout_sha256: item.stdout_sha256,
+            stderr_sha256: item.stderr_sha256,
+          }));
+          deferredCompletionFailure = (
+            "release.local verification failed; a failed completion receipt was stored, the authorization "
+            + "was consumed, and the delivery remains started. Request a fresh authorization before retrying. "
+            + `The current runner denies writes and external network; its loopback policy is `
+            + `${smokeBoundary.loopback_network}. Portable smoke tests must not depend on sockets. `
+            + "For an API, exercise its exported handler in-process; otherwise validate the built artifact files. "
+            + "This runner executes reviewed project code and does not provide host-file confidentiality. "
+            + `Artifact stable during smoke: ${artifactStable}. `
+            + `Safe smoke diagnostics: ${stableJson(safeDiagnostics)}`
+          );
+        }
       }
-      localReleaseVerification = {
-        target_root: profile.local_release_target.root_path,
-        allowed_write_paths: profile.local_release_target.allowed_write_paths,
-        smoke_tests: approvedSmokeTests,
-        smoke_cwd: approvedSmokeCwd,
-        smoke_test_receipts: smokeTestReceipts,
-        outcome: "passed",
-        evidence,
-        rollback: profile.local_release_target.rollback,
-        ...(requiredRollbackVerification?.receipt
-          ? {
-              rollback_verification_receipt_ref: deliveryActionReceiptRef(
-                context,
-                requiredRollbackVerification.receipt,
-              ),
-            }
-          : {}),
-        ...(dataMigrationSequence
-          ? { data_migration_sequence: dataMigrationSequence }
-          : {}),
-      };
     }
     let rollbackVerification = null;
     if (
@@ -19845,7 +21169,7 @@ function evaluateDeliveryAction(context, options) {
           context,
           profile,
           action,
-          reportedOutcome,
+          completionOutcome,
           evidence,
           options,
           priorAuthorization,
@@ -19855,7 +21179,11 @@ function evaluateDeliveryAction(context, options) {
       id: actionReceiptId,
       kind: "delivery_action_receipt",
       schema_version: pendingActionIntent?.action_receipt?.schema_version
-        || "delivery-action-receipt:v2",
+        || (
+          action === "release.local"
+            ? "delivery-action-receipt:v3"
+            : "delivery-action-receipt:v2"
+        ),
       profile_ref: {
         id: profile.id,
         path: toProjectPath(context, profilePath),
@@ -19878,12 +21206,21 @@ function evaluateDeliveryAction(context, options) {
             hash: priorAuthorization.receipt_hash,
           }
         : null,
+      ...(localReleaseAttempt
+        ? {
+            attempt_receipt_ref: deliveryActionAttemptReceiptRef(
+              context,
+              profile,
+              localReleaseAttempt,
+            ),
+          }
+        : {}),
       ...(completionRequest ? { completion_request: completionRequest } : {}),
       local_release_verification: localReleaseVerification,
       ...(rollbackVerification ? { rollback_verification: rollbackVerification } : {}),
       ...(dataOperationVerification ? { data_operation_verification: dataOperationVerification } : {}),
       evidence,
-      outcome: reportedOutcome || null,
+      outcome: completionOutcome || null,
       status: completingAction ? "completed" : "authorized",
       authorized_by: pendingActionIntent?.action_receipt?.authorized_by || attribution.actor,
       authorized_at: createdAt,
@@ -19895,6 +21232,21 @@ function evaluateDeliveryAction(context, options) {
       receipt_hash: autonomyLifecycleReceiptHash(receiptBase),
       hash_algorithm: "sha256:stable-json:v1",
     };
+    if (completingAction && action === "release.local" && localReleaseVerification) {
+      const completionIntegrity = localReleaseCompletionIntegrityErrors(
+        context,
+        profile,
+        receipt,
+        priorAuthorization,
+        { attempt: localReleaseAttempt },
+      );
+      if (completionIntegrity.legacy || completionIntegrity.errors.length > 0) {
+        fail(
+          "Local release completion proof could not be cross-bound to its authorization and "
+          + `write-ahead attempt: ${completionIntegrity.errors.join("; ") || "missing integrity proof"}.`,
+        );
+      }
+    }
     assertRecordSchema(receipt, "delivery-action-receipt.schema.json", `Delivery action receipt ${receipt.id}`);
     if (!completingAction) {
       persistDeliveryCheckpointPolicySource(context, preparedPolicySource);
@@ -20010,12 +21362,12 @@ function evaluateDeliveryAction(context, options) {
       process.env.NODE_ENV === "test"
       && process.env.AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE === "after-terminal-completion-receipt"
       && completingAction
-      && reportedOutcome === "passed"
+      && completionOutcome === "passed"
       && terminalStatusForDeliveryAction(action)
     ) {
       fail("Simulated interruption after the terminal completion receipt was persisted.");
     }
-    const autoClose = completingAction && reportedOutcome === "passed" && terminalStatusForDeliveryAction(action)
+    const autoClose = completingAction && completionOutcome === "passed" && terminalStatusForDeliveryAction(action)
       ? repairTerminalDeliveryClose(context, profile, executionState)
       : null;
     const autoClosePath = autoClose?.path || null;
@@ -20035,7 +21387,7 @@ function evaluateDeliveryAction(context, options) {
         summary: `${completingAction ? "Completed" : "Authorized"} ${action} for exact delivery ${profile.delivery_id}`,
         action,
         actor: attribution.actor,
-        outcome: completingAction ? reportedOutcome : "ready",
+        outcome: completingAction ? completionOutcome : "ready",
         evidence: [
           toProjectPath(context, receiptPath),
           autoClosePath,
@@ -20046,9 +21398,16 @@ function evaluateDeliveryAction(context, options) {
         run: attribution.run,
       });
     }
+    if (deferredCompletionFailure) {
+      fail(deferredCompletionFailure.replace(
+        "Safe smoke diagnostics: ",
+        `Failed completion receipt: ${toProjectPath(context, receiptPath)} (${receipt.id}). `
+          + "Safe smoke diagnostics: ",
+      ));
+    }
     const locale = humanGuidanceLocale(options);
     const italian = locale === "it";
-    const completedSuccessfully = reportedOutcome === "passed";
+    const completedSuccessfully = completionOutcome === "passed";
     const completionGuidance = completingAction
       ? {
           result: completedSuccessfully
@@ -20073,7 +21432,7 @@ function evaluateDeliveryAction(context, options) {
           details: {
             profile_id: profile.id,
             action,
-            outcome: reportedOutcome,
+            outcome: completionOutcome,
             receipt_path: toProjectPath(context, receiptPath),
           },
         }
@@ -20097,7 +21456,7 @@ function evaluateDeliveryAction(context, options) {
           `- Profile: ${profile.id}`,
           `- Delivery: ${profile.delivery_id}`,
           `- Canonical action: ${action}`,
-          `- Outcome: ${reportedOutcome}`,
+          `- Outcome: ${completionOutcome}`,
           `- Evidence record: ${toProjectPath(context, receiptPath)}`,
         ].map((line) => line.replace(/^- /u, "")), options)
       : humanGuidanceLines(authorizationGuidance, [
@@ -37371,6 +38730,94 @@ function readStableRegularFileBuffer(filePath, boundaryRoot) {
   }
 }
 
+function readStableRegularFileDigest(filePath, boundaryRoot, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    fail("Stable file digest maxBytes must be a non-negative safe integer.");
+  }
+  assertNoSymlinkPathSegments(filePath, boundaryRoot);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (before.size > maxBytes) {
+      fail(`Local release freshness target exceeds 512 MiB: ${filePath}`);
+    }
+    const digest = crypto.createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let total = 0;
+    let position = 0;
+    while (total < before.size) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        0,
+        Math.min(buffer.byteLength, before.size - total),
+        position,
+      );
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
+      total += bytesRead;
+      position += bytesRead;
+    }
+    const after = fs.fstatSync(descriptor);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (
+      !sameStableFileIdentity(before, after)
+      || before.size !== after.size
+      || before.mode !== after.mode
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+      || total !== after.size
+    ) {
+      fail(`File changed while creating its stable digest: ${filePath}`);
+    }
+    return {
+      file_type: "regular",
+      mode: after.mode & 0o7777,
+      size_bytes: after.size,
+      sha256: digest.digest("hex"),
+    };
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
+function readStableRegularFilePrefix(filePath, boundaryRoot, maxBytes = 4096) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    fail("Stable file prefix maxBytes must be a positive safe integer.");
+  }
+  assertNoSymlinkPathSegments(filePath, boundaryRoot);
+  const parentIdentity = captureDirectoryIdentity(path.dirname(filePath));
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const before = verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    const buffer = Buffer.allocUnsafe(Math.min(maxBytes, Math.max(before.size, 1)));
+    const bytesRead = before.size > 0
+      ? fs.readSync(descriptor, buffer, 0, Math.min(buffer.byteLength, before.size), 0)
+      : 0;
+    const after = fs.fstatSync(descriptor);
+    verifyOpenFileMatchesPath(descriptor, filePath, parentIdentity);
+    if (
+      !sameStableFileIdentity(before, after)
+      || before.size !== after.size
+      || before.mode !== after.mode
+      || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
+    ) {
+      fail(`File changed while reading its stable prefix: ${filePath}`);
+    }
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+}
+
 function assertContextSourcePathSafe(context, filePath, label) {
   assertNoSymlinkPathSegments(filePath, context.root);
   const realRoot = fs.realpathSync.native(context.root);
@@ -41557,6 +43004,9 @@ function validateDeliveryActionEvidence(context, report, receipt, actionLabel, e
 function validateDeliveryExecutionReceipts(context, report, profile, state, label, options = {}) {
   if (state.lifecycle_status === "available") return;
   const actions = deliveryActionReceipts(context, profile.id);
+  const attempts = profile.delivery_kind === "local_release"
+    ? deliveryActionAttemptReceipts(context, profile.id)
+    : [];
   if (profile.local_release_target?.data_migration) {
     report.errors.push(...dataMigrationPreviewEvidenceErrors(
       context,
@@ -41575,6 +43025,46 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     .filter((receipt) => receipt.status === "completed")
     .map((receipt) => receipt.authorization_receipt_ref?.id)
     .filter(Boolean));
+  for (const attempt of attempts) {
+    if (attempt.authorization_receipt_ref?.id) {
+      consumedAuthorizationIds.add(attempt.authorization_receipt_ref.id);
+    }
+  }
+  const authorizationsById = new Map(actions
+    .filter((receipt) => receipt.status === "authorized")
+    .map((receipt) => [receipt.id, receipt]));
+  const attemptsById = new Map();
+  const attemptCountByAuthorization = new Map();
+  for (const attempt of attempts) {
+    const attemptLabel = `${label} local release attempt ${attempt.id}`;
+    if (attemptsById.has(attempt.id)) {
+      report.errors.push(`${attemptLabel} duplicates another write-ahead attempt id`);
+      continue;
+    }
+    attemptsById.set(attempt.id, attempt);
+    const authorization = authorizationsById.get(attempt.authorization_receipt_ref?.id);
+    report.errors.push(...localReleaseAttemptReceiptErrors(
+      context,
+      profile,
+      attempt,
+      authorization,
+    ).map((error) => `${attemptLabel} is invalid: ${error}`));
+    const authorizationKey = `${attempt.authorization_receipt_ref?.id || "missing"}:`
+      + `${attempt.authorization_receipt_ref?.hash || "missing"}`;
+    attemptCountByAuthorization.set(
+      authorizationKey,
+      (attemptCountByAuthorization.get(authorizationKey) || 0) + 1,
+    );
+    report.checked.push(attemptLabel);
+  }
+  for (const [authorizationKey, count] of attemptCountByAuthorization.entries()) {
+    if (count > 1) {
+      report.errors.push(
+        `${label} action authorization ${authorizationKey} has ${count} write-ahead attempts`,
+      );
+    }
+  }
+  const completionCountByAttempt = new Map();
   const liveAuthorizationIds = new Set();
   const liveAuthorizationsByAction = new Map();
   for (const authorization of actions.filter((receipt) =>
@@ -41810,6 +43300,31 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         && candidate.receipt_hash === receipt.authorization_receipt_ref?.hash
         && candidate.action === receipt.action
         && candidate.status === "authorized");
+      const releaseAttempt = receipt.attempt_receipt_ref
+        ? attemptsById.get(receipt.attempt_receipt_ref.id)
+        : null;
+      if (receipt.attempt_receipt_ref) {
+        if (
+          receipt.action !== "release.local"
+          || !releaseAttempt
+          || stableJson(releaseAttempt.authorization_receipt_ref)
+            !== stableJson(receipt.authorization_receipt_ref)
+          || stableJson(receipt.attempt_receipt_ref)
+            !== stableJson(deliveryActionAttemptReceiptRef(context, profile, releaseAttempt))
+        ) {
+          report.errors.push(`${actionLabel} has an invalid write-ahead local release attempt reference`);
+        } else {
+          completionCountByAttempt.set(
+            releaseAttempt.id,
+            (completionCountByAttempt.get(releaseAttempt.id) || 0) + 1,
+          );
+        }
+        if (!receipt.local_release_verification) {
+          report.errors.push(
+            `${actionLabel} references a write-ahead attempt without its local release verification`,
+          );
+        }
+      }
       if (!authorization) {
         report.errors.push(`${actionLabel} does not reference its matching authorization receipt`);
       } else if (receipt.effective_level !== authorization.effective_level) {
@@ -41831,7 +43346,13 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         }
         if (receipt.action === "git.commit" && receipt.outcome === "passed") {
           validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
-        } else if (DELIVERY_PROVIDER_ACTIONS.has(receipt.action) && receipt.outcome === "passed") {
+        } else if (
+          DELIVERY_PROVIDER_ACTIONS.has(receipt.action)
+          && (
+            receipt.outcome === "passed"
+            || receipt.action_details?.provider_operation?.completion_receipt
+          )
+        ) {
           validateCompletedRemoteActionReceipt(context, report, profile, receipt, authorization, actionLabel);
         } else if (
           stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)
@@ -41840,7 +43361,7 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
           report.errors.push(`${actionLabel} completion differs from its exact authorization boundary`);
         }
       }
-      if (receipt.action === "release.local") {
+      if (receipt.action === "release.local" && receipt.outcome === "passed") {
         const verification = receipt.local_release_verification;
         const commands = (verification?.smoke_test_receipts || []).map((item) => stableJson(item.command)).sort();
         const approvedCommands = [...(profile.local_release_target?.smoke_tests || [])].sort();
@@ -41871,6 +43392,20 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
             || item.exit_code !== 0)
         ) {
           report.errors.push(`${actionLabel} does not prove the exact approved local smoke-test set and target`);
+        }
+        const integrityValidation = localReleaseCompletionIntegrityErrors(
+          context,
+          profile,
+          receipt,
+          authorization,
+          { revalidateArtifact: true, attempt: releaseAttempt },
+        );
+        if (integrityValidation.legacy) {
+          const warning = `${actionLabel} is a legacy local release without smoke-bound artifact integrity`;
+          if (!report.warnings.includes(warning)) report.warnings.push(warning);
+        } else {
+          report.errors.push(...integrityValidation.errors.map((error) =>
+            `${actionLabel} local release integrity is invalid: ${error}`));
         }
         if (profile.local_release_target?.rollback?.verification_required === true) {
           const rollbackRef = verification?.rollback_verification_receipt_ref;
@@ -41911,6 +43446,24 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
           }
         } else if (verification?.data_migration_sequence) {
           report.errors.push(`${actionLabel} unexpectedly records a reversible data sequence`);
+        }
+      } else if (
+        receipt.action === "release.local"
+        && receipt.outcome === "failed"
+        && receipt.local_release_verification
+      ) {
+        const integrityValidation = localReleaseCompletionIntegrityErrors(
+          context,
+          profile,
+          receipt,
+          authorization,
+          { attempt: releaseAttempt },
+        );
+        if (integrityValidation.legacy) {
+          report.errors.push(`${actionLabel} failed smoke attempt lacks its write-ahead integrity boundary`);
+        } else {
+          report.errors.push(...integrityValidation.errors.map((error) =>
+            `${actionLabel} failed release integrity is invalid: ${error}`));
         }
       }
       if (receipt.action === "rollback.verify" && receipt.outcome === "passed") {
@@ -41956,13 +43509,38 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     }
     report.checked.push(actionLabel);
   }
+  for (const [attemptId, count] of completionCountByAttempt.entries()) {
+    if (count > 1) {
+      report.errors.push(`${label} local release attempt ${attemptId} has ${count} completions`);
+    }
+  }
+  for (const attempt of attempts) {
+    if (!completionCountByAttempt.has(attempt.id)) {
+      const warning = `${label} local release attempt ${attempt.id} has no completion; its authorization remains consumed`;
+      if (!report.warnings.includes(warning)) report.warnings.push(warning);
+    }
+  }
   for (const authorization of actions.filter((receipt) => receipt.status === "authorized")) {
     const uses = actions.filter((receipt) =>
       receipt.status === "completed"
       && receipt.authorization_receipt_ref?.id === authorization.id
       && receipt.authorization_receipt_ref?.hash === authorization.receipt_hash);
-    if (uses.length > 1) {
+    const attemptUses = attempts.filter((attempt) =>
+      attempt.authorization_receipt_ref?.id === authorization.id
+      && attempt.authorization_receipt_ref?.hash === authorization.receipt_hash);
+    if (uses.length > 1 || attemptUses.length > 1) {
       report.errors.push(`${label} action authorization ${authorization.id} was consumed more than once`);
+    }
+    if (
+      attemptUses.length === 1
+      && uses.some((completion) =>
+        completion.action !== "release.local"
+        || completion.attempt_receipt_ref?.id !== attemptUses[0].id
+        || completion.attempt_receipt_ref?.hash !== attemptUses[0].receipt_hash)
+    ) {
+      report.errors.push(
+        `${label} action authorization ${authorization.id} has a completion outside its write-ahead attempt`,
+      );
     }
   }
   for (const authorization of actions.filter((receipt) =>

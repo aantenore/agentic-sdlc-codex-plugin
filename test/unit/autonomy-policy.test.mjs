@@ -441,6 +441,43 @@ test("local releases can be bounded autonomous only inside an exact reversible t
   );
 });
 
+test("local release profiles reject ambiguous smoke launchers before approval", () => {
+  const requirement = requirementProfile();
+  const buildLocalProfile = (smokeTests) => deliveryProfile(requirement, {
+    id: "AUT-LOCAL-SMOKE-BOUNDARY",
+    delivery_id: "LOCAL-SMOKE-BOUNDARY",
+    delivery_kind: "local_release",
+    material_scope: deliveryMaterial({ release_target: `${ROOT}/dist` }),
+    pull_request_target: null,
+    local_release_target: {
+      environment: "local",
+      root_path: ROOT,
+      allowed_write_paths: [`${ROOT}/dist`],
+      allowed_actions: ["release.local"],
+      smoke_tests: smokeTests,
+      rollback: { required: true, procedure: "Restore the previous local package artifact" },
+      external_access_allowed: false,
+      production_access_allowed: false,
+      destructive_actions_allowed: false,
+    },
+  });
+  for (const command of [
+    ["/bin/dash", "-c", "exit 0"],
+    ["/usr/bin/env", "node", "--version"],
+    ["node", "--eval=process.exit(0)"],
+    ["python3", "-cprint('unsafe')"],
+    ["npx", "unreviewed-package"],
+    ["npm", "exec", "unreviewed-package"],
+  ]) {
+    assert.throws(
+      () => buildLocalProfile([JSON.stringify(command)]),
+      /shell executable|indirect command dispatcher|inline interpreter code|package dispatcher|package manager must use/iu,
+    );
+  }
+  assert.doesNotThrow(() =>
+    buildLocalProfile(['["npm","run","smoke:local"]']));
+});
+
 test("audit-only authority caps autonomy at checkpointed", () => {
   assert.deepEqual(evaluateHostAuthorityCap({ mode: "audit_only" }), {
     max_level: "checkpointed",

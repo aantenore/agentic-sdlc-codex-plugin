@@ -158,6 +158,10 @@ test("describes an Italian local-release proposal with its real boundary before 
   assert.match(guidance.impact, /cartella locale “\/opt\/travel-operations\/local-release”/u);
   assert.match(guidance.impact, /“\/opt\/travel-operations\/local-release\/app” e “\/opt\/travel-operations\/local-release\/config”/u);
   assert.match(guidance.impact, /smoke test parte da “\/opt\/travel-operations\/local-release\/app”/u);
+  assert.match(guidance.impact, /un controllo portabile non deve dipendere da listener o connessioni/u);
+  assert.match(guidance.impact, /verificato il gestore direttamente nel processo/u);
+  assert.match(guidance.impact, /entrypoint esplicito deve restare nell'artefatto/u);
+  assert.match(guidance.impact, /non attesta gli import transitivi.*codice revisionato/u);
   assert.match(guidance.required_decision, /prima di completare il rilascio locale/u);
   assert.match(guidance.required_decision, /scade il 31 dicembre 2099/u);
   assert.match(guidance.required_decision, /Per questo rilascio locale, quanto vuoi che lavori in autonomia\?/u);
@@ -168,6 +172,25 @@ test("describes an Italian local-release proposal with its real boundary before 
   assert.doesNotMatch(guidance.required_decision, /Per questa PR|PR o rilascio locale/u);
   assert.equal(guidance.details.target_root, "/opt/travel-operations/local-release");
   assert.equal(guidance.details.smoke_cwd, "/opt/travel-operations/local-release/app");
+  assert.deepEqual(guidance.details.smoke_execution_boundary, {
+    schema_version: "local-smoke-execution-boundary:v1",
+    provider: "host_specific",
+    provider_available: null,
+    filesystem_writes: "denied",
+    readable_files: "host_account_scope",
+    confidentiality_isolation: "not_provided",
+    transitive_code_attestation: "not_provided",
+    external_network: "denied",
+    loopback_network: "host_specific_isolated",
+    listener_based_smoke: "not_portable",
+    reviewed_code_required: true,
+    explicit_entrypoint_binding: "artifact_manifest_bound",
+    portable_recommendation: "do_not_depend_on_network_or_listeners",
+    recommended_patterns: [
+      "exercise an exported API handler in-process",
+      "validate built artifact files without opening sockets",
+    ],
+  });
   assert.deepEqual(guidance.details.review_moments, ["release.local"]);
   assert.equal(guidance.details.expires_at, "2099-12-31T23:59:00.000Z");
 });

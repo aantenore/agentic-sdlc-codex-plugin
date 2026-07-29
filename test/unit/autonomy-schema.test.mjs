@@ -226,6 +226,155 @@ function deliveryActionReceipt({
   return receipt;
 }
 
+function localReleaseIntegrityV2() {
+  return {
+    schema_version: "local-release-integrity:v2",
+    smoke_execution_policy: {
+      schema_version: "local-smoke-sandbox-policy:v2",
+      launchers: [{
+        launcher_kind: "direct-interpreter",
+        payload_bindings: [],
+        launcher_hash: "5".repeat(64),
+      }],
+      policy_hash: "6".repeat(64),
+    },
+    artifact_manifest_policy: {
+      policy_hash: "7".repeat(64),
+    },
+    integrity_hash: "8".repeat(64),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+}
+
+function localReleaseActionReceiptV3({
+  status = "authorized",
+  outcome = status === "completed" ? "passed" : null,
+  includeAttempt = status === "completed" && outcome === "passed",
+  includeVerification = status === "completed" && outcome === "passed",
+} = {}) {
+  const receipt = deliveryActionReceipt({
+    schemaVersion: "delivery-action-receipt:v3",
+    status,
+  });
+  receipt.delivery = { id: "LOCAL-SCHEMA", kind: "local_release" };
+  receipt.action = "release.local";
+  receipt.action_details = {
+    local_release_integrity: localReleaseIntegrityV2(),
+  };
+  if (receipt.completion_request) {
+    receipt.completion_request.action = "release.local";
+    receipt.completion_request.outcome = outcome;
+    receipt.outcome = outcome;
+  }
+  if (includeAttempt) {
+    receipt.attempt_receipt_ref = ref(
+      "AUT-ACT-RELEASE-ATTEMPT",
+      "9".repeat(64),
+      ".sdlc/autonomy/executions/AUT-LOCAL-SCHEMA/attempts/AUT-ACT-RELEASE-ATTEMPT.json",
+    );
+  }
+  if (includeVerification) {
+    receipt.local_release_verification = {
+      target_root: "/workspace/travelops",
+      allowed_write_paths: ["/workspace/travelops/dist"],
+      smoke_tests: ['["node","smoke.mjs"]'],
+      smoke_cwd: "/workspace/travelops/dist",
+      smoke_test_receipts: [{
+        command: ["node", "smoke.mjs"],
+        cwd: "/workspace/travelops/dist",
+        sandbox: "macos-sandbox-exec-readonly-no-network",
+        exit_code: 0,
+        signal: null,
+        error_code: null,
+        outcome: "passed",
+        stdout_sha256: "a".repeat(64),
+        stderr_sha256: "b".repeat(64),
+        started_at: NOW,
+        finished_at: NOW,
+      }],
+      outcome,
+      evidence: receipt.evidence,
+      rollback: {
+        required: true,
+        procedure: "Restore the previous local package",
+        verification_required: true,
+      },
+      integrity: {
+        schema_version: "local-release-completion-integrity:v2",
+        authorized_policy: {},
+        pre_smoke_artifact_manifest: {},
+        post_smoke_artifact_manifest: {},
+        artifact_stable_during_smoke: true,
+      },
+    };
+  } else {
+    receipt.local_release_verification = null;
+  }
+  return receipt;
+}
+
+function localReleaseAttemptReceipt() {
+  const profileRef = ref(
+    "AUT-LOCAL-SCHEMA",
+    HASH.requirementProfile,
+    ".sdlc/autonomy/deliveries/AUT-LOCAL-SCHEMA.json",
+  );
+  const authorizationRef = ref(
+    "AUT-ACT-RELEASE-AUTHORIZED",
+    "1".repeat(64),
+    ".sdlc/autonomy/executions/AUT-LOCAL-SCHEMA/actions/AUT-ACT-RELEASE-AUTHORIZED.json",
+  );
+  return {
+    id: "AUT-ACT-RELEASE-ATTEMPT",
+    kind: "delivery_action_attempt_receipt",
+    schema_version: "delivery-action-attempt-receipt:v1",
+    profile_ref: profileRef,
+    delivery: { id: "LOCAL-SCHEMA", kind: "local_release" },
+    action: "release.local",
+    authorization_receipt_ref: authorizationRef,
+    completion_request: {
+      schema_version: "delivery-action-completion-request:v1",
+      profile_ref: profileRef,
+      action: "release.local",
+      outcome: "passed",
+      authorization_receipt_ref: authorizationRef,
+      evidence: [{ path: ".sdlc/tests/ST-SCHEMA.json", sha256: "2".repeat(64) }],
+      operation_args: {
+        scope_paths: ["/workspace/travelops/dist"],
+        smoke_cwd: "/workspace/travelops",
+        smoke_tests: ['["node","--version"]'],
+        rollback: "Restore the previous local package",
+      },
+      request_hash: "3".repeat(64),
+      hash_algorithm: "sha256:stable-json:v1",
+    },
+    smoke_execution_policy_ref: {
+      policy_hash: "4".repeat(64),
+    },
+    artifact_before_smoke: {
+      schema_version: "local-release-artifact-manifest:v1",
+      policy: {
+        schema_version: "local-release-artifact-manifest-policy:v1",
+        policy_hash: "5".repeat(64),
+      },
+      root_identity: {
+        path: "/workspace/travelops",
+        realpath: "/workspace/travelops",
+      },
+      paths: [{
+        path: "/workspace/travelops/dist",
+        kind: "directory",
+        digest: "6".repeat(64),
+      }],
+      hash_algorithm: "sha256:stable-json:v1",
+      manifest_hash: "7".repeat(64),
+    },
+    started_at: NOW,
+    receipt_hash: "8".repeat(64),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+}
+
 function profileTaskStartReceipt({
   schemaVersion = "profile-task-start-receipt:v2",
   includeWorkflowRef = schemaVersion === "profile-task-start-receipt:v2",
@@ -286,6 +435,38 @@ test("delivery action receipt v2 binds completions while v1 remains readable", (
   assertAgainstSchema(currentAuthorization, "delivery-action-receipt");
   assertAgainstSchema(currentCompletion, "delivery-action-receipt");
 
+  const completionWithAttempt = structuredClone(currentCompletion);
+  completionWithAttempt.attempt_receipt_ref = ref(
+    "AUT-ACT-RELEASE-ATTEMPT",
+    "5".repeat(64),
+    ".sdlc/autonomy/executions/AUT-LOCAL-SCHEMA/attempts/AUT-ACT-RELEASE-ATTEMPT.json",
+  );
+  assert.equal(
+    validateAgainstSchema(completionWithAttempt, "delivery-action-receipt").valid,
+    false,
+  );
+  const failedReleaseWithUnprovedAttempt = structuredClone(currentCompletion);
+  failedReleaseWithUnprovedAttempt.delivery = {
+    id: "LOCAL-SCHEMA",
+    kind: "local_release",
+  };
+  failedReleaseWithUnprovedAttempt.action = "release.local";
+  failedReleaseWithUnprovedAttempt.outcome = "failed";
+  failedReleaseWithUnprovedAttempt.completion_request.action = "release.local";
+  failedReleaseWithUnprovedAttempt.completion_request.outcome = "failed";
+  failedReleaseWithUnprovedAttempt.attempt_receipt_ref = ref(
+    "AUT-ACT-RELEASE-ATTEMPT",
+    "5".repeat(64),
+    ".sdlc/autonomy/executions/AUT-LOCAL-SCHEMA/attempts/AUT-ACT-RELEASE-ATTEMPT.json",
+  );
+  assert.equal(
+    validateAgainstSchema(
+      failedReleaseWithUnprovedAttempt,
+      "delivery-action-receipt",
+    ).valid,
+    false,
+  );
+
   const currentCompletionWithoutRequest = deliveryActionReceipt({
     includeCompletionRequest: false,
   });
@@ -311,6 +492,88 @@ test("delivery action receipt v2 binds completions while v1 remains readable", (
     includeCompletionRequest: false,
   });
   assertAgainstSchema(legacyCompletion, "delivery-action-receipt");
+});
+
+test("local release write-ahead attempt schema binds one passing request and pre-smoke artifact", () => {
+  const valid = localReleaseAttemptReceipt();
+  assertAgainstSchema(valid, "delivery-action-attempt-receipt");
+
+  const failedRequest = structuredClone(valid);
+  failedRequest.completion_request.outcome = "failed";
+  assert.equal(
+    validateAgainstSchema(
+      failedRequest,
+      "delivery-action-attempt-receipt",
+    ).valid,
+    false,
+  );
+
+  const wrongAction = structuredClone(valid);
+  wrongAction.action = "git.push";
+  assert.equal(
+    validateAgainstSchema(wrongAction, "delivery-action-attempt-receipt").valid,
+    false,
+  );
+
+  const unboundPolicy = structuredClone(valid);
+  delete unboundPolicy.smoke_execution_policy_ref.policy_hash;
+  assert.equal(
+    validateAgainstSchema(unboundPolicy, "delivery-action-attempt-receipt").valid,
+    false,
+  );
+
+  const unboundArtifact = structuredClone(valid);
+  delete unboundArtifact.artifact_before_smoke.manifest_hash;
+  assert.equal(
+    validateAgainstSchema(unboundArtifact, "delivery-action-attempt-receipt").valid,
+    false,
+  );
+});
+
+test("local release receipt v3 cannot downgrade its integrity chain while v2 remains explicit legacy", () => {
+  const authorization = localReleaseActionReceiptV3();
+  assertAgainstSchema(authorization, "delivery-action-receipt");
+
+  const missingAuthorizationIntegrity = structuredClone(authorization);
+  delete missingAuthorizationIntegrity.action_details.local_release_integrity;
+  assert.equal(
+    validateAgainstSchema(
+      missingAuthorizationIntegrity,
+      "delivery-action-receipt",
+    ).valid,
+    false,
+  );
+
+  const passingCompletion = localReleaseActionReceiptV3({ status: "completed" });
+  assertAgainstSchema(passingCompletion, "delivery-action-receipt");
+
+  const missingAttempt = structuredClone(passingCompletion);
+  delete missingAttempt.attempt_receipt_ref;
+  assert.equal(
+    validateAgainstSchema(missingAttempt, "delivery-action-receipt").valid,
+    false,
+  );
+
+  const oldCompletionIntegrity = structuredClone(passingCompletion);
+  oldCompletionIntegrity.local_release_verification.integrity.schema_version =
+    "local-release-completion-integrity:v1";
+  assert.equal(
+    validateAgainstSchema(oldCompletionIntegrity, "delivery-action-receipt").valid,
+    false,
+  );
+
+  const manualFailure = localReleaseActionReceiptV3({
+    status: "completed",
+    outcome: "failed",
+    includeAttempt: false,
+    includeVerification: false,
+  });
+  assertAgainstSchema(manualFailure, "delivery-action-receipt");
+
+  const legacyV2 = structuredClone(manualFailure);
+  legacyV2.schema_version = "delivery-action-receipt:v2";
+  delete legacyV2.action_details.local_release_integrity;
+  assertAgainstSchema(legacyV2, "delivery-action-receipt");
 });
 
 test("task-start receipt v2 requires workflow binding while byte-compatible v1 forbids it", () => {

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createServer as createNetServer } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -230,6 +231,163 @@ function hostSupportsLocalSmokeSandbox() {
   if (process.platform === "darwin") return fs.existsSync("/usr/bin/sandbox-exec");
   if (process.platform === "linux") return fs.existsSync("/usr/bin/bwrap");
   return false;
+}
+
+function prepareMacOsLocalSmokeRelease({
+  suffix,
+  smokeSource,
+  smokeCommandArgv = null,
+  commandOptions = {},
+  authorizeRelease = true,
+  deferSmokeMaterialization = false,
+}) {
+  const storyId = `ST-MACOS-SMOKE-${suffix}`;
+  const contractId = `CONTRACT-MACOS-SMOKE-${suffix}`;
+  const profileId = `AUT-MACOS-SMOKE-${suffix}`;
+  const project = tmpProject(`macos-local-smoke-${suffix.toLowerCase()}`);
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId,
+    contractId,
+    profileId,
+  });
+
+  const releaseRoot = path.join(project, "local-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  const smokeFileName = `smoke-${suffix.toLowerCase()}.mjs`;
+  const smokeFile = path.join(releaseOutput, smokeFileName);
+  const releaseEvidence = path.join(releaseOutput, "release-proof.txt");
+  const rollbackEvidenceName = `rollback-${suffix.toLowerCase()}.json`;
+  const rollbackEvidence = path.join(project, rollbackEvidenceName);
+  const smokeCommand = JSON.stringify(smokeCommandArgv || ["node", smokeFileName]);
+  const rollback = `Remove the ${suffix.toLowerCase()} local smoke fixture.`;
+
+  fs.mkdirSync(releaseOutput, { recursive: true });
+  if (!deferSmokeMaterialization) {
+    fs.writeFileSync(smokeFile, smokeSource, "utf8");
+    if (smokeCommandArgv) fs.chmodSync(smokeFile, 0o755);
+  }
+  fs.writeFileSync(releaseEvidence, "local smoke release evidence\n", "utf8");
+  fs.writeFileSync(
+    rollbackEvidence,
+    `${JSON.stringify({ target: "local-release/app", restored: true })}\n`,
+    "utf8",
+  );
+
+  const proposal = mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", profileId,
+    "--delivery", `LOCAL-MACOS-SMOKE-${suffix}`,
+    "--kind", "local_release",
+    "--story", storyId,
+    "--contract", contractId,
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--smoke-cwd", releaseOutput,
+    "--smoke-test", smokeCommand,
+    "--rollback", rollback,
+  ], commandOptions);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", profileId,
+    "--phase", "implementation",
+    ...humanApproval(`Approve ${suffix.toLowerCase()} local smoke delivery`),
+  ], commandOptions);
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent(storyId),
+    "--delivery-profile", profileId,
+  ], commandOptions);
+  const rollbackAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", profileId,
+    "--action", "rollback.verify",
+    "--evidence", rollbackEvidenceName,
+    "--confirm-action",
+    ...humanApproval(`Approve ${suffix.toLowerCase()} rollback evidence`),
+  ], commandOptions);
+  mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", profileId,
+    "--action", "rollback.verify",
+    "--outcome", "passed",
+    "--authorization-receipt", rollbackAuthorization.action_receipt.id,
+    "--evidence", rollbackEvidenceName,
+  ], commandOptions);
+  const releaseAuthorization = authorizeRelease
+    ? mustRunJson([
+        "autonomy", "delivery", "action",
+        "--root", project,
+        "--id", profileId,
+        "--action", "release.local",
+        "--confirm-action",
+        ...humanApproval(`Approve ${suffix.toLowerCase()} local release`),
+      ], commandOptions)
+    : null;
+  const completionArgsFor = (authorizationReceiptId) => [
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", profileId,
+    "--action", "release.local",
+    "--outcome", "passed",
+    "--authorization-receipt", authorizationReceiptId,
+    "--evidence", "local-release/app/release-proof.txt",
+    "--smoke-cwd", releaseOutput,
+    "--smoke-test", smokeCommand,
+    "--rollback", rollback,
+  ];
+
+  return {
+    project,
+    profileId,
+    proposal,
+    releaseOutput,
+    smokeFile,
+    smokeSource,
+    releaseEvidence,
+    smokeCommand,
+    rollback,
+    releaseAuthorization,
+    completionArgsFor,
+    completionArgs: releaseAuthorization
+      ? completionArgsFor(releaseAuthorization.action_receipt.id)
+      : null,
+  };
+}
+
+function localReleaseAttemptReceipts(project, profileId) {
+  const attemptsRoot = path.join(
+    project,
+    ".sdlc",
+    "autonomy",
+    "executions",
+    profileId,
+    "attempts",
+  );
+  if (!fs.existsSync(attemptsRoot)) return [];
+  return fs.readdirSync(attemptsRoot)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => JSON.parse(fs.readFileSync(path.join(attemptsRoot, name), "utf8")));
+}
+
+function localReleaseActionReceipts(project, profileId) {
+  const actionsRoot = path.join(project, ".sdlc", "autonomy", "actions");
+  if (!fs.existsSync(actionsRoot)) return [];
+  return fs.readdirSync(actionsRoot)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => JSON.parse(fs.readFileSync(path.join(actionsRoot, name), "utf8")))
+    .filter((receipt) =>
+      receipt.profile_ref?.id === profileId
+      && receipt.action === "release.local");
 }
 
 function taskIntent(storyId) {
@@ -3465,6 +3623,1046 @@ test("package-manager local smoke cannot fall back to the parent source package"
     "--smoke-test", '["npm","run","smoke:local"]',
     "--rollback", "Remove the local package release and restore its previous snapshot.",
   ], /requires a real package\.json in the governed smoke working directory.*parent project packages are never used/isu);
+});
+
+test("local smoke proposals reject shells, dispatchers, package execution, and inline code", () => {
+  const project = tmpProject("local-smoke-proposal-boundary");
+  initializeAutonomyProject(project);
+  createApprovedImplementationContract(project, {
+    storyId: "ST-LOCAL-SMOKE-PROPOSAL",
+    contractId: "CONTRACT-LOCAL-SMOKE-PROPOSAL",
+    profileId: "AUT-LOCAL-SMOKE-PROPOSAL",
+  });
+  const releaseRoot = path.join(project, "local-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  const base = [
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-LOCAL-SMOKE-PROPOSAL",
+    "--delivery", "LOCAL-SMOKE-PROPOSAL",
+    "--kind", "local_release",
+    "--story", "ST-LOCAL-SMOKE-PROPOSAL",
+    "--contract", "CONTRACT-LOCAL-SMOKE-PROPOSAL",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--rollback", "Remove the exact local smoke fixture.",
+  ];
+  const rejected = [
+    { command: ["/bin/dash", "-c", "exit 0"], pattern: /shell executable/iu },
+    { command: ["/usr/bin/env", "node", "--version"], pattern: /dispatcher/iu },
+    { command: ["node", "--eval=process.exit(0)"], pattern: /inline code/iu },
+    { command: ["python3", "-cprint('unsafe')"], pattern: /inline code/iu },
+    { command: ["npx", "unreviewed-package"], pattern: /package dispatcher/iu },
+    { command: ["npm", "exec", "unreviewed-package"], pattern: /must use 'test' or 'run/iu },
+  ];
+  for (const scenario of rejected) {
+    mustFail(
+      [...base, "--smoke-test", JSON.stringify(scenario.command)],
+      scenario.pattern,
+    );
+  }
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "autonomy", "proposals", "AUT-LOCAL-SMOKE-PROPOSAL.json")),
+    false,
+  );
+});
+
+test("release.local rejects resolved shells, indirect loaders, and payloads outside the artifact before authorization", {
+  skip: hostSupportsLocalSmokeSandbox() && process.platform !== "win32"
+    ? false
+    : "requires a POSIX host with a supported local smoke sandbox",
+  timeout: 240_000,
+}, () => {
+  const externalRoot = tmpProject("local-smoke-external-payload");
+  const externalNodePayload = path.join(externalRoot, "external-smoke.mjs");
+  const externalRequirePayload = path.join(externalRoot, "external-require.cjs");
+  const disguisedShell = path.join(externalRoot, "reviewed-runner");
+  fs.writeFileSync(externalNodePayload, "process.stdout.write('external\\n');\n", "utf8");
+  fs.writeFileSync(externalRequirePayload, "module.exports = {};\n", "utf8");
+  fs.symlinkSync("/bin/sh", disguisedShell);
+
+  const scenarios = [
+    {
+      suffix: "EXTERNAL-NODE-PAYLOAD",
+      command: [process.execPath, externalNodePayload],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /payload .* resolves outside the released artifact/isu,
+    },
+    {
+      suffix: "EXTERNAL-NODE-REQUIRE",
+      command: [process.execPath, `--require=${externalRequirePayload}`, "--version"],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /loader option .* is not allowed/isu,
+    },
+    {
+      suffix: "RESOLVED-SHELL",
+      command: [disguisedShell, "-c", "exit 0"],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /resolves to shell/isu,
+    },
+    {
+      suffix: "SHEBANG-DASH",
+      command: ["./smoke-shebang-dash.mjs"],
+      smokeSource: "#!/bin/dash\nexit 0\n",
+      pattern: /resolves to shell/isu,
+    },
+  ];
+  if (spawnSync("python3", ["--version"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  }).status === 0) {
+    const externalPythonPayload = path.join(externalRoot, "external-smoke.py");
+    fs.writeFileSync(externalPythonPayload, "print('external')\n", "utf8");
+    scenarios.push({
+      suffix: "EXTERNAL-PYTHON-PAYLOAD",
+      command: ["python3", externalPythonPayload],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /payload .* resolves outside the released artifact/isu,
+    });
+    scenarios.push({
+      suffix: "PYTHON-MODULE-CONCATENATED",
+      command: ["python3", "-mjson.tool"],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /loader option .* is not allowed/isu,
+    });
+    scenarios.push({
+      suffix: "PYTHON-MODULE-SEPARATE",
+      command: ["python3", "-m", "json.tool"],
+      smokeSource: "process.stdout.write('unused\\n');\n",
+      pattern: /loader option .* is not allowed/isu,
+    });
+  }
+
+  for (const scenario of scenarios) {
+    const fixture = prepareMacOsLocalSmokeRelease({
+      suffix: scenario.suffix,
+      smokeSource: scenario.smokeSource,
+      smokeCommandArgv: scenario.command,
+      authorizeRelease: false,
+    });
+    mustFail([
+      "autonomy", "delivery", "action",
+      "--root", fixture.project,
+      "--id", fixture.profileId,
+      "--action", "release.local",
+      "--confirm-action",
+      ...humanApproval(`Reject ${scenario.suffix.toLowerCase()} release boundary`),
+    ], scenario.pattern);
+    assert.equal(localReleaseActionReceipts(fixture.project, fixture.profileId).length, 0);
+    assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+    assert.equal(
+      fs.existsSync(path.join(
+        fixture.project,
+        ".sdlc",
+        "autonomy",
+        "executions",
+        fixture.profileId,
+        "close.json",
+      )),
+      false,
+    );
+  }
+});
+
+test("release.local binds a deferred artifact entrypoint before its write-ahead attempt", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const suffix = "DEFERRED-ENTRYPOINT";
+  const smokeFileName = `smoke-${suffix.toLowerCase()}.mjs`;
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix,
+    smokeSource: "process.stdout.write('deferred-entrypoint-ok\\n');\n",
+    smokeCommandArgv: ["node", smokeFileName],
+    deferSmokeMaterialization: true,
+  });
+  assert.equal(fs.existsSync(fixture.smokeFile), false);
+  const authorization = fixture.releaseAuthorization.action_receipt;
+  assert.equal(authorization.schema_version, "delivery-action-receipt:v3");
+  const integrity = authorization.action_details.local_release_integrity;
+  assert.equal(integrity.schema_version, "local-release-integrity:v2");
+  assert.equal(
+    integrity.smoke_execution_policy.schema_version,
+    "local-smoke-sandbox-policy:v2",
+  );
+  const [launcher] = integrity.smoke_execution_policy.launchers;
+  assert.equal(launcher.launcher_kind, "direct-interpreter");
+  assert.deepEqual(launcher.payload_bindings, [{
+    argument_index: 1,
+    argument: smokeFileName,
+    origin: "interpreter-entrypoint",
+    source: "interpreter-entrypoint",
+    resolved_path: fixture.smokeFile,
+    governed_write_path: fixture.releaseOutput,
+    binding: "artifact-manifest-bound",
+  }]);
+
+  fs.writeFileSync(fixture.smokeFile, fixture.smokeSource, "utf8");
+  const completed = mustRunJson(fixture.completionArgs, { timeout: 90_000 });
+  assert.equal(completed.action_receipt.schema_version, "delivery-action-receipt:v3");
+  assert.equal(
+    completed.action_receipt.local_release_verification.integrity.schema_version,
+    "local-release-completion-integrity:v2",
+  );
+  assert.equal(completed.action_receipt.attempt_receipt_ref.id.length > 0, true);
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 1);
+  assert.equal(completed.lifecycle_status, "terminal");
+
+  const authorizationPath = path.join(
+    fixture.project,
+    ".sdlc",
+    "autonomy",
+    "actions",
+    `${authorization.id}.json`,
+  );
+  const downgradedAuthorization = JSON.parse(
+    fs.readFileSync(authorizationPath, "utf8"),
+  );
+  delete downgradedAuthorization.action_details.local_release_integrity;
+  downgradedAuthorization.receipt_hash = lifecycleReceiptHash(downgradedAuthorization);
+  fs.writeFileSync(
+    authorizationPath,
+    `${JSON.stringify(downgradedAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+  mustFail([
+    "gate", "check",
+    "--root", fixture.project,
+    "--scope", "story",
+    "--story", `ST-MACOS-SMOKE-${suffix}`,
+    "--strict",
+    "--json",
+  ], /validation failed.*local_release_integrity/isu);
+});
+
+test("native executable flags are not misclassified as interpreter loaders", {
+  skip: hostSupportsLocalSmokeSandbox() && process.platform !== "win32"
+    ? false
+    : "requires a POSIX host with a supported local smoke sandbox",
+  timeout: 120_000,
+}, () => {
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "NATIVE-FLAG",
+    smokeSource: "process.stdout.write('unused\\n');\n",
+    smokeCommandArgv: [resolveHostCommand("true"), "--import", "-r"],
+  });
+  const [launcher] = fixture.releaseAuthorization.action_receipt.action_details
+    .local_release_integrity.smoke_execution_policy.launchers;
+  assert.equal(launcher.launcher_kind, "attested-native-executable");
+  assert.deepEqual(launcher.payload_bindings, []);
+  const completed = mustRunJson(fixture.completionArgs, { timeout: 90_000 });
+  assert.equal(completed.action_receipt.outcome, "passed");
+  assert.equal(completed.lifecycle_status, "terminal");
+});
+
+test("interpreter options with separate values preserve the governed entrypoint", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const scenarios = [{
+    suffix: "NODE-OPTION-VALUE",
+    command: (smokeFileName) => [
+      process.execPath,
+      "--conditions",
+      "development",
+      "--title",
+      "unit/foo",
+      smokeFileName,
+    ],
+    smokeSource: "process.stdout.write('node-option-value-ok\\n');\n",
+  }];
+  if (spawnSync("python3", ["--version"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  }).status === 0) {
+    scenarios.push({
+      suffix: "PYTHON-OPTION-VALUE",
+      command: (smokeFileName) => ["python3", "-W", "ignore", smokeFileName],
+      smokeSource: "print('python-option-value-ok')\n",
+    });
+  }
+  for (const scenario of scenarios) {
+    const smokeFileName = `smoke-${scenario.suffix.toLowerCase()}.mjs`;
+    const fixture = prepareMacOsLocalSmokeRelease({
+      suffix: scenario.suffix,
+      smokeSource: scenario.smokeSource,
+      smokeCommandArgv: scenario.command(smokeFileName),
+    });
+    const [launcher] = fixture.releaseAuthorization.action_receipt.action_details
+      .local_release_integrity.smoke_execution_policy.launchers;
+    assert.equal(launcher.launcher_kind, "direct-interpreter");
+    assert.equal(launcher.payload_bindings.length, 1);
+    assert.equal(launcher.payload_bindings[0].argument, smokeFileName);
+    assert.equal(launcher.payload_bindings[0].origin, "interpreter-entrypoint");
+    const completed = mustRunJson(fixture.completionArgs, { timeout: 90_000 });
+    assert.equal(completed.action_receipt.outcome, "passed");
+    assert.equal(completed.lifecycle_status, "terminal");
+  }
+});
+
+test("a manually failed v3 local release consumes authorization without inventing a smoke attempt", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "MANUAL-FAILED-V3",
+    smokeSource: "process.stdout.write('must-not-run\\n');\n",
+  });
+  const failedArgs = [...fixture.completionArgs];
+  failedArgs[failedArgs.indexOf("passed")] = "failed";
+  const failed = mustRunJson(failedArgs);
+  assert.equal(failed.action_receipt.schema_version, "delivery-action-receipt:v3");
+  assert.equal(failed.action_receipt.outcome, "failed");
+  assert.equal(failed.action_receipt.local_release_verification, null);
+  assert.equal(Object.hasOwn(failed.action_receipt, "attempt_receipt_ref"), false);
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+  mustFail(
+    fixture.completionArgs,
+    /already consumed|already recorded as failed/iu,
+    { timeout: 90_000 },
+  );
+  assert.equal(
+    localReleaseActionReceipts(fixture.project, fixture.profileId)
+      .filter((receipt) => receipt.status === "completed").length,
+    1,
+  );
+});
+
+test("macOS release.local smoke denies loopback, wildcard, LAN bind, and external outbound", {
+  skip: process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")
+    ? false
+    : "requires macOS sandbox-exec",
+  timeout: 120_000,
+}, async () => {
+  const hostServer = createNetServer((socket) => socket.end("HOST_SECRET"));
+  await new Promise((resolve, reject) => {
+    hostServer.once("error", reject);
+    hostServer.listen(0, "127.0.0.1", resolve);
+  });
+  const hostPort = hostServer.address().port;
+  try {
+    const fixture = prepareMacOsLocalSmokeRelease({
+      suffix: "BOUNDARY",
+      smokeSource: `import assert from "node:assert/strict";
+import fs from "node:fs";
+import { createServer, createConnection } from "node:net";
+import os from "node:os";
+
+async function bindResult(host) {
+  const server = createServer();
+  const result = await new Promise((resolve) => {
+    server.once("error", (error) => resolve(error.code || "UNKNOWN_ERROR"));
+    server.listen(0, host, () => resolve("BOUND"));
+  });
+  if (result === "BOUND") {
+    await new Promise((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()));
+  }
+  return result;
+}
+
+const lanAddress = Object.values(os.networkInterfaces())
+  .flat()
+  .find((entry) => entry && entry.family === "IPv4" && !entry.internal)
+  ?.address;
+const bindHosts = ["127.0.0.1", "::1", "0.0.0.0", "::", lanAddress].filter(Boolean);
+for (const host of bindHosts) {
+  assert.equal(await bindResult(host), "EPERM", "unexpected bind capability for " + host);
+}
+
+async function connectionResult(host, port) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    const socket = createConnection({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve("TIMEOUT");
+    }, 2_000);
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.once("end", () => {
+      clearTimeout(timer);
+      resolve("CONNECTED:" + Buffer.concat(chunks).toString("utf8"));
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      resolve(error.code || "UNKNOWN_ERROR");
+    });
+  });
+}
+
+assert.equal(await connectionResult("127.0.0.1", ${hostPort}), "EPERM");
+assert.equal(await connectionResult("1.1.1.1", 443), "EPERM");
+
+let writeResult = "WROTE";
+try {
+  fs.writeFileSync(new URL("./forbidden-write.txt", import.meta.url), "forbidden");
+} catch (error) {
+  writeResult = error.code || "UNKNOWN_ERROR";
+}
+assert.match(writeResult, /^(?:EACCES|EPERM)$/u);
+`,
+    });
+
+    assert.equal(fixture.proposal.review.smoke_execution_boundary.filesystem_writes, "denied");
+    assert.equal(fixture.proposal.review.smoke_execution_boundary.external_network, "denied");
+    assert.equal(fixture.proposal.review.smoke_execution_boundary.loopback_network, "denied");
+    assert.equal(fixture.proposal.review.smoke_execution_boundary.listener_based_smoke, "unsupported");
+    assert.equal(fixture.proposal.review.smoke_execution_boundary.confidentiality_isolation, "not_provided");
+    assert.equal(
+      fixture.proposal.review.smoke_execution_boundary.transitive_code_attestation,
+      "not_provided",
+    );
+    assert.equal(
+      fixture.proposal.review.smoke_execution_boundary.explicit_entrypoint_binding,
+      "artifact_manifest_bound",
+    );
+    assert.match(
+      fixture.proposal.human_guidance.impact,
+      /portable check must not depend on listeners or connections/iu,
+    );
+    const completedResult = await runAsync([...fixture.completionArgs, "--json"], { timeout: 90_000 });
+    assert.equal(completedResult.status, 0, completedResult.stdout + completedResult.stderr);
+    const completed = JSON.parse(completedResult.stdout);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.lifecycle_status, "terminal");
+    const [smokeReceipt] = completed.action_receipt.local_release_verification.smoke_test_receipts;
+    assert.equal(smokeReceipt.outcome, "passed");
+    assert.equal(smokeReceipt.exit_code, 0);
+    assert.equal(smokeReceipt.signal, null);
+    assert.equal(smokeReceipt.error_code, null);
+    assert.equal(smokeReceipt.sandbox, "macos-sandbox-exec-readonly-no-network");
+    assert.match(smokeReceipt.stdout_sha256, /^[a-f0-9]{64}$/u);
+    assert.match(smokeReceipt.stderr_sha256, /^[a-f0-9]{64}$/u);
+    assert.equal(
+      completed.action_receipt.authorization_receipt_ref.id,
+      fixture.releaseAuthorization.action_receipt.id,
+    );
+    assert.equal(
+      fs.existsSync(path.join(
+        fixture.project,
+        ".sdlc",
+        "autonomy",
+        "executions",
+        fixture.profileId,
+        "close.json",
+      )),
+      true,
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      hostServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("macOS listener-based local smoke fails closed with safe actionable guidance", {
+  skip: process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")
+    ? false
+    : "requires macOS sandbox-exec",
+  timeout: 120_000,
+}, () => {
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "LISTENER",
+    smokeSource: `import { createServer } from "node:http";
+
+const server = createServer((_request, response) => response.end("ok"));
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+});
+`,
+  });
+
+  const failed = run([...fixture.completionArgs, "--json"], { timeout: 90_000 });
+  assert.equal(failed.error, undefined, failed.error?.message);
+  assert.equal(failed.signal, null, failed.stderr);
+  assert.notEqual(failed.status, 0, failed.stdout);
+  const failure = JSON.parse(failed.stdout.trim() || failed.stderr.trim());
+  assert.equal(failure.error.code, "USER_ERROR");
+  assert.match(
+    failure.error.message,
+    /current runner denies writes and external network.*loopback policy is denied.*exercise its exported handler in-process/isu,
+  );
+  const marker = "Safe smoke diagnostics: ";
+  const markerIndex = failure.error.message.indexOf(marker);
+  assert.notEqual(markerIndex, -1, failure.error.message);
+  const diagnostics = JSON.parse(failure.error.message.slice(markerIndex + marker.length));
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0].command, ["node", "smoke-listener.mjs"]);
+  assert.equal(diagnostics[0].sandbox, "macos-sandbox-exec-readonly-no-network");
+  assert.equal(diagnostics[0].exit_code, 1);
+  assert.equal(diagnostics[0].signal, null);
+  assert.equal(diagnostics[0].error_code, null);
+  assert.equal(
+    diagnostics[0].stdout_sha256,
+    crypto.createHash("sha256").update("").digest("hex"),
+  );
+  assert.match(diagnostics[0].stderr_sha256, /^[a-f0-9]{64}$/u);
+  assert.doesNotMatch(failure.error.message, /\bEPERM\b|listen E(?:PERM|ACCES)|node:net/iu);
+
+  const status = mustRunJson([
+    "autonomy", "delivery", "status",
+    "--root", fixture.project,
+    "--id", fixture.profileId,
+  ]);
+  assert.equal(status.delivery_profiles[0].lifecycle_status, "started");
+  assert.equal(status.delivery_profiles[0].delivery_status, "started");
+  assert.equal(
+    fs.existsSync(path.join(
+      fixture.project,
+      ".sdlc",
+      "autonomy",
+      "executions",
+      fixture.profileId,
+      "close.json",
+    )),
+    false,
+  );
+});
+
+test("release.local write-ahead attempts consume failed smoke authorization and bind the released artifact", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "ATTEMPT-FAILED",
+    smokeSource: `import assert from "node:assert/strict";
+import fs from "node:fs";
+
+assert.equal(
+  fs.readFileSync(new URL("./release-state.txt", import.meta.url), "utf8"),
+  "ready\\n",
+  "LOCAL_RELEASE_NOT_READY",
+);
+`,
+  });
+  const statePath = path.join(fixture.releaseOutput, "release-state.txt");
+
+  // Artifact bytes are intentionally not frozen at authorization: the governed
+  // build may materialize or update them before completion starts.
+  fs.writeFileSync(statePath, "broken\n", "utf8");
+  mustFail(
+    fixture.completionArgs,
+    /Failed completion receipt: .*Safe smoke diagnostics:/su,
+    { timeout: 90_000 },
+  );
+
+  const failedAttempts = localReleaseAttemptReceipts(fixture.project, fixture.profileId);
+  assert.equal(failedAttempts.length, 1);
+  const [failedAttempt] = failedAttempts;
+  assert.equal(failedAttempt.schema_version, "delivery-action-attempt-receipt:v1");
+  assert.equal(
+    failedAttempt.authorization_receipt_ref.id,
+    fixture.releaseAuthorization.action_receipt.id,
+  );
+  assert.match(failedAttempt.receipt_hash, /^[a-f0-9]{64}$/u);
+
+  const failedCompletions = localReleaseActionReceipts(fixture.project, fixture.profileId)
+    .filter((receipt) =>
+      receipt.status === "completed"
+      && receipt.authorization_receipt_ref?.id
+        === fixture.releaseAuthorization.action_receipt.id);
+  assert.equal(failedCompletions.length, 1);
+  const [failedCompletion] = failedCompletions;
+  assert.equal(failedCompletion.outcome, "failed");
+  assert.equal(failedCompletion.local_release_verification.outcome, "failed");
+  assert.equal(failedCompletion.attempt_receipt_ref.id, failedAttempt.id);
+  assert.equal(failedCompletion.attempt_receipt_ref.hash, failedAttempt.receipt_hash);
+  assert.equal(
+    failedCompletion.local_release_verification.integrity.artifact_stable_during_smoke,
+    true,
+  );
+  assert.ok(
+    failedCompletion.local_release_verification.smoke_test_receipts
+      .some((receipt) => receipt.outcome === "failed" && receipt.exit_code !== 0),
+  );
+
+  const consumedRetry = run([...fixture.completionArgs, "--json"], { timeout: 90_000 });
+  assert.equal(consumedRetry.error, undefined, consumedRetry.error?.message);
+  assert.equal(consumedRetry.signal, null, consumedRetry.stderr);
+  assert.notEqual(consumedRetry.status, 0, consumedRetry.stdout);
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 1);
+  assert.equal(
+    localReleaseActionReceipts(fixture.project, fixture.profileId)
+      .filter((receipt) =>
+        receipt.status === "completed"
+        && receipt.authorization_receipt_ref?.id
+          === fixture.releaseAuthorization.action_receipt.id)
+      .length,
+    1,
+  );
+
+  const freshAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", fixture.project,
+    "--id", fixture.profileId,
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve a fresh local release attempt after correcting the failed smoke"),
+  ]);
+  assert.notEqual(
+    freshAuthorization.action_receipt.id,
+    fixture.releaseAuthorization.action_receipt.id,
+  );
+  assert.equal(
+    freshAuthorization.action_receipt.action_details.local_release_integrity.integrity_hash,
+    fixture.releaseAuthorization.action_receipt.action_details.local_release_integrity.integrity_hash,
+  );
+
+  // This change occurs after the fresh authorization and must be accepted:
+  // only the exact pre/post-smoke manifest belongs to the completion.
+  fs.writeFileSync(statePath, "ready\n", "utf8");
+  const completed = mustRunJson(
+    fixture.completionArgsFor(freshAuthorization.action_receipt.id),
+    { timeout: 90_000 },
+  );
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.lifecycle_status, "terminal");
+  assert.equal(completed.action_receipt.outcome, "passed");
+  assert.equal(
+    completed.action_receipt.authorization_receipt_ref.id,
+    freshAuthorization.action_receipt.id,
+  );
+  assert.equal(
+    completed.action_receipt.local_release_verification.integrity.artifact_stable_during_smoke,
+    true,
+  );
+  assert.equal(
+    completed.action_receipt.local_release_verification.integrity
+      .pre_smoke_artifact_manifest.manifest_hash,
+    completed.action_receipt.local_release_verification.integrity
+      .post_smoke_artifact_manifest.manifest_hash,
+  );
+  const successfulAttempt = localReleaseAttemptReceipts(fixture.project, fixture.profileId)
+    .find((attempt) =>
+      attempt.authorization_receipt_ref.id === freshAuthorization.action_receipt.id);
+  assert.ok(successfulAttempt);
+  assert.equal(completed.action_receipt.attempt_receipt_ref.id, successfulAttempt.id);
+  assert.equal(
+    completed.action_receipt.attempt_receipt_ref.hash,
+    successfulAttempt.receipt_hash,
+  );
+
+  const beforeDriftGate = run([
+    "gate", "check",
+    "--root", fixture.project,
+    "--scope", "story",
+    "--story", "ST-MACOS-SMOKE-ATTEMPT-FAILED",
+    "--strict",
+    "--json",
+  ]);
+  assert.ok([0, 1].includes(beforeDriftGate.status), beforeDriftGate.stderr);
+  const beforeDriftReport = JSON.parse(beforeDriftGate.stdout);
+  assert.equal(
+    beforeDriftReport.errors.some((error) =>
+      /failed release integrity|released artifact changed after its smoke-tested completion/iu
+        .test(error)),
+    false,
+    beforeDriftGate.stdout,
+  );
+
+  fs.writeFileSync(statePath, "changed-after-release\n", "utf8");
+  mustFail([
+    "gate", "check",
+    "--root", fixture.project,
+    "--scope", "story",
+    "--story", "ST-MACOS-SMOKE-ATTEMPT-FAILED",
+    "--strict",
+    "--json",
+  ], /released artifact changed after its smoke-tested completion/iu);
+});
+
+test("release.local shebang runtime drift is blocked before spawn and requires fresh authorization", {
+  skip: hostSupportsLocalSmokeSandbox() && process.platform !== "win32"
+    ? false
+    : "requires a POSIX host with a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const runtimeBin = tmpProject("local-smoke-runtime-bin");
+  const hostNode = fs.realpathSync.native(process.execPath);
+  const replacementNode = path.join(runtimeBin, "node-v2");
+  try {
+    fs.linkSync(hostNode, replacementNode);
+  } catch {
+    fs.copyFileSync(hostNode, replacementNode);
+  }
+  fs.chmodSync(replacementNode, 0o755);
+  const replacementNodeRealPath = fs.realpathSync.native(replacementNode);
+  const governedNode = path.join(runtimeBin, "node");
+  fs.symlinkSync(hostNode, governedNode);
+  const controlledPath = [runtimeBin, process.env.PATH].filter(Boolean).join(path.delimiter);
+  const commandOptions = { env: { PATH: controlledPath } };
+
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "SHEBANG-RUNTIME",
+    smokeSource: `#!/usr/bin/env node
+process.stdout.write("shebang-runtime-ok\\n");
+`,
+    smokeCommandArgv: ["./smoke-shebang-runtime.mjs"],
+    commandOptions,
+  });
+  const authorizedPolicy = fixture.releaseAuthorization.action_receipt
+    .action_details.local_release_integrity.smoke_execution_policy;
+  assert.equal(authorizedPolicy.launchers.length, 1);
+  const [authorizedLauncher] = authorizedPolicy.launchers;
+  assert.deepEqual(authorizedLauncher.command, ["./smoke-shebang-runtime.mjs"]);
+  assert.equal(
+    authorizedLauncher.command_executable,
+    fs.realpathSync.native(fixture.smokeFile),
+  );
+  assert.equal(authorizedLauncher.runtime_executable, hostNode);
+  assert.match(authorizedLauncher.runtime_executable_sha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(authorizedLauncher.interpreter, {
+    source: "env-path",
+    requested: "node",
+    resolved: hostNode,
+    shebang_sha256: crypto.createHash("sha256")
+      .update("/usr/bin/env node")
+      .digest("hex"),
+  });
+  const runtimeArgIndex = authorizedLauncher.wrapper_args.indexOf(hostNode);
+  assert.notEqual(runtimeArgIndex, -1);
+  assert.equal(
+    authorizedLauncher.wrapper_args[runtimeArgIndex + 1],
+    fs.realpathSync.native(fixture.smokeFile),
+  );
+  assert.equal(authorizedLauncher.wrapper_args.includes("/usr/bin/env"), false);
+
+  fs.unlinkSync(governedNode);
+  fs.symlinkSync(replacementNode, governedNode);
+  assert.equal(
+    [runtimeBin, process.env.PATH].filter(Boolean).join(path.delimiter),
+    controlledPath,
+  );
+  const governedNodeStat = fs.statSync(governedNode);
+  const replacementNodeStat = fs.statSync(replacementNodeRealPath);
+  assert.equal(String(governedNodeStat.dev), String(replacementNodeStat.dev));
+  assert.equal(String(governedNodeStat.ino), String(replacementNodeStat.ino));
+
+  const blocked = run([...fixture.completionArgs, "--json"], {
+    ...commandOptions,
+    timeout: 90_000,
+  });
+  assert.equal(blocked.error, undefined, blocked.error?.message);
+  assert.equal(blocked.signal, null, blocked.stderr);
+  assert.notEqual(blocked.status, 0, blocked.stdout);
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+  assert.equal(
+    localReleaseActionReceipts(fixture.project, fixture.profileId)
+      .some((receipt) =>
+        receipt.status === "completed"
+        && receipt.authorization_receipt_ref?.id
+          === fixture.releaseAuthorization.action_receipt.id),
+    false,
+  );
+
+  const freshAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", fixture.project,
+    "--id", fixture.profileId,
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Approve the changed exact shebang runtime"),
+  ], commandOptions);
+  const freshLauncher = freshAuthorization.action_receipt.action_details
+    .local_release_integrity.smoke_execution_policy.launchers[0];
+  assert.equal(freshLauncher.runtime_executable, replacementNodeRealPath);
+  assert.equal(
+    freshLauncher.runtime_executable_sha256,
+    authorizedLauncher.runtime_executable_sha256,
+  );
+  assert.notEqual(freshLauncher.launcher_hash, authorizedLauncher.launcher_hash);
+
+  const completed = mustRunJson(
+    fixture.completionArgsFor(freshAuthorization.action_receipt.id),
+    { ...commandOptions, timeout: 90_000 },
+  );
+  assert.equal(completed.lifecycle_status, "terminal");
+  assert.equal(completed.action_receipt.outcome, "passed");
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 1);
+});
+
+test("release.local rejects a nested shebang runtime before authorization", {
+  skip: hostSupportsLocalSmokeSandbox() && process.platform !== "win32"
+    ? false
+    : "requires a POSIX host with a supported local smoke sandbox",
+  timeout: 120_000,
+}, () => {
+  const runtimeBin = tmpProject("local-smoke-nested-runtime-bin");
+  const nestedNode = path.join(runtimeBin, "node");
+  fs.writeFileSync(
+    nestedNode,
+    `#!/bin/sh
+exec ${JSON.stringify(fs.realpathSync.native(process.execPath))} "$@"
+`,
+    "utf8",
+  );
+  fs.chmodSync(nestedNode, 0o755);
+  const commandOptions = {
+    env: {
+      PATH: [runtimeBin, process.env.PATH].filter(Boolean).join(path.delimiter),
+    },
+  };
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "NESTED-SHEBANG-RUNTIME",
+    smokeSource: `#!/usr/bin/env node
+process.stdout.write("must-not-run\\n");
+`,
+    smokeCommandArgv: ["./smoke-nested-shebang-runtime.mjs"],
+    commandOptions,
+    authorizeRelease: false,
+  });
+
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", fixture.project,
+    "--id", fixture.profileId,
+    "--action", "release.local",
+    "--confirm-action",
+    ...humanApproval("Attempt to authorize a nested shebang runtime"),
+  ], /resolves to nested script interpreter.*native runtime executable/isu, commandOptions);
+  assert.equal(
+    localReleaseActionReceipts(fixture.project, fixture.profileId).length,
+    0,
+  );
+  assert.equal(
+    localReleaseAttemptReceipts(fixture.project, fixture.profileId).length,
+    0,
+  );
+});
+
+test("release.local failed completion retry repairs its trace without rerunning smoke", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const suffix = "ATTEMPT-FAILED-TRACE";
+  const storyId = `ST-MACOS-SMOKE-${suffix}`;
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix,
+    smokeSource: `process.stderr.write("EXPECTED_SMOKE_FAILURE\\n");
+process.exit(23);
+`,
+  });
+  mustFail(
+    fixture.completionArgs,
+    /after action receipt persistence and before trace persistence/iu,
+    {
+      timeout: 90_000,
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE:
+          "after-action-receipt-before-trace",
+      },
+    },
+  );
+
+  const attemptsAfterFault = localReleaseAttemptReceipts(
+    fixture.project,
+    fixture.profileId,
+  );
+  assert.equal(attemptsAfterFault.length, 1);
+  const failedCompletions = localReleaseActionReceipts(
+    fixture.project,
+    fixture.profileId,
+  ).filter((receipt) =>
+    receipt.status === "completed"
+    && receipt.authorization_receipt_ref?.id
+      === fixture.releaseAuthorization.action_receipt.id);
+  assert.equal(failedCompletions.length, 1);
+  const [failedCompletion] = failedCompletions;
+  assert.equal(failedCompletion.outcome, "failed");
+  assert.equal(failedCompletion.attempt_receipt_ref.id, attemptsAfterFault[0].id);
+  assert.equal(failedCompletion.local_release_verification.outcome, "failed");
+  const failedSmokeReceipts = structuredClone(
+    failedCompletion.local_release_verification.smoke_test_receipts,
+  );
+
+  const tracePath = path.join(
+    fixture.project,
+    ".sdlc",
+    "traces",
+    `${storyId}.jsonl`,
+  );
+  const completionTraceEvents = () => fs.readFileSync(tracePath, "utf8")
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((event) => event.id === `TR-COMP-${failedCompletion.id}`);
+  assert.equal(completionTraceEvents().length, 0);
+
+  const retry = run([...fixture.completionArgs, "--json"], { timeout: 90_000 });
+  assert.equal(retry.error, undefined, retry.error?.message);
+  assert.equal(retry.signal, null, retry.stderr);
+  assert.notEqual(retry.status, 0, retry.stdout);
+  assert.match(
+    `${retry.stdout}\n${retry.stderr}`,
+    /already recorded as failed.*missing lifecycle trace was repaired.*No smoke command was executed again.*fresh authorization/isu,
+  );
+
+  const attemptsAfterRecovery = localReleaseAttemptReceipts(
+    fixture.project,
+    fixture.profileId,
+  );
+  assert.equal(attemptsAfterRecovery.length, 1);
+  assert.equal(
+    attemptsAfterRecovery[0].receipt_hash,
+    attemptsAfterFault[0].receipt_hash,
+  );
+  const completionsAfterRecovery = localReleaseActionReceipts(
+    fixture.project,
+    fixture.profileId,
+  ).filter((receipt) =>
+    receipt.status === "completed"
+    && receipt.authorization_receipt_ref?.id
+      === fixture.releaseAuthorization.action_receipt.id);
+  assert.equal(completionsAfterRecovery.length, 1);
+  assert.equal(completionsAfterRecovery[0].id, failedCompletion.id);
+  assert.equal(completionsAfterRecovery[0].receipt_hash, failedCompletion.receipt_hash);
+  assert.deepEqual(
+    completionsAfterRecovery[0].local_release_verification.smoke_test_receipts,
+    failedSmokeReceipts,
+  );
+  const repairedTraceEvents = completionTraceEvents();
+  assert.equal(repairedTraceEvents.length, 1);
+  assert.equal(repairedTraceEvents[0].outcome, "failed");
+  assert.equal(repairedTraceEvents[0].action, "release.local");
+  assert.ok(
+    repairedTraceEvents[0].evidence.includes(
+      `.sdlc/autonomy/actions/${failedCompletion.id}.json`,
+    ),
+  );
+});
+
+test("release.local write-ahead orphan attempts block authorization reuse across smoke crash windows", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+  timeout: 240_000,
+}, () => {
+  const cases = [
+    {
+      suffix: "ATTEMPT-ORPHAN-BEFORE-SMOKE",
+      failure: "after-local-release-attempt-before-smoke",
+      pattern: /Simulated interruption.*attempt.*before.*smoke/isu,
+    },
+    {
+      suffix: "ATTEMPT-ORPHAN-AFTER-SMOKE",
+      failure: "after-local-release-smoke-before-completion-receipt",
+      pattern: /Simulated interruption.*smoke.*before.*completion/isu,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const fixture = prepareMacOsLocalSmokeRelease({
+      suffix: scenario.suffix,
+      smokeSource: "process.stdout.write('SMOKE_REACHED\\n');\n",
+    });
+    mustFail(
+      fixture.completionArgs,
+      scenario.pattern,
+      {
+        timeout: 90_000,
+        env: {
+          NODE_ENV: "test",
+          AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE: scenario.failure,
+        },
+      },
+    );
+
+    const attempts = localReleaseAttemptReceipts(fixture.project, fixture.profileId);
+    assert.equal(attempts.length, 1);
+    assert.equal(
+      attempts[0].authorization_receipt_ref.id,
+      fixture.releaseAuthorization.action_receipt.id,
+    );
+    assert.equal(
+      localReleaseActionReceipts(fixture.project, fixture.profileId)
+        .some((receipt) =>
+          receipt.status === "completed"
+          && receipt.authorization_receipt_ref?.id
+            === fixture.releaseAuthorization.action_receipt.id),
+      false,
+    );
+
+    const orphanRetry = run([...fixture.completionArgs, "--json"], { timeout: 90_000 });
+    assert.equal(orphanRetry.error, undefined, orphanRetry.error?.message);
+    assert.equal(orphanRetry.signal, null, orphanRetry.stderr);
+    assert.notEqual(orphanRetry.status, 0, orphanRetry.stdout);
+    assert.equal(
+      localReleaseAttemptReceipts(fixture.project, fixture.profileId).length,
+      1,
+    );
+    assert.equal(
+      localReleaseActionReceipts(fixture.project, fixture.profileId)
+        .some((receipt) =>
+          receipt.status === "completed"
+          && receipt.authorization_receipt_ref?.id
+            === fixture.releaseAuthorization.action_receipt.id),
+      false,
+    );
+  }
+});
+
+test("release.local artifact snapshot rejects symlinks, special files, and over-limit trees before an attempt", {
+  skip: hostSupportsLocalSmokeSandbox() && process.platform !== "win32"
+    ? false
+    : "requires a POSIX host with a supported local smoke sandbox",
+  timeout: 180_000,
+}, () => {
+  const fixture = prepareMacOsLocalSmokeRelease({
+    suffix: "ATTEMPT-ARTIFACT-LIMITS",
+    smokeSource: "process.stdout.write('artifact-safe\\n');\n",
+  });
+  const unsafePath = path.join(fixture.releaseOutput, "unsafe-entry");
+  fs.symlinkSync(path.join(fixture.releaseOutput, "missing-target"), unsafePath);
+  mustFail(
+    fixture.completionArgs,
+    /freshness target contains a symlink/iu,
+    { timeout: 90_000 },
+  );
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+  fs.unlinkSync(unsafePath);
+
+  const fifo = spawnSync("mkfifo", [unsafePath], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(fifo.error, undefined, fifo.error?.message);
+  assert.equal(fifo.status, 0, fifo.stderr);
+  mustFail(
+    fixture.completionArgs,
+    /freshness target contains a non-regular entry/iu,
+    { timeout: 90_000 },
+  );
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+  fs.unlinkSync(unsafePath);
+
+  const oversizedPath = path.join(fixture.releaseOutput, "oversized-sparse.bin");
+  const oversizedDescriptor = fs.openSync(oversizedPath, "w");
+  try {
+    fs.ftruncateSync(oversizedDescriptor, (512 * 1024 * 1024) + 1);
+  } finally {
+    fs.closeSync(oversizedDescriptor);
+  }
+  mustFail(
+    fixture.completionArgs,
+    /freshness target exceeds 512 MiB/iu,
+    { timeout: 90_000 },
+  );
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 0);
+  fs.unlinkSync(oversizedPath);
+
+  const completed = mustRunJson(fixture.completionArgs, { timeout: 90_000 });
+  assert.equal(completed.lifecycle_status, "terminal");
+  assert.equal(localReleaseAttemptReceipts(fixture.project, fixture.profileId).length, 1);
 });
 
 test("local release autonomy requires a strict child target, smoke test, rollback, and supported sandbox", () => {
