@@ -1644,15 +1644,32 @@ test("concurrent workflow and task starts serialize on the story task-start boun
   ]);
 
   assert.equal(fs.readFileSync(hookMarkerPath, "utf8"), boundaryLockPath);
+  assert.equal(taskResult.signal, null, `${taskResult.stdout}\n${taskResult.stderr}`);
+  assert.equal(workflowResult.signal, null, `${workflowResult.stdout}\n${workflowResult.stderr}`);
   assert.equal(taskResult.status, 0, `${taskResult.stdout}\n${taskResult.stderr}`);
   assert.notEqual(
     workflowResult.status,
     0,
     "workflow start and task start both crossed the same pre-task boundary",
   );
-  assert.match(
-    `${workflowResult.stdout}\n${workflowResult.stderr}`,
-    /already has a task-start receipt.*must start before task start/su,
+  const workflowFailure = JSON.parse(
+    workflowResult.stderr.trim() || workflowResult.stdout.trim(),
+  );
+  assert.equal(workflowFailure.schema_version, "agentic-sdlc-cli-error:v1");
+  assert.equal(workflowFailure.status, "error");
+  assert.equal(typeof workflowFailure.error?.message, "string");
+  const workflowFailureMessage = workflowFailure.error?.message || "";
+  const semanticBoundaryRejection =
+    /already has a task-start receipt.*must start before task start/su
+      .test(workflowFailureMessage);
+  const boundedLockContention = new Set([
+    `Resource is locked by another SDLC operation: ${boundaryLockPath}`,
+    `Cannot acquire internal lock after transient Windows file-system contention: ${boundaryLockPath}`,
+  ]).has(workflowFailureMessage);
+  assert.equal(
+    semanticBoundaryRejection || boundedLockContention,
+    true,
+    `Unexpected workflow boundary rejection: ${workflowFailureMessage}`,
   );
   assert.equal(
     [taskResult, workflowResult].filter((result) => result.status === 0).length,
@@ -1663,22 +1680,53 @@ test("concurrent workflow and task starts serialize on the story task-start boun
     `.sdlc/stories/${storyId}/task-start.json`,
   );
   assert.equal(taskStartReceipt.workflow_instance_ref ?? null, null);
-  assert.equal(
-    fs.existsSync(path.join(
+  const workflowArtifactPaths = [
+    path.join(
       project,
       ".sdlc/workflows/instances",
       workflowInstanceId,
-    )),
-    false,
-  );
-  assert.equal(
-    fs.existsSync(path.join(
+    ),
+    path.join(
       project,
       ".sdlc/workflows/instances/.starts",
       `${workflowInstanceId}.json`,
-    )),
-    false,
-  );
+    ),
+    path.join(
+      project,
+      ".sdlc/workflows/instances/.staging",
+      workflowInstanceId,
+    ),
+  ];
+  const projectTracePath = path.join(project, ".sdlc/traces/project.jsonl");
+  const assertNoPartialWorkflowState = () => {
+    for (const artifactPath of workflowArtifactPaths) {
+      assert.equal(fs.existsSync(artifactPath), false, artifactPath);
+    }
+    assert.equal(fs.existsSync(boundaryLockPath), false, boundaryLockPath);
+    if (fs.existsSync(projectTracePath)) {
+      assert.doesNotMatch(
+        fs.readFileSync(projectTracePath, "utf8"),
+        new RegExp(workflowInstanceId, "u"),
+      );
+    }
+  };
+  assertNoPartialWorkflowState();
+  if (boundedLockContention) {
+    const stableRetry = run(workflowArgs, project);
+    assert.equal(stableRetry.signal, null, `${stableRetry.stdout}\n${stableRetry.stderr}`);
+    assert.notEqual(stableRetry.status, 0, "workflow retry crossed the completed task-start boundary");
+    const stableRetryFailure = JSON.parse(
+      stableRetry.stderr.trim() || stableRetry.stdout.trim(),
+    );
+    assert.equal(stableRetryFailure.schema_version, "agentic-sdlc-cli-error:v1");
+    assert.equal(stableRetryFailure.status, "error");
+    assert.equal(typeof stableRetryFailure.error?.message, "string");
+    assert.match(
+      stableRetryFailure.error.message,
+      /already has a task-start receipt.*must start before task start/su,
+    );
+    assertNoPartialWorkflowState();
+  }
 });
 
 test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", {
