@@ -915,13 +915,53 @@ test("effective configuration is human-readable, reviewable, hash-bound, and fai
   assert.match(legacyGuidance.firstLine, /^Outcome: The project is safely using its previous compatible behavior/u);
   assert.match(legacyGuidance.primary, /preview.*changes no files/i);
 
-  const firstPreview = JSON.parse(mustRun([
+  const firstPreviewResult = mustRun([
     "config", "migrate", "--root", project, "--json",
-  ]).stdout);
+  ]);
+  const firstPreview = JSON.parse(firstPreviewResult.stdout);
   assert.equal(firstPreview.status, "planned");
   assert.equal(firstPreview.files_changed, 0);
+  assert.equal(firstPreview.detail_level, "compact");
+  assert.deepEqual(firstPreview.omitted_fields, ["plan.target_config"]);
+  assert.equal(firstPreview.plan_complete, false);
+  assert.equal(firstPreview.plan_hash_verification, "requires_full_preview");
+  assert.equal(Object.hasOwn(firstPreview.plan, "target_config"), false);
+  assert.match(firstPreview.full_details, /--json --full/u);
+  assert.equal(
+    validateAgainstSchema(firstPreview.plan, "config-migration-plan.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    false,
+    "the compact plan summary must not be presented as a complete config-migration-plan:v1",
+  );
+  assert.ok(
+    Buffer.byteLength(firstPreviewResult.stdout, "utf8") < 16 * 1024,
+    `compact config preview is unexpectedly large: ${Buffer.byteLength(firstPreviewResult.stdout, "utf8")} bytes`,
+  );
   assert.equal(firstPreview.plan.mode, "materialize_legacy_defaults");
   assert.ok(firstPreview.plan.changes.some((change) => change.path === "/baseline_policy"));
+  const fullPreview = JSON.parse(mustRun([
+    "config", "migrate", "--root", project, "--json", "--full",
+  ]).stdout);
+  assert.equal(fullPreview.detail_level, "full");
+  assert.deepEqual(fullPreview.omitted_fields, []);
+  assert.equal(fullPreview.plan_complete, true);
+  assert.equal(fullPreview.plan_hash_verification, "self-contained");
+  assert.equal(fullPreview.full_details, null);
+  assert.equal(typeof fullPreview.plan.target_config.baseline_policy, "object");
+  assert.equal(
+    validateAgainstSchema(fullPreview.plan, "config-migration-plan.schema.json", {
+      schemaDir: path.join(repoRoot, "schemas"),
+    }).valid,
+    true,
+  );
+  assert.equal(
+    fullPreview.plan.target_config_hash,
+    computeStableHash(fullPreview.plan.target_config),
+  );
+  assert.equal(fullPreview.plan.plan_hash, firstPreview.plan.plan_hash);
+  const { plan_hash: fullPlanHash, ...fullPlanSubject } = fullPreview.plan;
+  assert.equal(fullPlanHash, computeStableHash(fullPlanSubject));
   assert.equal(fs.readFileSync(configPath, "utf8"), configBeforePreview);
   assert.equal(fs.existsSync(lockPath), false);
 
@@ -2734,6 +2774,10 @@ test("task start serializes contract replacement and keeps one exact story-contr
     "--actor-type", "human",
     "--json",
   ], { timeout: 60_000 });
+  let earlyStartResult = null;
+  void startPromise.then((result) => {
+    earlyStartResult = result;
+  });
   const boundaryLock = path.join(
     project,
     ".sdlc",
@@ -2741,10 +2785,22 @@ test("task start serializes contract replacement and keeps one exact story-contr
     "ST-START-RACE",
     "task-start-boundary.lock",
   );
-  for (let attempt = 0; attempt < 100 && !fs.existsSync(boundaryLock); attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < 1_500
+      && !fs.existsSync(boundaryLock)
+      && earlyStartResult === null;
+    attempt += 1
+  ) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.equal(fs.existsSync(boundaryLock), true, "task start never acquired its boundary lock");
+  assert.equal(
+    fs.existsSync(boundaryLock),
+    true,
+    earlyStartResult
+      ? `task start exited before acquiring its boundary lock:\n${earlyStartResult.stdout}\n${earlyStartResult.stderr}`
+      : "task start never acquired its boundary lock within 30 seconds",
+  );
   const replacementPromise = runAsync([
     "contract", "create", "--root", project,
     "--phase", "implementation",
@@ -3527,6 +3583,42 @@ test("delegated automation approvals require persistent action and scope authori
 
   const taskStartPath = path.join(project, ".sdlc", "stories", "ST-001", "task-start.json");
   const taskStartReceipt = readJson(taskStartPath);
+  const taskStartUsePath = path.join(project, taskStartReceipt.authorization_use_ref);
+  const taskStartUseReceipt = readJson(taskStartUsePath);
+  const historicalProposalUse = {
+    ...taskStartUseReceipt,
+    proposal_ref: {
+      id: "ASSESSMENT-UNRELATED",
+      hash: "f".repeat(64),
+    },
+  };
+  const {
+    receipt_hash: _historicalReceiptHash,
+    hash_algorithm: historicalHashAlgorithm,
+    ...historicalUseSubject
+  } = historicalProposalUse;
+  writeJson(taskStartUsePath, {
+    ...historicalUseSubject,
+    receipt_hash: computeStableHash(historicalUseSubject),
+    hash_algorithm: historicalHashAlgorithm,
+  });
+  const historicalTaskStartGate = JSON.parse(run([
+    "gate",
+    "check",
+    "--root",
+    project,
+    "--story",
+    "ST-001",
+    "--strict",
+    "--json",
+  ]).stdout);
+  assert.ok(historicalTaskStartGate.errors.some(
+    (error) =>
+      /task-start receipt: authorization usage receipt .* proposal binding mismatch.*ASSESSMENT-UNRELATED.*expects no proposal binding/isu
+        .test(error),
+  ));
+  writeJson(taskStartUsePath, taskStartUseReceipt);
+
   writeJson(taskStartPath, { ...taskStartReceipt, authorization_ref: wrongStartArtifactAuthorization.id });
   const tamperedStartGate = JSON.parse(run([
     "gate",
@@ -3851,7 +3943,25 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "--allow-unapproved-contract-output",
     "--evidence",
     workbook,
-  ], /evidence must be a separate render or inspection record/);
+  ], /Render verification evidence must be a separate render or visual-inspection record/);
+
+  mustFail([
+    "output",
+    "link",
+    "--root",
+    project,
+    "--story",
+    "ST-XLSX",
+    "--type",
+    "technical-analysis",
+    "--artifact",
+    workbook,
+    "--template",
+    "technical-analysis-v1",
+    "--mode",
+    "new",
+    "--allow-unapproved-contract-output",
+  ], /requires --render-evidence[\s\S]*only for render or visual verification[\s\S]*legacy --evidence name remains accepted/);
 
   const workbookPath = path.join(project, workbook);
   const artifactSha256 = sha256File(workbookPath);
@@ -3906,7 +4016,7 @@ test("output delivery canonicalizes Excel and verifies OOXML evidence before lin
     "--allow-unapproved-contract-output",
     "--requirement",
     "REQ-XLSX",
-    "--evidence",
+    "--render-evidence",
     evidence,
     "--receipt-file",
     generatorReceipt,
@@ -5079,7 +5189,7 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
       "",
     ].join("\n"),
   );
-  const linked = JSON.parse(mustRun([
+  const outputLinkArgs = [
     "output",
     "link",
     "--root",
@@ -5099,10 +5209,34 @@ test("assessment tranche runs from precise checkpoints through budgeted release-
     "--authorization",
     approved.authorization.id,
     "--json",
-  ]).stdout);
+  ];
+  const linked = JSON.parse(mustRun(outputLinkArgs).stdout);
   assert.equal(linked.link.verification_receipt.container_verified.status, "verified");
   assert.equal(linked.link.verification_receipt.content_verified.status, "verified");
   assert.equal(linked.link.verification_receipt.render_verified.status, "not-required");
+  const authorizationUsesDirectory = path.join(
+    project,
+    ".sdlc",
+    "authorization-uses",
+    approved.authorization.id,
+  );
+  const useReceiptNamesAfterFirstLink = fs.readdirSync(authorizationUsesDirectory)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  const linkedAgain = JSON.parse(mustRun(outputLinkArgs).stdout);
+  const useReceiptNamesAfterRetry = fs.readdirSync(authorizationUsesDirectory)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  assert.equal(
+    linkedAgain.link.authorization_use_ref,
+    linked.link.authorization_use_ref,
+    "an exact output-link retry must reuse its canonical action-subject receipt",
+  );
+  assert.deepEqual(
+    useReceiptNamesAfterRetry,
+    useReceiptNamesAfterFirstLink,
+    "an exact output-link retry must not consume another proposal authorization use",
+  );
 
   const completionGain = readJson(fakeRtk.reportPath);
   Object.assign(completionGain.summary, {
@@ -12012,12 +12146,72 @@ test("personal marketplace installer v2 keeps an exact recovery point until conf
   const home = tmpProject("personal-installer-v2-home");
   const python = process.env.PYTHON || "python3";
   const installer = path.join(repoRoot, "scripts", "install-personal-marketplace-v2.py");
-  const invoke = (args) => spawnSync(python, [installer, ...args, "--home", home], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: { ...process.env, HOME: home },
-    timeout: 30_000,
-  });
+  const codexHome = path.join(home, ".codex");
+  const fakeCodexDriver = path.join(home, "plugin");
+  fs.writeFileSync(fakeCodexDriver, [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "const pluginName = 'agentic-sdlc-codex-plugin';",
+    "const pluginId = `${pluginName}@personal`;",
+    "const home = process.env.HOME;",
+    "const codexHome = process.env.CODEX_HOME;",
+    "const statePath = path.join(codexHome, 'fixture-installed.json');",
+    "const cacheRoot = path.join(codexHome, 'plugins', 'cache', 'personal', pluginName);",
+    "const emit = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);",
+    "const readState = () => fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : null;",
+    "if (args[0] === 'list') {",
+    "  const state = readState();",
+    "  emit({ installed: state ? [state] : [], available: [] });",
+    "  process.exit(0);",
+    "}",
+    "if (args[0] === 'add' && args[1] === pluginId) {",
+    "  const marketplace = JSON.parse(fs.readFileSync(path.join(home, '.agents', 'plugins', 'marketplace.json'), 'utf8'));",
+    "  const plugin = marketplace.plugins.find((entry) => entry.name === pluginName);",
+    "  const source = path.resolve(home, plugin.source.path);",
+    "  const version = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8')).version;",
+    "  fs.rmSync(cacheRoot, { recursive: true, force: true });",
+    "  const cachePath = path.join(cacheRoot, version);",
+    "  fs.mkdirSync(path.dirname(cachePath), { recursive: true });",
+    "  fs.cpSync(source, cachePath, { recursive: true });",
+    "  const state = {",
+    "    pluginId,",
+    "    name: pluginName,",
+    "    marketplaceName: 'personal',",
+    "    version,",
+    "    installed: true,",
+    "    enabled: true,",
+    "    source: { source: 'local', path: source },",
+    "    installPolicy: 'AVAILABLE',",
+    "    authPolicy: 'ON_INSTALL',",
+    "  };",
+    "  fs.mkdirSync(codexHome, { recursive: true });",
+    "  fs.writeFileSync(statePath, JSON.stringify(state));",
+    "  emit({ ok: true, plugin: state });",
+    "  process.exit(0);",
+    "}",
+    "process.stderr.write(`unsupported fixture command: ${args.join(' ')}\\n`);",
+    "process.exit(2);",
+  ].join("\n"));
+  const invoke = (args) => {
+    const codexBinding = ["apply", "confirm", "restore"].includes(args[0])
+      ? [
+          "--codex-executable", process.execPath,
+          "--codex-home", codexHome,
+        ]
+      : [];
+    return spawnSync(python, [
+      installer,
+      ...args,
+      "--home", home,
+      ...codexBinding,
+    ], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+      timeout: 30_000,
+    });
+  };
 
   const planned = invoke(["plan", "--json"]);
   assert.equal(planned.status, 0, `${planned.stdout}\n${planned.stderr}`);
@@ -12055,7 +12249,7 @@ test("personal marketplace installer v2 keeps an exact recovery point until conf
     registration.command.argv[0],
     registration.command.argv.slice(1),
     {
-      cwd: repoRoot,
+      cwd: home,
       encoding: "utf8",
       env: { ...process.env, ...registration.command.environment },
       timeout: 30_000,
@@ -12066,7 +12260,7 @@ test("personal marketplace installer v2 keeps an exact recovery point until conf
     registration.verification.argv[0],
     registration.verification.argv.slice(1),
     {
-      cwd: repoRoot,
+      cwd: home,
       encoding: "utf8",
       env: { ...process.env, ...registration.verification.environment },
       timeout: 30_000,

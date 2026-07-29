@@ -419,6 +419,37 @@ function lifecycleReceiptHash(record) {
   return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
 }
 
+function mutateDeliveryStartReceipt(project, profileId, storyId, mutate) {
+  const startPath = path.join(
+    project,
+    ".sdlc",
+    "autonomy",
+    "executions",
+    profileId,
+    "start.json",
+  );
+  const start = JSON.parse(fs.readFileSync(startPath, "utf8"));
+  mutate(start);
+  start.receipt_hash = lifecycleReceiptHash(start);
+  fs.writeFileSync(startPath, `${JSON.stringify(start, null, 2)}\n`, "utf8");
+
+  const taskStartPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    storyId,
+    "task-start.json",
+  );
+  const taskStart = JSON.parse(fs.readFileSync(taskStartPath, "utf8"));
+  taskStart.delivery_start_receipt_ref.hash = start.receipt_hash;
+  fs.writeFileSync(
+    taskStartPath,
+    `${JSON.stringify(taskStart, null, 2)}\n`,
+    "utf8",
+  );
+  return start;
+}
+
 function legacyAuthorizationContentHash(record) {
   const canonical = structuredClone(record);
   for (const field of [
@@ -3674,6 +3705,10 @@ test("local release planning accepts a not-yet-created target while protected re
     [releaseOutput],
   );
   assert.equal(proposal.delivery_profile.local_release_target.smoke_cwd, releaseOutput);
+  assert.match(
+    proposal.human_guidance.impact,
+    /may be absent while this delivery is only being planned.*rollback\.verify, data\.migrate, data\.rollback, or release\.local.*first request the exact local build authorization.*external builder create that root.*CLI never creates the directory itself/isu,
+  );
   assert.equal(fs.existsSync(releaseRoot), false);
 
   mustRunJson([
@@ -3697,15 +3732,502 @@ test("local release planning accepts a not-yet-created target while protected re
     fs.existsSync(path.join(project, ...started.task_start_receipt.split("/"))),
     true,
   );
-  mustFail([
+  const deliveryStart = JSON.parse(fs.readFileSync(
+    path.join(
+      project,
+      ".sdlc",
+      "autonomy",
+      "executions",
+      "AUT-LOCAL-PLANNED",
+      "start.json",
+    ),
+    "utf8",
+  ));
+  assert.equal(deliveryStart.schema_version, "delivery-start-receipt:v2");
+  assert.equal(
+    deliveryStart.local_release_target_baseline.entries[0].status,
+    "absent",
+  );
+  const missingReleaseRoot = mustFail([
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-PLANNED",
     "--action", "release.local",
   ], /must exist before this protected action/u);
+  assert.match(
+    `${missingReleaseRoot.stdout}\n${missingReleaseRoot.stderr}`,
+    /first request build\.local without --confirm-action.*checkpoint_required.*repeat with direct approval.*external builder create the exact target root.*Complete build\.local with immutable evidence.*rollback\.verify, data\.migrate, data\.rollback, or release\.local.*CLI does not create directories.*ungoverned mkdir is not a repair/isu,
+  );
+  assert.equal(fs.existsSync(releaseRoot), false);
+
+  fs.writeFileSync(
+    path.join(project, "planned-rollback-rehearsal.json"),
+    '{"target":"local-release-planned","restored":true}\n',
+    "utf8",
+  );
+  const missingRollbackRoot = mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+  ], /must exist before this protected action/u);
+  assert.match(
+    `${missingRollbackRoot.stdout}\n${missingRollbackRoot.stderr}`,
+    /first request build\.local without --confirm-action.*checkpoint_required.*Complete build\.local with immutable evidence/isu,
+  );
+  assert.equal(fs.existsSync(releaseRoot), false);
+
+  fs.mkdirSync(releaseOutput, { recursive: true });
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+  ], /requires a completed passing build\.local receipt.*root was absent at task start.*mkdir is not a repair/isu);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "build.local",
+  ], /changed outside governed build\.local.*manual mkdir is not a repair/isu);
+
+  const downgradedProject = `${project}-downgraded-start`;
+  fs.cpSync(project, downgradedProject, { recursive: true });
+  tempProjects.add(downgradedProject);
+  mutateDeliveryStartReceipt(
+    downgradedProject,
+    "AUT-LOCAL-PLANNED",
+    "ST-LOCAL-PLANNED",
+    (start) => {
+      start.schema_version = "delivery-start-receipt:v1";
+      delete start.local_release_target_baseline;
+    },
+  );
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", downgradedProject,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+    "--confirm-action",
+    ...humanApproval("A downgraded start must not authorize the manual root"),
+  ], /legacy start receipt without an immutable local-target baseline.*cannot authorize or complete another action/isu);
+  const downgradedGate = run([
+    "gate", "check",
+    "--root", downgradedProject,
+    "--story", "ST-LOCAL-PLANNED",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(downgradedGate.status, 1, downgradedGate.stderr || downgradedGate.stdout);
+  assert.match(
+    downgradedGate.stdout,
+    /legacy start receipt without an immutable local-target baseline/isu,
+  );
+
+  const tamperedBaselineProject = `${project}-tampered-baseline`;
+  fs.cpSync(project, tamperedBaselineProject, { recursive: true });
+  tempProjects.add(tamperedBaselineProject);
+  mutateDeliveryStartReceipt(
+    tamperedBaselineProject,
+    "AUT-LOCAL-PLANNED",
+    "ST-LOCAL-PLANNED",
+    (start) => {
+      start.local_release_target_baseline.workspace_real_path =
+        fs.realpathSync.native(tamperedBaselineProject);
+      start.local_release_target_baseline.snapshot_hash = "0".repeat(64);
+    },
+  );
+  const tamperedBaselineGate = run([
+    "gate", "check",
+    "--root", tamperedBaselineProject,
+    "--story", "ST-LOCAL-PLANNED",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(
+    tamperedBaselineGate.status,
+    1,
+    tamperedBaselineGate.stderr || tamperedBaselineGate.stdout,
+  );
+  assert.match(
+    tamperedBaselineGate.stdout,
+    /immutable local-target baseline is invalid: local target snapshot integrity is invalid/isu,
+  );
+
+  fs.rmSync(releaseRoot, { recursive: true, force: true });
+  const buildCheckpoint = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "build.local",
+  ]);
+  const buildAuthorization = buildCheckpoint.status === "checkpoint_required"
+    ? mustRunJson([
+        "autonomy", "delivery", "action",
+        "--root", project,
+        "--id", "AUT-LOCAL-PLANNED",
+        "--action", "build.local",
+        "--confirm-action",
+        ...humanApproval("Approve creation of this exact absent-at-start local target"),
+      ])
+    : buildCheckpoint;
+  assert.equal(buildAuthorization.status, "authorized");
+  assert.equal(
+    buildAuthorization.action_receipt.action_details
+      .local_target_build_precondition.snapshot.entries[0].status,
+    "absent",
+  );
+
+  fs.mkdirSync(releaseOutput, { recursive: true });
+  fs.writeFileSync(
+    path.join(project, "planned-build-proof.json"),
+    '{"root":"planned-release","built":true}\n',
+    "utf8",
+  );
+  const failedBuild = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "build.local",
+    "--outcome", "failed",
+    "--authorization-receipt", buildAuthorization.action_receipt.id,
+    "--evidence", "planned-build-proof.json",
+  ]);
+  assert.equal(failedBuild.action_receipt.outcome, "failed");
+  assert.equal(
+    failedBuild.action_receipt.action_details
+      .local_target_build_completion.snapshot.entries[0].status,
+    "directory",
+  );
+
+  const retryBuildCheckpoint = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "build.local",
+  ]);
+  const retryBuildAuthorization = retryBuildCheckpoint.status === "checkpoint_required"
+    ? mustRunJson([
+        "autonomy", "delivery", "action",
+        "--root", project,
+        "--id", "AUT-LOCAL-PLANNED",
+        "--action", "build.local",
+        "--confirm-action",
+        ...humanApproval("Approve retry after the governed partial build failed"),
+      ])
+    : retryBuildCheckpoint;
+  assert.equal(retryBuildAuthorization.status, "authorized");
+  assert.equal(
+    retryBuildAuthorization.action_receipt.action_details
+      .local_target_build_precondition.predecessor_ref.receipt_ref.id,
+    failedBuild.action_receipt.id,
+  );
+  assert.equal(
+    retryBuildAuthorization.action_receipt.action_details
+      .local_target_build_precondition.predecessor_ref.outcome,
+    "failed",
+  );
+
+  const buildCompletionArgs = [
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "build.local",
+    "--outcome", "passed",
+    "--authorization-receipt", retryBuildAuthorization.action_receipt.id,
+    "--evidence", "planned-build-proof.json",
+  ];
+  mustFail(
+    buildCompletionArgs,
+    /Simulated interruption after action receipt persistence and before trace persistence/u,
+    {
+      env: {
+        NODE_ENV: "test",
+        AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE:
+          "after-action-receipt-before-trace",
+      },
+    },
+  );
+  const recoveredBuild = mustRunJson(buildCompletionArgs);
+  assert.equal(recoveredBuild.status, "completed");
+  assert.equal(recoveredBuild.idempotent, true);
+  assert.equal(
+    recoveredBuild.action_receipt.action_details
+      .local_target_build_completion.snapshot.entries[0].status,
+    "directory",
+  );
+
+  const governedRollback = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+    "--confirm-action",
+    ...humanApproval("Approve rollback rehearsal after governed target creation"),
+  ]);
+  assert.equal(
+    governedRollback.action_receipt.action_details
+      .local_target_materialization_ref.receipt_ref.id,
+    recoveredBuild.action_receipt.id,
+  );
+
+  const relocatedProject = `${project}-relocated`;
+  fs.cpSync(project, relocatedProject, { recursive: true });
+  tempProjects.add(relocatedProject);
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", relocatedProject,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+    "--confirm-action",
+    ...humanApproval("This relocated copy must not reuse target creation"),
+  ], /local target snapshot belongs to a different workspace location/iu);
+
+  const profileDriftProject = `${project}-profile-drift`;
+  fs.cpSync(project, profileDriftProject, { recursive: true });
+  tempProjects.add(profileDriftProject);
+  const driftStartPath = path.join(
+    profileDriftProject,
+    ".sdlc",
+    "autonomy",
+    "executions",
+    "AUT-LOCAL-PLANNED",
+    "start.json",
+  );
+  const driftStart = JSON.parse(fs.readFileSync(driftStartPath, "utf8"));
+  const driftBaseline = driftStart.local_release_target_baseline;
+  driftBaseline.profile_ref.hash = "0".repeat(64);
+  driftBaseline.workspace_real_path = fs.realpathSync.native(profileDriftProject);
+  const {
+    snapshot_hash: _driftSnapshotHash,
+    hash_algorithm: _driftSnapshotAlgorithm,
+    ...driftSnapshotBase
+  } = driftBaseline;
+  driftBaseline.snapshot_hash = crypto.createHash("sha256")
+    .update(stableJson(driftSnapshotBase))
+    .digest("hex");
+  driftStart.receipt_hash = lifecycleReceiptHash(driftStart);
+  fs.writeFileSync(driftStartPath, `${JSON.stringify(driftStart, null, 2)}\n`, "utf8");
+  const driftTaskStartPath = path.join(
+    profileDriftProject,
+    ".sdlc",
+    "stories",
+    "ST-LOCAL-PLANNED",
+    "task-start.json",
+  );
+  const driftTaskStart = JSON.parse(fs.readFileSync(driftTaskStartPath, "utf8"));
+  driftTaskStart.delivery_start_receipt_ref.hash = driftStart.receipt_hash;
+  fs.writeFileSync(
+    driftTaskStartPath,
+    `${JSON.stringify(driftTaskStart, null, 2)}\n`,
+    "utf8",
+  );
+  mustFail([
+    "autonomy", "delivery", "action",
+    "--root", profileDriftProject,
+    "--id", "AUT-LOCAL-PLANNED",
+    "--action", "rollback.verify",
+    "--evidence", "planned-rollback-rehearsal.json",
+    "--confirm-action",
+    ...humanApproval("Profile drift must not reuse target creation"),
+  ], /local target snapshot is bound to another delivery profile/iu);
 });
 
-test("package-manager local smoke cannot fall back to the parent source package", () => {
+test("existing-root starts require governed build for absent child paths while active legacy starts fail closed", () => {
+  for (const legacy of [false, true]) {
+    const suffix = legacy ? "LEGACY" : "BASELINE";
+    const project = tmpProject(`local-release-existing-root-${suffix.toLowerCase()}`);
+    initializeAutonomyProject(project);
+    createApprovedImplementationContract(project, {
+      storyId: `ST-LOCAL-${suffix}`,
+      contractId: `CONTRACT-LOCAL-${suffix}`,
+      profileId: `AUT-LOCAL-${suffix}`,
+    });
+    const releaseRoot = path.join(project, "existing-release");
+    const releaseOutput = path.join(releaseRoot, "app");
+    fs.mkdirSync(releaseRoot, { recursive: true });
+    assert.equal(fs.existsSync(releaseOutput), false);
+
+    mustRunJson([
+      "autonomy", "delivery", "propose",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--delivery", `LOCAL-RELEASE-${suffix}`,
+      "--kind", "local_release",
+      "--story", `ST-LOCAL-${suffix}`,
+      "--contract", `CONTRACT-LOCAL-${suffix}`,
+      "--requirement", "REQ-AUTONOMY",
+      "--level", "checkpointed",
+      "--target-root", releaseRoot,
+      "--write-path", releaseOutput,
+      "--smoke-test", '["node","--version"]',
+      "--rollback", "Restore the previous brownfield release snapshot.",
+    ]);
+    mustRunJson([
+      "autonomy", "delivery", "approve",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--phase", "implementation",
+      ...humanApproval(`Approve exact ${suffix} brownfield local target`),
+    ]);
+    mustRunJson([
+      "task", "start",
+      "--root", project,
+      "--intent-json", taskIntent(`ST-LOCAL-${suffix}`),
+      "--delivery-profile", `AUT-LOCAL-${suffix}`,
+      "--confirm-start",
+      "--actor-type", "human",
+    ]);
+    const startPath = path.join(
+      project,
+      ".sdlc",
+      "autonomy",
+      "executions",
+      `AUT-LOCAL-${suffix}`,
+      "start.json",
+    );
+    const start = JSON.parse(fs.readFileSync(startPath, "utf8"));
+    assert.equal(start.local_release_target_baseline.entries[0].status, "directory");
+    assert.equal(start.local_release_target_baseline.entries[1].status, "absent");
+
+    if (legacy) {
+      start.schema_version = "delivery-start-receipt:v1";
+      delete start.local_release_target_baseline;
+      start.receipt_hash = lifecycleReceiptHash(start);
+      fs.writeFileSync(startPath, `${JSON.stringify(start, null, 2)}\n`, "utf8");
+      const taskStartPath = path.join(
+        project,
+        ".sdlc",
+        "stories",
+        `ST-LOCAL-${suffix}`,
+        "task-start.json",
+      );
+      const taskStart = JSON.parse(fs.readFileSync(taskStartPath, "utf8"));
+      taskStart.delivery_start_receipt_ref.hash = start.receipt_hash;
+      fs.writeFileSync(taskStartPath, `${JSON.stringify(taskStart, null, 2)}\n`, "utf8");
+    }
+
+    fs.mkdirSync(releaseOutput, { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "brownfield-rollback.json"),
+      '{"root":"existing-release","restored":true}\n',
+      "utf8",
+    );
+    const rollbackArgs = [
+      "autonomy", "delivery", "action",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--action", "rollback.verify",
+      "--evidence", "brownfield-rollback.json",
+      "--confirm-action",
+      ...humanApproval(`Approve exact ${suffix} rollback evidence`),
+    ];
+    if (legacy) {
+      mustFail(
+        rollbackArgs,
+        /legacy start receipt without an immutable local-target baseline.*cannot authorize or complete another action/isu,
+      );
+      continue;
+    }
+
+    mustFail(
+      rollbackArgs,
+      /requires a completed passing build\.local receipt.*approved write path was absent at task start.*ungoverned mkdir is not a repair/isu,
+    );
+    mustFail([
+      "autonomy", "delivery", "action",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--action", "build.local",
+    ], /changed outside governed build\.local.*manual mkdir is not a repair/isu);
+
+    fs.rmSync(releaseOutput, { recursive: true, force: true });
+    const buildCheckpoint = mustRunJson([
+      "autonomy", "delivery", "action",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--action", "build.local",
+    ]);
+    const buildAuthorization = buildCheckpoint.status === "checkpoint_required"
+      ? mustRunJson([
+          "autonomy", "delivery", "action",
+          "--root", project,
+          "--id", `AUT-LOCAL-${suffix}`,
+          "--action", "build.local",
+          "--confirm-action",
+          ...humanApproval(`Approve exact ${suffix} child materialization`),
+        ])
+      : buildCheckpoint;
+    assert.equal(
+      buildAuthorization.action_receipt.action_details
+        .local_target_build_precondition.snapshot.entries[0].status,
+      "directory",
+    );
+    assert.equal(
+      buildAuthorization.action_receipt.action_details
+        .local_target_build_precondition.snapshot.entries[1].status,
+      "absent",
+    );
+
+    fs.mkdirSync(releaseOutput, { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "brownfield-build.json"),
+      '{"root":"existing-release","child_built":true}\n',
+      "utf8",
+    );
+    const buildCompletion = mustRunJson([
+      "autonomy", "delivery", "action",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--action", "build.local",
+      "--outcome", "passed",
+      "--authorization-receipt", buildAuthorization.action_receipt.id,
+      "--evidence", "brownfield-build.json",
+    ]);
+
+    const rollback = mustRunJson(rollbackArgs);
+    assert.equal(rollback.status, "authorized");
+    assert.equal(
+      rollback.action_receipt.action_details
+        .local_target_materialization_ref.receipt_ref.id,
+      buildCompletion.action_receipt.id,
+    );
+
+    const releaseCheckpoint = mustRunJson([
+      "autonomy", "delivery", "action",
+      "--root", project,
+      "--id", `AUT-LOCAL-${suffix}`,
+      "--action", "release.local",
+    ]);
+    assert.equal(releaseCheckpoint.status, "checkpoint_required");
+    if (hostSupportsLocalSmokeSandbox()) {
+      const releaseAuthorization = mustRunJson([
+        "autonomy", "delivery", "action",
+        "--root", project,
+        "--id", `AUT-LOCAL-${suffix}`,
+        "--action", "release.local",
+        "--confirm-action",
+        ...humanApproval(`Approve exact ${suffix} governed local release`),
+      ]);
+      assert.equal(
+        releaseAuthorization.action_receipt.action_details
+          .local_target_materialization_ref.receipt_ref.id,
+        buildCompletion.action_receipt.id,
+      );
+    }
+  }
+});
+
+test("package-manager local smoke cannot fall back to the parent source package", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox",
+}, () => {
   const project = tmpProject("local-release-package-boundary");
   initializeAutonomyProject(project);
   createApprovedImplementationContract(project, {
@@ -5007,14 +5529,60 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     undefined,
   );
 
-  const releaseAuthorization = mustRunJson([
+  const assertHistoricalGateDoesNotReopenLocalTarget = () => {
+    const unavailableReleaseRoot = `${releaseRoot}-after-completion`;
+    fs.renameSync(releaseRoot, unavailableReleaseRoot);
+    try {
+      const historicalGate = run([
+        "gate", "check",
+        "--root", project,
+        "--scope", "story",
+        "--story", "ST-LOCAL-1",
+        "--strict",
+        "--json",
+      ]);
+      assert.equal(historicalGate.error, undefined, historicalGate.error?.message);
+      assert.doesNotMatch(
+        `${historicalGate.stdout}\n${historicalGate.stderr}`,
+        /Local release target root must be an existing directory/u,
+      );
+    } finally {
+      fs.renameSync(unavailableReleaseRoot, releaseRoot);
+    }
+  };
+  const releaseAuthorizationArgs = [
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-1",
     "--action", "release.local",
     "--confirm-action",
     ...humanApproval("Approve this exact local release checkpoint"),
-  ]);
+  ];
+  if (!hostSupportsLocalSmokeSandbox()) {
+    mustFail(
+      releaseAuthorizationArgs,
+      /Local smoke-test execution requires a configured read-only, no-network sandbox on this host/u,
+    );
+    const unavailableStatus = mustRunJson([
+      "autonomy", "delivery", "status",
+      "--root", project,
+      "--id", "AUT-LOCAL-1",
+    ]);
+    assert.equal(unavailableStatus.delivery_profiles[0].lifecycle_status, "started");
+    assert.equal(unavailableStatus.delivery_profiles[0].delivery_status, "started");
+    const cancelled = mustRunJson([
+      "autonomy", "delivery", "close",
+      "--root", project,
+      "--id", "AUT-LOCAL-1",
+      "--terminal-status", "cancelled",
+      "--reason", "The host has no supported smoke-test sandbox for this local fixture.",
+      ...humanApproval("Approve cancellation of the sandbox-unavailable local fixture"),
+    ]);
+    assert.equal(cancelled.status, "terminal");
+    assertHistoricalGateDoesNotReopenLocalTarget();
+    return;
+  }
+  const releaseAuthorization = mustRunJson(releaseAuthorizationArgs);
   assert.equal(releaseAuthorization.status, "authorized");
   assert.equal(releaseAuthorization.execution_allowed, true);
   assert.equal(releaseAuthorization.checkpoint_required, true);
@@ -5262,28 +5830,6 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     refreshedBoundaryGate.stdout,
   );
 
-  const assertHistoricalGateDoesNotReopenLocalTarget = () => {
-    const unavailableReleaseRoot = `${releaseRoot}-after-completion`;
-    fs.renameSync(releaseRoot, unavailableReleaseRoot);
-    try {
-      const historicalGate = run([
-        "gate", "check",
-        "--root", project,
-        "--scope", "story",
-        "--story", "ST-LOCAL-1",
-        "--strict",
-        "--json",
-      ]);
-      assert.equal(historicalGate.error, undefined, historicalGate.error?.message);
-      assert.doesNotMatch(
-        `${historicalGate.stdout}\n${historicalGate.stderr}`,
-        /Local release target root must be an existing directory/u,
-      );
-    } finally {
-      fs.renameSync(unavailableReleaseRoot, releaseRoot);
-    }
-  };
-
   const releaseEvidence = path.join(releaseOutput, "release-proof.txt");
   fs.writeFileSync(releaseEvidence, "local release evidence\n", "utf8");
   const completionArgsFor = (root) => [
@@ -5301,32 +5847,6 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
     [...completionArgs, "--smoke-cwd", secondReleaseOutput],
     /must match the exact approved smoke working directory/u,
   );
-  if (!hostSupportsLocalSmokeSandbox()) {
-    mustFail(
-      completionArgs,
-      /Local smoke-test execution requires a configured read-only, no-network sandbox on this host/u,
-      { timeout: 90_000 },
-    );
-    const unavailableStatus = mustRunJson([
-      "autonomy", "delivery", "status",
-      "--root", project,
-      "--id", "AUT-LOCAL-1",
-    ]);
-    assert.equal(unavailableStatus.delivery_profiles[0].lifecycle_status, "started");
-    assert.equal(unavailableStatus.delivery_profiles[0].delivery_status, "started");
-    const cancelled = mustRunJson([
-      "autonomy", "delivery", "close",
-      "--root", project,
-      "--id", "AUT-LOCAL-1",
-      "--terminal-status", "cancelled",
-      "--reason", "The host has no supported smoke-test sandbox for this local fixture.",
-      ...humanApproval("Approve cancellation of the sandbox-unavailable local fixture"),
-    ]);
-    assert.equal(cancelled.status, "terminal");
-    assertHistoricalGateDoesNotReopenLocalTarget();
-    return;
-  }
-
   const interruptedProject = `${project}-interrupted`;
   fs.cpSync(project, interruptedProject, { recursive: true });
   tempProjects.add(interruptedProject);
@@ -5351,6 +5871,59 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
         AGENTIC_SDLC_TEST_DELIVERY_ACTION_FAILURE: "after-terminal-completion-receipt",
       },
     },
+  );
+  const interruptedActionsRoot = path.join(
+    interruptedProject,
+    ".sdlc",
+    "autonomy",
+    "actions",
+  );
+  for (const name of fs.readdirSync(interruptedActionsRoot)) {
+    if (!name.endsWith(".json")) continue;
+    const actionPath = path.join(interruptedActionsRoot, name);
+    if (JSON.parse(fs.readFileSync(actionPath, "utf8")).action === "build.local") {
+      fs.rmSync(actionPath);
+    }
+  }
+  mutateDeliveryStartReceipt(
+    interruptedProject,
+    "AUT-LOCAL-1",
+    "ST-LOCAL-1",
+    (start) => {
+      start.schema_version = "delivery-start-receipt:v1";
+      delete start.local_release_target_baseline;
+    },
+  );
+  const repairedLegacyTerminal = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", interruptedProject,
+    "--id", "AUT-LOCAL-1",
+    "--action", "release.local",
+  ]);
+  assert.equal(repairedLegacyTerminal.status, "terminal");
+  assert.equal(repairedLegacyTerminal.idempotent_repair, true);
+  assert.equal(repairedLegacyTerminal.lifecycle_status, "terminal");
+  assert.equal(repairedLegacyTerminal.terminal_status, "released");
+  assert.equal(
+    repairedLegacyTerminal.action_receipt.authorization_receipt_ref.id,
+    interruptedAuthorization.action_receipt.id,
+  );
+  assert.equal(
+    fs.existsSync(path.join(interruptedProject, repairedLegacyTerminal.close_receipt_path)),
+    true,
+  );
+  const repairedLegacyGate = run([
+    "gate", "check",
+    "--root", interruptedProject,
+    "--scope", "story",
+    "--story", "ST-LOCAL-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.ok([0, 1].includes(repairedLegacyGate.status), repairedLegacyGate.stderr);
+  assert.doesNotMatch(
+    `${repairedLegacyGate.stdout}\n${repairedLegacyGate.stderr}`,
+    /legacy start receipt without an immutable local-target baseline.*cannot authorize or complete another action/isu,
   );
   const interruptedRelocatedProject = `${interruptedProject}-relocated`;
   fs.cpSync(interruptedProject, interruptedRelocatedProject, { recursive: true });
@@ -5712,4 +6285,373 @@ test("configured story lifecycle checkpoints require exact historical authorizat
     "--story", "ST-CHECKPOINTS",
     "--strict",
   ], /story step ST-CHECKPOINTS\/implementation has no exact story\.complete-step authorization receipt/u);
+});
+
+test("explicit story authorizations are consumed and an identical claim retry reuses its persisted use", () => {
+  const project = tmpProject("optional-step-authorization");
+  initializeAutonomyProject(project);
+
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.autonomy_policy.mode = "enforce_all";
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const migration = mustRunJson(["config", "migrate", "--root", project]);
+  mustRunJson([
+    "config", "migrate",
+    "--root", project,
+    "--apply",
+    "--plan-hash", migration.plan.plan_hash,
+    "--actor-type", "human",
+  ]);
+
+  createApprovedImplementationContract(project, {
+    storyId: "ST-OPTIONAL-AUTH",
+    contractId: "CONTRACT-OPTIONAL-AUTH",
+    profileId: "AUT-OPTIONAL-AUTH",
+  });
+  const releaseRoot = path.join(project, "local-release");
+  const releaseOutput = path.join(releaseRoot, "app");
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-OPTIONAL-AUTH",
+    "--delivery", "LOCAL-OPTIONAL-AUTH",
+    "--kind", "local_release",
+    "--story", "ST-OPTIONAL-AUTH",
+    "--contract", "CONTRACT-OPTIONAL-AUTH",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--target-root", releaseRoot,
+    "--write-path", releaseOutput,
+    "--smoke-test", '["node","--version"]',
+    "--rollback", "Restore the previous local release snapshot.",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-OPTIONAL-AUTH",
+    "--phase", "implementation",
+    ...humanApproval("Approve checkpointed autonomy for this exact local delivery"),
+  ]);
+  const deliveryProfile = JSON.parse(fs.readFileSync(
+    path.join(project, ".sdlc", "autonomy", "deliveries", "AUT-OPTIONAL-AUTH.json"),
+    "utf8",
+  ));
+  assert.equal(deliveryProfile.requested_level, "checkpointed");
+  assert.equal(deliveryProfile.checkpoints.includes("story.complete-step"), false);
+
+  mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-OPTIONAL-AUTH"),
+    "--delivery-profile", "AUT-OPTIONAL-AUTH",
+  ]);
+  const unrelatedProposalHash = "f".repeat(64);
+  const assertProposalBoundGrantRejectedWithoutUse = (authorization, command) => {
+    mustFail(
+      [...command, "--authorization", authorization.id],
+      /proposal binding mismatch.*grant has proposal ASSESSMENT-UNRELATED.*this action expects no proposal binding/isu,
+    );
+    const status = mustRunJson([
+      "authorization", "status",
+      "--root", project,
+      "--id", authorization.id,
+    ]).authorizations[0];
+    assert.equal(status.status, "active");
+    assert.equal(status.use_count || 0, 0);
+    assert.equal(
+      fs.existsSync(path.join(project, ".sdlc", "authorization-uses", authorization.id)),
+      false,
+    );
+  };
+  const proposalBoundClaimAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-CLAIM-BOUND",
+    "--scope", "Claim ST-OPTIONAL-AUTH only for an unrelated assessment proposal.",
+    "--allow-use", "story.claim=ST-OPTIONAL-AUTH",
+    "--proposal", "ASSESSMENT-UNRELATED",
+    "--proposal-hash", unrelatedProposalHash,
+    "--max-uses", "1",
+    ...humanApproval("Approve only the proposal-bound story claim"),
+  ]).authorization;
+  assertProposalBoundGrantRejectedWithoutUse(proposalBoundClaimAuthorization, [
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-OPTIONAL-AUTH",
+    "--agent", "codex",
+  ]);
+  const claimAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-CLAIM",
+    "--scope", "Claim ST-OPTIONAL-AUTH once.",
+    "--allow-use", "story.claim=ST-OPTIONAL-AUTH",
+    "--max-uses", "1",
+    ...humanApproval("Approve only the story claim"),
+  ]).authorization;
+  const claimArgs = [
+    "story", "claim",
+    "--root", project,
+    "--id", "ST-OPTIONAL-AUTH",
+    "--agent", "codex",
+    "--authorization", claimAuthorization.id,
+  ];
+  const claimPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-OPTIONAL-AUTH",
+    "claim.json",
+  );
+  const tracePath = path.join(
+    project,
+    ".sdlc",
+    "traces",
+    "ST-OPTIONAL-AUTH.jsonl",
+  );
+  const traceBeforeInterruptedClaim = fs.readFileSync(tracePath);
+  fs.rmSync(tracePath);
+  fs.mkdirSync(tracePath);
+  mustFail(
+    claimArgs,
+    /trace integrity|regular file|EISDIR|directory/iu,
+  );
+  assert.equal(fs.existsSync(claimPath), false);
+  const useRoot = path.join(
+    project,
+    ".sdlc",
+    "authorization-uses",
+    claimAuthorization.id,
+  );
+  const usesAfterInterruptedClaim = fs.readdirSync(useRoot)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  assert.equal(usesAfterInterruptedClaim.length, 1);
+  const statusAfterInterruptedClaim = mustRunJson([
+    "authorization", "status",
+    "--root", project,
+    "--id", claimAuthorization.id,
+  ]).authorizations[0];
+  assert.equal(statusAfterInterruptedClaim.status, "consumed");
+  assert.equal(statusAfterInterruptedClaim.use_count, 1);
+
+  fs.rmSync(tracePath, { recursive: true });
+  fs.writeFileSync(tracePath, traceBeforeInterruptedClaim);
+  const claim = mustRunJson(claimArgs);
+  assert.equal(claim.claim.authorization_ref, claimAuthorization.id);
+  assert.equal(claim.claim.checkpoint_profile_ref.id, "AUT-OPTIONAL-AUTH");
+  assert.equal(
+    claim.claim.authorization_use_ref,
+    path.relative(
+      project,
+      path.join(useRoot, usesAfterInterruptedClaim[0]),
+    ).split(path.sep).join("/"),
+  );
+  assert.deepEqual(
+    fs.readdirSync(useRoot).filter((name) => name.endsWith(".json")).sort(),
+    usesAfterInterruptedClaim,
+  );
+  const statusAfterClaimRetry = mustRunJson([
+    "authorization", "status",
+    "--root", project,
+    "--id", claimAuthorization.id,
+  ]).authorizations[0];
+  assert.equal(statusAfterClaimRetry.status, "consumed");
+  assert.equal(statusAfterClaimRetry.use_count, 1);
+
+  const artifactPath = path.join(project, "src", "optional-authorization-summary.md");
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(
+    artifactPath,
+    "# Optional authorization\n\nThe explicit grant must be consumed rather than ignored.\n",
+    "utf8",
+  );
+  const outputArgs = [
+    "output", "link",
+    "--root", project,
+    "--story", "ST-OPTIONAL-AUTH",
+    "--type", "implementation-summary",
+    "--artifact", "src/optional-authorization-summary.md",
+    "--template", "implementation-summary-v1",
+    "--mode", "new",
+    "--requirement", "REQ-AUTONOMY",
+  ];
+  const proposalBoundOutputAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-OUTPUT-BOUND",
+    "--scope", "Link the output only for an unrelated assessment proposal.",
+    "--allow-use", "output.link=ST-OPTIONAL-AUTH",
+    "--allow-artifact-type", "implementation-summary",
+    "--proposal", "ASSESSMENT-UNRELATED",
+    "--proposal-hash", unrelatedProposalHash,
+    "--max-uses", "1",
+    ...humanApproval("Approve only the proposal-bound implementation output link"),
+  ]).authorization;
+  assertProposalBoundGrantRejectedWithoutUse(
+    proposalBoundOutputAuthorization,
+    outputArgs,
+  );
+  const outputAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-OUTPUT",
+    "--scope", "Link the implementation output for ST-OPTIONAL-AUTH once.",
+    "--allow-use", "output.link=ST-OPTIONAL-AUTH",
+    "--allow-artifact-type", "implementation-summary",
+    "--max-uses", "1",
+    ...humanApproval("Approve only the implementation output link"),
+  ]).authorization;
+  const outputLink = mustRunJson([
+    ...outputArgs,
+    "--authorization", outputAuthorization.id,
+  ]);
+  assert.equal(outputLink.link.authorization_ref, outputAuthorization.id);
+  assert.equal(outputLink.link.checkpoint_profile_ref.id, "AUT-OPTIONAL-AUTH");
+  assert.equal(
+    mustRunJson([
+      "authorization", "status",
+      "--root", project,
+      "--id", outputAuthorization.id,
+    ]).authorizations[0].status,
+    "consumed",
+  );
+
+  const wrongAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-WRONG",
+    "--scope", "Complete discovery for ST-OPTIONAL-AUTH only.",
+    "--allow-use", "story.complete-step=ST-OPTIONAL-AUTH.step.discovery",
+    "--allow-artifact-type", "implementation-summary",
+    "--max-uses", "1",
+    ...humanApproval("Approve only the discovery completion"),
+  ]).authorization;
+  const completionArgs = [
+    "story", "complete-step",
+    "--root", project,
+    "--id", "ST-OPTIONAL-AUTH",
+    "--step", "implementation",
+    "--type", "implementation-summary",
+    "--summary", "Implementation is complete with the exact linked output.",
+  ];
+  const proposalBoundCompletionAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-COMPLETE-BOUND",
+    "--scope", "Complete implementation only for an unrelated assessment proposal.",
+    "--allow-use", "story.complete-step=ST-OPTIONAL-AUTH.step.implementation",
+    "--allow-artifact-type", "implementation-summary",
+    "--proposal", "ASSESSMENT-UNRELATED",
+    "--proposal-hash", unrelatedProposalHash,
+    "--max-uses", "1",
+    ...humanApproval("Approve only the proposal-bound implementation completion"),
+  ]).authorization;
+  assertProposalBoundGrantRejectedWithoutUse(
+    proposalBoundCompletionAuthorization,
+    completionArgs,
+  );
+  mustFail(
+    [...completionArgs, "--authorization", wrongAuthorization.id],
+    /does not allow subject ST-OPTIONAL-AUTH\.step\.implementation/isu,
+  );
+  const wrongStatus = mustRunJson([
+    "authorization", "status",
+    "--root", project,
+    "--id", wrongAuthorization.id,
+  ]);
+  assert.equal(wrongStatus.authorizations[0].status, "active");
+
+  const authorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-OPTIONAL-AUTH-IMPLEMENTATION",
+    "--scope", "Complete implementation for ST-OPTIONAL-AUTH only.",
+    "--allow-use", "story.complete-step=ST-OPTIONAL-AUTH.step.implementation",
+    "--allow-artifact-type", "implementation-summary",
+    "--max-uses", "1",
+    ...humanApproval("Approve only the implementation completion"),
+  ]).authorization;
+  const completion = mustRunJson([
+    ...completionArgs,
+    "--authorization", authorization.id,
+  ]);
+  assert.equal(completion.step.authorization_ref, authorization.id);
+  assert.equal(completion.step.authorization_action, "story.complete-step");
+  assert.equal(completion.step.checkpoint_profile_ref.id, "AUT-OPTIONAL-AUTH");
+  assert.match(
+    completion.step.authorization_use_ref,
+    /^\.sdlc\/authorization-uses\/AUTH-ST-OPTIONAL-AUTH-IMPLEMENTATION\//u,
+  );
+
+  const consumedStatus = mustRunJson([
+    "authorization", "status",
+    "--root", project,
+    "--id", authorization.id,
+  ]);
+  assert.equal(consumedStatus.authorizations[0].status, "consumed");
+  assert.equal(consumedStatus.authorizations[0].use_count, 1);
+
+  const historicalParent = tmpProject("optional-step-authorization-historical");
+  const historicalProject = path.join(historicalParent, "copy");
+  fs.cpSync(project, historicalProject, { recursive: true });
+  const historicalProposalRef = {
+    id: "ASSESSMENT-UNRELATED",
+    hash: unrelatedProposalHash,
+  };
+  const historicalAuthorizationPath = path.join(
+    historicalProject,
+    ".sdlc",
+    "authorizations",
+    `${authorization.id}.json`,
+  );
+  const historicalAuthorization = JSON.parse(
+    fs.readFileSync(historicalAuthorizationPath, "utf8"),
+  );
+  historicalAuthorization.proposal_ref = historicalProposalRef;
+  historicalAuthorization.approved_content_hash = legacyAuthorizationContentHash(
+    historicalAuthorization,
+  );
+  fs.writeFileSync(
+    historicalAuthorizationPath,
+    `${JSON.stringify(historicalAuthorization, null, 2)}\n`,
+    "utf8",
+  );
+  const historicalUsePath = path.join(
+    historicalProject,
+    completion.step.authorization_use_ref,
+  );
+  const historicalUse = JSON.parse(fs.readFileSync(historicalUsePath, "utf8"));
+  historicalUse.proposal_ref = historicalProposalRef;
+  historicalUse.authorization_hash = historicalAuthorization.approved_content_hash;
+  historicalUse.receipt_hash = lifecycleReceiptHash(historicalUse);
+  fs.writeFileSync(
+    historicalUsePath,
+    `${JSON.stringify(historicalUse, null, 2)}\n`,
+    "utf8",
+  );
+  const historicalGate = mustFail([
+    "gate", "check",
+    "--root", historicalProject,
+    "--scope", "story",
+    "--story", "ST-OPTIONAL-AUTH",
+    "--strict",
+    "--json",
+  ], /proposal binding mismatch.*ASSESSMENT-UNRELATED.*expects no proposal binding/isu);
+  const historicalReport = JSON.parse(historicalGate.stdout);
+  assert.ok(historicalReport.errors.some((error) =>
+    /Authorization AUTH-ST-OPTIONAL-AUTH-IMPLEMENTATION proposal binding mismatch/iu.test(error)));
+  assert.ok(historicalReport.errors.some((error) =>
+    /authorization usage receipt .* proposal binding mismatch.*recorded use has proposal ASSESSMENT-UNRELATED/iu
+      .test(error)));
+
+  fs.rmSync(path.join(project, completion.step.authorization_use_ref));
+  mustFail([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-OPTIONAL-AUTH",
+    "--strict",
+  ], /story step ST-OPTIONAL-AUTH\/implementation references missing authorization use receipt/u);
 });

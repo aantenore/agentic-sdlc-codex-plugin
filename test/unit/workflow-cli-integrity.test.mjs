@@ -29,12 +29,12 @@ function sanitizedEnvironment(overrides = {}) {
   return env;
 }
 
-function run(args, cwd, envOverrides = {}) {
+function run(args, cwd, envOverrides = {}, options = {}) {
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd,
     encoding: "utf8",
     env: sanitizedEnvironment(envOverrides),
-    timeout: 30_000,
+    timeout: options.timeout ?? 30_000,
   });
 }
 
@@ -449,8 +449,22 @@ test("an actual process termination during start is recovered from durable stagi
     const crashed = run(args, project, {
       NODE_ENV: "test",
       AGENTIC_SDLC_TEST_WORKFLOW_START_CRASH_PHASE: phase,
-    });
+    }, { timeout: 90_000 });
     assert.notEqual(crashed.status, 0, `${crashed.stdout}\n${crashed.stderr}`);
+    assert.equal(
+      crashed.error,
+      undefined,
+      `${phase} reached the subprocess timeout instead of the requested crash point: `
+        + `${crashed.error?.message || "unknown timeout error"}\n`
+        + `${crashed.stdout}\n${crashed.stderr}`,
+    );
+    if (process.platform !== "win32") {
+      assert.equal(
+        crashed.signal,
+        "SIGKILL",
+        `${phase} exited without the requested SIGKILL crash: ${crashed.signal || "no signal"}`,
+      );
+    }
 
     const files = instanceFiles(project, instanceId);
     const staging = path.join(project, ".sdlc", "workflows", "instances", ".staging", instanceId);

@@ -26,6 +26,12 @@ function temporaryProject(label) {
   return project;
 }
 
+function hostSupportsLocalSmokeSandbox() {
+  if (process.platform === "darwin") return fs.existsSync("/usr/bin/sandbox-exec");
+  if (process.platform === "linux") return fs.existsSync("/usr/bin/bwrap");
+  return false;
+}
+
 function cloneTemporaryProject(source, label) {
   const project = temporaryProject(label);
   fs.cpSync(source, project, {
@@ -1675,7 +1681,11 @@ test("concurrent workflow and task starts serialize on the story task-start boun
   );
 });
 
-test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", async () => {
+test("lifecycle-complete strict gate requires the pre-task workflow and an alternating phase timeline", {
+  skip: hostSupportsLocalSmokeSandbox()
+    ? false
+    : "requires a supported local smoke sandbox for terminal local release evidence",
+}, async () => {
   const project = temporaryProject("lifecycle");
   const customPhase = "package-boundary-check";
   const finalReceiptPath = ".sdlc/gates/ST-FINAL-final.json";
@@ -2267,6 +2277,32 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     "--authorization", fixture.storyActionAuthorizationId,
   ], project);
 
+  const localBuildAuthorization = mustRunJson([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--action", "build.local",
+    "--confirm-action",
+    ...humanApproval("Approve creation of the exact absent-at-start local target"),
+  ], project);
+  fs.mkdirSync(path.join(project, "docs", "local-release", "app"), {
+    recursive: true,
+  });
+  const localBuildEvidence = writeProjectFile(
+    project,
+    "docs/local-build-proof.json",
+    '{"target":"docs/local-release","built":true}\n',
+  );
+  mustRun([
+    "autonomy", "delivery", "action",
+    "--root", project,
+    "--id", fixture.profileId,
+    "--action", "build.local",
+    "--outcome", "passed",
+    "--authorization-receipt", localBuildAuthorization.action_receipt.id,
+    "--evidence", localBuildEvidence,
+  ], project);
+
   const rollbackEvidence = writeProjectFile(
     project,
     "docs/local-release/rollback-rehearsal.json",
@@ -2596,12 +2632,32 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   const certifiedStatus = mustRunJson([
     "status", "--root", project,
   ], project);
-  assert.equal(certifiedStatus.next_action.kind, "onboard_project");
-  assert.equal(certifiedStatus.next_action.reason, "project_context_not_onboarded");
+  assert.equal(certifiedStatus.next_action.kind, "none");
+  assert.equal(certifiedStatus.next_action.reason, "completed_work_terminal");
+  assert.match(certifiedStatus.next_action.label, /1 governed work item is terminal/u);
+  assert.equal(certifiedStatus.next_action.terminal_work, 1);
   assert.notEqual(certifiedStatus.next_action.kind, "inspect_story_workflow");
   assert.equal(certifiedStatus.summary.available_work, 0);
   assert.equal(certifiedStatus.summary.active_work, 0);
   assert.equal(certifiedStatus.summary.completed_work, 1);
+  const certifiedHumanStatus = mustRun([
+    "status", "--root", project,
+  ], project).stdout;
+  assert.match(certifiedHumanStatus, /Outcome: Governed work is complete\./u);
+  assert.match(
+    certifiedHumanStatus,
+    /no unfinished operational work or new onboarding step is waiting/iu,
+  );
+  assert.doesNotMatch(certifiedHumanStatus, /Prepare the initial context|Agree the first requirement/u);
+  const certifiedItalianStatus = mustRun([
+    "status", "--root", project, "--locale", "it",
+  ], project).stdout;
+  assert.match(certifiedItalianStatus, /Risultato: Il lavoro governato è completo\./u);
+  assert.match(
+    certifiedItalianStatus,
+    /non sono in attesa attività operative incomplete né un nuovo onboarding/u,
+  );
+  assert.doesNotMatch(certifiedItalianStatus, /Prepara il contesto iniziale|Concorda il primo requisito/u);
 
   const terminalOrchestration = mustRunJson([
     "orchestrate", "status", "--root", project,
@@ -2619,6 +2675,45 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   );
   assert.equal(terminalStory.lifecycle_source, "workflow_final_receipt");
   assert.equal(terminalStory.orchestration_state, "terminal");
+
+  const manifestProjectionProject = cloneTemporaryProject(
+    project,
+    "terminal-manifest-projection",
+  );
+  mustRun([
+    "manifest", "rebuild", "--root", manifestProjectionProject,
+  ], manifestProjectionProject);
+  const manifest = readJson(
+    manifestProjectionProject,
+    ".sdlc/manifests/kb-manifest.json",
+  );
+  assert.equal(
+    manifest.story_projection_schema_version,
+    "effective-story-lifecycle:v1",
+  );
+  const manifestProjection = manifest.stories
+    .find((story) => story.id === fixture.storyId);
+  assert.equal(manifestProjection.status, "ready");
+  assert.equal(manifestProjection.phase, "implementation");
+  assert.equal(manifestProjection.record_status, "ready");
+  assert.equal(manifestProjection.record_phase, "implementation");
+  assert.equal(manifestProjection.effective_status, "done");
+  assert.equal(manifestProjection.effective_phase, "release");
+  assert.equal(manifestProjection.lifecycle_terminal, true);
+  assert.equal(manifestProjection.lifecycle_blocked, false);
+  assert.equal(
+    manifestProjection.lifecycle_source,
+    "workflow_final_receipt",
+  );
+  assert.equal(manifestProjection.workflow_instance_id, workflowInstanceId);
+  assert.deepEqual(
+    readJson(
+      manifestProjectionProject,
+      `.sdlc/stories/${fixture.storyId}/story.json`,
+    ),
+    readJson(project, `.sdlc/stories/${fixture.storyId}/story.json`),
+    "the derived manifest must not mutate the canonical story record",
+  );
 
   const certifiedWorkflowStatus = mustRunJson([
     "workflow", "instance", "status",

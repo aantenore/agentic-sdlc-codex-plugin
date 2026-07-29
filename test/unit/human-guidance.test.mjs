@@ -156,6 +156,14 @@ test("describes an Italian local-release proposal with its real boundary before 
   assertCanonicalCodesOnlyInDetails(guidance);
   assert.match(guidance.impact, /progetto “Operazioni di viaggio”/u);
   assert.match(guidance.impact, /cartella locale “\/opt\/travel-operations\/local-release”/u);
+  assert.match(guidance.impact, /Può essere assente finché la consegna è solo in pianificazione/u);
+  assert.match(
+    guidance.impact,
+    /prima di rollback\.verify, data\.migrate, data\.rollback o release\.local deve esistere come cartella reale/u,
+  );
+  assert.match(guidance.impact, /prima richiesta l’autorizzazione della build locale esatta/u);
+  assert.match(guidance.impact, /strumento esterno può creare quella root e i figli approvati/u);
+  assert.match(guidance.impact, /CLI non crea mai la cartella da solo/u);
   assert.match(guidance.impact, /“\/opt\/travel-operations\/local-release\/app” e “\/opt\/travel-operations\/local-release\/config”/u);
   assert.match(guidance.impact, /smoke test parte da “\/opt\/travel-operations\/local-release\/app”/u);
   assert.match(guidance.impact, /un controllo portabile non deve dipendere da listener o connessioni/u);

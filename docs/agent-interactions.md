@@ -267,10 +267,10 @@ node <plugin-root>/bin/agentic-sdlc.mjs output link \
   --requirement REQ-INITIAL-ASSESSMENT \
   --authorization <authorization-id-from-assessment-proposal-approve> \
   --receipt-file .sdlc/receipts/generation/GEN-ST-INITIAL-ASSESSMENT.json \
-  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render.png
+  --render-evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render.png
 ```
 
-`--authorization` is the exact proposal-bound ID emitted by approval; the link consumes only its `output.link` action/subject pair and stores a use receipt. `--receipt-file` attests which generator produced the exact artifact hash. `--evidence` supplies separate render/content proof; neither substitutes for the other.
+`--authorization` is the exact proposal-bound ID emitted by approval; the link consumes only its `output.link` action/subject pair and stores a use receipt. `--receipt-file` attests which generator produced the exact artifact hash. `--render-evidence` supplies only separate render or visual proof; functional and test evidence belongs in step or trace records. The older `--evidence` spelling remains accepted here as a compatibility alias; neither form substitutes for the generator receipt.
 
 The `verification_receipt:v1` reports separately:
 

@@ -58,6 +58,10 @@ test("delivery help exposes required runtime inputs rather than internal aliases
   assert.doesNotMatch(proposeTechnical, /--contract-id/u);
   assert.match(proposeTechnical, /--repository[^\n]*required with --kind pull_request/u);
   assert.match(proposeTechnical, /--target-root[^\n]*required with --kind local_release/u);
+  assert.match(
+    proposeTechnical,
+    /--target-root[\s\S]*may be absent while planning[\s\S]*before rollback\.verify, data\.migrate, data\.rollback, or release\.local[\s\S]*request build\.local authorization first[\s\S]*CLI never creates directories/u,
+  );
   assert.match(proposeTechnical, /--smoke-cwd[^\n]*required when more than one --write-path is present/u);
   assert.match(proposeTechnical, /--pr-mode <new\|existing>/u);
   assert.match(proposeTechnical, /--pr-mode[^\n]*defaults to new/u);
@@ -81,6 +85,24 @@ test("delivery help exposes required runtime inputs rather than internal aliases
   assert.equal(flags.get("--action").required, true);
   assert.equal(flags.has("--outcome"), true);
   assert.equal(flags.has("--evidence"), true);
+  assert.match(
+    action.human.result,
+    /new local destination.*request build\.local first without confirmation.*only if it reports checkpoint_required.*repeat with direct approval.*external builder creates the exact approved root.*completed with evidence.*rollback\.verify, data\.migrate, data\.rollback, or release\.local/iu,
+  );
+  assert.equal(
+    action.examples.filter((example) => /--action build\.local/u.test(example))[0],
+    "agentic-sdlc autonomy delivery action --id AUT-LOCAL-009 --action build.local",
+  );
+  assert.equal(
+    action.examples.some((example) =>
+      /--action build\.local --confirm-action.*exact approved local target/u.test(example)),
+    true,
+  );
+  assert.equal(
+    action.examples.some((example) =>
+      /--action build\.local --outcome passed.*--authorization-receipt.*--evidence/u.test(example)),
+    true,
+  );
 });
 
 test("trace append help includes a runnable example and its operational flags", () => {
@@ -228,6 +250,10 @@ test("first-project lifecycle help exposes the exact assessment, evidence, and g
     assert.equal(complete.has(flag), true, `story complete-step should expose ${flag}`);
   }
   assert.match(complete.get("--authorization")?.required_when, /story\.complete-step/u);
+  assert.match(
+    complete.get("--authorization")?.description || "",
+    /otherwise automatic completion.*validated and consumed/iu,
+  );
 
   const taskStart = flags("task start");
   for (const flag of ["--actor", "--actor-type", "--actor-name", "--actor-email"]) {

@@ -203,7 +203,14 @@ test("package configuration separates correctness from the enforcing enterprise 
     packageDefinition.scripts?.["benchmark:enterprise"],
     "node scripts/benchmark-enterprise-performance.mjs --enforce",
   );
-  assert.equal(packageDefinition.scripts?.test, "node --test");
+  assert.equal(
+    packageDefinition.scripts?.test,
+    "node scripts/run-test-suite.mjs",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(packageDefinition.scripts),
+    /--test-concurrency(?:=|\s)/u,
+  );
   assert.equal(
     packageDefinition.scripts?.["test:enterprise"],
     "npm test && npm run benchmark:enterprise",

@@ -394,6 +394,8 @@ when PR-184 is merged, closed, or cancelled and does not apply to another PR.
 
 A local release is a first-class delivery unit. Its profile must name the local root, allowed actions and write paths, smoke tests, their governed working directory, and a required rollback procedure. The smoke directory must be inside an allowed write path; it defaults to the only allowed write path and must be explicit when several are present. Local does not mean unrestricted: machine-global changes, writes outside the workspace, destructive actions, external access, remote deployment, and production access remain explicit exception boundaries.
 
+The exact local root may be absent while a new delivery is only planned, proposed, approved, or started. Before `rollback.verify`, `data.migrate`, `data.rollback`, or `release.local` it must exist as a real, non-symlinked directory. Its creation is itself governed: request `build.local` first without confirmation; only if it reports `checkpoint_required`, show the exact decision and repeat with direct approval. The external builder may then create only that exact root, its approved children, and the artifact, after which `build.local` is completed with immutable evidence. The CLI never creates the directory, and an untracked `mkdir` is not a valid repair for a blocked release action.
+
 Every new local release automatically includes the checkpointed `rollback.verify` action. It binds the exact local root, write paths, rollback procedure, and immutable rehearsal evidence. The CLI only observes and hashes that subject; it accepts no rollback command and executes no restore operation. Authorize `rollback.verify` with `--evidence`, then complete it with the same unchanged evidence. A passing receipt must predate `release.local` authorization, is referenced by the final release receipt, and is revalidated by the lifecycle gate. For a declared data migration it also binds the exact passing `data.rollback` receipt. Missing, tampered, or out-of-order evidence fails closed.
 
 Reversible local data changes use the typed actions `data.migrate` and `data.rollback`; the pair is mandatory. The profile binds one existing regular data file, one or more exact logical scopes, immutable dry-run/preview evidence outside the mutable write paths, an exact backup file, and the rollback procedure. Both actions are always checkpoints. The CLI never accepts or runs a migration shell command: it authorizes the immutable subject, an external tool performs the exact operation, and the local-filesystem observer hashes the target and backup before and after completion. A rollback must prove a real target change back to the backup; a no-op cannot become verified evidence. Both `release.local` authorization and completion require the exact rollback receipt, its bound `rollback.verify`, and a later passing migration, so an incomplete sequence cannot close the delivery terminally. The lifecycle gate revalidates the same chain.
@@ -548,10 +550,10 @@ node bin/agentic-sdlc.mjs output link \
   --requirement REQ-INITIAL-ASSESSMENT \
   --authorization <authorization-id-from-assessment-proposal-approve> \
   --receipt-file .sdlc/receipts/generation/GEN-ST-INITIAL-ASSESSMENT.json \
-  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-render.png
+  --render-evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-render.png
 ```
 
-`--authorization` is the exact proposal-bound ID returned by checkpoint 2; linking consumes its dedicated `output.link` action/subject pair and persists a usage receipt. `--receipt-file` identifies the real generator; `--evidence` is separate content/render proof. Inspect the persisted output link and layered receipt with:
+`--authorization` is the exact proposal-bound ID returned by checkpoint 2; linking consumes its dedicated `output.link` action/subject pair and persists a usage receipt. `--receipt-file` identifies the real generator; `--render-evidence` is separate render or visual proof, not functional or test evidence. The older `--evidence` spelling remains accepted here as a compatibility alias. Inspect the persisted output link and layered receipt with:
 
 ```bash
 node bin/agentic-sdlc.mjs output status \

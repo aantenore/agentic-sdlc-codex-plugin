@@ -43,6 +43,32 @@ node "$PLUGIN_CLI" config migrate --root /path/to/project
 
 It reports every JSON path that would be added, replaced, or removed and prints a deterministic plan hash. It does not change `config.json`, create a lock, or write a migration receipt.
 
+For automation, the machine-readable preview is compact by default:
+
+```bash
+node "$PLUGIN_CLI" config migrate --root /path/to/project --json
+```
+
+It keeps the plan hash and reviewable changes but reports which plan details
+were omitted. The envelope explicitly reports `plan_complete: false` and
+`plan_hash_verification: requires_full_preview`: its nested `plan` is a compact
+summary, not a complete `config-migration-plan:v1`, and its hash cannot be
+independently recomputed from that summary alone. The hash remains the exact
+opaque reference accepted by apply, which recomputes the full plan before any
+write.
+
+Request the complete machine payload to inspect the target configuration or
+verify the plan hash independently:
+
+```bash
+node "$PLUGIN_CLI" config migrate --root /path/to/project --json --full
+```
+
+Here `--full` expands details omitted from compact machine/JSON output; it does
+not change the plan or apply it. It reports `plan_complete: true` and
+`plan_hash_verification: self-contained`; its nested plan validates against
+`schemas/config-migration-plan.schema.json`.
+
 Apply only the plan you just reviewed:
 
 ```bash

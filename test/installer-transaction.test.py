@@ -1237,6 +1237,20 @@ class InstallerTransactionTests(unittest.TestCase):
             crash_repo / "scripts" / "install-personal-marketplace-v2.py",
         )
         crash_home = self.root / "v2-crash-home"
+        crash_home.mkdir()
+        (crash_home / "plugin").write_text(
+            """import json
+import sys
+
+if sys.argv[1:] == ["list", "--json"]:
+    print(json.dumps({"installed": [], "available": []}, sort_keys=True))
+    raise SystemExit(0)
+
+print("unsupported Codex fixture command", file=sys.stderr)
+raise SystemExit(2)
+""",
+            encoding="utf-8",
+        )
         copied = crash_repo / "scripts" / "install-personal-marketplace-v2.py"
 
         def invoke(arguments, crash_phase=None):
@@ -1246,8 +1260,25 @@ class InstallerTransactionTests(unittest.TestCase):
                 environment[
                     "_AGENTIC_SDLC_INSTALLER_V2_TEST_CRASH_PHASE"
                 ] = crash_phase
+            codex_binding = (
+                [
+                    "--codex-executable",
+                    sys.executable,
+                    "--codex-home",
+                    str(crash_home / ".codex"),
+                ]
+                if arguments[0] in {"apply", "confirm", "restore"}
+                else []
+            )
             return subprocess.run(
-                [sys.executable, str(copied), *arguments, "--home", str(crash_home)],
+                [
+                    sys.executable,
+                    str(copied),
+                    *arguments,
+                    "--home",
+                    str(crash_home),
+                    *codex_binding,
+                ],
                 cwd=str(crash_repo),
                 env=environment,
                 capture_output=True,
@@ -1263,7 +1294,11 @@ class InstallerTransactionTests(unittest.TestCase):
             ["apply", "--json", "--plan-hash", plan_hash],
             crash_phase="plugin_replaced",
         )
-        self.assertEqual(crashed.returncode, 87)
+        self.assertEqual(
+            crashed.returncode,
+            87,
+            f"stdout:\n{crashed.stdout}\nstderr:\n{crashed.stderr}",
+        )
 
         retried = invoke(["apply", "--json", "--plan-hash", plan_hash])
         self.assertEqual(retried.returncode, 0, retried.stderr)

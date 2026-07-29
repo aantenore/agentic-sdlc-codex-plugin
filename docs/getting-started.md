@@ -237,6 +237,26 @@ Before starting, Codex shows:
 
 “Local” describes the destination and data boundary; it does not mean unrestricted. A missing tool installation, write outside the workspace, or machine-global change remains a separate decision.
 
+### When the local destination does not exist yet
+
+The destination may be absent while the delivery is being planned, approved,
+or started. Before `rollback.verify`, `data.migrate`, `data.rollback`, or
+`release.local`, Codex follows this governed build sequence:
+
+1. Request `build.local` once without `--confirm-action`.
+2. If, and only if, the response is `checkpoint_required`, show you the exact
+   paused decision and repeat the same request with direct human or CI approval.
+   If the first request is already authorized, it is not confirmed again.
+3. While that exact authorization is active, let the external builder create
+   only the approved destination root, approved children, and artifact. The
+   Agentic SDLC CLI does not create the directory.
+4. Complete the same `build.local` authorization with immutable evidence.
+5. Only after that completion, continue with `rollback.verify`, any declared
+   `data.migrate`/`data.rollback` cycle, and `release.local`.
+
+Creating the destination with an untracked `mkdir` does not repair a blocked
+release: the creation itself belongs to the approved build boundary.
+
 ## Local, Repository, And Production Are Separate
 
 | Boundary | Examples | Network or wider authority |

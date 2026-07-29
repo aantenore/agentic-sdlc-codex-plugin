@@ -225,6 +225,47 @@ node bin/agentic-sdlc.mjs autonomy delivery propose \
   --json
 ```
 
+The exact `--target-root` may be absent while a new local delivery is only
+planned, proposed, approved, or started. Before `rollback.verify`,
+`data.migrate`, `data.rollback`, or `release.local` authorization, it must
+exist as a real, non-symlinked directory. Create it through the governed build
+sequence, not with an untracked setup command: request `build.local` without
+`--confirm-action` first. Only if the response is `checkpoint_required`, show
+that exact decision and repeat with direct human or CI approval attribution. A
+non-checkpointed request returns its authorization directly and must not be
+confirmed again. Let the external builder create only the exact approved root,
+write-path children, and artifact while executing the resulting authorization,
+then complete that same action with immutable evidence. The CLI never creates
+release directories.
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-REL-009 \
+  --action build.local
+```
+
+Only if that response is `checkpoint_required`, repeat it with the displayed
+direct approval:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-REL-009 \
+  --action build.local --confirm-action \
+  --actor-type human --approval-source explicit-user \
+  --summary "Authorize creation and build of this exact local target"
+```
+
+The external builder may now create only the approved root, children, and
+artifact. Complete the same authorization afterward:
+
+```bash
+node bin/agentic-sdlc.mjs autonomy delivery action \
+  --root <project> --id AUT-LOCAL-REL-009 \
+  --action build.local --outcome passed \
+  --authorization-receipt <AUT-ACT-id-from-build-authorization> \
+  --evidence evidence/local-build.json
+```
+
 Approve, inspect, explain, or revoke the exact profile:
 
 ```bash
@@ -529,6 +570,15 @@ Create a new grant ID and compound subject such as
 completion grants remain readable for compatibility but warn and must not be
 created for new work. Neither grant covers the contract, task start, output
 link, release, or another step.
+
+At effective levels where a claim, output link, or step completion is
+automatic, `--authorization` is optional. Supplying it deliberately tightens
+that one operation: the CLI validates and consumes the exact action-subject
+grant, or fails without recording the operation. A supplied grant is never
+silently ignored. Proposal-bound `output.link` is the exception: it always
+requires and consumes the proposal-bound `output.link` authorization created
+at proposal approval, even when the delivery profile does not configure that
+action as a checkpoint.
 
 Replace `discovery-note` with the exact type required by the approved
 contract. Every `--type <type>` passed to `story complete-step` requires the
@@ -844,6 +894,13 @@ node bin/agentic-sdlc.mjs output status --root <project> --story ST-001
 ```
 
 `output resolve` checks the approved template registry and related story links. If another story already covers the same requirement, the expected result is reuse plus delta. `output link` requires an approved fresh story contract, then records the final user-agreed artifact, approved template, mode, requirements, and content fingerprints. Strict gates fail when linked outputs use unapproved or changed templates, create unjustified duplicates, omit requirements, point to cache/index files, or drift after linking.
+
+For a rendered or visual output, pass `--render-evidence <path>` with a PNG,
+JPEG, WebP, or PDF render, or with a typed
+`render-verification-receipt:v1` JSON file. This option does not accept
+functional or test evidence; record those with `story complete-step` or
+`trace append`. The older `--evidence` spelling remains accepted by
+`output link` only as a compatibility alias for the same render-only input.
 
 When a duplicate new output or structure override is intentionally approved, run `output link` with `--decision-id` and `--rationale` as a human or CI actor. The CLI records the approved decision in the registry:
 

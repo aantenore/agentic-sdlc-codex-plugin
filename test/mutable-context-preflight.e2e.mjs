@@ -438,25 +438,27 @@ test("approved brownfield context may evolve after an exact preflight while unre
     false,
   );
 
-  const configPath = path.join(project, "src", "config.mjs");
-  const originalConfigMode = fs.statSync(configPath).mode & 0o7777;
-  fs.chmodSync(configPath, originalConfigMode ^ 0o100);
-  mustFail([
-    "gate", "check",
-    "--root", project,
-    "--scope", "story",
-    "--story", "ST-BROWNFIELD",
-    "--strict",
-    "--json",
-  ], project, /outside the approved requirement write paths: src\/config\.mjs/u);
-  fs.chmodSync(configPath, originalConfigMode);
-  assert.equal(mustRunJson([
-    "gate", "check",
-    "--root", project,
-    "--scope", "story",
-    "--story", "ST-BROWNFIELD",
-    "--strict",
-  ], project).status, "passed");
+  if (process.platform !== "win32") {
+    const configPath = path.join(project, "src", "config.mjs");
+    const originalConfigMode = fs.statSync(configPath).mode & 0o7777;
+    fs.chmodSync(configPath, originalConfigMode ^ 0o100);
+    mustFail([
+      "gate", "check",
+      "--root", project,
+      "--scope", "story",
+      "--story", "ST-BROWNFIELD",
+      "--strict",
+      "--json",
+    ], project, /outside the approved requirement write paths: src\/config\.mjs/u);
+    fs.chmodSync(configPath, originalConfigMode);
+    assert.equal(mustRunJson([
+      "gate", "check",
+      "--root", project,
+      "--scope", "story",
+      "--story", "ST-BROWNFIELD",
+      "--strict",
+    ], project).status, "passed");
+  }
 
   writeProjectFile(project, "src/config.mjs", "export const timeoutMs = 2000;\n");
   const rejectedGate = mustFail([

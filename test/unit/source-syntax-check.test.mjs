@@ -27,6 +27,7 @@ test("syntax discovery includes every source area and previously omitted modules
     "lib/verification-levels.mjs",
     "scripts/benchmark-foundation.mjs",
     "scripts/check-source-syntax.mjs",
+    "test/unit/first-user-language-ux.test.mjs",
     "ui/change-observatory/app.js",
   ]) {
     assert.equal(files.has(expected), true, `missing syntax coverage for ${expected}`);

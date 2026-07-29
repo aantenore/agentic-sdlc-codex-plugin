@@ -10,6 +10,7 @@ evidence.
 | --- | --- | --- |
 | KB search results | Compact ranked metadata and snippets; omit duplicated `search_text` | `kb search --json --full` |
 | Cache diagnostics | Counts, drift, and fingerprints; omit the serialized derived cache | `cache status --json --full` |
+| Configuration migration preview | Reviewable semantic diff and opaque plan reference; omit the complete target configuration | `config migrate --json --full` for a self-contained v1 plan |
 | Test output | RTK test summary only for fixed, known-safe test vectors | `optimization run --exact` for the same allowlisted vector |
 | Git status/diff/log/show | RTK read-only profile; machine formats stay native and mutations are rejected | `optimization run --exact` |
 | `rg` search output | RTK search profile; JSON/NUL output stays native and external preprocessors are rejected | `optimization run --exact` |
@@ -47,15 +48,25 @@ path only when its full content is needed.
 `cache status --json` reports cache validity, drift, collection counts, and the
 same optimization metrics without serializing the complete derived cache.
 
-Both commands expose the previous large payload explicitly:
+`config migrate --json` retains the exact apply reference and semantic changes,
+but marks the nested plan summary with `plan_complete: false` and
+`plan_hash_verification: requires_full_preview`. Because `target_config` is
+omitted, that summary is not independently validatable as a complete
+`config-migration-plan:v1`.
+
+The commands expose their complete machine payloads explicitly:
 
 ```bash
 agentic-sdlc kb search "checkout risk" --json --full
 agentic-sdlc cache status --json --full
+agentic-sdlc config migrate --json --full
 ```
 
-Use `--full` only when the omitted derived field is required. It never changes
-canonical `.sdlc` files. Search limits are validated and bounded to 1-100.
+Use `--full` only when an omitted machine field is required. It never changes
+canonical `.sdlc` files. For configuration migration, the full preview reports
+`plan_complete: true` and `plan_hash_verification: self-contained`, includes
+`target_config`, and permits independent schema and stable-hash verification.
+Search limits are validated and bounded to 1-100.
 
 ## RTK command gateway
 

@@ -27,7 +27,7 @@
     "check": "node scripts/check-source-syntax.mjs",
     "doctor": "node bin/agentic-sdlc.mjs doctor",
     "smoke": "node bin/agentic-sdlc.mjs --help",
-    "test": "node --test",
+    "test": "node scripts/run-test-suite.mjs",
     "test:enterprise": "npm test && npm run benchmark:enterprise"
   },
   "keywords": [

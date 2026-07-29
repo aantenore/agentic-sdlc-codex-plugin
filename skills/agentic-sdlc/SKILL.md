@@ -267,6 +267,13 @@ The dedicated assessment journey remains the exception described above: it packa
      --requirement REQ-001
    ```
 
+   `--render-evidence` is reserved for render or visual verification of the
+   produced output: a PNG, JPEG, WebP, or PDF render, or a typed
+   `render-verification-receipt:v1` JSON file. It is not functional or test
+   evidence; record those with `story complete-step` or `trace append`.
+   `--evidence` remains accepted by `output link` only as a compatibility
+   alias for the same render-only input.
+
 13. Before every delivery, ask for and obtain one fresh working-mode choice. Never inherit, infer, or reuse the choice from an earlier delivery, even when it implements the same approved requirement. First show only the concrete destination, files that may change, actions that remain protected, expiry, and material risks in normal product language. Before listing the choices, state whether the most independent option can actually be effective in this installation; if approver identity cannot be digitally verified, explain that selecting option 3 will produce the effective “Autonomy with checkpoints” mode. Do not lead with internal levels, policy modes, record IDs, hashes, or approval-evidence terminology. A delivery execution profile remains deliberately exact and non-reusable: one story, its one approved contract, and one concrete delivery. If several stories must ship together, agree an aggregation story and contract first.
 
    For a pull request, ask in the user's language. In Italian, use this copy:
@@ -338,6 +345,51 @@ The dedicated assessment journey remains the exception described above: it packa
      --smoke-cwd /absolute/project/.local-release/app \
      --smoke-test '["npm","run","smoke:local"]' \
      --rollback "Restore the previous local package and restart the local process" \
+     --json
+   ```
+
+   A new local `--target-root` may be absent while the delivery is only being
+   proposed, reviewed, approved, or started. It must exist as a real,
+   non-symlinked directory before `rollback.verify`, `data.migrate`,
+   `data.rollback`, or `release.local` is authorized. Govern creation instead
+   of running an untracked `mkdir`: after task start, request `build.local`
+   without `--confirm-action` first. If and only if the response is
+   `checkpoint_required`, show the exact paused decision and repeat the request
+   with direct human or CI approval attribution. A non-checkpointed request can
+   return its authorization immediately and must not be confirmed a second
+   time. Only while executing the resulting exact authorization may the
+   external builder create the exact target root, its approved write-path
+   children, and the artifact. Then complete `build.local` with immutable
+   evidence. The CLI deliberately creates no release directory itself.
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
+     --root <target-project> --id AUT-LOCAL-REL-009 \
+     --action build.local \
+     --json
+   ```
+
+   Only when that first response is `checkpoint_required`, repeat it with the
+   displayed direct approval:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
+     --root <target-project> --id AUT-LOCAL-REL-009 \
+     --action build.local --confirm-action \
+     --actor-type human --approval-source explicit-user \
+     --summary "Authorize creation and build of this exact local target" \
+     --json
+   ```
+
+   The external builder may now create only the approved root, children, and
+   artifact. Complete the same authorization afterward:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs autonomy delivery action \
+     --root <target-project> --id AUT-LOCAL-REL-009 \
+     --action build.local --outcome passed \
+     --authorization-receipt <AUT-ACT-id-from-build-authorization> \
+     --evidence evidence/local-build.json \
      --json
    ```
 
@@ -605,6 +657,14 @@ The dedicated assessment journey remains the exception described above: it packa
    subject for every later step. Story-wide completion grants remain compatible
    for historical records but warn and must not be created for new work. These
    grants do not cover task start, output linking, release, or another step.
+   When the effective delivery profile makes a claim, output link, or step
+   completion automatic, `--authorization` is optional. If it is nevertheless
+   supplied, the CLI treats it as a deliberate tighter approval: it validates
+   and consumes the exact action-subject grant or fails the command. It never
+   silently ignores the supplied grant. Proposal-bound `output.link` is the
+   deliberate exception: it always requires and consumes the proposal-bound
+   `output.link` authorization created at proposal approval, even when the
+   delivery profile does not configure that action as a checkpoint.
    Replace `discovery-note` with the exact type required by the approved
    contract. Every `--type <type>` passed to `story complete-step` requires the
    same `--allow-artifact-type <type>` on that step's grant; omit it only when

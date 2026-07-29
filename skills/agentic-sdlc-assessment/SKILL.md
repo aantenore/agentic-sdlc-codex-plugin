@@ -193,10 +193,10 @@ node <plugin-root>/bin/agentic-sdlc.mjs output link \
   --requirement REQ-INITIAL-ASSESSMENT \
   --authorization <authorization-id-from-assessment-proposal-approve> \
   --receipt-file .sdlc/receipts/generation/GEN-ST-INITIAL-ASSESSMENT.json \
-  --evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render.png
+  --render-evidence .sdlc/tests/ST-INITIAL-ASSESSMENT-docx-render.png
 ```
 
-`--authorization` is the exact proposal-bound ID returned by approval; linking consumes only its `output.link` action/subject pair and persists a use receipt. `--receipt-file` proves which capability generated the real artifact. `--evidence` is separate content/render evidence; one cannot substitute for the other.
+`--authorization` is the exact proposal-bound ID returned by approval; linking consumes only its `output.link` action/subject pair and persists a use receipt. `--receipt-file` proves which capability generated the real artifact. `--render-evidence` supplies only the separate render or visual proof; functional and test evidence belongs in `story complete-step` or `trace append`. The older `--evidence` spelling remains a compatibility alias for this render-only input; neither form can substitute for the generator receipt.
 
 Persist a layered `verification_receipt:v1` with distinct dimensions:
 

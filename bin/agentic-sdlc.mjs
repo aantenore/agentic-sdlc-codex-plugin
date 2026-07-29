@@ -7571,6 +7571,29 @@ function formatConfigMigrationChange(change) {
   return `- ${change.operation} ${change.path || "/"}`;
 }
 
+function configMigrationPlanPresentation(plan, { full = false } = {}) {
+  if (full) {
+    return {
+      detail_level: "full",
+      omitted_fields: [],
+      plan_complete: true,
+      plan_hash_verification: "self-contained",
+      plan,
+    };
+  }
+  const {
+    target_config: _targetConfig,
+    ...compactPlan
+  } = plan;
+  return {
+    detail_level: "compact",
+    omitted_fields: ["plan.target_config"],
+    plan_complete: false,
+    plan_hash_verification: "requires_full_preview",
+    plan: compactPlan,
+  };
+}
+
 function migrateProjectConfig(context, options) {
   if (!context.rawProjectConfig) {
     fail([
@@ -7633,6 +7656,9 @@ function migrateProjectConfig(context, options) {
     const legacyAdoptionArgument = legacyAdoption
       ? " --confirm-legacy-bootstrap --actor-type human --approval-source explicit-user --summary \"I adopt this exact legacy bootstrap\""
       : "";
+    const planPresentation = configMigrationPlanPresentation(plan, {
+      full: options.full === true,
+    });
     output(options, {
       status: "planned",
       files_changed: 0,
@@ -7647,7 +7673,14 @@ function migrateProjectConfig(context, options) {
         : legacyAdoption
           ? `Review the changes and the exact legacy bootstrap, then explicitly adopt and apply plan ${plan.plan_hash}.`
           : `Review the changes, then apply plan ${plan.plan_hash}.`,
-      plan,
+      detail_level: planPresentation.detail_level,
+      omitted_fields: planPresentation.omitted_fields,
+      plan_complete: planPresentation.plan_complete,
+      plan_hash_verification: planPresentation.plan_hash_verification,
+      full_details: planPresentation.omitted_fields.length > 0
+        ? "Repeat this read-only preview with --json --full to inspect and independently verify the complete v1 plan."
+        : null,
+      plan: planPresentation.plan,
     }, [
       "Configuration migration preview is ready; no files were changed.",
       `Impact: ${impact}`,
@@ -8644,6 +8677,7 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
           limitation: "Legacy string attribution is recorded but cannot independently prove authority.",
         };
   const workflowInstanceRef = decision.workflow_instance_ref || null;
+  const confirmedAt = now();
   const receipt = {
     id: `START-${decision.story_id || "PROJECT"}-${uniqueRecordSuffix()}`,
     kind: "profile_task_start_receipt",
@@ -8684,17 +8718,27 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     authorization_use_ref: authorization?.__use_receipt?.path || null,
     authority_assurance: taskStartAuthorityAssurance,
     confirmed_by: attribution.actor,
-    confirmed_at: now(),
+    confirmed_at: confirmedAt,
     audit: { git: attribution.git, run: attribution.run },
   };
   let deliveryStartPath = null;
   if (deliveryProfile && autonomyDecisionRef) {
     const story = decision.story_id ? readStory(context, decision.story_id) : null;
     const contract = decision.contract_id ? readContractById(context, decision.contract_id, { missingOk: true }) : null;
+    const localReleaseTargetBaseline = deliveryProfile.delivery_kind === "local_release"
+      ? buildLocalReleaseTargetSnapshot(
+          context,
+          deliveryProfile,
+          "task_start",
+          confirmedAt,
+        )
+      : null;
     const startRecordBase = {
       id: `AUT-START-${normalizeId(deliveryProfile.id)}`,
       kind: "delivery_start_receipt",
-      schema_version: "delivery-start-receipt:v1",
+      schema_version: deliveryProfile.delivery_kind === "local_release"
+        ? "delivery-start-receipt:v2"
+        : "delivery-start-receipt:v1",
       profile_ref: {
         id: deliveryProfile.id,
         path: toProjectPath(context, deliveryAutonomyPath(context, deliveryProfile.id)),
@@ -8724,6 +8768,9 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
       status: "started",
       started_by: attribution.actor,
       started_at: receipt.confirmed_at,
+      ...(localReleaseTargetBaseline
+        ? { local_release_target_baseline: localReleaseTargetBaseline }
+        : {}),
       audit: receipt.audit,
     };
     const startRecord = {
@@ -11831,6 +11878,10 @@ function validateTaskStartReceipt(context, storyId, contract) {
   }
   const receipt = readProjectJson(context, receiptPath);
   const issues = [];
+  const story = readStory(context, storyId);
+  const expectedProposalRef = story?.proposal_ref
+    ? { id: story.proposal_ref.id, hash: story.proposal_ref.hash }
+    : null;
   if (receipt.kind === "profile_task_start_receipt") {
     try {
       assertRecordSchema(
@@ -11923,7 +11974,16 @@ function validateTaskStartReceipt(context, storyId, contract) {
     const authorization = readAuthorization(context, receipt.authorization_ref, { missingOk: true });
     if (!authorization) {
       issues.push(`task-start receipt authorization ${receipt.authorization_ref} is missing`);
-    } else if (receipt.authorization_use_ref) {
+    } else {
+      const proposalBindingError = authorizationProposalBindingError(
+        authorization,
+        expectedProposalRef,
+      );
+      if (proposalBindingError) {
+        issues.push(`task-start receipt: ${proposalBindingError}`);
+      }
+    }
+    if (authorization && receipt.authorization_use_ref) {
       const useReceipt = readAuthorizationUseReceipt(context, receipt.authorization_use_ref, { missingOk: true });
       if (!useReceipt) {
         issues.push(`task-start receipt authorization use ${receipt.authorization_use_ref} is missing`);
@@ -11931,6 +11991,7 @@ function validateTaskStartReceipt(context, storyId, contract) {
         issues.push(...validateAuthorizationUseReceipt(useReceipt, {
           authorization_id: receipt.authorization_ref,
           action: "task.start.confirm",
+          proposal_ref: expectedProposalRef,
           subject_id: storyId,
           artifact_types: contractArtifactTypes(contract),
         }).map((error) => `task-start receipt: ${error}`));
@@ -11949,8 +12010,9 @@ function validateTaskStartReceipt(context, storyId, contract) {
           }
         }
       }
-    } else {
+    } else if (authorization) {
       issues.push(...authorizationUseErrors(authorization, "task.start.confirm", {
+        proposal_ref: expectedProposalRef,
         subject_id: storyId,
         artifact_types: contractArtifactTypes(contract),
       }).map((error) => `task-start receipt: ${error}`));
@@ -18490,6 +18552,202 @@ function plannedRealPath(rawPath) {
   return path.resolve(fs.realpathSync.native(existingParent), relative);
 }
 
+const GOVERNED_LOCAL_TARGET_ACTIONS = Object.freeze([
+  "rollback.verify",
+  "data.migrate",
+  "data.rollback",
+  "release.local",
+]);
+
+function localReleaseTargetEntryPaths(profile) {
+  const target = profile.local_release_target || {};
+  return [
+    path.resolve(String(target.root_path || "")),
+    ...(target.allowed_write_paths || []).map((item) => path.resolve(String(item))),
+  ];
+}
+
+function inspectLocalReleaseTargetEntry(rawPath) {
+  const entryPath = path.resolve(String(rawPath || ""));
+  if (!pathEntryExistsNoFollow(entryPath)) {
+    return { path: entryPath, status: "absent" };
+  }
+  const entryLstat = fs.lstatSync(entryPath);
+  if (entryLstat.isSymbolicLink()) {
+    fail(`Governed local target entry cannot be a symlink: ${entryPath}.`);
+  }
+  if (!entryLstat.isDirectory()) {
+    fail(`Governed local target entry must be a directory: ${entryPath}.`);
+  }
+  const realPath = fs.realpathSync.native(entryPath);
+  const entryStat = fs.statSync(realPath);
+  return {
+    path: entryPath,
+    status: "directory",
+    real_path: realPath,
+    device: String(entryStat.dev),
+    inode: String(entryStat.ino),
+  };
+}
+
+function buildLocalReleaseTargetSnapshot(
+  context,
+  profile,
+  purpose,
+  observedAt,
+) {
+  validateLocalReleaseFilesystemBoundary(profile.local_release_target, {
+    requireExistingRoot: false,
+  });
+  const snapshotBase = {
+    schema_version: "local-release-target-snapshot:v1",
+    purpose,
+    profile_ref: {
+      id: profile.id,
+      hash: profile.profile_hash,
+    },
+    workspace_real_path: fs.realpathSync.native(context.root),
+    target_root: path.resolve(profile.local_release_target.root_path),
+    allowed_write_paths: profile.local_release_target.allowed_write_paths
+      .map((item) => path.resolve(item)),
+    entries: localReleaseTargetEntryPaths(profile)
+      .map((entryPath) => inspectLocalReleaseTargetEntry(entryPath)),
+    observed_at: observedAt,
+  };
+  return {
+    ...snapshotBase,
+    snapshot_hash: hashApprovalSubject(snapshotBase),
+    hash_algorithm: "sha256:stable-json:v1",
+  };
+}
+
+function localReleaseTargetSnapshotErrors(context, profile, snapshot, {
+  purpose = null,
+  requireCurrentWorkspace = false,
+} = {}) {
+  const errors = [];
+  if (
+    !snapshot
+    || typeof snapshot !== "object"
+    || Array.isArray(snapshot)
+  ) {
+    return ["local target snapshot is missing or invalid"];
+  }
+  const {
+    snapshot_hash: storedHash,
+    hash_algorithm: hashAlgorithm,
+    ...snapshotBase
+  } = snapshot;
+  const expectedSnapshotKeys = [
+    "allowed_write_paths",
+    "entries",
+    "hash_algorithm",
+    "observed_at",
+    "profile_ref",
+    "purpose",
+    "schema_version",
+    "snapshot_hash",
+    "target_root",
+    "workspace_real_path",
+  ];
+  if (
+    stableJson(Object.keys(snapshot).sort())
+      !== stableJson(expectedSnapshotKeys)
+  ) {
+    errors.push("local target snapshot fields are invalid");
+  }
+  if (
+    snapshot.schema_version !== "local-release-target-snapshot:v1"
+    || !["task_start", "build_authorization", "build_completion"].includes(snapshot.purpose)
+    || hashAlgorithm !== "sha256:stable-json:v1"
+    || storedHash !== hashApprovalSubject(snapshotBase)
+  ) {
+    errors.push("local target snapshot integrity is invalid");
+  }
+  if (purpose && snapshot.purpose !== purpose) {
+    errors.push(`local target snapshot purpose is not ${purpose}`);
+  }
+  if (
+    snapshot.profile_ref?.id !== profile.id
+    || snapshot.profile_ref?.hash !== profile.profile_hash
+    || stableJson(Object.keys(snapshot.profile_ref || {}).sort())
+      !== stableJson(["hash", "id"])
+  ) {
+    errors.push("local target snapshot is bound to another delivery profile");
+  }
+  const expectedRoot = path.resolve(profile.local_release_target.root_path);
+  const expectedWritePaths = profile.local_release_target.allowed_write_paths
+    .map((item) => path.resolve(item));
+  const expectedPaths = [expectedRoot, ...expectedWritePaths];
+  if (
+    !path.isAbsolute(snapshot.workspace_real_path || "")
+    || !path.isAbsolute(snapshot.target_root || "")
+    ||
+    snapshot.target_root !== expectedRoot
+    || stableJson(snapshot.allowed_write_paths) !== stableJson(expectedWritePaths)
+    || stableJson((snapshot.entries || []).map((entry) => entry?.path))
+      !== stableJson(expectedPaths)
+  ) {
+    errors.push("local target snapshot differs from the exact root or approved write paths");
+  }
+  if (
+    !Array.isArray(snapshot.entries)
+    || snapshot.entries.some((entry) => (
+      !entry
+      || typeof entry !== "object"
+      || Array.isArray(entry)
+      || !["absent", "directory"].includes(entry.status)
+      || (
+        entry.status === "absent"
+        && Object.keys(entry).sort().join("\u0000") !== ["path", "status"].sort().join("\u0000")
+      )
+      || (
+        entry.status === "directory"
+        && (
+          !entry.real_path
+          || typeof entry.device !== "string"
+          || typeof entry.inode !== "string"
+          || Object.keys(entry).sort().join("\u0000")
+            !== ["device", "inode", "path", "real_path", "status"].sort().join("\u0000")
+        )
+      )
+    ))
+  ) {
+    errors.push("local target snapshot entries are invalid");
+  }
+  if (!Number.isFinite(Date.parse(snapshot.observed_at || ""))) {
+    errors.push("local target snapshot observation time is invalid");
+  }
+  if (requireCurrentWorkspace) {
+    const currentWorkspace = fs.realpathSync.native(context.root);
+    if (snapshot.workspace_real_path !== currentWorkspace) {
+      errors.push("local target snapshot belongs to a different workspace location");
+    }
+  }
+  return errors;
+}
+
+function localReleaseTargetEntryState(snapshot) {
+  return (snapshot?.entries || []).map((entry) => ({ ...entry }));
+}
+
+function localReleaseTargetHadAbsentEntries(snapshot) {
+  return (snapshot?.entries || []).some((entry) => entry?.status === "absent");
+}
+
+function localReleaseTargetHadOnlyDirectories(snapshot) {
+  return (
+    Array.isArray(snapshot?.entries)
+    && snapshot.entries.length > 0
+    && snapshot.entries.every((entry) => entry?.status === "directory")
+  );
+}
+
+function localReleaseTargetStateMatches(left, right) {
+  return stableJson(localReleaseTargetEntryState(left))
+    === stableJson(localReleaseTargetEntryState(right));
+}
+
 function validateLocalReleaseFilesystemBoundary(target, options = {}) {
   const rootPath = path.resolve(String(target?.root_path || ""));
   const requireExistingRoot = options.requireExistingRoot !== false;
@@ -18497,9 +18755,24 @@ function validateLocalReleaseFilesystemBoundary(target, options = {}) {
     fail("Local release target root is missing.");
   }
   if (requireExistingRoot && (!fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory())) {
+    const buildCreationGuidance = (target.allowed_actions || []).includes("build.local")
+      ? (
+          "For a new target, first request build.local without --confirm-action. If it reports "
+          + "checkpoint_required, show that decision and repeat with direct approval. Only while "
+          + "executing the resulting exact authorized build may the external builder create "
+          + "the exact target root and its "
+          + "approved child paths. Complete build.local with immutable evidence before "
+          + "authorizing rollback.verify, data.migrate, data.rollback, or release.local."
+        )
+      : (
+          "This delivery does not allow build.local. Do not create the target outside governance; "
+          + "propose and approve a new one-time delivery profile that includes build.local, then "
+          + "use that exact authorized build to create the approved root and complete it with evidence."
+        );
     fail(
       `Local release target root must exist before this protected action: ${target.root_path}. `
-      + "It may be absent while planning; create it only inside the approved build boundary before authorizing release.local.",
+      + `It may be absent while planning. ${buildCreationGuidance} `
+      + "The CLI does not create directories, and an ungoverned mkdir is not a repair.",
     );
   }
   if (fs.existsSync(rootPath) && !fs.statSync(rootPath).isDirectory()) {
@@ -20747,6 +21020,477 @@ function deliveryStartReceiptRef(context, profile, receipt) {
   };
 }
 
+function activeLegacyLocalStartError(profile) {
+  return (
+    `Active local delivery ${profile.id} has a legacy start receipt without an immutable `
+    + "local-target baseline, so it cannot authorize or complete another action. Create, approve, "
+    + "and start a new exact delivery profile; changing the root or recomputing receipt hashes "
+    + "cannot upgrade the historical start."
+  );
+}
+
+function localReleaseTargetBaselineState(context, profile, executionState, {
+  requireCurrentWorkspace = true,
+} = {}) {
+  const startReceipt = executionState?.start_receipt;
+  if (!startReceipt) {
+    fail(`Local target governance for ${profile.id} requires its immutable delivery-start receipt.`);
+  }
+  const baseline = startReceipt.local_release_target_baseline;
+  if (!baseline) {
+    fail(activeLegacyLocalStartError(profile));
+  }
+  const baselineHadAbsence = localReleaseTargetHadAbsentEntries(baseline);
+  const baselineErrors = localReleaseTargetSnapshotErrors(context, profile, baseline, {
+    purpose: "task_start",
+    requireCurrentWorkspace: requireCurrentWorkspace && baselineHadAbsence,
+  });
+  if (baselineErrors.length > 0) {
+    fail(`Immutable local-target baseline for ${profile.id} is invalid: ${baselineErrors.join("; ")}.`);
+  }
+  if (baseline.observed_at !== startReceipt.started_at) {
+    fail(`Immutable local-target baseline for ${profile.id} does not match its delivery-start time.`);
+  }
+  return {
+    legacy: false,
+    snapshot: baseline,
+    ref: {
+      source: "delivery_start",
+      receipt_ref: deliveryStartReceiptRef(context, profile, startReceipt),
+      snapshot_hash: baseline.snapshot_hash,
+    },
+  };
+}
+
+function localTargetBuildCompletionDetails(receipt) {
+  return receipt?.action_details?.local_target_build_completion || null;
+}
+
+function localTargetBuildPreconditionDetails(receipt) {
+  return receipt?.action_details?.local_target_build_precondition || null;
+}
+
+function localTargetBuildReceiptRef(context, receipt) {
+  return {
+    source: "build.local",
+    outcome: receipt.outcome,
+    receipt_ref: deliveryActionReceiptRef(context, receipt),
+    snapshot_hash: localTargetBuildCompletionDetails(receipt)?.snapshot?.snapshot_hash || null,
+  };
+}
+
+function localTargetBuildAuthorizationErrors(
+  context,
+  profile,
+  authorization,
+  predecessor,
+) {
+  const errors = [];
+  if (
+    authorization?.action !== "build.local"
+    || authorization?.status !== "authorized"
+    || authorization.profile_ref?.id !== profile.id
+    || authorization.profile_ref?.hash !== profile.profile_hash
+    || authorization.delivery?.id !== profile.delivery_id
+    || authorization.delivery?.kind !== "local_release"
+  ) {
+    return ["receipt is not a build.local authorization for the exact profile"];
+  }
+  const precondition = localTargetBuildPreconditionDetails(authorization);
+  if (
+    !precondition
+    || stableJson(Object.keys(precondition).sort())
+      !== stableJson(["predecessor_ref", "snapshot"])
+    || stableJson(precondition.predecessor_ref) !== stableJson(predecessor.ref)
+  ) {
+    return ["build.local authorization does not bind its exact predecessor"];
+  }
+  errors.push(...localReleaseTargetSnapshotErrors(
+    context,
+    profile,
+    precondition.snapshot,
+    { purpose: "build_authorization" },
+  ));
+  if (precondition.snapshot?.observed_at !== authorization.authorized_at) {
+    errors.push("build.local authorization snapshot does not match its authorization time");
+  }
+  if (!localTargetPredecessorStateMatches(predecessor, precondition.snapshot)) {
+    errors.push("build.local authorization snapshot differs from its exact predecessor state");
+  }
+  return errors;
+}
+
+function localTargetBuildReceiptErrors(
+  context,
+  profile,
+  receipt,
+  authorization,
+  predecessor,
+) {
+  const errors = [];
+  if (
+    receipt?.action !== "build.local"
+    || receipt?.status !== "completed"
+    || !["passed", "failed"].includes(receipt?.outcome)
+    || receipt.profile_ref?.id !== profile.id
+    || receipt.profile_ref?.hash !== profile.profile_hash
+    || receipt.delivery?.id !== profile.delivery_id
+    || receipt.delivery?.kind !== "local_release"
+  ) {
+    return ["receipt is not a completed build.local action for the exact profile"];
+  }
+  if (
+    !authorization
+    || authorization.action !== "build.local"
+    || authorization.status !== "authorized"
+    || authorization.profile_ref?.id !== profile.id
+    || authorization.profile_ref?.hash !== profile.profile_hash
+    || stableJson(receipt.authorization_receipt_ref)
+      !== stableJson(deliveryActionReceiptRef(context, authorization))
+    || compareDeliveryAuthorizationOrder(authorization, receipt) >= 0
+  ) {
+    errors.push("build.local completion lacks its exact antecedent authorization");
+  }
+  const precondition = localTargetBuildPreconditionDetails(authorization);
+  const completion = localTargetBuildCompletionDetails(receipt);
+  if (
+    !precondition
+    || !completion
+    || stableJson(Object.keys(precondition || {}).sort())
+      !== stableJson(["predecessor_ref", "snapshot"])
+    || stableJson(Object.keys(completion || {}).sort())
+      !== stableJson(["precondition_snapshot_hash", "snapshot"])
+    || stableJson(precondition.predecessor_ref) !== stableJson(predecessor.ref)
+  ) {
+    errors.push("build.local does not bind the exact prior local-target state");
+    return errors;
+  }
+  errors.push(...localReleaseTargetSnapshotErrors(
+    context,
+    profile,
+    precondition.snapshot,
+    { purpose: "build_authorization" },
+  ));
+  errors.push(...localReleaseTargetSnapshotErrors(
+    context,
+    profile,
+    completion.snapshot,
+    { purpose: "build_completion" },
+  ));
+  if (precondition.snapshot?.observed_at !== authorization?.authorized_at) {
+    errors.push("build.local authorization snapshot does not match its authorization time");
+  }
+  if (completion.snapshot?.observed_at !== receipt.authorized_at) {
+    errors.push("build.local completion snapshot does not match its completion time");
+  }
+  if (!localTargetPredecessorStateMatches(predecessor, precondition.snapshot)) {
+    errors.push("build.local precondition differs from its exact predecessor snapshot");
+  }
+  if (completion.precondition_snapshot_hash !== precondition.snapshot?.snapshot_hash) {
+    errors.push("build.local completion is not bound to its authorization snapshot");
+  }
+  const authorizedProjection = structuredClone(receipt.action_details || {});
+  delete authorizedProjection.local_target_build_completion;
+  if (stableJson(authorizedProjection) !== stableJson(authorization.action_details)) {
+    errors.push("build.local completion differs from its exact authorization boundary");
+  }
+  if (stableJson(receipt.runtime_target) !== stableJson(authorization.runtime_target)) {
+    errors.push("build.local completion changed its runtime target");
+  }
+  if (
+    receipt.outcome === "passed"
+    && (completion.snapshot?.entries || []).some((entry) => entry.status !== "directory")
+  ) {
+    errors.push("build.local completion does not materialize the exact root and approved write paths");
+  }
+  const rootBefore = precondition.snapshot?.entries?.[0];
+  const rootAfter = completion.snapshot?.entries?.[0];
+  if (
+    rootBefore?.status === "directory"
+    && stableJson(rootBefore) !== stableJson(rootAfter)
+  ) {
+    errors.push("build.local replaced the governed target root instead of preserving its identity");
+  }
+  if (!Array.isArray(receipt.evidence) || receipt.evidence.length === 0) {
+    errors.push("build.local completion has no immutable evidence");
+  } else {
+    const evidenceReport = { errors: [], warnings: [] };
+    for (const evidence of receipt.evidence) {
+      validateDeliveryActionEvidence(
+        context,
+        evidenceReport,
+        receipt,
+        `build.local receipt ${receipt.id}`,
+        evidence,
+        "evidence changed after recording",
+      );
+    }
+    errors.push(...evidenceReport.errors);
+  }
+  return errors;
+}
+
+function localReleaseTargetGovernanceState(context, profile, executionState, {
+  requireCurrentWorkspace = true,
+  beforeReceipt = null,
+} = {}) {
+  let state = localReleaseTargetBaselineState(context, profile, executionState, {
+    requireCurrentWorkspace,
+  });
+  const actions = deliveryActionReceipts(context, profile.id);
+  const authorizations = new Map(actions
+    .filter((receipt) => receipt.action === "build.local" && receipt.status === "authorized")
+    .map((receipt) => [receipt.id, receipt]));
+  const invalid = [];
+  for (const receipt of actions
+    .filter((candidate) =>
+      candidate.action === "build.local"
+      && candidate.status === "completed"
+      && ["passed", "failed"].includes(candidate.outcome)
+      && localTargetBuildCompletionDetails(candidate)
+      && (!beforeReceipt || compareDeliveryAuthorizationOrder(candidate, beforeReceipt) < 0))
+    .sort(compareDeliveryAuthorizationOrder)) {
+    const authorization = authorizations.get(receipt.authorization_receipt_ref?.id);
+    const errors = localTargetBuildReceiptErrors(
+      context,
+      profile,
+      receipt,
+      authorization,
+      state,
+    );
+    if (errors.length > 0) {
+      invalid.push(`${receipt.id}: ${errors.join("; ")}`);
+      continue;
+    }
+    state = {
+      legacy: false,
+      snapshot: localTargetBuildCompletionDetails(receipt).snapshot,
+      ref: localTargetBuildReceiptRef(context, receipt),
+      buildReceipt: receipt,
+      materialized: receipt.outcome === "passed",
+    };
+  }
+  return { ...state, invalid };
+}
+
+function assertCurrentLocalReleaseTargetState(context, profile, state, purpose, observedAt) {
+  const current = buildLocalReleaseTargetSnapshot(
+    context,
+    profile,
+    purpose,
+    observedAt,
+  );
+  if (!localTargetPredecessorStateMatches(state, current)) {
+    fail(
+      `The exact local target changed outside governed build.local for ${profile.id}. `
+      + "Restore the attested directory identities or start a new delivery; a manual mkdir is not a repair.",
+    );
+  }
+  return current;
+}
+
+function localTargetPredecessorStateMatches(predecessor, observedSnapshot) {
+  const baselineRoot = predecessor?.snapshot?.entries?.[0];
+  const observedRoot = observedSnapshot?.entries?.[0];
+  if (
+    ["delivery_start", "legacy_delivery_start"].includes(predecessor?.ref?.source)
+    && baselineRoot?.status === "directory"
+    && localReleaseTargetHadOnlyDirectories(predecessor.snapshot)
+  ) {
+    return stableJson(baselineRoot) === stableJson(observedRoot);
+  }
+  return localReleaseTargetStateMatches(predecessor?.snapshot, observedSnapshot);
+}
+
+function localTargetBuildAuthorizationPrecondition(
+  context,
+  profile,
+  executionState,
+  authorizedAt,
+) {
+  const state = localReleaseTargetGovernanceState(context, profile, executionState);
+  if (state.invalid.length > 0) {
+    fail(`Existing build.local governance is invalid: ${state.invalid.join("; ")}.`);
+  }
+  const snapshot = assertCurrentLocalReleaseTargetState(
+    context,
+    profile,
+    state,
+    "build_authorization",
+    authorizedAt,
+  );
+  return {
+    predecessor_ref: state.ref,
+    snapshot,
+  };
+}
+
+function completedLocalTargetBuildDetails(
+  context,
+  profile,
+  executionState,
+  authorization,
+  completedAt,
+  outcome,
+) {
+  const state = localReleaseTargetGovernanceState(context, profile, executionState);
+  const precondition = localTargetBuildPreconditionDetails(authorization);
+  if (
+    !precondition
+    || stableJson(precondition.predecessor_ref) !== stableJson(state.ref)
+    || !localTargetPredecessorStateMatches(state, precondition.snapshot)
+  ) {
+    fail(
+      "build.local authorization no longer follows the exact local-target predecessor; "
+      + "request a fresh build authorization.",
+    );
+  }
+  const completionSnapshot = buildLocalReleaseTargetSnapshot(
+    context,
+    profile,
+    "build_completion",
+    completedAt,
+  );
+  if (
+    outcome === "passed"
+    && completionSnapshot.entries.some((entry) => entry.status !== "directory")
+  ) {
+    fail(
+      "Passing build.local completion requires the exact target root and every approved "
+      + "write path to exist as real directories.",
+    );
+  }
+  const rootBefore = precondition.snapshot.entries[0];
+  if (
+    rootBefore.status === "directory"
+    && stableJson(rootBefore) !== stableJson(completionSnapshot.entries[0])
+  ) {
+    fail("build.local cannot replace the governed target root identity.");
+  }
+  return {
+    ...authorization.action_details,
+    local_target_build_completion: {
+      precondition_snapshot_hash: precondition.snapshot.snapshot_hash,
+      snapshot: completionSnapshot,
+    },
+  };
+}
+
+function localReleaseProtectedTargetState(
+  context,
+  profile,
+  executionState,
+  options = {},
+) {
+  const baseline = localReleaseTargetBaselineState(
+    context,
+    profile,
+    executionState,
+    {
+      requireCurrentWorkspace: options.requireCurrentWorkspace !== false,
+    },
+  );
+  if (localReleaseTargetHadOnlyDirectories(baseline.snapshot)) {
+    return { ...baseline, invalid: [] };
+  }
+  return localReleaseTargetGovernanceState(
+    context,
+    profile,
+    executionState,
+    options,
+  );
+}
+
+function requireGovernedLocalReleaseTarget(
+  context,
+  profile,
+  executionState,
+  action,
+  observedAt,
+  expectedRef = null,
+) {
+  const state = localReleaseProtectedTargetState(
+    context,
+    profile,
+    executionState,
+  );
+  if (state.invalid.length > 0) {
+    fail(`Existing build.local governance is invalid: ${state.invalid.join("; ")}.`);
+  }
+  const baselineHadAbsence = !state.legacy
+    && localReleaseTargetHadAbsentEntries(
+      executionState.start_receipt.local_release_target_baseline,
+    );
+  if (
+    baselineHadAbsence
+    && (
+      state.ref.source !== "build.local"
+      || state.materialized !== true
+      || state.buildReceipt?.outcome !== "passed"
+    )
+  ) {
+    fail(
+      `${action} requires a completed passing build.local receipt because the exact target root was `
+      + "absent at task start or an approved write path was absent at task start. "
+      + "An ungoverned mkdir is not a repair.",
+    );
+  }
+  assertCurrentLocalReleaseTargetState(
+    context,
+    profile,
+    state,
+    action === "build.local" ? "build_authorization" : "build_completion",
+    observedAt,
+  );
+  if (expectedRef && stableJson(expectedRef) !== stableJson(state.ref)) {
+    fail(
+      `${action} no longer follows the exact local-target materialization receipt bound at authorization.`,
+    );
+  }
+  return state.ref;
+}
+
+function localTargetMaterializationRefErrors(
+  context,
+  profile,
+  executionState,
+  authorization,
+) {
+  if (!executionState.start_receipt?.local_release_target_baseline) {
+    return [];
+  }
+  const state = localReleaseProtectedTargetState(
+    context,
+    profile,
+    executionState,
+    {
+      requireCurrentWorkspace: false,
+      beforeReceipt: authorization,
+    },
+  );
+  const errors = [...state.invalid];
+  const targetHadAbsence = localReleaseTargetHadAbsentEntries(
+    executionState.start_receipt.local_release_target_baseline,
+  );
+  if (
+    targetHadAbsence
+    && (
+      state.ref.source !== "build.local"
+      || state.materialized !== true
+      || state.buildReceipt?.outcome !== "passed"
+    )
+  ) {
+    errors.push("protected local action has no antecedent passing build.local for its absent-at-start root");
+  }
+  if (
+    stableJson(authorization.action_details?.local_target_materialization_ref)
+      !== stableJson(state.ref)
+  ) {
+    errors.push("protected local action does not reference its exact antecedent target materialization");
+  }
+  return errors;
+}
+
 function validateCommitCoverageProfileRef(context, profile, profileRef, label) {
   const expectedPath = toProjectPath(context, deliveryAutonomyPath(context, profile.id));
   if (
@@ -22131,6 +22875,12 @@ function evaluateDeliveryAction(context, options) {
       }, [`Recovered terminal close for ${profile.delivery_kind} ${profile.delivery_id}.`]);
       return;
     }
+    if (
+      profile.delivery_kind === "local_release"
+      && !executionState.start_receipt?.local_release_target_baseline
+    ) {
+      fail(activeLegacyLocalStartError(profile));
+    }
     let runtimeTarget = profile.delivery_kind === "pull_request"
       ? validatePullRequestGitBoundary(context, profile.pull_request_target)
       : null;
@@ -22157,6 +22907,13 @@ function evaluateDeliveryAction(context, options) {
     }
     if (action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       fail(`Delivery profile ${profileId} does not authorize pull_request.merge.`);
+    }
+    if (
+      !completingAction
+      && profile.delivery_kind === "local_release"
+      && ["rollback.verify", "data.migrate", "data.rollback", "release.local"].includes(action)
+    ) {
+      validateLocalReleaseFilesystemBoundary(profile.local_release_target);
     }
     const actionPolicy = deliveryActionCheckpointRequired(context, profile, decision.effective_level, action);
     let checkpointRequired = actionPolicy.required;
@@ -22215,6 +22972,37 @@ function evaluateDeliveryAction(context, options) {
     let actionDetails = completingAction
       ? null
       : buildDeliveryActionDetails(context, profile, action, runtimeTarget, options);
+    if (
+      !completingAction
+      && profile.delivery_kind === "local_release"
+      && action === "build.local"
+    ) {
+      actionDetails = {
+        ...actionDetails,
+        local_target_build_precondition: localTargetBuildAuthorizationPrecondition(
+          context,
+          profile,
+          executionState,
+          actionReceiptTimestamp,
+        ),
+      };
+    }
+    if (
+      !completingAction
+      && profile.delivery_kind === "local_release"
+      && GOVERNED_LOCAL_TARGET_ACTIONS.includes(action)
+    ) {
+      actionDetails = {
+        ...actionDetails,
+        local_target_materialization_ref: requireGovernedLocalReleaseTarget(
+          context,
+          profile,
+          executionState,
+          action,
+          actionReceiptTimestamp,
+        ),
+      };
+    }
     if (!completingAction && DELIVERY_PROVIDER_ACTIONS.has(action)) {
       const providerOperation = observeDeliveryProviderPrecondition(
         context,
@@ -22402,6 +23190,34 @@ function evaluateDeliveryAction(context, options) {
       actionDetails = action === "git.commit" && reportedOutcome === "passed"
         ? buildCompletedGitCommitDetails(context, priorAuthorization, runtimeTarget)
         : priorAuthorization.action_details;
+    }
+    if (
+      completingAction
+      && profile.delivery_kind === "local_release"
+      && action === "build.local"
+    ) {
+      actionDetails = completedLocalTargetBuildDetails(
+        context,
+        profile,
+        executionState,
+        priorAuthorization,
+        actionReceiptTimestamp,
+        reportedOutcome,
+      );
+    }
+    if (
+      completingAction
+      && profile.delivery_kind === "local_release"
+      && GOVERNED_LOCAL_TARGET_ACTIONS.includes(action)
+    ) {
+      requireGovernedLocalReleaseTarget(
+        context,
+        profile,
+        executionState,
+        action,
+        actionReceiptTimestamp,
+        priorAuthorization.action_details?.local_target_materialization_ref,
+      );
     }
     let currentLocalReleaseIntegrity = null;
     if (completingAction && action === "release.local") {
@@ -24518,18 +25334,77 @@ function existingAuthorizationUse(context, authorizationId, action, settings) {
   return receipt ? { receipt: receipt.value, path: toProjectPath(context, receipt.path) } : null;
 }
 
+function validatedExistingAuthorizationUse(context, authorization, action, settings) {
+  const existing = existingAuthorizationUse(
+    context,
+    authorization.id,
+    action,
+    settings,
+  );
+  if (!existing) {
+    return null;
+  }
+  const errors = validateAuthorizationUseReceipt(existing.receipt, {
+    authorization_id: authorization.id,
+    action,
+    proposal_ref: settings.proposal_ref,
+    subject_id: settings.subject_id,
+    subject_hash: settings.subject_hash,
+    artifact_types: settings.artifact_types,
+    approval_boundaries: settings.approval_boundaries,
+  });
+  const receiptSubject = [
+    "authorization-usage-receipt:v1",
+    "authorization-usage-receipt:v2",
+  ].includes(existing.receipt.schema_version)
+    ? existing.receipt.subject || {}
+    : existing.receipt;
+  const expectedArtifactTypes = authorizationArtifactTypes(settings).sort();
+  const actualArtifactTypes = authorizationArtifactTypes({
+    artifact_types: receiptSubject.artifact_types || [],
+  }).sort();
+  if (stableJson(actualArtifactTypes) !== stableJson(expectedArtifactTypes)) {
+    errors.push(
+      `authorization usage receipt artifact types are ${actualArtifactTypes.join(", ") || "empty"}, `
+      + `expected ${expectedArtifactTypes.join(", ") || "empty"}`,
+    );
+  }
+  const expectedApprovalBoundaries = authorizationApprovalBoundaries(settings).sort();
+  const actualApprovalBoundaries = authorizationApprovalBoundaries({
+    approval_boundaries: receiptSubject.approval_boundaries || [],
+  }).sort();
+  if (stableJson(actualApprovalBoundaries) !== stableJson(expectedApprovalBoundaries)) {
+    errors.push(
+      `authorization usage receipt approval boundaries are ${actualApprovalBoundaries.join(", ") || "empty"}, `
+      + `expected ${expectedApprovalBoundaries.join(", ") || "empty"}`,
+    );
+  }
+  if (
+    Object.hasOwn(settings, "subject_hash")
+    && (receiptSubject.subject_hash || null) !== (settings.subject_hash || null)
+  ) {
+    errors.push("authorization usage receipt is not bound to the exact expected subject hash");
+  }
+  if (
+    errors.length > 0
+    || existing.receipt.authorization_hash !== authorizationRecordHash(authorization)
+  ) {
+    fail(
+      `Existing authorization use for ${action} is invalid: `
+      + `${errors.join("; ") || "authorization hash mismatch"}`,
+    );
+  }
+  return existing;
+}
+
 function recordOrReuseAuthorizationUse(context, authorization, action, settings) {
-  const existing = existingAuthorizationUse(context, authorization.id, action, settings);
+  const existing = validatedExistingAuthorizationUse(
+    context,
+    authorization,
+    action,
+    settings,
+  );
   if (existing) {
-    const errors = validateAuthorizationUseReceipt(existing.receipt, {
-      authorization_id: authorization.id,
-      action,
-      subject_id: settings.subject_id,
-      artifact_types: settings.artifact_types,
-    });
-    if (errors.length > 0 || existing.receipt.authorization_hash !== authorizationRecordHash(authorization)) {
-      fail(`Existing authorization use for ${action} is invalid: ${errors.join("; ") || "authorization hash mismatch"}`);
-    }
     return existing;
   }
   return recordAuthorizationUse(context, authorization, action, settings);
@@ -28562,10 +29437,60 @@ function hashAuthorizationRecordV1(record) {
   return hashApprovalSubject(subject);
 }
 
+function exactAuthorizationProposalRefMatch(actualRef, expectedRef) {
+  const actual = actualRef ?? null;
+  const expected = expectedRef ?? null;
+  if (actual === null || expected === null) {
+    return actual === null && expected === null;
+  }
+  return (
+    typeof actual === "object"
+    && !Array.isArray(actual)
+    && typeof expected === "object"
+    && !Array.isArray(expected)
+    && typeof actual.id === "string"
+    && actual.id.length > 0
+    && typeof actual.hash === "string"
+    && actual.hash.length > 0
+    && typeof expected.id === "string"
+    && expected.id.length > 0
+    && typeof expected.hash === "string"
+    && expected.hash.length > 0
+    && actual.id === expected.id
+    && actual.hash === expected.hash
+  );
+}
+
+function describeAuthorizationProposalRef(reference) {
+  return reference === null
+    ? "no proposal binding"
+    : `proposal ${reference?.id || "<missing-id>"} at hash ${reference?.hash || "<missing-hash>"}`;
+}
+
+function authorizationProposalBindingError(record, expectedRef) {
+  const actual = record?.proposal_ref ?? null;
+  const expected = expectedRef ?? null;
+  if (exactAuthorizationProposalRefMatch(actual, expected)) {
+    return null;
+  }
+  return (
+    `Authorization ${record?.id || "unknown"} proposal binding mismatch: `
+    + `grant has ${describeAuthorizationProposalRef(actual)}; `
+    + `this action expects ${describeAuthorizationProposalRef(expected)}.`
+  );
+}
+
 function authorizationUseErrors(record, action, settings = {}) {
   const errors = [];
   if (record.__lifecycle?.effective_at && Date.parse(record.__lifecycle.effective_at) <= Date.now()) {
     errors.push(`Authorization ${record.id} was closed or revoked at ${record.__lifecycle.effective_at}.`);
+  }
+  const proposalBindingError = authorizationProposalBindingError(
+    record,
+    settings.proposal_ref ?? null,
+  );
+  if (proposalBindingError) {
+    errors.push(proposalBindingError);
   }
   if (isCanonicalContentAuthorization(record)) {
     try {
@@ -28604,12 +29529,13 @@ function authorizationUseErrors(record, action, settings = {}) {
 }
 
 function authorizationUseKey(action, settings = {}) {
+  const proposalRef = canonicalAuthorizationUseSubject(settings).proposal_ref;
   return shortHashFull(stableJson({
     action: String(action || "").trim().toLowerCase(),
     subject_id: settings.subject_id || null,
     artifact_types: authorizationArtifactTypes(settings).sort(),
     approval_boundaries: authorizationApprovalBoundaries(settings).sort(),
-    proposal_ref: settings.proposal_ref || null,
+    proposal_ref: proposalRef,
   }));
 }
 
@@ -28663,6 +29589,13 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
   const releaseLock = acquireFileLock(`${authorizationFile}.lock`);
   try {
     const current = readAuthorization(context, authorization.id);
+    const proposalBindingError = authorizationProposalBindingError(
+      current,
+      settings.proposal_ref ?? null,
+    );
+    if (proposalBindingError) {
+      fail(proposalBindingError);
+    }
     const exactRecovery = existingExactAuthorizationUse(
       context,
       current,
@@ -28675,11 +29608,6 @@ function recordAuthorizationUse(context, authorization, action, settings = {}) {
     const errors = authorizationUseErrors(current, action, settings);
     if (errors.length > 0) {
       fail(errors[0]);
-    }
-    if (settings.proposal_ref) {
-      if (!current.proposal_ref || current.proposal_ref.id !== settings.proposal_ref.id || current.proposal_ref.hash !== settings.proposal_ref.hash) {
-        fail(`Authorization ${current.id} is not bound to proposal ${settings.proposal_ref.id} at hash ${settings.proposal_ref.hash}.`);
-      }
     }
     const useKey = authorizationUseKey(action, settings);
     const usesRoot = authorizationUsesRoot(context, current.id);
@@ -28795,10 +29723,49 @@ function readAuthorizationUseReceipt(context, reference, options = {}) {
   return readProjectJson(context, filePath);
 }
 
+function authorizationUseReceiptProposalBindingErrors(receipt, expectedRef) {
+  const expected = expectedRef ?? null;
+  const references = [
+    {
+      label: "recorded use",
+      value: ["authorization-usage-receipt:v1", "authorization-usage-receipt:v2"]
+        .includes(receipt?.schema_version)
+        ? receipt?.subject?.proposal_ref ?? null
+        : receipt?.proposal_ref ?? null,
+    },
+  ];
+  if (["authorization-usage-receipt:v1", "authorization-usage-receipt:v2"]
+    .includes(receipt?.schema_version)) {
+    references.push(
+      {
+        label: "authorization snapshot",
+        value: receipt?.authorization_snapshot?.proposal_ref ?? null,
+      },
+      {
+        label: "receipt proposal reference",
+        value: receipt?.proposal_ref ?? null,
+      },
+    );
+  }
+  return references
+    .filter(({ value }) => !exactAuthorizationProposalRefMatch(value, expected))
+    .map(({ label, value }) =>
+      `authorization usage receipt ${receipt?.id || "unknown"} proposal binding mismatch: `
+      + `${label} has ${describeAuthorizationProposalRef(value)}; `
+      + `this action expects ${describeAuthorizationProposalRef(expected)}`);
+}
+
 function validateAuthorizationUseReceipt(receipt, settings = {}) {
   const errors = [];
   if (!receipt || receipt.kind !== "authorization_usage_receipt") {
     return ["authorization usage receipt is missing or has the wrong kind"];
+  }
+  const hasExpectedProposalBinding = Object.hasOwn(settings, "proposal_ref");
+  if (hasExpectedProposalBinding) {
+    errors.push(...authorizationUseReceiptProposalBindingErrors(
+      receipt,
+      settings.proposal_ref ?? null,
+    ));
   }
   if (["authorization-usage-receipt:v1", "authorization-usage-receipt:v2"].includes(receipt.schema_version)) {
     const integrity = validateCanonicalAuthorizationUsageReceipt(receipt);
@@ -28816,7 +29783,9 @@ function validateAuthorizationUseReceipt(receipt, settings = {}) {
     }
     const expectedSubject = canonicalAuthorizationUseSubject({
       ...settings,
-      proposal_ref: settings.proposal_ref || receipt.subject?.proposal_ref || null,
+      proposal_ref: hasExpectedProposalBinding
+        ? settings.proposal_ref ?? null
+        : receipt.subject?.proposal_ref ?? null,
       subject_id: settings.subject_id || receipt.subject?.subject_id || null,
       subject_hash: settings.subject_hash || receipt.subject?.subject_hash || null,
       artifact_types: authorizationArtifactTypes(settings).length > 0
@@ -28971,9 +29940,19 @@ function storyActionAuthorizationSettings(policy, subjectId, artifactTypes = [])
   };
 }
 
+function canRecoverConsumedLegacyAuthorizationUse(authorization, errors, existingUse) {
+  return Boolean(
+    existingUse
+    && !isCanonicalContentAuthorization(authorization)
+    && errors.length === 1
+    && errors[0] === `Authorization ${authorization.id} is consumed.`,
+  );
+}
+
 function consumeStoryActionCheckpoint(context, storyId, action, options, settings = {}) {
   const policy = storyActionCheckpointPolicy(context, storyId, action);
-  if (!policy.required) {
+  const authorizationId = getOptionString(options, "authorization");
+  if (!policy.required && !authorizationId) {
     return null;
   }
   const artifactTypes = authorizationArtifactTypes({
@@ -28983,7 +29962,6 @@ function consumeStoryActionCheckpoint(context, storyId, action, options, setting
     .map((artifactType) => ` --allow-artifact-type ${artifactType}`)
     .join("");
   const subjectId = storyActionCheckpointSubjectId(storyId, action, settings);
-  const authorizationId = getOptionString(options, "authorization");
   if (!authorizationId) {
     fail([
       `${action} is a required checkpoint in exact delivery profile ${policy.profile.id}.`,
@@ -28998,27 +29976,58 @@ function consumeStoryActionCheckpoint(context, storyId, action, options, setting
     subjectId,
     artifactTypes,
   );
+  let existingUse = validatedExistingAuthorizationUse(
+    context,
+    authorization,
+    action,
+    authorizationSettings,
+  );
   let errors = authorizationUseErrors(authorization, action, authorizationSettings);
+  let reusableExistingUse = existingUse && (
+    errors.length === 0
+    || canRecoverConsumedLegacyAuthorizationUse(
+      authorization,
+      errors,
+      existingUse,
+    )
+  )
+    ? existingUse
+    : null;
   if (errors.length > 0 && subjectId !== storyId) {
     const legacyStorySettings = storyActionAuthorizationSettings(
       policy,
       storyId,
       artifactTypes,
     );
+    const legacyExistingUse = validatedExistingAuthorizationUse(
+      context,
+      authorization,
+      action,
+      legacyStorySettings,
+    );
     const legacyErrors = authorizationUseErrors(
       authorization,
       action,
       legacyStorySettings,
     );
-    if (legacyErrors.length === 0) {
+    if (
+      legacyErrors.length === 0
+      || canRecoverConsumedLegacyAuthorizationUse(
+        authorization,
+        legacyErrors,
+        legacyExistingUse,
+      )
+    ) {
       authorizationSettings = legacyStorySettings;
-      errors = [];
+      existingUse = legacyExistingUse;
+      errors = legacyErrors;
+      reusableExistingUse = legacyExistingUse;
     }
   }
-  if (errors.length > 0) {
+  if (errors.length > 0 && !reusableExistingUse) {
     fail(errors[0]);
   }
-  const use = recordOrReuseAuthorizationUse(
+  const use = reusableExistingUse || recordOrReuseAuthorizationUse(
     context,
     authorization,
     action,
@@ -29051,17 +30060,29 @@ function validateStoryActionCheckpoint(
     report.errors.push(`${label} checkpoint policy cannot be verified: ${error.message}`);
     return;
   }
-  if (!policy.required) {
+  const hasExplicitAuthorizationEvidence = Boolean(
+    record.authorization_ref
+    || record.authorization_use_ref
+    || record.authorization_action
+    || record.checkpoint_profile_ref,
+  );
+  if (!policy.required && !hasExplicitAuthorizationEvidence) {
     return;
   }
-  if (
-    record.checkpoint_profile_ref?.id !== policy.profile_ref.id
-    || record.checkpoint_profile_ref?.path !== policy.profile_ref.path
-    || record.checkpoint_profile_ref?.hash !== policy.profile_ref.hash
-  ) {
-    report.errors.push(
-      `${label} has no exact checkpoint profile reference for ${action} in ${policy.profile.id}`,
-    );
+  if (policy.required || record.checkpoint_profile_ref) {
+    if (policy.profile_ref && (
+      record.checkpoint_profile_ref?.id !== policy.profile_ref.id
+      || record.checkpoint_profile_ref?.path !== policy.profile_ref.path
+      || record.checkpoint_profile_ref?.hash !== policy.profile_ref.hash
+    )) {
+      report.errors.push(
+        `${label} has no exact checkpoint profile reference for ${action} in ${policy.profile.id}`,
+      );
+    } else if (!policy.profile_ref && record.checkpoint_profile_ref) {
+      report.errors.push(
+        `${label} records a checkpoint profile reference even though ${action} has no delivery profile`,
+      );
+    }
   }
   if (
     !record.authorization_ref
@@ -29069,7 +30090,9 @@ function validateStoryActionCheckpoint(
     || record.authorization_action !== action
   ) {
     report.errors.push(
-      `${label} has no exact ${action} authorization receipt required by delivery profile ${policy.profile.id}`,
+      policy.required
+        ? `${label} has no exact ${action} authorization receipt required by delivery profile ${policy.profile.id}`
+        : `${label} has incomplete explicit ${action} authorization evidence`,
     );
     return;
   }
@@ -29095,6 +30118,13 @@ function validateStoryActionCheckpoint(
     expectedSubjectId,
     settings.artifact_types || [],
   );
+  const proposalBindingError = authorizationProposalBindingError(
+    authorization,
+    authorizationSettings.proposal_ref,
+  );
+  if (proposalBindingError) {
+    report.errors.push(`${label}: ${proposalBindingError}`);
+  }
   for (const error of validateAuthorizationUseReceipt(useReceipt, {
     authorization_id: authorization.id,
     action,
@@ -29150,7 +30180,7 @@ function showApprovalRequests(context, options) {
     },
     humanGuidanceLines(
       guidance,
-      assistantMessage.split("\n"),
+      approvalAssistantMessageLinesForLocale(requests, options, assistantMessage),
       options,
       approvalRequestsPrimarySummary(requests, options, { internalRefreshOnly }),
     ),
@@ -29250,14 +30280,49 @@ function approvalRequestPrimaryHighlights(request, italian = false) {
   return userVisibleReviewItems(request)
     .map((item) => safePrimaryGuidanceText(item, request))
     .filter(Boolean)
-    .slice(0, 2)
     .map((item) => italian
-      ? item
-          .replace(/^Purpose:/u, "Obiettivo:")
-          .replace(/^Context:/u, "Contesto:")
-          .replace(/^Expected output:/u, "Risultato atteso:")
-          .replace(/^Validation:/u, "Verifica:")
-      : item);
+      ? localizeApprovalHighlightItalian(request, item)
+      : item)
+    .filter(Boolean)
+    .slice(0, 2);
+}
+
+function localizeApprovalHighlightItalian(request, item) {
+  if (request.type === "capability_profile_approval") {
+    if (item.startsWith("What this is:")) {
+      return "Definisce le evidenze del progetto, i controlli locali e i limiti degli strumenti utilizzabili; non approva il risultato dell’implementazione né l’accordo di lavoro.";
+    }
+    if (item.startsWith("Work scope:")) {
+      return `Ambito del lavoro: ${item.slice("Work scope:".length).trim()
+        .replace(/\bscope project\b/gu, "progetto")
+        .replace(/\bphase\b/gu, "fase")
+        .replace(/\bwork item\b/gu, "attività")}`;
+    }
+  }
+  if (request.type === "capability_recommendation_approval") {
+    if (item.startsWith("What this is:")) {
+      return "Elenca gli strumenti, i permessi, le destinazioni e le eventuali installazioni consentite per questo lavoro; non approva il risultato finale.";
+    }
+    if (item.startsWith("Based on approved evidence and boundaries:")) {
+      return `Basato sulle evidenze e sui limiti già approvati: ${item.slice("Based on approved evidence and boundaries:".length).trim()}`;
+    }
+  }
+  if (request.type === "output_template_approval") {
+    if (item.startsWith("What this is:")) {
+      return "Definisce struttura, livello di dettaglio e modalità di consegna del risultato; non approva il contenuto finale né l’accordo di lavoro.";
+    }
+    if (item.startsWith("Decision scope:")) {
+      return "Questa decisione approva soltanto la struttura del risultato mostrato, non il suo contenuto finale.";
+    }
+  }
+  if (item.startsWith("Confidence:")) {
+    return `Affidabilità stimata: ${item.slice("Confidence:".length).trim()}`;
+  }
+  return item
+    .replace(/^Purpose:/u, "Obiettivo:")
+    .replace(/^Context:/u, "Contesto:")
+    .replace(/^Expected output:/u, "Risultato atteso:")
+    .replace(/^Validation:/u, "Verifica:");
 }
 
 function safePrimaryGuidanceText(value, request = {}) {
@@ -29416,6 +30481,64 @@ function renderApprovalRequestsAssistantMessage(requests) {
   ].filter(Boolean).join("\n");
 }
 
+function approvalAssistantMessageLinesForLocale(requests, options, englishMessage) {
+  if (humanGuidanceLocale(options) !== "it") {
+    return englishMessage.split("\n");
+  }
+  if (requests.length === 0) {
+    return [
+      "Non ci sono approvazioni o chiarimenti SDLC in attesa.",
+      "Quando serve, posso continuare con il prossimo passo operativo.",
+    ];
+  }
+  const internalRefreshOnly = requests.every((request) => request.status === "needs_internal_refresh");
+  const lines = [
+    internalRefreshOnly
+      ? "Devo aggiornare alcuni riferimenti interni al progetto; non ti sto chiedendo di approvare un ambito diverso."
+      : "Ho bisogno della tua decisione prima di continuare.",
+    "In breve: sto verificando di usare il contesto corretto, produrre il risultato nel formato concordato e restare entro i limiti del lavoro richiesto.",
+    "La risposta vale soltanto per le voci mostrate e non autorizza decisioni future, altre consegne, merge, rilasci o accessi non concordati.",
+    "",
+  ];
+  for (const [index, request] of requests.entries()) {
+    const copy = approvalRequestPrimaryCopy(request, true);
+    const targetedHighlights = [
+      "capability_profile_approval",
+      "capability_recommendation_approval",
+      "output_template_approval",
+    ].includes(request.type)
+      ? approvalRequestPrimaryHighlights(request, true)
+      : [];
+    const scopeLine = request.type === "capability_profile_approval"
+      && (request.phase || request.story_id)
+      ? [
+          "   Ambito del lavoro: "
+          + [
+            request.phase ? `fase ${request.phase}` : null,
+            request.story_id ? `attività ${request.story_id}` : null,
+          ].filter(Boolean).join(", "),
+        ]
+      : [];
+    lines.push(
+      `${index + 1}. ${copy.label}${request.subject_id ? ` (${request.subject_id})` : ""}`,
+      ...scopeLine,
+      ...targetedHighlights.map((highlight) => `   Cosa comprende: ${highlight}`),
+      `   Decisione richiesta: ${copy.decision}`,
+      "   Ambito della risposta: vale solo per questa voce; un nuovo formato, strumento, accordo di lavoro o avvio richiede una nuova conferma.",
+      "",
+    );
+  }
+  if (!internalRefreshOnly) {
+    lines.push(
+      "Puoi rispondere in linguaggio naturale, per esempio:",
+      '- "Va bene questo insieme di evidenze e limiti."',
+      '- "La struttura va bene, ma aggiungi i rischi di rilascio."',
+      '- "Non iniziare ancora: spiegami meglio la seconda voce."',
+    );
+  }
+  return lines;
+}
+
 function assistantMessagePresentationFields() {
   const preservedLiterals = [
     "record IDs",
@@ -29570,9 +30693,9 @@ function buildCapabilityProfileApprovalRequest(context, profile, options = {}) {
     sources: [profilePath, ...(profile.source_paths || [])].filter(Boolean),
     ...humanApprovalFields({
       title: `Project evidence and boundaries (${profile.id})`,
-      why_needed: "Before I choose tools for the assessment, I need you to confirm the boundaries: which project evidence I can rely on and what kind of local checks are acceptable.",
+      why_needed: "Before I choose tools for this work, I need you to confirm the boundaries: which project evidence I can rely on and what kind of local checks are acceptable.",
       review_items: [
-        "What this is: the list of project evidence, local checks, and tool boundaries I may use. It is not the assessment content and it does not approve the final work brief.",
+        "What this is: the list of project evidence, local checks, and tool boundaries I may use. It is not the implementation result or other final content, and it does not approve the final work brief.",
         `Work scope: ${formatCapabilitySubject(profile.subject)}`,
         profile.detected_stack?.length ? `Project signals found: ${formatDetectedStackForUser(profile.detected_stack)}` : null,
         profile.evidence?.length ? `Evidence I used to build this profile: ${formatCapabilityEvidenceForUser(profile.evidence)}` : null,
@@ -29581,7 +30704,7 @@ function buildCapabilityProfileApprovalRequest(context, profile, options = {}) {
         profile.confidence !== undefined ? `Confidence: ${profile.confidence}` : null,
       ],
       approval_meaning: "If you approve it, I can use these boundaries to choose the concrete tools for the work. I still need approval for the final work brief unless your broader scope already covers it.",
-      approve_if: "Approve if local repo/document reading and the detected project signals are accurate enough for this assessment.",
+      approve_if: "Approve if local repository/document reading and the detected project signals are accurate enough for this work.",
       change_if: "Ask for changes if I should not run tests, should not use certain files, should include a Word/document skill, or should avoid any tool category.",
       after_approval: "Then I can choose the allowed tools based on these boundaries.",
       user_prompt: "Can I use this evidence and boundary set, or should I change the allowed files, checks, or tool limits first?",
@@ -30539,7 +31662,7 @@ function recommendedDeliveryFormatForOutput(artifactType = "", phase = null) {
   if (matchesAny(normalized, ["design", "architecture", "api", "ux", "ui"])) {
     return "Project document plus chat summary, with design rationale and interface contracts when implementation will follow.";
   }
-  return "Project document plus chat summary: save the assessment and provide a concise chat summary.";
+  return "Project document plus chat summary: save the result and provide a concise chat summary.";
 }
 
 function deliveryQuestionForOutput(artifactType = "", phase = null) {
@@ -30687,7 +31810,7 @@ function plainApprovalRequestCopy(request) {
     case "capability_profile_approval":
       return {
         title: `Project evidence and boundaries (${request.subject_id})`,
-        explanation: "This defines which project evidence, local checks, and tool boundaries I may use. It is not approval of the final assessment or work brief.",
+        explanation: "This defines which project evidence, local checks, and tool boundaries I may use. It is not approval of the implementation result, other final content, or work brief.",
         example: "Use this evidence and boundary set.",
       };
     case "capability_recommendation_approval":
@@ -34335,6 +35458,11 @@ function proposeCapabilityProfile(context, options) {
   });
   const approvalRequest = buildCapabilityProfileApprovalRequest(context, profile);
   const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
+  const localizedAssistantLines = approvalAssistantMessageLinesForLocale(
+    [approvalRequest],
+    options,
+    assistantMessage,
+  );
   output(
     options,
     {
@@ -34345,7 +35473,13 @@ function proposeCapabilityProfile(context, options) {
       ...assistantMessagePresentationFields(),
       approval_request: approvalRequest,
     },
-    [`Proposed capability profile ${id}`, "", ...assistantMessage.split("\n")],
+    [
+      humanGuidanceLocale(options) === "it"
+        ? `Proposto il perimetro di evidenze e strumenti ${id}`
+        : `Proposed capability profile ${id}`,
+      "",
+      ...localizedAssistantLines,
+    ],
   );
 }
 
@@ -34474,6 +35608,11 @@ function proposeCapabilityRecommendation(context, options) {
   });
   const approvalRequest = buildCapabilityRecommendationApprovalRequest(context, recommendation);
   const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
+  const localizedAssistantLines = approvalAssistantMessageLinesForLocale(
+    [approvalRequest],
+    options,
+    assistantMessage,
+  );
   output(
     options,
     {
@@ -34484,7 +35623,13 @@ function proposeCapabilityRecommendation(context, options) {
       ...assistantMessagePresentationFields(),
       approval_request: approvalRequest,
     },
-    [`Proposed capability recommendation ${id}`, "", ...assistantMessage.split("\n")],
+    [
+      humanGuidanceLocale(options) === "it"
+        ? `Proposta la selezione di strumenti ${id}`
+        : `Proposed capability recommendation ${id}`,
+      "",
+      ...localizedAssistantLines,
+    ],
   );
 }
 
@@ -37061,6 +38206,11 @@ function proposeOutputTemplate(context, options) {
   });
   const approvalRequest = buildOutputTemplateApprovalRequest(context, templateRecord);
   const assistantMessage = renderApprovalRequestsAssistantMessage([approvalRequest]);
+  const localizedAssistantLines = approvalAssistantMessageLinesForLocale(
+    [approvalRequest],
+    options,
+    assistantMessage,
+  );
 
   output(
     options,
@@ -37072,7 +38222,13 @@ function proposeOutputTemplate(context, options) {
       ...assistantMessagePresentationFields(),
       approval_request: approvalRequest,
     },
-    [`Proposed output template ${id} for ${artifactType}`, "", ...assistantMessage.split("\n")],
+    [
+      humanGuidanceLocale(options) === "it"
+        ? `Proposto il formato di risultato ${id} per ${artifactType}`
+        : `Proposed output template ${id} for ${artifactType}`,
+      "",
+      ...localizedAssistantLines,
+    ],
   );
   });
 }
@@ -37300,6 +38456,13 @@ function outputResolutionFingerprint(resolution) {
   return stableJson(comparable);
 }
 
+function outputRenderEvidenceOptions(options) {
+  return Array.from(new Set([
+    ...normalizeListOption(options["render-evidence"]),
+    ...normalizeListOption(options.evidence),
+  ]));
+}
+
 function linkOutputArtifact(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "story"));
@@ -37386,7 +38549,7 @@ function linkOutputArtifact(context, options) {
     );
   }
   let verificationReceipt = verifyOutputArtifact(context, artifactPath, delivery, {
-    evidence: normalizeListOption(options.evidence),
+    evidence: outputRenderEvidenceOptions(options),
     requireVisualEvidence: true,
     receiptFile: getOptionString(options, "receipt-file"),
     id: `VERIFY-${id}-${hashFile(artifactPath).slice(0, 8)}`,
@@ -37613,13 +38776,29 @@ function linkOutputArtifact(context, options) {
     link.authorization_action = "output.link";
     link.source_paths = Array.from(new Set([...link.source_paths, authorizationUse.path]));
   }
-  const checkpoint = consumeStoryActionCheckpoint(
+  const checkpointPolicy = storyActionCheckpointPolicy(
     context,
     storyId,
     "output.link",
-    options,
-    { artifact_types: [artifactType] },
   );
+  const checkpoint = story.proposal_ref && link.authorization_ref
+    ? (
+        checkpointPolicy.required
+          ? {
+              authorization_ref: link.authorization_ref,
+              authorization_use_ref: link.authorization_use_ref,
+              authorization_action: link.authorization_action,
+              checkpoint_profile_ref: checkpointPolicy.profile_ref,
+            }
+          : null
+      )
+    : consumeStoryActionCheckpoint(
+        context,
+        storyId,
+        "output.link",
+        options,
+        { artifact_types: [artifactType] },
+      );
   if (checkpoint) {
     link.authorization_ref = checkpoint.authorization_ref;
     link.authorization_use_ref = checkpoint.authorization_use_ref;
@@ -37628,8 +38807,8 @@ function linkOutputArtifact(context, options) {
     link.source_paths = Array.from(new Set([
       ...link.source_paths,
       checkpoint.authorization_use_ref,
-      checkpoint.checkpoint_profile_ref.path,
-    ]));
+      checkpoint.checkpoint_profile_ref?.path,
+    ].filter(Boolean)));
   }
 
   const priorVerificationSnapshot = pathEntryExistsNoFollow(verificationFile)
@@ -38783,6 +39962,7 @@ function buildKnowledgeManifest(context, options = {}) {
   return {
     kind: "kb_manifest",
     schema_version: context.config.schema_version,
+    story_projection_schema_version: "effective-story-lifecycle:v1",
     generated_at: generatedAt,
     canonical_root: SDLC_DIR,
     summary: {
@@ -38797,11 +39977,20 @@ function buildKnowledgeManifest(context, options = {}) {
     stories: stories.map((story) => {
       const claimPath = path.join(context.sdlcRoot, "stories", story.id, "claim.json");
       const claim = fs.existsSync(claimPath) ? readProjectJson(context, claimPath) : null;
+      const lifecycle = effectiveStoryLifecycleProjection(context, story);
       return {
         id: story.id,
         title: story.title,
         status: story.status,
         phase: story.phase,
+        record_status: story.status,
+        record_phase: story.phase,
+        effective_status: lifecycle.status,
+        effective_phase: lifecycle.phase,
+        lifecycle_terminal: lifecycle.terminal,
+        lifecycle_blocked: lifecycle.blocked,
+        lifecycle_source: lifecycle.source,
+        workflow_instance_id: lifecycle.workflow_instance_id,
         contract_id: story.contract_id || null,
         requirements: Array.isArray(story.links?.requirements) ? story.links.requirements : [],
         active_claim: claim?.status === "active" ? { agent: claim.agent, branch: claim.branch, expires_at: claim.expires_at || null } : null,
@@ -40554,7 +41743,7 @@ function verifyOutputArtifact(context, artifactPath, delivery, options = {}) {
     const evidencePath = resolveProjectFilePath(context, rawPath, { mustExist: true, fileOnly: true });
     assertNotDerivedArtifact(context, evidencePath, "Output verification evidence");
     if (fs.realpathSync.native(evidencePath) === fs.realpathSync.native(artifactPath)) {
-      fail("Output verification evidence must be a separate render or inspection record, not the output artifact itself.");
+      fail("Render verification evidence must be a separate render or visual-inspection record, not the output artifact itself.");
     }
     const extension = path.extname(evidencePath).toLowerCase();
     const visualExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".pdf"]);
@@ -40592,7 +41781,7 @@ function verifyOutputArtifact(context, artifactPath, delivery, options = {}) {
       }
       evidenceKind = "typed_render_receipt";
     } else if (!visualExtensions.has(extension)) {
-      fail(`Verification evidence ${toProjectPath(context, evidencePath)} is not a render. Provide a PNG/JPEG/WebP/PDF render or a typed JSON render verification receipt; a text assertion is not sufficient.`);
+      fail(`Render verification evidence ${toProjectPath(context, evidencePath)} is not a render. Use --render-evidence with a PNG/JPEG/WebP/PDF render or a typed render-verification-receipt:v1 JSON file; a functional test result or text assertion is not sufficient.`);
     } else {
       verifyVisualEvidenceFile(evidencePath, extension);
     }
@@ -40603,7 +41792,11 @@ function verifyOutputArtifact(context, artifactPath, delivery, options = {}) {
     };
   });
   if (options.requireVisualEvidence && OUTPUT_VISUAL_FORMATS.has(delivery.format) && evidence.length === 0) {
-    fail(`${delivery.label} output requires --evidence <render-or-visual-check-file> before it can be linked as canonical.`);
+    fail(
+      `${delivery.label} output requires --render-evidence <render-or-visual-check-file> before it can be linked as canonical. `
+      + "This flag is only for render or visual verification; record functional and test evidence with story complete-step or trace append. "
+      + "The legacy --evidence name remains accepted for compatibility.",
+    );
   }
   const generatorReceipt = delivery.generator
     ? readArtifactGeneratorReceipt(context, options.receiptFile, artifactPath, delivery)
@@ -43525,6 +44718,18 @@ function buildStatusNextAction(context, summary, orchestration, counts, project)
     const workflowNextAction = buildStoryWorkflowNextAction(context, story);
     if (workflowNextAction) return workflowNextAction;
   }
+  if (summary.completed_work > 0) {
+    return {
+      kind: "none",
+      reason: "completed_work_terminal",
+      label:
+        `${summary.completed_work} governed work item${summary.completed_work === 1 ? " is" : "s are"} `
+        + "terminal; no operational work is waiting.",
+      command: null,
+      protected: false,
+      terminal_work: summary.completed_work,
+    };
+  }
   const baselines = readBaselines(context);
   if (baselines.length === 0) {
     const hasExistingEvidence =
@@ -43692,6 +44897,12 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Descrivi risultato osservabile, criteri di completamento, esclusioni e massima autonomia.",
           next: "Concorda il primo requisito prima della scomposizione.",
         },
+        completed_work_terminal: {
+          result: "Il lavoro governato è completo.",
+          impact: "Tutto il lavoro registrato è terminale; non sono in attesa attività operative incomplete né un nuovo onboarding.",
+          decision: "Non devi approvare nulla né ripetere l’onboarding per questa consegna completata.",
+          next: "Apri un nuovo requisito solo quando vuoi ottenere un altro risultato.",
+        },
         none: {
           result: "Non ci sono attività operative in attesa.",
           impact: "Il progetto non richiede un’azione immediata.",
@@ -43826,6 +45037,12 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           decision: "Describe the observable outcome, completion checks, exclusions, and maximum independence.",
           next: "Agree the first requirement before decomposition.",
         },
+        completed_work_terminal: {
+          result: "Governed work is complete.",
+          impact: "All recorded work is terminal; no unfinished operational work or new onboarding step is waiting.",
+          decision: "You do not need to approve anything or repeat onboarding for this completed delivery.",
+          next: "Open a new requirement only when you want another outcome.",
+        },
         none: {
           result: "There is no operational work waiting.",
           impact: "The project does not need an immediate action.",
@@ -43833,7 +45050,9 @@ function statusHumanGuidance(nextAction, summary, options = {}) {
           next: "Check again when the project state changes.",
         },
       };
-  const selected = copy[nextAction.kind] || copy.none;
+  const selected = nextAction.reason === "completed_work_terminal"
+    ? copy.completed_work_terminal
+    : copy[nextAction.kind] || copy.none;
   return Object.freeze({
     result: selected.result,
     impact: selected.impact,
@@ -45886,6 +47105,39 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
   const historical = state.lifecycle_status === "terminal"
     || effectiveDeliveryProfileStatus(context, profile).status === "revoked"
     || recoverableTerminal;
+  if (profile.delivery_kind === "local_release") {
+    const baseline = state.start_receipt?.local_release_target_baseline || null;
+    if (!baseline) {
+      if (
+        historical
+        && state.start_receipt?.schema_version === "delivery-start-receipt:v1"
+      ) {
+        const warning = `${label} has a terminal historical v1 start without an immutable local-target baseline; its existing terminal receipts are audited, but the start cannot authorize more work`;
+        if (!report.warnings.includes(warning)) report.warnings.push(warning);
+      } else {
+        report.errors.push(`${label} ${activeLegacyLocalStartError(profile)}`);
+      }
+    } else {
+      const baselineErrors = localReleaseTargetSnapshotErrors(
+        context,
+        profile,
+        baseline,
+        {
+          purpose: "task_start",
+          requireCurrentWorkspace: (
+            !historical
+            && localReleaseTargetHadAbsentEntries(baseline)
+          ),
+        },
+      );
+      if (baseline.observed_at !== state.start_receipt.started_at) {
+        baselineErrors.push("local target snapshot does not match its delivery-start time");
+      }
+      report.errors.push(...baselineErrors.map((error) =>
+        `${label} immutable local-target baseline is invalid: ${error}`));
+      report.checked.push(`${label} immutable local-target baseline`);
+    }
+  }
   const consumedAuthorizationIds = new Set(actions
     .filter((receipt) => receipt.status === "completed")
     .map((receipt) => receipt.authorization_receipt_ref?.id)
@@ -46045,6 +47297,45 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
     }
     if (receipt.action === "pull_request.merge" && profile.pull_request_target?.merge_allowed !== true) {
       report.errors.push(`${actionLabel} claims merge authority although merge_allowed is false`);
+    }
+    if (
+      receipt.status === "authorized"
+      && receipt.action === "build.local"
+      && state.start_receipt?.local_release_target_baseline
+    ) {
+      try {
+        const predecessor = localReleaseTargetGovernanceState(
+          context,
+          profile,
+          state,
+          {
+            requireCurrentWorkspace: false,
+            beforeReceipt: receipt,
+          },
+        );
+        report.errors.push(...predecessor.invalid.map((error) =>
+          `${actionLabel} has invalid predecessor build governance: ${error}`));
+        report.errors.push(...localTargetBuildAuthorizationErrors(
+          context,
+          profile,
+          receipt,
+          predecessor,
+        ).map((error) => `${actionLabel} is invalid: ${error}`));
+      } catch (error) {
+        report.errors.push(`${actionLabel} build authorization cannot be verified: ${error.message}`);
+      }
+    }
+    if (
+      receipt.status === "authorized"
+      && profile.delivery_kind === "local_release"
+      && GOVERNED_LOCAL_TARGET_ACTIONS.includes(receipt.action)
+    ) {
+      report.errors.push(...localTargetMaterializationRefErrors(
+        context,
+        profile,
+        state,
+        receipt,
+      ).map((error) => `${actionLabel} has invalid target materialization: ${error}`));
     }
     if (receipt.status === "authorized" && DELIVERY_PROVIDER_ACTIONS.has(receipt.action)) {
       try {
@@ -46211,6 +47502,33 @@ function validateDeliveryExecutionReceipts(context, report, profile, state, labe
         }
         if (receipt.action === "git.commit" && receipt.outcome === "passed") {
           validateCompletedGitCommitReceipt(context, report, receipt, authorization, actionLabel);
+        } else if (
+          receipt.action === "build.local"
+          && state.start_receipt?.local_release_target_baseline
+        ) {
+          if (!localTargetBuildCompletionDetails(receipt)) {
+            report.errors.push(
+              `${actionLabel} has no immutable local-target completion snapshot`,
+            );
+          }
+          const predecessor = localReleaseTargetGovernanceState(
+            context,
+            profile,
+            state,
+            {
+              requireCurrentWorkspace: false,
+              beforeReceipt: receipt,
+            },
+          );
+          report.errors.push(...predecessor.invalid.map((error) =>
+            `${actionLabel} has invalid predecessor build governance: ${error}`));
+          report.errors.push(...localTargetBuildReceiptErrors(
+            context,
+            profile,
+            receipt,
+            authorization,
+            predecessor,
+          ).map((error) => `${actionLabel} is invalid: ${error}`));
         } else if (
           DELIVERY_PROVIDER_ACTIONS.has(receipt.action)
           && (

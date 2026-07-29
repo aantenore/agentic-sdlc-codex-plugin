@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   buildDeliveryExecutionProfile,
@@ -281,7 +282,7 @@ test("v2 local releases bind reversible data actions to an exact migration decla
   ]);
   assert.equal(
     profile.local_release_target.data_migration.backup.path,
-    "/workspace/travelops/data/store.before.json",
+    path.normalize("/workspace/travelops/data/store.before.json"),
   );
   assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
   assertAgainstSchema(profile, "delivery-execution-profile-v2");
@@ -321,7 +322,7 @@ test("local release smoke working directories stay inside an allowed write path"
   const profile = buildDeliveryExecutionProfileV2(base);
   assert.equal(
     profile.local_release_target.smoke_cwd,
-    "/workspace/travelops/release/app/package",
+    path.normalize("/workspace/travelops/release/app/package"),
   );
   assert.deepEqual(buildDeliveryExecutionProfileV2(profile), profile);
   assertAgainstSchema(profile, "delivery-execution-profile-v2");

@@ -945,6 +945,16 @@ node bin/agentic-sdlc.mjs manifest rebuild --root <target-project>
 
 The manifest summarizes stories, claims, completed steps, contracts, output links, approvals, and trace activity. It records source paths and hashes, so it is auditable and useful for fast context assembly. It is still derived from canonical KB files; when in doubt, agents must inspect the source paths listed in the manifest.
 
+Story projections are explicitly versioned by
+`story_projection_schema_version: effective-story-lifecycle:v1`.
+Backward-compatible `status` and `phase` fields preserve the values stored in
+the canonical story record; `record_status` and `record_phase` make that origin
+explicit. Use `effective_status`, `effective_phase`, `lifecycle_terminal`,
+`lifecycle_blocked`, and `lifecycle_source` for the verified operational
+projection derived from workflow evidence. A terminal workflow receipt can
+therefore project `effective_status: done` without rewriting or silently
+reinterpreting the canonical story fields.
+
 ## `archive/`
 
 Two intentionally distinct archive records live here:
