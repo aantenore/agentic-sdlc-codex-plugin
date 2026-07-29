@@ -49,6 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run check
+          node --test test/unit/test-suite-runner.test.mjs
           npm test
       - name: Enforce enterprise performance on the reference runtime
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24

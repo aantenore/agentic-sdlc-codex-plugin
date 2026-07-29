@@ -4198,28 +4198,31 @@ test("existing-root starts require governed build for absent child paths while a
       buildCompletion.action_receipt.id,
     );
 
-    const releaseCheckpoint = mustRunJson([
+    const releaseCheckpointArgs = [
       "autonomy", "delivery", "action",
       "--root", project,
       "--id", `AUT-LOCAL-${suffix}`,
       "--action", "release.local",
-    ]);
-    assert.equal(releaseCheckpoint.status, "checkpoint_required");
-    if (hostSupportsLocalSmokeSandbox()) {
-      const releaseAuthorization = mustRunJson([
-        "autonomy", "delivery", "action",
-        "--root", project,
-        "--id", `AUT-LOCAL-${suffix}`,
-        "--action", "release.local",
-        "--confirm-action",
-        ...humanApproval(`Approve exact ${suffix} governed local release`),
-      ]);
-      assert.equal(
-        releaseAuthorization.action_receipt.action_details
-          .local_target_materialization_ref.receipt_ref.id,
-        buildCompletion.action_receipt.id,
+    ];
+    if (!hostSupportsLocalSmokeSandbox()) {
+      mustFail(
+        releaseCheckpointArgs,
+        /Local smoke-test execution requires a configured read-only, no-network sandbox on this host/u,
       );
+      continue;
     }
+    const releaseCheckpoint = mustRunJson(releaseCheckpointArgs);
+    assert.equal(releaseCheckpoint.status, "checkpoint_required");
+    const releaseAuthorization = mustRunJson([
+      ...releaseCheckpointArgs,
+      "--confirm-action",
+      ...humanApproval(`Approve exact ${suffix} governed local release`),
+    ]);
+    assert.equal(
+      releaseAuthorization.action_receipt.action_details
+        .local_target_materialization_ref.receipt_ref.id,
+      buildCompletion.action_receipt.id,
+    );
   }
 });
 
@@ -5465,15 +5468,23 @@ test("local release autonomy requires a strict child target, smoke test, rollbac
   assert.equal(started.autonomy.effective_level, "checkpointed");
   assert.equal(started.autonomy.task_start_automatic, true);
 
-  const checkpoint = mustRunJson([
+  const checkpointArgs = [
     "autonomy", "delivery", "action",
     "--root", project,
     "--id", "AUT-LOCAL-1",
     "--action", "release.local",
-  ]);
-  assert.equal(checkpoint.status, "checkpoint_required");
-  assert.equal(checkpoint.execution_allowed, false);
-  assert.equal(checkpoint.checkpoints.includes("release.local"), true);
+  ];
+  if (hostSupportsLocalSmokeSandbox()) {
+    const checkpoint = mustRunJson(checkpointArgs);
+    assert.equal(checkpoint.status, "checkpoint_required");
+    assert.equal(checkpoint.execution_allowed, false);
+    assert.equal(checkpoint.checkpoints.includes("release.local"), true);
+  } else {
+    mustFail(
+      checkpointArgs,
+      /Local smoke-test execution requires a configured read-only, no-network sandbox on this host/u,
+    );
+  }
 
   const missingRollbackGate = run([
     "gate", "check",

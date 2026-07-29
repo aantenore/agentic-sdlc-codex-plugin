@@ -31,6 +31,8 @@ jobs:
           python-version: "3.13.14"
           update-environment: false
       - run: npm run check
+      - name: Verify bounded test-runner bootstrap
+        run: node --test test/unit/test-suite-runner.test.mjs
       - run: npm test
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}

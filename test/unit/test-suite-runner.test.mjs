@@ -9,6 +9,7 @@ import {
   DEFAULT_TEST_CONCURRENCY,
   MAX_TEST_CONCURRENCY,
   TEST_CONCURRENCY_ENV,
+  discoverTestFiles,
   main,
   parseTestConcurrency,
 } from "../../scripts/run-test-suite.mjs";
@@ -54,6 +55,16 @@ test("npm test uses the Node 18.18-compatible programmatic runner", () => {
   assert.doesNotMatch(JSON.stringify(packageJson.scripts), /--test-concurrency(?:=|\s)/u);
 });
 
+test("runner discovers an explicit, non-empty, stable test-file list", () => {
+  const files = discoverTestFiles();
+
+  assert.ok(files.length > 0);
+  assert.deepEqual(files, [...files].sort());
+  assert.ok(files.every((file) => path.isAbsolute(file)));
+  assert.ok(files.every((file) => file.startsWith(path.join(PROJECT_ROOT, "test"))));
+  assert.ok(files.includes(fileURLToPath(import.meta.url)));
+});
+
 test("runner returns a nonzero status for test failures and stream errors", async () => {
   const failure = await runMainWithEvent("test:fail", { name: "failed test" });
   assert.equal(failure.code, 1);
@@ -62,6 +73,41 @@ test("runner returns a nonzero status for test failures and stream errors", asyn
   const error = await runMainWithEvent("error", new Error("runner exploded"));
   assert.equal(error.code, 1);
   assert.match(error.stderr, /Test runner error: Error: runner exploded/u);
+});
+
+test("runner fails closed when the stream reports fewer tests than explicit files", async () => {
+  const testStream = new EventEmitter();
+  let stderr = "";
+  const code = await main({
+    env: {},
+    stdout: {
+      write() {
+        return true;
+      },
+    },
+    stderr: {
+      write(chunk) {
+        stderr += chunk;
+        return true;
+      },
+    },
+    runTests(options) {
+      assert.deepEqual(options, {
+        concurrency: DEFAULT_TEST_CONCURRENCY,
+        files: ["/deterministic/one.test.mjs", "/deterministic/two.test.mjs"],
+      });
+      return testStream;
+    },
+    findTestFiles() {
+      return ["/deterministic/one.test.mjs", "/deterministic/two.test.mjs"];
+    },
+    async *reporter() {
+      yield "TAP version 13\n";
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.match(stderr, /completed only 0 test events for 2 explicit test files/u);
 });
 
 async function runMainWithEvent(eventName, payload) {
@@ -83,8 +129,14 @@ async function runMainWithEvent(eventName, payload) {
       },
     },
     runTests(options) {
-      assert.deepEqual(options, { concurrency: DEFAULT_TEST_CONCURRENCY });
+      assert.deepEqual(options, {
+        concurrency: DEFAULT_TEST_CONCURRENCY,
+        files: ["/deterministic/test.mjs"],
+      });
       return testStream;
+    },
+    findTestFiles() {
+      return ["/deterministic/test.mjs"];
     },
     async *reporter(stream) {
       stream.emit(eventName, payload);

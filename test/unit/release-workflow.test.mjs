@@ -103,6 +103,11 @@ function ciContractErrors(source) {
     || (source.match(/package-manager-cache: false/gu) ?? []).length !== 1) {
     errors.push("CI checkout and cache policy");
   }
+  if ((correctness.match(
+    /node --test test\/unit\/test-suite-runner\.test\.mjs/gu,
+  ) ?? []).length !== 1) {
+    errors.push("CI test-runner bootstrap canary");
+  }
   return errors;
 }
 
@@ -161,6 +166,11 @@ function releaseContractErrors(source) {
     || (packageJob.match(/PYTHON: \$\{\{ steps\.python\.outputs\.python-path \}\}/gu) ?? []).length !== 1
     || (source.match(/--python "\$PYTHON"/gu) ?? []).length !== 2) {
     errors.push("explicit Python provisioning");
+  }
+  if ((verify.match(
+    /node --test test\/unit\/test-suite-runner\.test\.mjs/gu,
+  ) ?? []).length !== 1) {
+    errors.push("release test-runner bootstrap canary");
   }
   if (!/scripts\/verify-release-package\.mjs/u.test(verify)
     || !/scripts\/verify-release-package\.mjs/u.test(packageJob)) errors.push("policy verifier");
@@ -299,6 +309,22 @@ test("CI pins actions and separates the compatibility matrix from the performanc
   assert.match(
     ciWorkflow,
     /- run: npm test\n\s+env:\n\s+PYTHON: \$\{\{ steps\.python\.outputs\.python-path \}\}/u,
+  );
+  assert.match(
+    ciWorkflow,
+    /- name: Verify bounded test-runner bootstrap\n\s+run: node --test test\/unit\/test-suite-runner\.test\.mjs/u,
+  );
+});
+
+test("CI and release workflows fail closed without the independent runner canary", () => {
+  const command = "node --test test/unit/test-suite-runner.test.mjs";
+  assert.ok(
+    ciContractErrors(ciWorkflow.replace(command, "true"))
+      .includes("CI test-runner bootstrap canary"),
+  );
+  assert.ok(
+    releaseContractErrors(workflow.replace(command, "true"))
+      .includes("release test-runner bootstrap canary"),
   );
 });
 
