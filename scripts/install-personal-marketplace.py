@@ -25,6 +25,7 @@ PLUGIN_NAME = "agentic-sdlc-codex-plugin"
 DEFAULT_MARKETPLACE_NAME = "personal"
 STANDARD_ROOT_FILES = ("package.json", "README.md", "LICENSE")
 EXCLUDED_NAMES = frozenset({".git", ".sdlc", "test", ".DS_Store"})
+EXCLUDED_DISTRIBUTION_METADATA = frozenset({".npmignore"})
 EXCLUDED_FILE_SUFFIXES = (".pyc", ".pyo")
 INSTALL_LOCK_WAIT_SECONDS = 30.0
 MINIMUM_PYTHON = (3, 8)
@@ -558,6 +559,7 @@ def _read_package_allowlist(repo_root: Path) -> tuple[str, ...]:
 def _is_excluded(relative_path: Path) -> bool:
     return any(part in EXCLUDED_NAMES for part in relative_path.parts) or (
         relative_path.name == "__pycache__"
+        or relative_path.name in EXCLUDED_DISTRIBUTION_METADATA
         or relative_path.name.endswith(EXCLUDED_FILE_SUFFIXES)
     )
 

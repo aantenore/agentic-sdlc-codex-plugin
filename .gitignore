@@ -1,6 +1,9 @@
 node_modules/
 .DS_Store
 *.log
+__pycache__/
+*.pyc
+*.pyo
 tmp/
 .sdlc/indexes/*.json
 .sdlc/reports/*.tmp

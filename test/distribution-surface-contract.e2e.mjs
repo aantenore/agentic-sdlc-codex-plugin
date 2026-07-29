@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -56,7 +57,30 @@ print(json.dumps({
 
 test("npm pack, build identity, and the reversible installer share one distribution surface", {
   timeout: 60_000,
-}, () => {
+}, (context) => {
+  const transientFixtureRoot = path.join(
+    repoRoot,
+    "scripts",
+    `.distribution-contract-${process.pid}`,
+  );
+  const transientDirectory = path.join(transientFixtureRoot, "__pycache__");
+  const transientArtifacts = [
+    path.join(transientDirectory, "fixture.pyc"),
+    path.join(transientDirectory, "fixture.pyo"),
+  ];
+  fs.mkdirSync(transientDirectory, { recursive: true });
+  for (const artifactPath of transientArtifacts) {
+    fs.writeFileSync(artifactPath, "transient Python bytecode fixture\n");
+  }
+  context.after(() => {
+    fs.rmSync(transientFixtureRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
+  });
+
   const javascriptPaths = discoverDistributedFiles(repoRoot)
     .map((entry) => entry.relative_path);
   const javascriptFingerprint = computeBuildFingerprint(repoRoot);
@@ -105,6 +129,13 @@ test("npm pack, build identity, and the reversible installer share one distribut
   const npmPaths = packResult[0].files
     .map((entry) => entry.path)
     .sort();
+  assert.equal(
+    npmPaths.some((filePath) =>
+      filePath.includes("__pycache__")
+      || filePath.endsWith(".pyc")
+      || filePath.endsWith(".pyo")),
+    false,
+  );
 
   assert.deepEqual(pythonResult.paths, javascriptPaths);
   assert.deepEqual(npmPaths, javascriptPaths);

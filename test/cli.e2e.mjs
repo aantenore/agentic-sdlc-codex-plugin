@@ -6149,6 +6149,8 @@ test("onboard rejects a self-consistent bootstrap manifest with a different phas
 
 test("onboard rejects removing both the manifest and its marker from a new project", () => {
   const project = tmpProject("onboard-bootstrap-downgrade");
+  const escapedPluginVersion = readJson(path.join(repoRoot, "package.json"))
+    .version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   initProject(project);
   fs.writeFileSync(path.join(project, "README.md"), "# Project with removed bootstrap marker\n");
   const sdlcRoot = path.join(project, ".sdlc");
@@ -6166,7 +6168,10 @@ test("onboard rejects removing both the manifest and its marker from a new proje
     project,
     "--project-name",
     "Bootstrap Downgrade",
-  ], /bootstrap-manifest\.json is missing for a project created by Agentic SDLC 0\.13\.3.*require the completed bootstrap record.*No files were changed/s);
+  ], new RegExp(
+    String.raw`bootstrap-manifest\.json is missing for a project created by Agentic SDLC ${escapedPluginVersion}.*require the completed bootstrap record.*No files were changed`,
+    "s",
+  ));
 
   assert.deepEqual(snapshotFilesystemTree(sdlcRoot), treeBefore);
   assert.equal(fs.existsSync(path.join(sdlcRoot, "baseline", "BASELINE-INITIAL.json")), false);
