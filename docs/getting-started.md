@@ -51,12 +51,14 @@ For implementation work, Codex follows one visible order:
    Codex first binds the exact configured phase order to the story. This must
    happen before task start and before the first completed step. Only then does
    Codex make the task-start decision. An explicit start confirmation, when
-   required, completes that same start; it is not a second planning phase.
+   required, completes that same start; it is not a second planning phase. A
+   worker can claim the story only after this start succeeds for the current
+   approved contract.
 
 7. **Implement and test**
-   Codex changes only the displayed paths, runs the agreed checks, records
-   evidence, completes each phase, and enters the next phase only after the
-   previous one is complete.
+   Codex claims the started story, changes only the displayed paths, runs the
+   agreed checks, records evidence, completes each phase, and enters the next
+   phase only after the previous one is complete.
 
 8. **Validate, then enter release**
    After validation is complete, Codex seals the intermediate strict receipt
@@ -71,6 +73,30 @@ For implementation work, Codex follows one visible order:
    approved.
 
 If a material requirement, branch, path, tool, budget, environment, or destination changes, Codex shows the changed boundary before continuing.
+
+### Declare paths before work starts
+
+For implementation, validation, or release, the requirement records every
+project area that may receive a durable change. Source, tests, documentation,
+and evidence are separate areas, so Codex should show all that apply before
+asking you to approve the requirement. The stored requirement paths are
+sorted, deduplicated, and Git-relative, for example `src`, `test`, `docs`, and
+`evidence`. The project root, paths outside the project, and `.git` repository
+metadata are never valid. Govern Git commits, pushes, and merges through their
+explicit delivery actions instead of granting file-write scope over `.git`.
+
+An empty path list is useful only for governance work that changes no product
+or named output. If product work reaches task start with an empty requirement
+scope, Agentic SDLC stops before preflight and explains how to create a new
+requirement revision with `--write-path`. Omitting paths while revising
+inherits the existing scope; supplying any path replaces the whole list.
+Approval never silently repairs an older non-canonical proposal.
+
+This requirement boundary is different from a local-release destination.
+Requirement paths describe project-relative material scope. A local release
+shows an explicit absolute target and absolute allowed paths inside that target,
+for example `/absolute/project/.local-release` and
+`/absolute/project/.local-release/app`.
 
 ## Walk Through One Complete First Project
 
@@ -92,7 +118,7 @@ stage understandable before moving to the next:
 | Stage | What Codex should show | What makes the stage ready |
 | --- | --- | --- |
 | Discovery | Observed project facts, inferences, relevant files, assumptions, and missing decisions | You correct or accept the displayed context; no implementation has started |
-| Requirement | Configurable limit behavior, observable acceptance checks, non-goals, constraints, and maximum autonomy | One exact requirement revision is approved |
+| Requirement | Configurable limit behavior, observable acceptance checks, non-goals, constraints, maximum autonomy, and Git-relative source/test/docs/evidence scope | One exact requirement revision with every needed project path is approved |
 | Contract | Source/test paths, configuration boundary, commands, local destination, allowed smoke-test working directory, smoke test, rollback, allowed writes, and excluded actions | One exact implementation agreement is approved |
 | Story and workflow | Story `ST-TRIP-POLICY-001` and a story-bound `software-project` v3 journey through discovery, analysis, design, implementation, validation, and release | The workflow starts before task start and the first completed step; a custom phase order uses an approved exact-match definition |
 | Implementation | Only the approved source, configuration, test, and documentation changes | The implementation matches the requirement and contract |
@@ -120,6 +146,15 @@ before required phases, current test evidence, the named release, and the
 current workflow's terminal state are complete. On success, ask Codex to show
 the final receipt, delivered path, checks run, exclusions, and residual risks
 in plain language.
+
+If status reports an old `workflow-final-freshness-proof:v1`, keep it as
+historical evidence and rerun that exact lifecycle-complete command on the
+reviewed terminal project. A passing rerun writes the current v2 proof. V2
+accepts staging or committing the exact certified bytes on descendant history,
+but rejects different transient commits, rewritten/replaced history, alternate
+Git index environments, shallow history, hidden index flags, and any later
+governed-path drift. Untracked files inside the approved scope remain covered
+even when project, repository, or global Git ignore rules match them.
 
 If the same requirement later needs a pull request, create a new delivery
 profile and autonomy choice for that PR. Do not reuse the completed local
@@ -194,7 +229,7 @@ Build and verify this result only on my local machine. Do not push, open a pull 
 
 Before starting, Codex shows:
 
-- the exact local destination and allowed write paths;
+- the exact absolute local destination and absolute allowed write paths inside it;
 - build and test actions;
 - a shell-free smoke test;
 - how to restore the previous local result;

@@ -691,10 +691,31 @@ function routeDecision(project, overrides = {}, command = ["route", "decide"]) {
   return JSON.parse(result.stdout);
 }
 
+function startStoryTask(project, id, phase = "design", extra = []) {
+  return JSON.parse(mustRun([
+    "task", "start", "--root", project,
+    "--story", id,
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id }],
+      proposed_phase: phase,
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+    "--json",
+    ...extra,
+  ]).stdout);
+}
+
 function createStrictReadyStory(project, id, artifactType = "functional-analysis") {
-  story(project, id, ["--requirement", "REQ-001"]);
+  story(project, id, [
+    "--requirement", "REQ-001",
+    "--phase", "design",
+    "--status", "ready",
+  ]);
   createApprovedTemplate(project, artifactType);
   createApprovedStoryContract(project, id, "design", artifactType);
+  startStoryTask(project, id, "design");
   const artifact = writeArtifact(project, `.sdlc/requirements/${id}-${artifactType}.md`);
   mustRun([
     "output",
@@ -1459,6 +1480,1305 @@ test("story create persists acceptance criteria with human-readable alias", () =
   assert.doesNotMatch(plan, /[ \t]+$/m);
 });
 
+test("story acceptance add preserves governed story state and workspace files", () => {
+  const project = tmpProject("story-acceptance-add");
+  initProject(project);
+  mustRun([
+    "requirement",
+    "propose",
+    "--root",
+    project,
+    "--id",
+    "REQ-SAFE-FORCE",
+    "--title",
+    "Preserve governed story recovery",
+    "--summary",
+    "Keep all approved story bindings when adding a missing acceptance criterion",
+    "--acceptance",
+    "Recovery changes only the supplied story values",
+    "--autonomy-ceiling",
+    "checkpointed",
+  ]);
+  mustRun([
+    "requirement",
+    "approve",
+    "--root",
+    project,
+    "--id",
+    "REQ-SAFE-FORCE",
+    ...humanApproval("Approve the governed story recovery fixture"),
+  ]);
+  mustRun([
+    "story",
+    "create",
+    "--root",
+    project,
+    "--id",
+    "ST-SAFE-FORCE",
+    "--title",
+    "Preserve governed story state",
+    "--requirement",
+    "REQ-SAFE-FORCE",
+  ]);
+
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-SAFE-FORCE", "story.json");
+  const planPath = path.join(project, ".sdlc", "stories", "ST-SAFE-FORCE", "plan.md");
+  const implementationLogPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-SAFE-FORCE",
+    "implementation-log.md",
+  );
+  const original = readJson(storyPath);
+  const governed = {
+    ...original,
+    status: "implementation",
+    phase: "implementation",
+    contract_id: "CONTRACT-SAFE-FORCE",
+    work_breakdown_id: "BREAKDOWN-SAFE-FORCE",
+    links: {
+      ...original.links,
+      decisions: ["DEC-SAFE-FORCE"],
+      tests: ["TEST-SAFE-FORCE"],
+    },
+  };
+  writeJson(storyPath, governed);
+  fs.writeFileSync(planPath, "# Preserved plan\n");
+  fs.writeFileSync(implementationLogPath, "# Preserved implementation log\n");
+  const deliveriesPath = path.join(project, ".sdlc", "autonomy", "deliveries");
+  fs.mkdirSync(deliveriesPath, { recursive: true });
+  writeJson(path.join(deliveriesPath, "AUT-SAFE-FORCE.json"), {
+    id: "AUT-SAFE-FORCE",
+    story_refs: [{ id: "ST-SAFE-FORCE", hash: "stale-story-hash" }],
+  });
+
+  const updated = JSON.parse(mustRun([
+    "story",
+    "acceptance",
+    "add",
+    "--root",
+    project,
+    "--id",
+    "ST-SAFE-FORCE",
+    "--acceptance",
+    "The recovery update keeps every existing governance binding",
+    "--summary",
+    "Recover the missing story-level criterion",
+    "--json",
+  ]).stdout);
+  assert.equal(updated.status, "updated");
+  assert.equal(updated.story.contract_id, "CONTRACT-SAFE-FORCE");
+  assert.equal(updated.story.work_breakdown_id, "BREAKDOWN-SAFE-FORCE");
+  assert.equal(updated.story.phase, "implementation");
+  assert.equal(updated.story.status, "implementation");
+  assert.equal(updated.story.autonomy_ceiling, governed.autonomy_ceiling);
+  assert.deepEqual(updated.story.links.requirements, ["REQ-SAFE-FORCE"]);
+  assert.deepEqual(updated.story.links.decisions, ["DEC-SAFE-FORCE"]);
+  assert.deepEqual(updated.story.links.tests, ["TEST-SAFE-FORCE"]);
+  assert.equal(updated.story.requirement_refs[0].id, "REQ-SAFE-FORCE");
+  assert.deepEqual(updated.story.acceptance_criteria, [
+    "The recovery update keeps every existing governance binding",
+  ]);
+  assert.equal(updated.story.created_at, governed.created_at);
+  assert.deepEqual(updated.story.audit.created_by, governed.audit.created_by);
+  assert.equal(updated.downstream_review_required, true);
+  assert.deepEqual(updated.delivery_profile_ids, ["AUT-SAFE-FORCE"]);
+  assert.equal(updated.trace_event.request.previous_story_hash, updated.previous_story_hash);
+  assert.equal(updated.trace_event.request.current_story_hash, updated.current_story_hash);
+  assert.deepEqual(
+    updated.trace_event.request.downstream_delivery_profiles_requiring_review,
+    ["AUT-SAFE-FORCE"],
+  );
+  const unchanged = JSON.parse(mustRun([
+    "story",
+    "acceptance",
+    "add",
+    "--root",
+    project,
+    "--id",
+    "ST-SAFE-FORCE",
+    "--acceptance",
+    "The recovery update keeps every existing governance binding",
+    "--json",
+  ]).stdout);
+  assert.equal(unchanged.status, "unchanged");
+  assert.equal(unchanged.downstream_review_required, true);
+  assert.equal(unchanged.contract_review_required, true);
+  assert.deepEqual(unchanged.delivery_profile_ids, ["AUT-SAFE-FORCE"]);
+  assert.equal(fs.readFileSync(planPath, "utf8"), "# Preserved plan\n");
+  assert.equal(fs.readFileSync(implementationLogPath, "utf8"), "# Preserved implementation log\n");
+});
+
+test("story creation and acceptance recovery reject lifecycle and binding bypass options", () => {
+  const project = tmpProject("story-command-options");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-OPTIONS", "--title", "Safe story options",
+    "--acceptance", "One observable result",
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-OPTIONS", "story.json");
+  const before = fs.readFileSync(storyPath);
+
+  mustFail([
+    "story", "create", "--root", project,
+    "--id", "ST-OPTIONS", "--title", "Unsafe rewrite",
+    "--acceptance", "Another result", "--force",
+  ], /story create does not accept --force/i);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-OPTIONS", "--acceptance", "Another result", "--status", "done",
+  ], /story acceptance add does not accept --status/i);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-OPTIONS", "--acceptance", "Another result", "--contract", "CONTRACT-UNAPPROVED",
+  ], /story acceptance add does not accept --contract/i);
+  mustFail([
+    "story", "create", "--root", project,
+    "--id", "ST-DONE", "--title", "Skip the lifecycle",
+    "--acceptance", "Pretend complete", "--status", "done",
+  ], /may start only as draft or ready/i);
+  mustFail([
+    "story", "create", "--root", project,
+    "--id", "ST-READY-INCOMPLETE", "--title", "Ready without success criteria",
+    "--status", "ready",
+  ], /ready story requires at least one observable --acceptance/i);
+  const draftCreated = mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-DRAFT-INCOMPLETE", "--title", "Draft awaiting success criteria",
+  ]);
+  const draftGuidance = splitHumanGuidance(draftCreated.stdout);
+  assert.match(draftGuidance.primary, /does not yet have an observable success criterion/is);
+  assert.match(draftGuidance.primary, /State at least one verifiable result/is);
+  assert.match(
+    draftGuidance.technical,
+    /story acceptance add --id ST-DRAFT-INCOMPLETE --acceptance <criterion>/u,
+  );
+  const draftItalian = mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-DRAFT-INCOMPLETE-IT",
+    "--title", "Bozza in attesa del risultato",
+    "--locale", "it",
+  ]);
+  const draftItalianGuidance = splitHumanGuidance(draftItalian.stdout, "it");
+  assert.match(draftItalianGuidance.primary, /senza un criterio di successo osservabile/is);
+  assert.match(draftItalianGuidance.primary, /Indica almeno un risultato verificabile/is);
+  assert.match(
+    draftItalianGuidance.technical,
+    /story acceptance add --id ST-DRAFT-INCOMPLETE-IT --acceptance <criterion>/u,
+  );
+  const definedEnglish = mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-DEFINED-EN",
+    "--title", "Story with a visible result",
+    "--acceptance", "The saved result can be reopened",
+  ]);
+  const definedEnglishGuidance = splitHumanGuidance(definedEnglish.stdout, "en");
+  assert.match(definedEnglishGuidance.primary, /observable success criteria is ready/is);
+  assert.match(definedEnglishGuidance.primary, /expected result is recorded/is);
+  assert.doesNotMatch(definedEnglish.stdout, /story acceptance add --id ST-DEFINED-EN/u);
+  const definedItalian = mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-DEFINED-IT",
+    "--title", "Story con risultato visibile",
+    "--acceptance", "Il risultato salvato può essere riaperto",
+    "--locale", "it",
+  ]);
+  const definedItalianGuidance = splitHumanGuidance(definedItalian.stdout, "it");
+  assert.match(definedItalianGuidance.primary, /criteri di successo osservabili/is);
+  assert.match(definedItalianGuidance.primary, /risultato atteso è registrato/is);
+  assert.doesNotMatch(definedItalian.stdout, /story acceptance add --id ST-DEFINED-IT/u);
+  mustFail([
+    "contract", "create", "--root", project,
+    "--phase", "design", "--story", "ST-DRAFT-INCOMPLETE",
+    "--id", "contract-ST-DRAFT-INCOMPLETE-design",
+    "--context-summary", "This must wait for story success criteria",
+    "--qa", "Is the story ready?|No",
+  ], /has no observable acceptance criteria.*story acceptance add/is);
+  assert.deepEqual(fs.readFileSync(storyPath), before);
+  assert.equal(fs.existsSync(path.join(project, ".sdlc", "stories", "ST-DONE")), false);
+});
+
+test("story claim requires observable acceptance and gives the additive recovery command", () => {
+  const project = tmpProject("claim-missing-acceptance");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--title", "Do not claim an undefined story",
+  ]);
+  const claimPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CLAIM-NO-ACCEPTANCE",
+    "claim.json",
+  );
+  const englishFailure = mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--agent", "codex",
+  ], /no observable acceptance criteria.*story acceptance add --id ST-CLAIM-NO-ACCEPTANCE/is);
+  const englishGuidance = splitHumanGuidance(englishFailure.stderr, "en");
+  assert.match(englishGuidance.primary, /cannot be assigned.*no observable success criterion/is);
+  assert.match(englishGuidance.primary, /State at least one verifiable result/is);
+  assert.equal(
+    (englishFailure.stderr.match(
+      /story acceptance add --id ST-CLAIM-NO-ACCEPTANCE --acceptance <criterion>/gu,
+    ) || []).length,
+    1,
+  );
+  const italianFailure = mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--agent", "codex",
+    "--locale", "it",
+  ], /no observable acceptance criteria.*story acceptance add --id ST-CLAIM-NO-ACCEPTANCE/is);
+  const italianGuidance = splitHumanGuidance(italianFailure.stderr, "it");
+  assert.match(italianGuidance.primary, /non può ancora essere assegnata.*criterio di successo osservabile/is);
+  assert.match(italianGuidance.primary, /Indica almeno un risultato verificabile/is);
+  assert.equal(
+    (italianFailure.stderr.match(
+      /story acceptance add --id ST-CLAIM-NO-ACCEPTANCE --acceptance <criterion>/gu,
+    ) || []).length,
+    1,
+  );
+  assert.equal(fs.existsSync(claimPath), false);
+  mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--acceptance", "The assigned work has one verifiable outcome",
+  ]);
+  const missingStart = mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--agent", "codex",
+  ], /cannot be claimed before its current approved contract and immutable task start are valid/is);
+  const missingStartGuidance = splitHumanGuidance(missingStart.stderr, "en");
+  assert.match(missingStartGuidance.primary, /cannot be assigned.*has not been validly started/is);
+  assert.match(missingStartGuidance.primary, /Complete the governed task start/is);
+  assert.equal(fs.existsSync(claimPath), false);
+
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(
+    project,
+    "ST-CLAIM-NO-ACCEPTANCE",
+    "design",
+    "functional-analysis",
+  );
+  mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--agent", "codex",
+  ], /no task-start receipt/is);
+  assert.equal(fs.existsSync(claimPath), false);
+  startStoryTask(project, "ST-CLAIM-NO-ACCEPTANCE", "design");
+  const claimed = JSON.parse(mustRun([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-NO-ACCEPTANCE",
+    "--agent", "codex",
+    "--json",
+  ]).stdout);
+  assert.equal(claimed.status, "claimed");
+  assert.equal(readJson(claimPath).status, "active");
+});
+
+test("story claim and release roll back exactly when their audit trace is unsafe", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("story-claim-release-trace-transaction");
+  initProject(project);
+  story(project, "ST-CLAIM-TRACE", [
+    "--phase", "design",
+    "--status", "ready",
+  ]);
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(
+    project,
+    "ST-CLAIM-TRACE",
+    "design",
+    "functional-analysis",
+  );
+  startStoryTask(project, "ST-CLAIM-TRACE", "design");
+
+  const storyDir = path.join(project, ".sdlc", "stories", "ST-CLAIM-TRACE");
+  const claimPath = path.join(storyDir, "claim.json");
+  const claimProjectPath = ".sdlc/stories/ST-CLAIM-TRACE/claim.json";
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-CLAIM-TRACE.jsonl");
+  const originalTrace = fs.existsSync(tracePath) ? fs.readFileSync(tracePath) : null;
+  const externalTrace = path.join(project, "external-claim-trace.jsonl");
+  const externalBefore = Buffer.from("outside claim trace\n");
+  fs.writeFileSync(externalTrace, externalBefore);
+  fs.rmSync(tracePath, { force: true });
+  fs.symlinkSync(externalTrace, tracePath);
+
+  mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-TRACE",
+    "--agent", "codex",
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.equal(fs.existsSync(claimPath), false);
+  assert.deepEqual(fs.readFileSync(externalTrace), externalBefore);
+
+  fs.rmSync(tracePath);
+  if (originalTrace) {
+    fs.writeFileSync(tracePath, originalTrace);
+  }
+  const claimed = JSON.parse(mustRun([
+    "story", "claim", "--root", project,
+    "--id", "ST-CLAIM-TRACE",
+    "--agent", "codex",
+    "--json",
+  ]).stdout);
+  assert.equal(claimed.status, "claimed");
+  assert.equal(claimed.trace_event.action, "story.claim");
+  const claimedEvidenceRef = claimed.trace_event.evidence_refs.find(
+    (reference) => reference.path === claimProjectPath,
+  );
+  assert.ok(claimedEvidenceRef);
+  const activeSnapshotTrace = JSON.parse(mustRun([
+    "trace", "append", "--root", project,
+    "--story", "ST-CLAIM-TRACE",
+    "--type", "sync",
+    "--summary", "Verify the active claim evidence snapshot",
+    "--evidence", claimProjectPath,
+    "--json",
+  ]).stdout).event;
+  assert.equal(
+    activeSnapshotTrace.evidence_refs.find(
+      (reference) => reference.path === claimProjectPath,
+    ).sha256,
+    claimedEvidenceRef.sha256,
+  );
+  const activeClaim = fs.readFileSync(claimPath);
+  const validClaimTrace = fs.readFileSync(tracePath);
+
+  const externalReleaseTrace = path.join(project, "external-release-trace.jsonl");
+  const externalReleaseBefore = Buffer.from("outside release trace\n");
+  fs.writeFileSync(externalReleaseTrace, externalReleaseBefore);
+  fs.rmSync(tracePath);
+  fs.symlinkSync(externalReleaseTrace, tracePath);
+  mustFail([
+    "story", "release", "--root", project,
+    "--id", "ST-CLAIM-TRACE",
+    "--agent", "codex",
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.deepEqual(fs.readFileSync(claimPath), activeClaim);
+  assert.equal(readJson(claimPath).status, "active");
+  assert.deepEqual(fs.readFileSync(externalReleaseTrace), externalReleaseBefore);
+
+  fs.rmSync(tracePath);
+  fs.writeFileSync(tracePath, validClaimTrace);
+  const released = JSON.parse(mustRun([
+    "story", "release", "--root", project,
+    "--id", "ST-CLAIM-TRACE",
+    "--agent", "codex",
+    "--json",
+  ]).stdout);
+  assert.equal(released.status, "released");
+  assert.equal(released.trace_event.action, "story.release");
+  assert.equal(readJson(claimPath).status, "released");
+  const releasedEvidenceRef = released.trace_event.evidence_refs.find(
+    (reference) => reference.path === claimProjectPath,
+  );
+  assert.ok(releasedEvidenceRef);
+  assert.notEqual(releasedEvidenceRef.sha256, claimedEvidenceRef.sha256);
+  const releasedSnapshotTrace = JSON.parse(mustRun([
+    "trace", "append", "--root", project,
+    "--story", "ST-CLAIM-TRACE",
+    "--type", "sync",
+    "--summary", "Verify the released claim evidence snapshot",
+    "--evidence", claimProjectPath,
+    "--json",
+  ]).stdout).event;
+  assert.equal(
+    releasedSnapshotTrace.evidence_refs.find(
+      (reference) => reference.path === claimProjectPath,
+    ).sha256,
+    releasedEvidenceRef.sha256,
+  );
+});
+
+test("story acceptance add preserves stale requirement refs, is idempotent, and refuses in-flight or terminal stories", () => {
+  const project = tmpProject("story-acceptance-boundaries");
+  initProject(project);
+  mustRun([
+    "requirement", "propose", "--root", project,
+    "--id", "REQ-BOUNDARY", "--title", "Acceptance recovery boundary",
+    "--summary", "Preserve the exact reviewed requirement binding",
+    "--acceptance", "The story keeps its reviewed requirement revision",
+    "--autonomy-ceiling", "checkpointed",
+  ]);
+  mustRun([
+    "requirement", "approve", "--root", project, "--id", "REQ-BOUNDARY",
+    ...humanApproval("Approve exact requirement binding"),
+  ]);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-BOUNDARY", "--title", "Acceptance recovery boundaries",
+    "--requirement", "REQ-BOUNDARY",
+  ]);
+  const storyDir = path.join(project, ".sdlc", "stories", "ST-BOUNDARY");
+  const storyPath = path.join(storyDir, "story.json");
+  const requirementPath = path.join(project, ".sdlc", "requirements", "REQ-BOUNDARY.json");
+  const initialStory = readJson(storyPath);
+  const exactRequirementRefs = structuredClone(initialStory.requirement_refs);
+  const changedRequirement = readJson(requirementPath);
+  changedRequirement.summary = "Unapproved changed requirement content";
+  changedRequirement.updated_at = new Date().toISOString();
+  writeJson(requirementPath, changedRequirement);
+
+  const updated = JSON.parse(mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-BOUNDARY",
+    "--acceptance", "A recovered criterion is observable",
+    "--json",
+  ]).stdout);
+  assert.deepEqual(updated.story.requirement_refs, exactRequirementRefs);
+  assert.equal(updated.downstream_review_required, false);
+
+  const afterUpdate = fs.readFileSync(storyPath);
+  const unchanged = JSON.parse(mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-BOUNDARY",
+    "--acceptance", "A recovered criterion is observable",
+    "--json",
+  ]).stdout);
+  assert.equal(unchanged.status, "unchanged");
+  assert.deepEqual(fs.readFileSync(storyPath), afterUpdate);
+
+  writeJson(path.join(storyDir, "task-start.json"), { status: "confirmed" });
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-BOUNDARY",
+    "--acceptance", "Must not change in flight",
+  ], /already has a task-start receipt/i);
+  assert.deepEqual(fs.readFileSync(storyPath), afterUpdate);
+
+  const terminalStory = readJson(storyPath);
+  terminalStory.status = "done";
+  writeJson(storyPath, terminalStory);
+  fs.rmSync(path.join(storyDir, "task-start.json"));
+  const terminalBytes = fs.readFileSync(storyPath);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-BOUNDARY",
+    "--acceptance", "Must not change after completion",
+  ], /terminal.*immutable/i);
+  assert.deepEqual(fs.readFileSync(storyPath), terminalBytes);
+});
+
+test("story creation refuses an orphaned workspace without overwriting its files", () => {
+  const project = tmpProject("story-orphan-workspace");
+  initProject(project);
+  const storyDir = path.join(project, ".sdlc", "stories", "ST-ORPHAN");
+  fs.mkdirSync(storyDir, { recursive: true });
+  const planPath = path.join(storyDir, "plan.md");
+  const logPath = path.join(storyDir, "implementation-log.md");
+  fs.writeFileSync(planPath, "# Existing plan\n");
+  fs.writeFileSync(logPath, "# Existing log\n");
+  mustFail([
+    "story", "create", "--root", project,
+    "--id", "ST-ORPHAN", "--title", "Do not overwrite orphan",
+    "--acceptance", "Existing work remains intact",
+  ], /exists without story\.json.*refusing to overwrite/i);
+  assert.equal(fs.readFileSync(planPath, "utf8"), "# Existing plan\n");
+  assert.equal(fs.readFileSync(logPath, "utf8"), "# Existing log\n");
+  assert.equal(fs.existsSync(path.join(storyDir, "story.json")), false);
+});
+
+test("story acceptance add rejects symlinked workspace files before rewriting story state", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("story-acceptance-symlink");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-SYMLINK", "--title", "Reject unsafe workspace",
+    "--acceptance", "The workspace remains canonical",
+  ]);
+  const storyDir = path.join(project, ".sdlc", "stories", "ST-SYMLINK");
+  const storyPath = path.join(storyDir, "story.json");
+  const planPath = path.join(storyDir, "plan.md");
+  const externalPlan = path.join(project, "external-plan.md");
+  fs.writeFileSync(externalPlan, "# External plan\n");
+  fs.rmSync(planPath);
+  fs.symlinkSync(externalPlan, planPath);
+  const before = fs.readFileSync(storyPath);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-SYMLINK", "--acceptance", "Must fail before mutation",
+  ], /symbolic link|symlink|regular file/i);
+  assert.deepEqual(fs.readFileSync(storyPath), before);
+  assert.equal(fs.lstatSync(planPath).isSymbolicLink(), true);
+});
+
+test("story acceptance add leaves story bytes unchanged when its audit trace is unsafe", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("story-acceptance-trace-rollback");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-TRACE", "--title", "Trace-bound acceptance recovery",
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-TRACE", "story.json");
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-TRACE.jsonl");
+  const externalTrace = path.join(project, "external-trace.jsonl");
+  fs.writeFileSync(externalTrace, "");
+  fs.symlinkSync(externalTrace, tracePath);
+  const before = fs.readFileSync(storyPath);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-TRACE", "--acceptance", "The update and its audit event commit together",
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.deepEqual(fs.readFileSync(storyPath), before);
+  assert.equal(readJson(storyPath).acceptance_criteria.length, 0);
+});
+
+test("story acceptance add refuses legacy stories with completed work but no task-start receipt", () => {
+  const project = tmpProject("story-acceptance-legacy-in-flight");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-LEGACY", "--title", "Legacy in-flight story",
+  ]);
+  const storyDir = path.join(project, ".sdlc", "stories", "ST-LEGACY");
+  const stepsDir = path.join(storyDir, "steps");
+  fs.mkdirSync(stepsDir, { recursive: true });
+  writeJson(path.join(stepsDir, "design.json"), {
+    id: "STEP-ST-LEGACY-DESIGN",
+    story_id: "ST-LEGACY",
+    step: "design",
+    phase: "design",
+    status: "completed",
+    completed_at: new Date().toISOString(),
+  });
+  const before = fs.readFileSync(path.join(storyDir, "story.json"));
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-LEGACY", "--acceptance", "Late scope must be rejected",
+  ], /completed lifecycle work.*cannot change in-flight/i);
+  assert.deepEqual(fs.readFileSync(path.join(storyDir, "story.json")), before);
+});
+
+test("concurrent story acceptance additions are serialized without lost updates", async () => {
+  const project = tmpProject("story-acceptance-concurrency");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-CONCURRENT", "--title", "Serialize acceptance recovery",
+    "--acceptance", "Base criterion",
+  ]);
+  const criteria = Array.from({ length: 12 }, (_, index) => `Concurrent criterion ${index + 1}`);
+  const results = await Promise.all(criteria.map((criterion) => runAsync([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-CONCURRENT", "--acceptance", criterion, "--json",
+  ], { timeout: 60_000 })));
+  for (const result of results) {
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  }
+  const storyRecord = readJson(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONCURRENT",
+    "story.json",
+  ));
+  assert.deepEqual(
+    new Set(storyRecord.acceptance_criteria),
+    new Set(["Base criterion", ...criteria]),
+  );
+  assert.equal(storyRecord.acceptance_criteria.length, criteria.length + 1);
+});
+
+test("acceptance changes block task start until a new exact contract is created and approved", () => {
+  const project = tmpProject("story-acceptance-contract-review");
+  initProject(project);
+  story(project, "ST-CONTRACT-REVIEW");
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(project, "ST-CONTRACT-REVIEW", "design", "functional-analysis");
+
+  const recovery = JSON.parse(mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-CONTRACT-REVIEW",
+    "--acceptance", "The additional success condition is covered by a new work brief",
+    "--json",
+  ]).stdout);
+  assert.equal(recovery.contract_review_required, true);
+  assert.equal(recovery.previous_contract_id, "contract-ST-CONTRACT-REVIEW-design");
+  const markedStory = readJson(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "story.json",
+  ));
+  assert.equal(
+    markedStory.contract_review_required.contract_id,
+    "contract-ST-CONTRACT-REVIEW-design",
+  );
+  const claimPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "claim.json",
+  );
+  const blockedClaim = mustFail([
+    "story", "claim", "--root", project,
+    "--id", "ST-CONTRACT-REVIEW",
+    "--agent", "codex",
+  ], /acceptance criteria changed after its previous contract.*cannot be claimed/is);
+  const blockedClaimGuidance = splitHumanGuidance(blockedClaim.stderr, "en");
+  assert.match(blockedClaimGuidance.primary, /cannot be assigned.*success criteria changed/is);
+  assert.match(blockedClaimGuidance.primary, /Prepare and approve the new agreement/is);
+  assert.equal(fs.existsSync(claimPath), false);
+  const staleArtifact = writeArtifact(
+    project,
+    ".sdlc/requirements/ST-CONTRACT-REVIEW-functional-analysis.md",
+  );
+  mustFail([
+    "output", "link", "--root", project,
+    "--story", "ST-CONTRACT-REVIEW",
+    "--type", "functional-analysis",
+    "--artifact", staleArtifact,
+    "--template", "functional-analysis-v1",
+    "--mode", "new",
+    "--requirement", "REQ-001",
+  ], /acceptance criteria changed.*new exact contract ID/is);
+  mustFail([
+    "story", "complete-step", "--root", project,
+    "--id", "ST-CONTRACT-REVIEW",
+    "--step", "functional-analysis",
+    "--type", "functional-analysis",
+    "--summary", "Must not use the stale contract",
+  ], /acceptance criteria changed.*new exact contract ID/is);
+  const staleGate = JSON.parse(run([
+    "gate", "check", "--root", project,
+    "--story", "ST-CONTRACT-REVIEW",
+    "--strict", "--json",
+  ]).stdout);
+  assert.ok(staleGate.errors.some((error) =>
+    /acceptance criteria changed.*new exact contract ID/is.test(error)));
+  mustFail([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-REVIEW",
+    "--id", "contract-ST-CONTRACT-REVIEW-design",
+    "--force",
+    "--context-summary", "Do not overwrite the historical agreement",
+    "--qa", "Can the old ID be reused?|No",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ], /historical and cannot be overwritten.*new exact contract ID/is);
+
+  const blocked = JSON.parse(mustRun([
+    "task", "start", "--root", project, "--json",
+    "--story", "ST-CONTRACT-REVIEW",
+    "--contract-id", "contract-ST-CONTRACT-REVIEW-design",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-CONTRACT-REVIEW" }],
+      proposed_phase: "design",
+    }),
+    "--confirm-start",
+  ]).stdout);
+  assert.equal(blocked.execution_allowed, false);
+  assert.equal(blocked.contract_action, "replace_contract_after_story_revision");
+  assert.ok(blocked.blocking_reasons.includes("story_definition_changed_after_contract"));
+  assert.equal(fs.existsSync(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "task-start.json",
+  )), false);
+  const blockedHumanArgs = [
+    "task", "start", "--root", project,
+    "--story", "ST-CONTRACT-REVIEW",
+    "--contract-id", "contract-ST-CONTRACT-REVIEW-design",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-CONTRACT-REVIEW" }],
+      proposed_phase: "design",
+    }),
+    "--confirm-start",
+  ];
+  const blockedEnglish = mustRun(blockedHumanArgs).stdout;
+  const blockedEnglishGuidance = splitHumanGuidance(blockedEnglish, "en");
+  assert.match(blockedEnglishGuidance.primary, /success criteria changed.*work remains paused/is);
+  assert.match(blockedEnglishGuidance.primary, /prepare a new agreement.*approval before starting/is);
+  assert.equal(
+    (blockedEnglish.match(/Question 1:/gu) || []).length,
+    1,
+  );
+  assert.equal(
+    (blockedEnglish.match(
+      /agentic-sdlc contract create --story ST-CONTRACT-REVIEW --phase design/gu,
+    ) || []).length,
+    1,
+  );
+  const blockedItalian = mustRun([...blockedHumanArgs, "--locale", "it"]).stdout;
+  const blockedItalianGuidance = splitHumanGuidance(blockedItalian, "it");
+  assert.match(blockedItalianGuidance.primary, /criteri di riuscita sono cambiati.*lavoro resta fermo/is);
+  assert.match(blockedItalianGuidance.primary, /nuovo accordo.*approvazione prima di iniziare/is);
+  assert.equal(
+    (blockedItalian.match(/Domanda 1:/gu) || []).length,
+    1,
+  );
+  assert.equal(
+    (blockedItalian.match(
+      /agentic-sdlc contract create --story ST-CONTRACT-REVIEW --phase design/gu,
+    ) || []).length,
+    1,
+  );
+
+  mustRun([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-REVIEW",
+    "--id", "contract-ST-CONTRACT-REVIEW-design-v2",
+    "--replace-story-contract",
+    "--context-summary", "Cover the revised acceptance criteria",
+    "--qa", "Do the new success conditions belong to this work?|Yes",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ]);
+  mustRun([
+    "contract", "approve", "--root", project,
+    "--id", "contract-ST-CONTRACT-REVIEW-design-v2",
+    ...humanApproval("Approve the revised exact work brief"),
+  ]);
+  const refreshedStory = readJson(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "story.json",
+  ));
+  assert.equal(refreshedStory.contract_id, "contract-ST-CONTRACT-REVIEW-design-v2");
+  assert.equal(Object.hasOwn(refreshedStory, "contract_review_required"), false);
+
+  const startArgs = [
+    "task", "start", "--root", project, "--json",
+    "--story", "ST-CONTRACT-REVIEW",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-CONTRACT-REVIEW" }],
+      proposed_phase: "design",
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+  ];
+  const historical = JSON.parse(mustRun([
+    ...startArgs,
+    "--contract-id", "contract-ST-CONTRACT-REVIEW-design",
+  ]).stdout);
+  assert.equal(historical.execution_allowed, false);
+  assert.ok(historical.blocking_reasons.includes("contract_not_current_story_binding"));
+  assert.equal(fs.existsSync(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "task-start.json",
+  )), false);
+
+  const started = JSON.parse(mustRun(startArgs).stdout);
+  assert.equal(started.execution_allowed, true);
+  assert.equal(started.contract_id, "contract-ST-CONTRACT-REVIEW-design-v2");
+  const taskStartPath = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-CONTRACT-REVIEW",
+    "task-start.json",
+  );
+  const taskStartBytes = fs.readFileSync(taskStartPath);
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-CONTRACT-REVIEW.jsonl");
+  const startTraceCount = readJsonLines(tracePath)
+    .filter((event) => event.action === "task.start.confirm").length;
+  mustFail(startArgs, /already immutably recorded.*continue the existing governed run/is);
+  assert.deepEqual(fs.readFileSync(taskStartPath), taskStartBytes);
+  assert.equal(
+    readJsonLines(tracePath).filter((event) => event.action === "task.start.confirm").length,
+    startTraceCount,
+  );
+
+  const currentContractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-CONTRACT-REVIEW-design-v2.json",
+  );
+  const currentContractBytes = fs.readFileSync(currentContractPath);
+  mustFail([
+    "contract", "approve", "--root", project,
+    "--id", "contract-ST-CONTRACT-REVIEW-design-v2",
+    "--status", "rejected",
+    ...humanApproval("Do not mutate an in-flight contract"),
+  ], /cannot receive another approval or status change after story.*has started/is);
+  assert.deepEqual(fs.readFileSync(currentContractPath), currentContractBytes);
+});
+
+test("story acceptance recovery human guidance stays plain, direct, and localized", () => {
+  const project = tmpProject("story-acceptance-human-guidance");
+  initProject(project);
+  story(project, "ST-RECOVERY-UX");
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(project, "ST-RECOVERY-UX", "design", "functional-analysis");
+
+  const english = mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-RECOVERY-UX",
+    "--acceptance", "A second observable result is reviewed",
+  ]).stdout;
+  const englishGuidance = splitHumanGuidance(english, "en");
+  assert.match(englishGuidance.primary, /previous work agreement.*no longer authorize work/is);
+  assert.equal((english.match(/^Outcome:/gmu) || []).length, 1);
+  assert.match(englishGuidance.technical, /ST-RECOVERY-UX/u);
+
+  const italian = mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-RECOVERY-UX",
+    "--acceptance", "Un terzo risultato osservabile viene verificato",
+    "--locale", "it",
+  ]).stdout;
+  const italianGuidance = splitHumanGuidance(italian, "it");
+  assert.match(italianGuidance.primary, /precedente accordo di lavoro.*non autorizzano più l’avvio/is);
+  assert.equal((italian.match(/^Risultato:/gmu) || []).length, 1);
+
+  const unchanged = mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-RECOVERY-UX",
+    "--acceptance", "Un terzo risultato osservabile viene verificato",
+    "--locale", "it",
+  ]).stdout;
+  const unchangedGuidance = splitHumanGuidance(unchanged, "it");
+  assert.match(unchangedGuidance.primary, /conteneva già tutti i criteri/is);
+  assert.match(unchangedGuidance.primary, /nuovo accordo di lavoro/is);
+  assert.equal((unchanged.match(/^Risultato:/gmu) || []).length, 1);
+});
+
+test("contract replacement restores the exact story and contract state when its audit trace is unsafe", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("contract-replacement-trace-transaction");
+  initProject(project);
+  story(project, "ST-CONTRACT-TRACE");
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(project, "ST-CONTRACT-TRACE", "design", "functional-analysis");
+  mustRun([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-CONTRACT-TRACE",
+    "--acceptance", "The replacement agreement and its audit event commit together",
+  ]);
+
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-CONTRACT-TRACE", "story.json");
+  const beforeStory = fs.readFileSync(storyPath);
+  const newContractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-CONTRACT-TRACE-design-v2.json",
+  );
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-CONTRACT-TRACE.jsonl");
+  const externalTrace = path.join(project, "external-contract-trace.jsonl");
+  fs.rmSync(tracePath);
+  fs.writeFileSync(externalTrace, "");
+  fs.symlinkSync(externalTrace, tracePath);
+
+  mustFail([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-TRACE",
+    "--id", "contract-ST-CONTRACT-TRACE-design-v2",
+    "--replace-story-contract",
+    "--context-summary", "This replacement must be atomically audited",
+    "--qa", "Does the revised agreement cover the story?|Yes",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.deepEqual(fs.readFileSync(storyPath), beforeStory);
+  assert.equal(fs.existsSync(newContractPath), false);
+  const preserved = readJson(storyPath);
+  assert.equal(preserved.contract_id, "contract-ST-CONTRACT-TRACE-design");
+  assert.equal(preserved.contract_review_required.contract_id, "contract-ST-CONTRACT-TRACE-design");
+});
+
+test("contract approval restores exact draft bytes when its audit trace is unsafe", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("contract-approval-trace-transaction");
+  initProject(project);
+  story(project, "ST-APPROVAL-TRACE");
+  createApprovedTemplate(project, "functional-analysis");
+  mustRun([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-APPROVAL-TRACE",
+    "--id", "contract-ST-APPROVAL-TRACE-design",
+    "--context-summary", "Approval and audit must commit together",
+    "--qa", "Who approves this exact draft?|The owner",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ]);
+  const contractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-APPROVAL-TRACE-design.json",
+  );
+  const beforeContract = fs.readFileSync(contractPath);
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-APPROVAL-TRACE.jsonl");
+  const externalTrace = path.join(project, "external-approval-trace.jsonl");
+  fs.rmSync(tracePath);
+  fs.writeFileSync(externalTrace, "");
+  fs.symlinkSync(externalTrace, tracePath);
+
+  mustFail([
+    "contract", "approve", "--root", project,
+    "--id", "contract-ST-APPROVAL-TRACE-design",
+    ...humanApproval("Approve only with a durable audit event"),
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.deepEqual(fs.readFileSync(contractPath), beforeContract);
+  assert.equal(readJson(contractPath).status, "draft");
+  assert.equal((readJson(contractPath).approvals || []).length, 0);
+});
+
+test("contract IDs cannot be reassigned across stories or overwrite reviewed history", () => {
+  const project = tmpProject("contract-id-ownership");
+  initProject(project);
+  story(project, "ST-CONTRACT-OWNER-A");
+  story(project, "ST-CONTRACT-OWNER-B");
+  createApprovedTemplate(project, "functional-analysis");
+  mustRun([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-OWNER-A",
+    "--id", "CONTRACT-SHARED",
+    "--context-summary", "The agreement belongs only to story A",
+    "--qa", "Which story owns this agreement?|Story A",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ]);
+  const contractPath = path.join(project, ".sdlc", "contracts", "CONTRACT-SHARED.json");
+  const storyAPath = path.join(project, ".sdlc", "stories", "ST-CONTRACT-OWNER-A", "story.json");
+  const storyBPath = path.join(project, ".sdlc", "stories", "ST-CONTRACT-OWNER-B", "story.json");
+  const draftBytes = fs.readFileSync(contractPath);
+  const storyABytes = fs.readFileSync(storyAPath);
+  const storyBBytes = fs.readFileSync(storyBPath);
+
+  mustFail([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-OWNER-B",
+    "--id", "CONTRACT-SHARED",
+    "--force",
+    "--context-summary", "This must not steal the existing contract ID",
+    "--qa", "May story B reuse story A's ID?|No",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ], /already bound to ST-CONTRACT-OWNER-A.*cannot be reassigned.*new contract ID/is);
+  assert.deepEqual(fs.readFileSync(contractPath), draftBytes);
+  assert.deepEqual(fs.readFileSync(storyAPath), storyABytes);
+  assert.deepEqual(fs.readFileSync(storyBPath), storyBBytes);
+
+  mustRun([
+    "contract", "approve", "--root", project,
+    "--id", "CONTRACT-SHARED",
+    ...humanApproval("Approve story A's exact agreement"),
+  ]);
+  const approvedBytes = fs.readFileSync(contractPath);
+  mustFail([
+    "contract", "create", "--root", project,
+    "--phase", "design",
+    "--story", "ST-CONTRACT-OWNER-A",
+    "--id", "CONTRACT-SHARED",
+    "--force",
+    "--context-summary", "This must not erase reviewed history",
+    "--qa", "May reviewed content be overwritten?|No",
+    "--output-ref", "functional-analysis:functional-analysis-v1:new",
+  ], /already reviewed or no longer a draft.*new exact contract ID/is);
+  assert.deepEqual(fs.readFileSync(contractPath), approvedBytes);
+});
+
+test("phase output and step completion require task start and roll back when trace sealing fails", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const outputProject = tmpProject("phase-output-start-trace");
+  initProject(outputProject);
+  story(outputProject, "ST-OUTPUT-TX", ["--phase", "design", "--status", "ready"]);
+  createApprovedTemplate(outputProject, "functional-analysis");
+  createApprovedStoryContract(outputProject, "ST-OUTPUT-TX", "design", "functional-analysis");
+  const outputArtifact = writeArtifact(
+    outputProject,
+    ".sdlc/requirements/ST-OUTPUT-TX-functional-analysis.md",
+  );
+  const outputArgs = [
+    "output", "link", "--root", outputProject,
+    "--story", "ST-OUTPUT-TX",
+    "--type", "functional-analysis",
+    "--artifact", outputArtifact,
+    "--template", "functional-analysis-v1",
+    "--mode", "new",
+    "--requirement", "REQ-001",
+  ];
+  const registryPath = path.join(outputProject, ".sdlc", "output-contracts", "registry.json");
+  const registryBeforeStart = fs.readFileSync(registryPath);
+  mustFail(outputArgs, /no task-start receipt.*task start --confirm-start/is);
+  mustFail([
+    "story", "complete-step", "--root", outputProject,
+    "--id", "ST-OUTPUT-TX",
+    "--step", "functional-analysis",
+    "--type", "functional-analysis",
+    "--summary", "Must not complete before task start",
+  ], /no task-start receipt.*task start --confirm-start/is);
+  assert.deepEqual(fs.readFileSync(registryPath), registryBeforeStart);
+  assert.equal(fs.existsSync(path.join(
+    outputProject,
+    ".sdlc",
+    "stories",
+    "ST-OUTPUT-TX",
+    "steps",
+  )), false);
+
+  mustRun([
+    "task", "start", "--root", outputProject,
+    "--story", "ST-OUTPUT-TX",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-OUTPUT-TX" }],
+      proposed_phase: "design",
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+  ]);
+  const registryBeforeUnsafeTrace = fs.readFileSync(registryPath);
+  const verificationRoot = path.join(outputProject, ".sdlc", "receipts", "verification");
+  const verificationBefore = fs.existsSync(verificationRoot)
+    ? snapshotFilesystemTree(verificationRoot)
+    : [];
+  const outputTracePath = path.join(outputProject, ".sdlc", "traces", "ST-OUTPUT-TX.jsonl");
+  const externalOutputTrace = path.join(outputProject, "external-output-trace.jsonl");
+  fs.rmSync(outputTracePath);
+  fs.writeFileSync(externalOutputTrace, "");
+  fs.symlinkSync(externalOutputTrace, outputTracePath);
+  mustFail(outputArgs, /symbolic link|symlink|trace integrity/i);
+  assert.deepEqual(fs.readFileSync(registryPath), registryBeforeUnsafeTrace);
+  assert.deepEqual(
+    fs.existsSync(verificationRoot) ? snapshotFilesystemTree(verificationRoot) : [],
+    verificationBefore,
+  );
+
+  const stepProject = tmpProject("phase-step-start-trace");
+  initProject(stepProject);
+  story(stepProject, "ST-STEP-TX", ["--phase", "design", "--status", "ready"]);
+  createApprovedTemplate(stepProject, "functional-analysis");
+  createApprovedStoryContract(stepProject, "ST-STEP-TX", "design", "functional-analysis");
+  const stepArtifact = writeArtifact(
+    stepProject,
+    ".sdlc/requirements/ST-STEP-TX-functional-analysis.md",
+  );
+  mustRun([
+    "task", "start", "--root", stepProject,
+    "--story", "ST-STEP-TX",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-STEP-TX" }],
+      proposed_phase: "design",
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+  ]);
+  mustRun([
+    "output", "link", "--root", stepProject,
+    "--story", "ST-STEP-TX",
+    "--type", "functional-analysis",
+    "--artifact", stepArtifact,
+    "--template", "functional-analysis-v1",
+    "--mode", "new",
+    "--requirement", "REQ-001",
+  ]);
+  mustRun([
+    "story", "claim", "--root", stepProject,
+    "--id", "ST-STEP-TX",
+    "--agent", "analysis-agent",
+    "--branch", "feature/ST-STEP-TX",
+  ]);
+  const stepDir = path.join(stepProject, ".sdlc", "stories", "ST-STEP-TX", "steps");
+  const stepPath = path.join(stepDir, "functional-analysis.json");
+  const historyPath = path.join(stepDir, "history.jsonl");
+  const stepTracePath = path.join(stepProject, ".sdlc", "traces", "ST-STEP-TX.jsonl");
+  const externalStepTrace = path.join(stepProject, "external-step-trace.jsonl");
+  fs.rmSync(stepTracePath);
+  fs.writeFileSync(externalStepTrace, "");
+  fs.symlinkSync(externalStepTrace, stepTracePath);
+  mustFail([
+    "story", "complete-step", "--root", stepProject,
+    "--id", "ST-STEP-TX",
+    "--step", "functional-analysis",
+    "--type", "functional-analysis",
+    "--summary", "The step and trace must commit together",
+    "--artifact", stepArtifact,
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.equal(fs.existsSync(stepPath), false);
+  assert.equal(fs.existsSync(historyPath), false);
+});
+
+test("story acceptance recovery refuses legacy stories that already have work traces", () => {
+  const project = tmpProject("story-acceptance-legacy-trace");
+  initProject(project);
+  story(project, "ST-LEGACY-TRACE", ["--phase", "implementation", "--status", "ready"]);
+  mustRun([
+    "trace", "append", "--root", project,
+    "--story", "ST-LEGACY-TRACE",
+    "--type", "implementation",
+    "--summary", "Implementation work already happened",
+    "--outcome", "passed",
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-LEGACY-TRACE", "story.json");
+  const before = fs.readFileSync(storyPath);
+  mustFail([
+    "story", "acceptance", "add", "--root", project,
+    "--id", "ST-LEGACY-TRACE",
+    "--acceptance", "Late success criteria must not redefine completed work",
+  ], /already has governed work trace.*cannot change in-flight/is);
+  assert.deepEqual(fs.readFileSync(storyPath), before);
+});
+
+test("task start does not persist a receipt when its confirmation trace is unsafe", (t) => {
+  if (!requireSymlinkSupport(t, "file")) return;
+  const project = tmpProject("task-start-trace-transaction");
+  initProject(project);
+  story(project, "ST-START-TRACE");
+  createApprovedTemplate(project, "implementation-summary");
+  mustRun([
+    "contract", "create", "--root", project,
+    "--phase", "implementation",
+    "--story", "ST-START-TRACE",
+    "--id", "contract-ST-START-TRACE-implementation",
+    "--context-summary", "Start only with an auditable receipt",
+    "--qa", "Who confirms start?|Human user",
+    "--output-ref", "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustRun([
+    "contract", "approve", "--root", project,
+    "--id", "contract-ST-START-TRACE-implementation",
+    ...humanApproval("Approve trace-bound task start"),
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-START-TRACE", "story.json");
+  writeJson(storyPath, {
+    ...readJson(storyPath),
+    status: "ready",
+    phase: "implementation",
+  });
+  const tracePath = path.join(project, ".sdlc", "traces", "ST-START-TRACE.jsonl");
+  const externalTrace = path.join(project, "external-start-trace.jsonl");
+  fs.rmSync(tracePath);
+  fs.writeFileSync(externalTrace, "");
+  fs.symlinkSync(externalTrace, tracePath);
+  mustFail([
+    "task", "start", "--root", project,
+    "--story", "ST-START-TRACE",
+    "--contract-id", "contract-ST-START-TRACE-implementation",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-START-TRACE" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+  ], /symbolic link|symlink|trace integrity/i);
+  assert.equal(fs.existsSync(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-START-TRACE",
+    "task-start.json",
+  )), false);
+});
+
+test("task start serializes contract replacement and keeps one exact story-contract receipt", async () => {
+  const project = tmpProject("task-start-contract-race");
+  initProject(project);
+  story(project, "ST-START-RACE");
+  createApprovedTemplate(project, "implementation-summary");
+  mustRun([
+    "contract", "create", "--root", project,
+    "--phase", "implementation",
+    "--story", "ST-START-RACE",
+    "--id", "contract-ST-START-RACE-v1",
+    "--context-summary", "Use the first exact approved work brief",
+    "--qa", "Who confirms start?|Human user",
+    "--output-ref", "implementation-summary:implementation-summary-v1:new",
+  ]);
+  mustRun([
+    "contract", "approve", "--root", project,
+    "--id", "contract-ST-START-RACE-v1",
+    ...humanApproval("Approve the first exact work brief"),
+  ]);
+  const storyPath = path.join(project, ".sdlc", "stories", "ST-START-RACE", "story.json");
+  writeJson(storyPath, {
+    ...readJson(storyPath),
+    status: "ready",
+    phase: "implementation",
+  });
+  const heldTraceLock = path.join(project, ".sdlc", "traces", "ST-START-RACE.jsonl.lock");
+  writeJson(heldTraceLock, {
+    pid: process.pid,
+    host: os.hostname(),
+    nonce: "held-task-start-race-trace",
+    created_at: new Date().toISOString(),
+  });
+  const startPromise = runAsync([
+    "task", "start", "--root", project,
+    "--story", "ST-START-RACE",
+    "--contract-id", "contract-ST-START-RACE-v1",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-START-RACE" }],
+      proposed_phase: "implementation",
+    }),
+    "--confirm-start",
+    "--actor-type", "human",
+    "--json",
+  ], { timeout: 60_000 });
+  const boundaryLock = path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-START-RACE",
+    "task-start-boundary.lock",
+  );
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(boundaryLock); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(fs.existsSync(boundaryLock), true, "task start never acquired its boundary lock");
+  const replacementPromise = runAsync([
+    "contract", "create", "--root", project,
+    "--phase", "implementation",
+    "--story", "ST-START-RACE",
+    "--id", "contract-ST-START-RACE-v2",
+    "--replace-story-contract",
+    "--context-summary", "A concurrent replacement must wait",
+    "--qa", "May this replace an already-starting task?|No",
+    "--output-ref", "implementation-summary:implementation-summary-v1:new",
+  ], { timeout: 60_000 });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "contracts", "contract-ST-START-RACE-v2.json")),
+    false,
+  );
+  fs.rmSync(heldTraceLock);
+  const [started, replacement] = await Promise.all([startPromise, replacementPromise]);
+  assert.equal(started.status, 0, `${started.stdout}\n${started.stderr}`);
+  assert.notEqual(replacement.status, 0, "contract replacement unexpectedly raced past task start");
+  assert.match(
+    `${replacement.stdout}\n${replacement.stderr}`,
+    /already has an immutable task-start boundary/i,
+  );
+  const receipt = readJson(path.join(
+    project,
+    ".sdlc",
+    "stories",
+    "ST-START-RACE",
+    "task-start.json",
+  ));
+  assert.equal(receipt.contract_id, "contract-ST-START-RACE-v1");
+  assert.equal(readJson(storyPath).contract_id, "contract-ST-START-RACE-v1");
+});
+
 test("strict gate fails when a story has no contract", () => {
   const project = tmpProject("missing-contract");
   initProject(project);
@@ -1689,6 +3009,9 @@ test("claim TTL is config-driven and legacy unbounded claims become stale", () =
   config.claim_policy.default_ttl_seconds = 90;
   writeJson(configPath, config);
   pinProjectConfig(project);
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(project, "ST-TTL", "design", "functional-analysis");
+  startStoryTask(project, "ST-TTL", "design");
 
   const claimed = JSON.parse(mustRun([
     "story",
@@ -1766,7 +3089,11 @@ test("formal approvals require explicit source and summary or evidence", () => {
   mustRun(["contract", "approve", "--root", project, "--id", "contract-approval-policy", ...humanApproval("Explicitly approved")]);
   const approvalTrace = readJsonLines(path.join(project, ".sdlc", "traces", "project.jsonl"))
     .find((event) => event.action === "contract.approve");
-  assert.deepEqual(approvalTrace.evidence, [".sdlc/contracts/contract-approval-policy.json"]);
+  assert.deepEqual(approvalTrace.evidence, []);
+  assert.equal(approvalTrace.request.source, "contract.approve");
+  assert.equal(approvalTrace.request.contract_id, "contract-approval-policy");
+  assert.equal(approvalTrace.request.approval_status, "approved");
+  assert.match(approvalTrace.request.resulting_contract_hash, /^[a-f0-9]{64}$/u);
 });
 
 test("delegated automation approvals require persistent action and scope authorization", () => {
@@ -1832,7 +3159,7 @@ test("delegated automation approvals require persistent action and scope authori
     "--approval-source",
     "explicit-user",
   ], /cannot combine multiple --allow-action and multiple --allow-subject/);
-  story(project, "ST-001", ["--contract", "contract-ST-001-implementation"]);
+  story(project, "ST-001");
   const authorization = grantAutomationAuthorization(
     project,
     "AUTH-DELEGATED-ASSESSMENT",
@@ -2253,7 +3580,7 @@ test("delegated automation approvals require persistent action and scope authori
   );
   mustFail(
     [...startArguments, "--authorization", wrongStartArtifactAuthorization.id],
-    /does not allow artifact type implementation-summary/,
+    /already immutably recorded.*continue the existing governed run/is,
   );
 });
 
@@ -5436,6 +6763,7 @@ test("strict gates reject missing historical baselines still referenced by contr
     "functional-analysis:functional-analysis-v1:new",
   ]);
   mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-design", ...humanApproval("Approved baseline-bound contract")]);
+  startStoryTask(project, "ST-001", "design");
   const artifact = writeArtifact(project, ".sdlc/requirements/ST-001-functional-analysis.md");
   mustRun([
     "output",
@@ -5495,6 +6823,8 @@ test("output duplicate new is blocked before registry write without matching dec
   createApprovedTemplate(project);
   createApprovedStoryContract(project, "ST-001");
   createApprovedStoryContract(project, "ST-002");
+  startStoryTask(project, "ST-001", "design");
+  startStoryTask(project, "ST-002", "design");
   const first = writeArtifact(project, ".sdlc/requirements/ST-001-functional.md");
   const second = writeArtifact(project, ".sdlc/requirements/ST-002-functional.md");
   mustRun([
@@ -5572,6 +6902,8 @@ test("output override decision cannot be reused for a different link", () => {
   createApprovedTemplate(project);
   createApprovedStoryContract(project, "ST-001");
   createApprovedStoryContract(project, "ST-002");
+  startStoryTask(project, "ST-001", "design");
+  startStoryTask(project, "ST-002", "design");
   const first = writeArtifact(project, ".sdlc/requirements/ST-001.md");
   const second = writeArtifact(project, ".sdlc/requirements/ST-002.md");
   mustRun([
@@ -6026,7 +7358,7 @@ test("phase locks reject concurrent active locks on the same scope", () => {
 test("work items and approved breakdown are persisted and indexed as canonical KB", () => {
   const project = tmpProject("work-breakdown");
   initProject(project);
-  story(project, "ST-001", ["--requirement", "REQ-001", "--breakdown", "BD-REQ-001"]);
+  story(project, "ST-001", ["--requirement", "REQ-001"]);
   mustRun(["work", "item", "create", "--root", project, "--type", "epic", "--id", "EP-001", "--title", "Epic 001", "--requirement", "REQ-001"]);
   mustRun(["work", "item", "create", "--root", project, "--type", "task", "--id", "TASK-001", "--title", "Task 001", "--parent", "EP-001", "--story", "ST-001"]);
   mustRun([
@@ -6105,11 +7437,12 @@ test("strict gate blocks story delivery when referenced breakdown is not approve
 test("contract capability policy requires bindings and rejects overlaps", () => {
   const project = tmpProject("capability-contract");
   initProject(project);
-  createStrictReadyStory(project, "ST-001");
-  const storyPath = path.join(project, ".sdlc", "stories", "ST-001", "story.json");
-  const storyData = readJson(storyPath);
-  writeJson(storyPath, { ...storyData, status: "implementation", phase: "implementation", contract_id: "contract-ST-001-implementation" });
-  mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "codex", "--branch", "feature/ST-001"]);
+  story(project, "ST-001", [
+    "--requirement", "REQ-001",
+    "--phase", "implementation",
+    "--status", "ready",
+  ]);
+  createApprovedTemplate(project, "functional-analysis");
   const policy = JSON.stringify({
     skills: { required: ["agentic-sdlc"], allowed: [], forbidden: [] },
     mcp: { required: ["repo"], allowed: [], forbidden: [] },
@@ -6222,7 +7555,8 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     "--story",
     "ST-001",
     "--id",
-    "contract-ST-001-implementation",
+    "contract-ST-001-implementation-v2",
+    "--replace-story-contract",
     "--context-summary",
     "Implementation capability contract",
     "--qa",
@@ -6233,15 +7567,32 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     policy,
     "--capability-binding-json",
     binding,
-    "--force",
   ]);
-  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation", ...humanApproval("Approved implementation contract")]);
-  mustRun(["gate", "check", "--root", project, "--story", "ST-001", "--strict"]);
-  const historicalApprovedContract = readJson(incompleteContractPath);
+  mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-implementation-v2", ...humanApproval("Approved implementation contract")]);
+  const validContractPath = path.join(
+    project,
+    ".sdlc",
+    "contracts",
+    "contract-ST-001-implementation-v2.json",
+  );
+  const readyStart = JSON.parse(mustRun([
+    "task", "start",
+    "--root", project,
+    "--json",
+    "--contract-id", "contract-ST-001-implementation-v2",
+    "--intent-json", routeIntent({
+      requested_action: "implement_story",
+      referenced_entities: [{ type: "story", id: "ST-001" }],
+      proposed_phase: "implementation",
+    }),
+  ]).stdout);
+  assert.equal(readyStart.contract_action, "confirm_start");
+  assert.equal(readyStart.blocking_reasons.includes("contract_incomplete"), false);
+  const historicalApprovedContract = readJson(validContractPath);
   historicalApprovedContract.capability_bindings = [];
   historicalApprovedContract.approvals.at(-1).approved_content_hash =
     computeGovernedApprovalSubjectHash(historicalApprovedContract);
-  writeJson(incompleteContractPath, historicalApprovedContract);
+  writeJson(validContractPath, historicalApprovedContract);
   const historicalStart = JSON.parse(mustRun([
     "task",
     "start",
@@ -6249,7 +7600,7 @@ test("contract capability policy requires bindings and rejects overlaps", () => 
     project,
     "--json",
     "--contract-id",
-    "contract-ST-001-implementation",
+    "contract-ST-001-implementation-v2",
     "--intent-json",
     routeIntent({
       requested_action: "implement_story",
@@ -6663,6 +8014,7 @@ test("phase-scoped output refs parse compatibly and bind completion to the exact
     "contract-ST-PHASED-lifecycle",
     ...humanApproval("Approve phase-scoped lifecycle outputs"),
   ]);
+  startStoryTask(project, "ST-PHASED", "implementation");
 
   mustFail([
     "story",
@@ -7403,7 +8755,7 @@ test("capability recommendation stays usable when its profile is approved after 
 test("install-required capability recommendation blocks strict gate without install approval", () => {
   const project = tmpProject("capability-install");
   initProject(project);
-  story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
+  story(project, "ST-001");
   createApprovedTemplate(project, "technical-analysis");
   mustRun(["capability", "profile", "propose", "--root", project, "--id", "CAP-PROFILE-ST-001", "--story", "ST-001"]);
   mustRun(["capability", "profile", "approve", "--root", project, "--id", "CAP-PROFILE-ST-001", ...humanApproval("Approved capability profile")]);
@@ -7508,7 +8860,7 @@ test("install-required capability recommendation blocks strict gate without inst
 test("stale capability recommendation source fails strict gate", () => {
   const project = tmpProject("capability-stale");
   initProject(project);
-  story(project, "ST-001", ["--contract", "contract-ST-001-analysis"]);
+  story(project, "ST-001");
   const source = writeArtifact(project, ".sdlc/requirements/REQ-001.md", "# Requirement\n");
   createApprovedTemplate(project, "technical-analysis");
   const analysisArtifact = writeArtifact(project, ".sdlc/requirements/ST-001-technical-analysis.md", "# Technical Analysis\n");
@@ -7548,6 +8900,7 @@ test("stale capability recommendation source fails strict gate", () => {
     "--force",
   ]);
   mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", ...humanApproval("Approved analysis contract")]);
+  startStoryTask(project, "ST-001", "analysis");
   mustRun([
     "output",
     "link",
@@ -8078,6 +9431,7 @@ test("orchestration hashes dependency artifacts outside .sdlc without using a sh
   story(project, "ST-UPSTREAM");
   createApprovedTemplate(project);
   createApprovedStoryContract(project, "ST-UPSTREAM");
+  startStoryTask(project, "ST-UPSTREAM", "design");
   const artifact = writeArtifact(project, "docs/ST-UPSTREAM-functional-analysis.md");
   writeArtifact(project, ".sdlc/docs/ST-UPSTREAM-functional-analysis.md", "# Stale shadow artifact\n");
   mustRun([
@@ -8231,7 +9585,7 @@ test("task start is the SDLC front door before phase work", () => {
 
   const readyProject = tmpProject("task-start-ready");
   initProject(readyProject);
-  story(readyProject, "ST-001", ["--contract", "contract-ST-001-implementation"]);
+  story(readyProject, "ST-001");
   createApprovedTemplate(readyProject, "implementation-summary");
   mustRun([
     "contract",
@@ -8255,9 +9609,14 @@ test("task start is the SDLC front door before phase work", () => {
   const storyPath = path.join(readyProject, ".sdlc", "stories", "ST-001", "story.json");
   const storyData = readJson(storyPath);
   writeJson(storyPath, { ...storyData, status: "ready", phase: "implementation" });
-  story(readyProject, "ST-002", ["--contract", "contract-ST-001-implementation"]);
+  story(readyProject, "ST-002");
   const secondStoryPath = path.join(readyProject, ".sdlc", "stories", "ST-002", "story.json");
-  writeJson(secondStoryPath, { ...readJson(secondStoryPath), status: "ready", phase: "implementation" });
+  writeJson(secondStoryPath, {
+    ...readJson(secondStoryPath),
+    status: "ready",
+    phase: "implementation",
+    contract_id: "contract-ST-001-implementation",
+  });
 
   const intent = routeIntent({
     requested_action: "implement_story",
@@ -8332,6 +9691,8 @@ test("task start is the SDLC front door before phase work", () => {
   assert.equal(confirmed.execution_allowed, true);
   assert.equal(confirmed.contract_id, "contract-ST-001-implementation");
   assert.match(confirmed.confirmation_trace_id, /^TR-/);
+  const confirmedReceiptPath = path.join(readyProject, confirmed.task_start_receipt);
+  const confirmedReceiptBytes = fs.readFileSync(confirmedReceiptPath);
 
   const resumeAuthorization = grantAutomationAuthorization(
     readyProject,
@@ -8349,7 +9710,7 @@ test("task start is the SDLC front door before phase work", () => {
     "--agent",
     "codex",
   ]);
-  const resumedByClaimant = JSON.parse(mustRun([
+  mustFail([
     "task",
     "start",
     "--root",
@@ -8360,12 +9721,8 @@ test("task start is the SDLC front door before phase work", () => {
     "--confirm-start",
     "--authorization",
     resumeAuthorization.id,
-  ]).stdout);
-  assert.equal(resumedByClaimant.status, "ready_to_execute");
-  assert.equal(resumedByClaimant.execution_allowed, true);
-  assert.ok(resumedByClaimant.route_decision.deterministic_checks.some(
-    (check) => check.check === "active_claim" && /requesting actor codex/.test(check.details),
-  ));
+  ], /already immutably recorded.*continue the existing governed run/is);
+  assert.deepEqual(fs.readFileSync(confirmedReceiptPath), confirmedReceiptBytes);
 
   const revision = JSON.parse(mustRun([
     "task",
@@ -8386,7 +9743,7 @@ test("task start is the SDLC front door before phase work", () => {
 test("task start rejects a bootstrap-only contract approval", () => {
   const project = tmpProject("task-start-bootstrap-contract");
   initProject(project);
-  story(project, "ST-BOOT", ["--contract", "contract-ST-BOOT-implementation"]);
+  story(project, "ST-BOOT");
   createApprovedTemplate(project, "implementation-summary");
   mustRun([
     "contract",
@@ -8451,7 +9808,7 @@ test("task start blocks when an approved contract source changes", () => {
     "requirements/implementation-context.md",
     "# Implementation context\nUse the approved API boundary.\n",
   );
-  story(project, "ST-STALE", ["--contract", "contract-ST-STALE-implementation"]);
+  story(project, "ST-STALE");
   createApprovedTemplate(project, "implementation-summary");
   mustRun([
     "contract",
@@ -8584,6 +9941,77 @@ test("route decide sends ready implementation story to claim_and_implement with 
   assert.ok(decision.next_commands.some((command) => command.includes("story claim --id ST-001")));
 });
 
+test("route and orchestration do not advertise a claim before governed task start", () => {
+  const project = tmpProject("route-claim-before-task-start");
+  initProject(project);
+  story(project, "ST-CLAIM-START", [
+    "--phase", "design",
+    "--status", "ready",
+  ]);
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(
+    project,
+    "ST-CLAIM-START",
+    "design",
+    "functional-analysis",
+  );
+
+  const beforeStart = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-CLAIM-START" }],
+    proposed_phase: "design",
+  });
+  assert.equal(beforeStart.route, "claim_and_implement");
+  assert.equal(beforeStart.status, "blocked");
+  assert.equal(beforeStart.requires_confirmation, false);
+  assert.ok(beforeStart.blocking_reasons.includes("task_start_required"));
+  assert.ok(beforeStart.next_commands.some((command) =>
+    command.includes("task start --story ST-CLAIM-START")));
+  assert.equal(beforeStart.next_commands.some((command) =>
+    command.includes("story claim --id ST-CLAIM-START")), false);
+
+  const blockedStatus = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  const preStartStory = blockedStatus.stories.find((item) =>
+    item.id === "ST-CLAIM-START");
+  assert.equal(preStartStory.orchestration_state, "available");
+  const preStartPlan = JSON.parse(mustRun([
+    "orchestrate", "plan", "--root", project, "--json",
+  ]).stdout);
+  const preStartCandidate = preStartPlan.candidates.find((item) =>
+    item.story_id === "ST-CLAIM-START");
+  assert.equal(preStartCandidate.suggested_action, "task_start");
+  assert.match(preStartCandidate.suggested_command, /task start --story ST-CLAIM-START/u);
+  assert.equal(preStartCandidate.suggested_claim, null);
+
+  startStoryTask(project, "ST-CLAIM-START", "design");
+  const afterStart = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-CLAIM-START" }],
+    proposed_phase: "design",
+  });
+  assert.equal(afterStart.route, "claim_and_implement");
+  assert.equal(afterStart.requires_confirmation, true);
+  assert.ok(afterStart.next_commands.some((command) =>
+    command.includes("story claim --id ST-CLAIM-START")));
+  const availableStatus = JSON.parse(mustRun([
+    "orchestrate", "status", "--root", project, "--json",
+  ]).stdout);
+  assert.equal(
+    availableStatus.stories.find((item) =>
+      item.id === "ST-CLAIM-START").orchestration_state,
+    "available",
+  );
+  const claimPlan = JSON.parse(mustRun([
+    "orchestrate", "plan", "--root", project, "--json",
+  ]).stdout);
+  const claimCandidate = claimPlan.candidates.find((item) =>
+    item.story_id === "ST-CLAIM-START");
+  assert.equal(claimCandidate.suggested_action, "claim_story");
+  assert.match(claimCandidate.suggested_claim, /story claim --id ST-CLAIM-START/u);
+});
+
 test("route decide asks to create a missing story before implementation", () => {
   const project = tmpProject("route-missing-story");
   initProject(project);
@@ -8594,6 +10022,73 @@ test("route decide asks to create a missing story before implementation", () => 
   assert.equal(decision.route, "ask_clarification");
   assert.ok(decision.blocking_reasons.includes("story_not_found"));
   assert.ok(decision.next_commands.some((command) => command.includes("story create --id ST-404")));
+});
+
+test("route decide gives the additive recovery command for a legacy story without acceptance", () => {
+  const project = tmpProject("route-missing-story-acceptance");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-LEGACY-ACCEPTANCE",
+    "--title", "Legacy story missing success criteria",
+  ]);
+  const decision = routeDecision(project, {
+    requested_action: "implement_story",
+    referenced_entities: [{ type: "story", id: "ST-LEGACY-ACCEPTANCE" }],
+  });
+  assert.equal(decision.route, "ask_clarification");
+  assert.ok(decision.blocking_reasons.includes("missing_acceptance_criteria"));
+  assert.ok(decision.next_commands.some((command) =>
+    command.includes("story acceptance add --id ST-LEGACY-ACCEPTANCE --acceptance")));
+  assert.equal(decision.next_commands.some((command) => command.includes("story create")), false);
+});
+
+test("route decide does not propose an impossible contract before story acceptance is observable", () => {
+  const project = tmpProject("route-contract-missing-story-acceptance");
+  initProject(project);
+  mustRun([
+    "story", "create", "--root", project,
+    "--id", "ST-CONTRACT-NO-ACCEPTANCE",
+    "--title", "Contract must wait for observable success",
+  ]);
+  const intent = {
+    requested_action: "create_contract",
+    referenced_entities: [{ type: "story", id: "ST-CONTRACT-NO-ACCEPTANCE" }],
+    proposed_phase: "design",
+  };
+  const decision = routeDecision(project, intent);
+  assert.equal(decision.route, "ask_clarification");
+  assert.ok(decision.blocking_reasons.includes("missing_acceptance_criteria"));
+  assert.ok(decision.next_commands.some((command) =>
+    command.includes("story acceptance add --id ST-CONTRACT-NO-ACCEPTANCE --acceptance")));
+  assert.equal(decision.next_commands.some((command) => command.includes("contract create")), false);
+  const english = mustRun([
+    "route", "decide", "--root", project,
+    "--intent-json", routeIntent(intent),
+  ]).stdout;
+  const englishGuidance = splitHumanGuidance(english, "en");
+  assert.match(englishGuidance.primary, /does not yet define a verifiable result.*work agreement cannot be prepared/is);
+  assert.match(englishGuidance.primary, /State at least one observable result/is);
+  assert.equal(
+    (english.match(
+      /story acceptance add --id ST-CONTRACT-NO-ACCEPTANCE --acceptance <criterion>/gu,
+    ) || []).length,
+    1,
+  );
+  const italian = mustRun([
+    "route", "decide", "--root", project,
+    "--intent-json", routeIntent(intent),
+    "--locale", "it",
+  ]).stdout;
+  const italianGuidance = splitHumanGuidance(italian, "it");
+  assert.match(italianGuidance.primary, /non definisce ancora un risultato verificabile.*accordo di lavoro non può essere preparato/is);
+  assert.match(italianGuidance.primary, /Indica almeno un risultato osservabile/is);
+  assert.equal(
+    (italian.match(
+      /story acceptance add --id ST-CONTRACT-NO-ACCEPTANCE --acceptance <criterion>/gu,
+    ) || []).length,
+    1,
+  );
 });
 
 test("route decide confirms phase skip for functional analysis", () => {
@@ -8628,6 +10123,7 @@ test("story step completion requires linked outputs and prepares releasable hand
   story(project, "ST-MISSING");
   createApprovedTemplate(project);
   createApprovedStoryContract(project, "ST-MISSING");
+  startStoryTask(project, "ST-MISSING", "design");
   mustFail(
     [
       "story",
@@ -8648,6 +10144,7 @@ test("story step completion requires linked outputs and prepares releasable hand
 
   story(project, "ST-001", ["--requirement", "REQ-001"]);
   createApprovedStoryContract(project, "ST-001");
+  startStoryTask(project, "ST-001", "design");
   const artifact = writeArtifact(project, ".sdlc/requirements/ST-001-functional-analysis.md");
   mustRun([
     "output",
@@ -9499,6 +10996,7 @@ test("phase outputs and story step completion require approved story contracts",
   ], /story\.complete-step is blocked[\s\S]*contract\.status is 'draft'/);
 
   mustRun(["contract", "approve", "--root", project, "--id", "contract-ST-001-analysis", ...humanApproval("Approved analysis contract")]);
+  startStoryTask(project, "ST-001", "analysis");
   mustRun([
     "output",
     "link",
@@ -10215,6 +11713,9 @@ test("parallel claim replacement and release cannot release the replacement clai
   const project = tmpProject("parallel-claim-release");
   initProject(project);
   story(project, "ST-001");
+  createApprovedTemplate(project, "functional-analysis");
+  createApprovedStoryContract(project, "ST-001", "design", "functional-analysis");
+  startStoryTask(project, "ST-001", "design");
   mustRun(["story", "claim", "--root", project, "--id", "ST-001", "--agent", "agent-old"]);
   const replacement = runAsync([
     "story",

@@ -110,6 +110,14 @@ Open the target project in a **new Codex task** and choose the request that matc
 
 Add the actual requirement, PR URL, desired local destination, exclusions, or acceptance criteria after the starter. Codex preserves information you already supplied and asks only for material gaps.
 
+For work that changes a product or named output, Codex also agrees the
+requirement's material paths before task start. These are stored as
+Git-relative project paths such as `src`, `test`, `docs`, and `evidence`; the
+project root and outside paths are rejected. A local release uses a separate
+boundary: its target and writable paths are explicit absolute filesystem paths
+inside that target. A revision inherits the requirement paths when none are
+supplied and replaces the complete list when any are supplied.
+
 For implementation work, the order is deliberately linear:
 
 1. preview and normalize the request without starting work;
@@ -118,7 +126,7 @@ For implementation work, the order is deliberately linear:
 4. agree the output and plain-language work brief;
 5. make a fresh autonomy choice for this one PR or local release;
 6. start the exact story-bound workflow before the task, then start the task once;
-7. implement and test, completing each phase before entering the next;
+7. claim the now-started story, then implement and test, completing each phase before entering the next;
 8. after validation, seal the intermediate strict gate and enter `release`;
 9. complete the named PR or local release, record release evidence, release the completed story claim, then seal the final lifecycle gate.
 
@@ -175,6 +183,15 @@ checkpoint. Codex then reports the delivered location, checks, exclusions,
 residual risks, and final receipt. The reader does not need to run the preceding
 low-level commands manually; [Getting Started](docs/getting-started.md#walk-through-one-complete-first-project)
 shows what to expect at each decision.
+
+A final receipt containing `workflow-final-freshness-proof:v1` remains useful
+as history but does not certify the current project. Rerun the same
+`--lifecycle-complete` command on the reviewed terminal state to reseal v2.
+V2 allows the exact certified content to be staged and committed on descendant
+history; it rejects transient divergent commits, replacement/graft history,
+alternate Git index environments, shallow history, hidden index flags, and
+later in-scope drift. In-scope untracked paths are inventoried even when
+project, repository, or global Git ignore rules match them.
 
 ### Know where work happens
 

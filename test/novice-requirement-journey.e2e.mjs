@@ -170,8 +170,16 @@ test("a structured Codex handoff reaches one executable PR task in lifecycle ord
     "--acceptance", "A Node test proves the response.",
     "--non-goal", "Do not deploy or contact an external service.",
     "--autonomy-ceiling", "checkpointed",
+    "--write-path", "src",
+    "--write-path", "test",
+    "--write-path", "evidence",
+    "--write-path", ".sdlc",
   ]);
   assert.equal(proposedRequirement.requirement.status, "proposed");
+  assert.deepEqual(
+    proposedRequirement.autonomy_profile.constraints.allowed_write_paths,
+    [".sdlc", "evidence", "src", "test"],
+  );
 
   const approvedRequirement = mustRunJson([
     "requirement", "approve",
@@ -303,6 +311,11 @@ test("a structured Codex handoff reaches one executable PR task in lifecycle ord
   assert.equal(started.contract_id, "contract-ST-NOVICE-001-implementation");
   assert.equal(started.delivery_profile_id, "AUT-PR-NOVICE-001");
   assert.deepEqual(started.blocking_reasons, []);
+  assert.equal(
+    started.deterministic_checks.some((check) =>
+      check.check === "requirement_write_scope" && check.status === "passed"),
+    true,
+  );
   assert.ok(started.delivery_start_receipt);
   assert.ok(started.task_start_receipt);
 });

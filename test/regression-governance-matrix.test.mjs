@@ -471,6 +471,7 @@ function createApprovedRequirement(project, id) {
     "--summary", "Deliver one exact governed result.",
     "--acceptance", "The selected delivery remains inside its reviewed boundary.",
     "--autonomy-ceiling", "bounded-autonomous",
+    "--write-path", "src",
   ]);
   cliJson([
     "requirement", "approve",

@@ -507,9 +507,9 @@ flowchart LR
 
 ## Parallel Work Model
 
-Parallelism is story-scoped. Each agent or developer claims a story and works on a dedicated branch. The claim is stored in the story folder, while events are appended to a trace log.
+Parallelism is story-scoped. Each agent or developer claims a story only after its current approved contract is bound by a valid immutable task start, then works on a dedicated branch. The claim is stored in the story folder, while events are appended to a trace log.
 
-For multiple Codex chats, one chat can act as parent orchestrator by reading `orchestrate status --json` and assigning available story lanes. Worker chats claim exactly one story, write attributed traces, record push/sync events, and release or hand off their claim when done.
+For multiple Codex chats, one chat can act as parent orchestrator by reading `orchestrate status --json` and assigning available story lanes. Worker chats verify the story workflow and task-start binding, claim exactly one story, write attributed traces, record push/sync events, and release or hand off their claim when done.
 
 Phase locks are reserved for shared artifacts that cannot be safely edited by multiple story lanes at once. Handoff records capture transfer between analysis, implementation, validation, and release agents.
 

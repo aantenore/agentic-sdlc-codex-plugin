@@ -32,6 +32,7 @@ function cloneTemporaryProject(source, label) {
     recursive: true,
     force: true,
     preserveTimestamps: true,
+    verbatimSymlinks: true,
   });
   return project;
 }
@@ -75,6 +76,28 @@ function runConcurrently(args, project, envOverrides = {}) {
       resolve({ status, signal, stdout, stderr });
     });
   });
+}
+
+async function waitForTextFile(
+  filePath,
+  expectedContents,
+  { timeoutMs = 20_000, intervalMs = 25 } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
+  let observedContents = null;
+  while (Date.now() < deadline) {
+    try {
+      observedContents = fs.readFileSync(filePath, "utf8");
+      if (observedContents === expectedContents) return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail(
+    `Timed out waiting for ${filePath}; expected `
+    + `${JSON.stringify(expectedContents)}, observed ${JSON.stringify(observedContents)}`,
+  );
 }
 
 function mustRun(args, project, options = {}) {
@@ -287,6 +310,16 @@ function initializeGitProject(project, branch, configureProject = null) {
     project,
     "docs/untouched-runtime.md",
     "# Untouched runtime input\n",
+  );
+  writeProjectFile(
+    project,
+    "docs/tracked-runtime.md",
+    "# Tracked runtime input\n",
+  );
+  writeProjectFile(
+    project,
+    "docs/deleted-runtime.md",
+    "# Runtime input deleted by the governed implementation\n",
   );
   writeProjectFile(
     project,
@@ -582,6 +615,17 @@ function createLegacyStrictStory(project, suffix) {
     "--id", contractId,
     ...humanApproval(`Approve ${contractId}`),
   ], project);
+  const taskStart = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--story", storyId,
+    "--phase", "design",
+    "--contract-id", contractId,
+    "--intent-json", implementationIntent(storyId),
+    "--confirm-start",
+    "--actor-type", "human",
+  ], project);
+  assert.equal(taskStart.execution_allowed, true);
   mustRun([
     "story", "claim",
     "--root", project,
@@ -1684,6 +1728,12 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   );
   assert.equal(taskStartReceipt.schema_version, "profile-task-start-receipt:v2");
   assert.equal(taskStartReceipt.workflow_instance_ref.id, workflowInstanceId);
+  fs.appendFileSync(
+    path.join(project, "docs", "tracked-runtime.md"),
+    "\nGoverned tracked-file implementation change.\n",
+    "utf8",
+  );
+  fs.rmSync(path.join(project, "docs", "deleted-runtime.md"));
   mustFail([
     "workflow", "instance", "start",
     "--root", project,
@@ -2581,6 +2631,505 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   assert.equal(certifiedWorkflowStatus.final_receipt_exists, true);
   assert.equal(certifiedWorkflowStatus.final_receipt_valid, true);
 
+  const finalReceiptIsValid = (target, options = {}) => mustRunJson([
+    "workflow", "instance", "status",
+    "--root", target,
+    "--id", workflowInstanceId,
+  ], target, options).final_receipt_valid;
+
+  const certificationGitEntries = readJson(project, finalReceiptPath)
+    .freshness_proof.git_scope.scoped_changes;
+  const trackedCertificationEntry = certificationGitEntries
+    .find((entry) => entry.path === "docs/tracked-runtime.md");
+  assert.equal(trackedCertificationEntry.index_matches_head, true);
+  assert.equal(trackedCertificationEntry.index_matches_worktree, false);
+  const trackedCommitProject = cloneTemporaryProject(
+    project,
+    "final-receipt-tracked-commit",
+  );
+  mustGit(trackedCommitProject, ["add", "docs/tracked-runtime.md"]);
+  assert.equal(finalReceiptIsValid(trackedCommitProject), true);
+  mustGit(
+    trackedCommitProject,
+    ["commit", "-m", "test: persist exact tracked-file change"],
+  );
+  assert.equal(finalReceiptIsValid(trackedCommitProject), true);
+
+  const deletedCertificationEntry = certificationGitEntries
+    .find((entry) => entry.path === "docs/deleted-runtime.md");
+  assert.equal(deletedCertificationEntry.index_matches_head, true);
+  assert.equal(deletedCertificationEntry.index_matches_worktree, false);
+  assert.equal(deletedCertificationEntry.working_tree.present, false);
+  const deletionCommitProject = cloneTemporaryProject(
+    project,
+    "final-receipt-deletion-commit",
+  );
+  mustGit(deletionCommitProject, ["add", "-u", "docs/deleted-runtime.md"]);
+  assert.equal(finalReceiptIsValid(deletionCommitProject), true);
+  mustGit(
+    deletionCommitProject,
+    ["commit", "-m", "test: persist exact certified deletion"],
+  );
+  assert.equal(finalReceiptIsValid(deletionCommitProject), true);
+
+  const divergentIndexProject = cloneTemporaryProject(
+    project,
+    "final-receipt-divergent-index",
+  );
+  const divergentBlob = mustGit(
+    divergentIndexProject,
+    ["hash-object", "src/index.mjs"],
+  );
+  mustGit(divergentIndexProject, [
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `100644,${divergentBlob},docs/implementation-summary.md`,
+  ]);
+  assert.equal(finalReceiptIsValid(divergentIndexProject), false);
+  mustGit(
+    divergentIndexProject,
+    ["commit", "-m", "test: persist a divergent staged blob"],
+  );
+  assert.equal(finalReceiptIsValid(divergentIndexProject), false);
+
+  const changedBrokenSymlinkProject = cloneTemporaryProject(
+    project,
+    "final-receipt-broken-symlink",
+  );
+  const changedBrokenSymlinkPath = path.join(
+    changedBrokenSymlinkProject,
+    "docs",
+    "deleted-runtime.md",
+  );
+  fs.symlinkSync("missing-runtime-target-b", changedBrokenSymlinkPath);
+  assert.equal(finalReceiptIsValid(changedBrokenSymlinkProject), false);
+
+  const certifiedSymlinkProject = cloneTemporaryProject(
+    project,
+    "final-receipt-certified-symlink",
+  );
+  fs.rmSync(path.join(certifiedSymlinkProject, finalReceiptPath));
+  const certifiedSymlinkPath = path.join(
+    certifiedSymlinkProject,
+    "docs",
+    "certified-runtime-link",
+  );
+  fs.symlinkSync("tracked-runtime.md", certifiedSymlinkPath);
+  const certifiedSymlinkReport = mustRunJson([
+    "gate", "check",
+    "--root", certifiedSymlinkProject,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], certifiedSymlinkProject);
+  assert.equal(certifiedSymlinkReport.status, "passed");
+  assert.equal(finalReceiptIsValid(certifiedSymlinkProject), true);
+  const changedCertifiedSymlinkProject = cloneTemporaryProject(
+    certifiedSymlinkProject,
+    "final-receipt-certified-symlink-target",
+  );
+  const changedCertifiedSymlinkPath = path.join(
+    changedCertifiedSymlinkProject,
+    "docs",
+    "certified-runtime-link",
+  );
+  assert.equal(
+    fs.readlinkSync(changedCertifiedSymlinkPath),
+    "tracked-runtime.md",
+  );
+  assert.equal(finalReceiptIsValid(changedCertifiedSymlinkProject), true);
+  fs.unlinkSync(changedCertifiedSymlinkPath);
+  fs.symlinkSync("untouched-runtime.md", changedCertifiedSymlinkPath);
+  assert.equal(finalReceiptIsValid(changedCertifiedSymlinkProject), false);
+
+  const infoExcludeProject = cloneTemporaryProject(
+    project,
+    "final-receipt-info-exclude",
+  );
+  writeProjectFile(
+    infoExcludeProject,
+    "docs/hidden-after-certification.md",
+    "Governed content must remain visible even when info/exclude changes.\n",
+  );
+  fs.appendFileSync(
+    path.join(infoExcludeProject, ".git", "info", "exclude"),
+    "\ndocs/hidden-after-certification.md\n",
+    "utf8",
+  );
+  assert.equal(finalReceiptIsValid(infoExcludeProject), false);
+
+  const worktreeIgnoreProject = cloneTemporaryProject(
+    project,
+    "final-receipt-worktree-ignore",
+  );
+  writeProjectFile(
+    worktreeIgnoreProject,
+    "docs/hidden-after-certification.md",
+    "Governed content must remain visible through a worktree ignore.\n",
+  );
+  writeProjectFile(
+    worktreeIgnoreProject,
+    ".gitignore",
+    "docs/hidden-after-certification.md\n",
+  );
+  assert.equal(finalReceiptIsValid(worktreeIgnoreProject), false);
+
+  const globalIgnoreProject = cloneTemporaryProject(
+    project,
+    "final-receipt-global-ignore",
+  );
+  writeProjectFile(
+    globalIgnoreProject,
+    "docs/hidden-after-certification.md",
+    "Governed content must remain visible through a global ignore.\n",
+  );
+  const fakeHome = path.join(globalIgnoreProject, "test-global-home");
+  const globalExcludesPath = path.join(fakeHome, "global-excludes");
+  fs.mkdirSync(fakeHome, { recursive: true });
+  fs.writeFileSync(
+    globalExcludesPath,
+    "docs/hidden-after-certification.md\n",
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(fakeHome, ".gitconfig"),
+    `[core]\n\texcludesFile = ${globalExcludesPath}\n`,
+    "utf8",
+  );
+  assert.equal(
+    finalReceiptIsValid(globalIgnoreProject, { env: { HOME: fakeHome } }),
+    false,
+  );
+
+  const outsideScopeGitlinkProject = cloneTemporaryProject(
+    project,
+    "final-receipt-outside-scope-gitlink",
+  );
+  const gitlinkCommit = mustGit(outsideScopeGitlinkProject, ["rev-parse", "HEAD"]);
+  mustGit(outsideScopeGitlinkProject, [
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${gitlinkCommit},vendor/outside-scope-submodule`,
+  ]);
+  assert.equal(finalReceiptIsValid(outsideScopeGitlinkProject), true);
+
+  const inScopeGitlinkProject = cloneTemporaryProject(
+    project,
+    "final-receipt-in-scope-gitlink",
+  );
+  mustGit(inScopeGitlinkProject, [
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${gitlinkCommit},docs/in-scope-submodule`,
+  ]);
+  assert.equal(finalReceiptIsValid(inScopeGitlinkProject), false);
+
+  const committedCertificationProject = cloneTemporaryProject(
+    project,
+    "final-receipt-clean-commit",
+  );
+  mustGit(committedCertificationProject, ["add", "-A"]);
+  assert.equal(finalReceiptIsValid(committedCertificationProject), true);
+  mustGit(
+    committedCertificationProject,
+    ["commit", "-m", "test: persist certified local project"],
+  );
+  assert.equal(
+    mustGit(committedCertificationProject, ["status", "--porcelain=v1"]),
+    "",
+  );
+  const committedCertificationStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", committedCertificationProject,
+    "--id", workflowInstanceId,
+  ], committedCertificationProject);
+  assert.equal(committedCertificationStatus.status, "terminal");
+  assert.equal(committedCertificationStatus.final_receipt_valid, true);
+
+  const divergentModeProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-divergent-mode",
+  );
+  mustGit(divergentModeProject, ["config", "core.filemode", "false"]);
+  mustGit(
+    divergentModeProject,
+    ["update-index", "--chmod=+x", "docs/implementation-summary.md"],
+  );
+  assert.equal(finalReceiptIsValid(divergentModeProject), false);
+  mustGit(
+    divergentModeProject,
+    ["commit", "-m", "test: persist divergent executable mode"],
+  );
+  assert.equal(finalReceiptIsValid(divergentModeProject), false);
+
+  const alternateIndexProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-alternate-index",
+  );
+  const alternateIndexPath = path.join(
+    alternateIndexProject,
+    ".git",
+    "certified-index-copy",
+  );
+  fs.copyFileSync(
+    path.join(alternateIndexProject, ".git", "index"),
+    alternateIndexPath,
+  );
+  mustGit(
+    alternateIndexProject,
+    ["update-index", "--chmod=+x", "docs/implementation-summary.md"],
+  );
+  assert.equal(finalReceiptIsValid(alternateIndexProject), false);
+  assert.equal(
+    finalReceiptIsValid(alternateIndexProject, {
+      env: { GIT_INDEX_FILE: alternateIndexPath },
+    }),
+    false,
+  );
+
+  const graftsProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-grafts",
+  );
+  const graftHead = mustGit(graftsProject, ["rev-parse", "HEAD"]);
+  const graftParent = mustGit(graftsProject, ["rev-parse", "HEAD^"]);
+  fs.writeFileSync(
+    path.join(graftsProject, ".git", "info", "grafts"),
+    `${graftHead} ${graftParent}\n`,
+    "utf8",
+  );
+  assert.equal(finalReceiptIsValid(graftsProject), false);
+
+  const shallowProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-shallow-history",
+  );
+  fs.writeFileSync(
+    path.join(shallowProject, ".git", "shallow"),
+    `${mustGit(shallowProject, ["rev-parse", "HEAD"])}\n`,
+    "utf8",
+  );
+  assert.equal(
+    mustGit(shallowProject, ["rev-parse", "--is-shallow-repository"]),
+    "true",
+  );
+  assert.equal(finalReceiptIsValid(shallowProject), false);
+
+  const rewrittenHistoryProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-rewritten-history",
+  );
+  const rewrittenTree = mustGit(
+    rewrittenHistoryProject,
+    ["rev-parse", "HEAD^{tree}"],
+  );
+  const nonDescendantCommit = mustGit(
+    rewrittenHistoryProject,
+    ["commit-tree", rewrittenTree, "-m", "test: same tree outside certified ancestry"],
+  );
+  mustGit(
+    rewrittenHistoryProject,
+    ["reset", "--hard", nonDescendantCommit],
+  );
+  assert.equal(
+    mustGit(rewrittenHistoryProject, ["status", "--porcelain=v1"]),
+    "",
+  );
+  assert.equal(finalReceiptIsValid(rewrittenHistoryProject), false);
+
+  const untrackedAfterCommitProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-rm-cached",
+  );
+  mustGit(
+    untrackedAfterCommitProject,
+    ["rm", "--cached", "--", "docs/implementation-summary.md"],
+  );
+  assert.equal(finalReceiptIsValid(untrackedAfterCommitProject), false);
+  mustGit(
+    untrackedAfterCommitProject,
+    ["commit", "-m", "test: remove certified artifact from Git"],
+  );
+  assert.equal(finalReceiptIsValid(untrackedAfterCommitProject), false);
+
+  const transientHistoryProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-transient-history",
+  );
+  writeProjectFile(
+    transientHistoryProject,
+    "docs/transient-after-certification.md",
+    "This path must remain visible in the post-certification history union.\n",
+  );
+  mustGit(
+    transientHistoryProject,
+    ["add", "docs/transient-after-certification.md"],
+  );
+  mustGit(
+    transientHistoryProject,
+    ["commit", "-m", "test: add transient governed path"],
+  );
+  mustGit(
+    transientHistoryProject,
+    ["rm", "docs/transient-after-certification.md"],
+  );
+  mustGit(
+    transientHistoryProject,
+    ["commit", "-m", "test: remove transient governed path"],
+  );
+  assert.equal(finalReceiptIsValid(transientHistoryProject), false);
+
+  const transientRevertProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-transient-revert",
+  );
+  const transientRevertPath = path.join(
+    transientRevertProject,
+    "docs",
+    "implementation-summary.md",
+  );
+  const certifiedTransientBytes = fs.readFileSync(transientRevertPath);
+  fs.appendFileSync(
+    transientRevertPath,
+    "\nDivergent transient governed content.\n",
+    "utf8",
+  );
+  mustGit(transientRevertProject, ["add", "docs/implementation-summary.md"]);
+  mustGit(
+    transientRevertProject,
+    ["commit", "-m", "test: commit divergent transient content"],
+  );
+  fs.writeFileSync(transientRevertPath, certifiedTransientBytes);
+  mustGit(transientRevertProject, ["add", "docs/implementation-summary.md"]);
+  mustGit(
+    transientRevertProject,
+    ["commit", "-m", "test: restore certified content"],
+  );
+  assert.equal(finalReceiptIsValid(transientRevertProject), false);
+
+  const replaceRefProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-replace-ref",
+  );
+  const replaceRefPath = path.join(
+    replaceRefProject,
+    "docs",
+    "implementation-summary.md",
+  );
+  const replacementBaseBytes = fs.readFileSync(replaceRefPath);
+  const replacementBaseCommit = mustGit(replaceRefProject, ["rev-parse", "HEAD"]);
+  const replacementBaseTree = mustGit(replaceRefProject, ["rev-parse", "HEAD^{tree}"]);
+  fs.appendFileSync(
+    replaceRefPath,
+    "\nDivergent commit hidden by a local Git replace ref.\n",
+    "utf8",
+  );
+  mustGit(replaceRefProject, ["add", "docs/implementation-summary.md"]);
+  mustGit(
+    replaceRefProject,
+    ["commit", "-m", "test: create replace-ref attack commit"],
+  );
+  const replacedCommit = mustGit(replaceRefProject, ["rev-parse", "HEAD"]);
+  const replacementCommit = mustGit(replaceRefProject, [
+    "commit-tree",
+    replacementBaseTree,
+    "-p",
+    replacementBaseCommit,
+    "-m",
+    "test: replacement object with certified tree",
+  ]);
+  mustGit(replaceRefProject, ["replace", replacedCommit, replacementCommit]);
+  fs.writeFileSync(replaceRefPath, replacementBaseBytes);
+  mustGit(replaceRefProject, ["add", "docs/implementation-summary.md"]);
+  assert.equal(finalReceiptIsValid(replaceRefProject), false);
+
+  const assumeUnchangedProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-assume-unchanged",
+  );
+  mustGit(
+    assumeUnchangedProject,
+    ["update-index", "--assume-unchanged", "docs/untouched-runtime.md"],
+  );
+  fs.appendFileSync(
+    path.join(assumeUnchangedProject, "docs", "untouched-runtime.md"),
+    "\nHidden assume-unchanged mutation.\n",
+    "utf8",
+  );
+  assert.equal(finalReceiptIsValid(assumeUnchangedProject), false);
+
+  const skipWorktreeProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-skip-worktree",
+  );
+  mustGit(
+    skipWorktreeProject,
+    ["update-index", "--skip-worktree", "docs/untouched-runtime.md"],
+  );
+  fs.appendFileSync(
+    path.join(skipWorktreeProject, "docs", "untouched-runtime.md"),
+    "\nHidden skip-worktree mutation.\n",
+    "utf8",
+  );
+  assert.equal(finalReceiptIsValid(skipWorktreeProject), false);
+
+  const legacyFreshnessProject = cloneTemporaryProject(
+    committedCertificationProject,
+    "final-receipt-v1-freshness",
+  );
+  const legacyFreshnessReceipt = readJson(
+    legacyFreshnessProject,
+    finalReceiptPath,
+  );
+  legacyFreshnessReceipt.freshness_proof.schema_version =
+    "workflow-final-freshness-proof:v1";
+  const {
+    proof_hash: ignoredLegacyFreshnessHash,
+    ...legacyFreshnessSubject
+  } = legacyFreshnessReceipt.freshness_proof;
+  legacyFreshnessReceipt.freshness_proof.proof_hash =
+    computeStableHash(legacyFreshnessSubject);
+  const {
+    receipt_hash: ignoredLegacyReceiptHash,
+    hash_algorithm: ignoredLegacyReceiptAlgorithm,
+    ...legacyReceiptSubject
+  } = legacyFreshnessReceipt;
+  legacyFreshnessReceipt.receipt_hash = computeStableHash(legacyReceiptSubject);
+  fs.writeFileSync(
+    path.join(legacyFreshnessProject, finalReceiptPath),
+    `${JSON.stringify(legacyFreshnessReceipt, null, 2)}\n`,
+    "utf8",
+  );
+  assert.equal(finalReceiptIsValid(legacyFreshnessProject), false);
+  const resealedFreshness = mustRunJson([
+    "gate", "check",
+    "--root", legacyFreshnessProject,
+    "--strict",
+    "--story", fixture.storyId,
+    "--lifecycle-complete",
+  ], legacyFreshnessProject);
+  assert.equal(
+    resealedFreshness.freshness_proof.schema_version,
+    "workflow-final-freshness-proof:v2",
+  );
+  assert.equal(finalReceiptIsValid(legacyFreshnessProject), true);
+
+  fs.appendFileSync(
+    path.join(committedCertificationProject, "docs", "implementation-summary.md"),
+    "\nChanged after the clean certification commit.\n",
+    "utf8",
+  );
+  const changedAfterCommitStatus = mustRunJson([
+    "workflow", "instance", "status",
+    "--root", committedCertificationProject,
+    "--id", workflowInstanceId,
+  ], committedCertificationProject);
+  assert.equal(changedAfterCommitStatus.status, "blocked");
+  assert.equal(changedAfterCommitStatus.final_receipt_valid, false);
+
   const trackedInScopePath = path.join(
     project,
     "docs",
@@ -2620,23 +3169,23 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   assert.equal(outsideScopeStatus.final_receipt_valid, true);
   fs.writeFileSync(postFinalOutsideScopePath, outsideScopeBytes);
 
-  const unrelatedLocalReleaseSibling = path.join(
+  const requirementScopedReleaseSibling = path.join(
     fixture.localReleaseRoot,
     "sibling-unrelated.txt",
   );
   fs.writeFileSync(
-    unrelatedLocalReleaseSibling,
-    "This sibling is outside the approved local-release write path.\n",
+    requirementScopedReleaseSibling,
+    "This sibling is outside the release write path but remains inside the requirement scope.\n",
     "utf8",
   );
-  const unrelatedLocalReleaseStatus = mustRunJson([
+  const requirementScopedReleaseStatus = mustRunJson([
     "workflow", "instance", "status",
     "--root", project,
     "--id", workflowInstanceId,
   ], project);
-  assert.equal(unrelatedLocalReleaseStatus.status, "terminal");
-  assert.equal(unrelatedLocalReleaseStatus.final_receipt_valid, true);
-  fs.rmSync(unrelatedLocalReleaseSibling);
+  assert.equal(requirementScopedReleaseStatus.status, "blocked");
+  assert.equal(requirementScopedReleaseStatus.final_receipt_valid, false);
+  fs.rmSync(requirementScopedReleaseSibling);
 
   const certifiedLocalReleaseArtifactPath = path.join(
     fixture.localReleaseOutput,
@@ -2712,7 +3261,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
   );
   assert.equal(
     resurrectionReceiptRecordBefore.freshness_proof.schema_version,
-    "workflow-final-freshness-proof:v1",
+    "workflow-final-freshness-proof:v2",
   );
   const independentProject = cloneTemporaryProject(
     project,
@@ -3488,10 +4037,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: raceMarkerPath,
   });
-  for (let attempt = 0; attempt < 200 && !fs.existsSync(raceMarkerPath); attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.equal(fs.readFileSync(raceMarkerPath, "utf8"), lifecycleLockPath);
+  await waitForTextFile(raceMarkerPath, lifecycleLockPath);
   const racedFailedTracePromise = runConcurrently(failedTraceArgs, project);
   const [racedGate, racedFailedTrace] = await Promise.all([
     racedGatePromise,
@@ -3585,17 +4131,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: outputRaceMarkerPath,
   });
-  for (
-    let attempt = 0;
-    attempt < 200 && !fs.existsSync(outputRaceMarkerPath);
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.equal(
-    fs.readFileSync(outputRaceMarkerPath, "utf8"),
-    lifecycleLockPath,
-  );
+  await waitForTextFile(outputRaceMarkerPath, lifecycleLockPath);
   const outputRaceLinkPromise = runConcurrently([
     "output", "link",
     "--root", project,
@@ -3674,17 +4210,7 @@ test("lifecycle-complete strict gate requires the pre-task workflow and an alter
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_PATH: lifecycleLockPath,
     AGENTIC_SDLC_TEST_LIFECYCLE_LOCK_MARKER: contractRaceMarkerPath,
   });
-  for (
-    let attempt = 0;
-    attempt < 200 && !fs.existsSync(contractRaceMarkerPath);
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.equal(
-    fs.readFileSync(contractRaceMarkerPath, "utf8"),
-    lifecycleLockPath,
-  );
+  await waitForTextFile(contractRaceMarkerPath, lifecycleLockPath);
   fs.writeFileSync(
     certifiedContractPath,
     `${JSON.stringify(changedCertifiedContract, null, 2)}\n`,

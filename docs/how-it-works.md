@@ -28,11 +28,12 @@ The technical chain for `ST-TRIP-POLICY-001` is:
    `phase_order` requires an approved story-bound definition with that exact
    order. Its transitions consult canonical requirement,
    contract, output, gate, and delivery records rather than trusting
-   caller-supplied guard claims.
-5. **Implementation and validation** write only the intersection of approved
-   scopes, link the real output, record the latest test and verification
-   evidence, and complete each phase before entering the next. A newer failure
-   supersedes an older passing trace.
+   caller-supplied guard claims. The immutable task start must bind the current
+   approved contract before any worker can claim the story.
+5. **Implementation and validation** claim the started story, write only the
+   intersection of approved scopes, link the real output, record the latest
+   test and verification evidence, and complete each phase before entering the
+   next. A newer failure supersedes an older passing trace.
 6. **Release entry** runs the ordinary strict validation gate and moves the
    bound workflow into `release`.
 7. **Release** only then closes the exact local delivery as `released`, appends
@@ -51,6 +52,17 @@ configured phases, current approvals, required output, latest test evidence,
 terminal delivery, and release evidence into the final receipt. A strict check
 run earlier may support an intermediate decision but must not be presented as
 proof that discovery-to-release delivery is complete.
+
+Final receipts sealed with `workflow-final-freshness-proof:v1` are historical
+evidence, not a current certificate. On an unchanged, still-valid terminal
+workflow, rerun the same lifecycle-complete command to reseal the receipt with
+v2. The v2 proof permits the exact certified working tree to be staged and
+committed only along descendant history; a transient different value, history
+replacement or graft, inherited alternate Git index, hidden index flag, or
+shallow history invalidates it. Ignored and non-ignored untracked paths inside
+the approved write scope are both inventoried, so changing ignore rules cannot
+hide a later in-scope mutation. Preserve the old receipt in repository history
+if the audit trail matters.
 
 The normal user experiences this chain as an explained sequence of decisions
 and results. Codex prepares the structured inputs and runs the CLI; record IDs,

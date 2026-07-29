@@ -6,6 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { computeRequirementExecutionProfileHash } from "../lib/autonomy-policy.mjs";
+import { computeStableHash } from "../lib/canonical.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
 
@@ -60,6 +63,7 @@ test("direct focused help exposes the exact inputs for the core work sequence", 
   const cwd = temporaryDirectory("core-work-help");
   const expectations = [
     { command: ["story", "create"], required: ["--id", "--title"], present: ["--acceptance"] },
+    { command: ["story", "acceptance", "add"], required: ["--id", "--acceptance"], present: ["--summary"] },
     { command: ["story", "claim"], required: ["--id", "--agent"], present: ["--branch"] },
     { command: ["output", "resolve"], required: ["--story", "--type"], present: [] },
     { command: ["contract", "approve"], required: ["--id", "--actor-type"], present: ["--approval-source", "--approval-evidence"] },
@@ -80,6 +84,16 @@ test("direct focused help exposes the exact inputs for the core work sequence", 
   const italian = mustRun(["task", "start", "--help", "--locale", "it"], { cwd });
   assertPrimaryHasNoTechnicalJargon(italian.stdout, "it");
   assert.match(italian.stdout.split("Dettagli tecnici (facoltativi):")[1], /--intent-json/u);
+  const acceptanceGroup = mustRun(["help", "story", "acceptance", "--locale", "it"], { cwd });
+  assert.match(acceptanceGroup.stdout, /Completa i criteri di successo osservabili/u);
+  const acceptanceLeaf = JSON.parse(
+    mustRun(["help", "story", "acceptance", "add", "--json"], { cwd }).stdout,
+  );
+  assert.equal(acceptanceLeaf.command.path, "story acceptance add");
+  assert.equal(
+    acceptanceLeaf.options.find((entry) => entry.flag === "--acceptance")?.required,
+    true,
+  );
   assert.equal(fs.existsSync(path.join(cwd, ".sdlc")), false);
 });
 
@@ -93,6 +107,18 @@ test("requirement and contract help describe commands that run with the document
     assert.equal(requirementFlags.get(flag)?.required, true, flag);
   }
   assert.match(requirementHelp.examples[0], /--title .*--summary .*--acceptance .*--autonomy-ceiling/u);
+  assert.match(requirementHelp.examples[0], /--write-path src .*--write-path test/iu);
+  assert.match(requirementFlags.get("--write-path")?.description, /stored Git-relative/u);
+
+  const revisionHelp = JSON.parse(mustRun([
+    "help", "requirement", "revise", "--locale", "it", "--json",
+  ], { cwd }).stdout);
+  const revisionFlags = new Map(revisionHelp.options.map((entry) => [entry.flag, entry]));
+  assert.equal(revisionFlags.get("--id")?.required, true);
+  assert.equal(revisionFlags.get("--new-id")?.required, true);
+  assert.equal(revisionFlags.get("--write-path")?.repeatable, true);
+  assert.match(revisionHelp.human.result, /vengono ereditate.*elenco sostitutivo/iu);
+  assert.match(revisionFlags.get("--write-path")?.description, /salvati relativi a Git/iu);
 
   const proposed = JSON.parse(mustRun([
     "requirement", "propose",
@@ -102,9 +128,17 @@ test("requirement and contract help describe commands that run with the document
     "--summary", "Confirm a booking once and expose a recoverable failure",
     "--acceptance", "A successful request returns one confirmation reference",
     "--autonomy-ceiling", "checkpointed",
+    "--write-path", "src",
+    "--write-path", "test",
+    "--write-path", "evidence",
     "--json",
   ], { cwd }).stdout);
   assert.equal(proposed.status, "proposed");
+  assert.deepEqual(
+    proposed.autonomy_profile.constraints.allowed_write_paths,
+    ["evidence", "src", "test"],
+  );
+  assert.deepEqual(proposed.warnings, []);
 
   const approved = JSON.parse(mustRun([
     "requirement", "approve",
@@ -132,6 +166,154 @@ test("requirement and contract help describe commands that run with the document
   ], { cwd }).stdout);
   assert.equal(contract.contract.id, "CONTRACT-BOOKING-DESIGN-001");
   assert.equal(contract.contract.status, "draft");
+});
+
+test("requirement write paths become Git-relative and invalid root or outside scopes leave no proposal", () => {
+  const cwd = temporaryDirectory("requirement-write-scope");
+  mustRun(["init", "--project-name", "Requirement write scope", "--root", cwd]);
+
+  const proposed = JSON.parse(mustRun([
+    "requirement", "propose",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-CANONICAL",
+    "--title", "Canonical project scope",
+    "--summary", "Change only the named project areas",
+    "--acceptance", "The named project areas contain the verified result",
+    "--autonomy-ceiling", "checkpointed",
+    "--write-path", `${cwd}/src/../src`,
+    "--write-path", "./test",
+    "--write-path", "src",
+    "--json",
+  ], { cwd }).stdout);
+  assert.deepEqual(proposed.autonomy_profile.material_scope.write_paths, ["src", "test"]);
+  assert.deepEqual(proposed.autonomy_profile.constraints.allowed_write_paths, ["src", "test"]);
+  assert.deepEqual(proposed.warnings, []);
+
+  const empty = JSON.parse(mustRun([
+    "requirement", "propose",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-EMPTY",
+    "--title", "Empty project scope",
+    "--summary", "Describe an outcome before its file areas are known",
+    "--acceptance", "A later revision names every area that may change",
+    "--autonomy-ceiling", "supervised",
+    "--locale", "it",
+    "--json",
+  ], { cwd }).stdout);
+  assert.equal(empty.warnings.length, 1);
+  assert.match(empty.warnings[0], /scope di scrittura.*vuoto/iu);
+
+  for (const [id, rejectedPath, message] of [
+    ["REQ-SCOPE-ROOT", cwd, /project root itself/u],
+    ["REQ-SCOPE-OUTSIDE", path.join(os.tmpdir(), "agentic-sdlc-outside-scope"), /inside the target project root/u],
+    ["REQ-SCOPE-GIT-METADATA", ".git/index", /cannot include Git repository metadata/u],
+  ]) {
+    const rejected = run([
+      "requirement", "propose",
+      "--root", cwd,
+      "--id", id,
+      "--title", "Rejected project scope",
+      "--summary", "This proposal must remain atomic",
+      "--acceptance", "No partial requirement or profile is written",
+      "--autonomy-ceiling", "supervised",
+      "--write-path", rejectedPath,
+      "--json",
+    ], { cwd });
+    assert.equal(rejected.status, 1, rejected.stderr || rejected.stdout);
+    assert.match(rejected.stderr, message);
+    assert.equal(fs.existsSync(path.join(cwd, ".sdlc", "requirements", `${id}.json`)), false);
+    assert.equal(
+      fs.existsSync(path.join(cwd, ".sdlc", "autonomy", "requirements", `AUT-${id}-R1.json`)),
+      false,
+    );
+  }
+});
+
+test("requirement revise inherits write scope when omitted and replaces it when explicit", () => {
+  const cwd = temporaryDirectory("requirement-revise-scope");
+  mustRun(["init", "--project-name", "Requirement revision scope", "--root", cwd]);
+
+  const proposed = JSON.parse(mustRun([
+    "requirement", "propose",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-R1",
+    "--title", "Initial project scope",
+    "--summary", "Change source and tests",
+    "--acceptance", "Source and tests prove the result",
+    "--autonomy-ceiling", "checkpointed",
+    "--write-path", path.join(cwd, "src"),
+    "--write-path", "test",
+    "--json",
+  ], { cwd }).stdout);
+  assert.deepEqual(proposed.autonomy_profile.constraints.allowed_write_paths, ["src", "test"]);
+
+  const inherited = JSON.parse(mustRun([
+    "requirement", "revise",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-R1",
+    "--new-id", "REQ-SCOPE-R2",
+    "--summary", "Keep the same file boundary while refining the outcome",
+    "--json",
+  ], { cwd }).stdout);
+  assert.deepEqual(inherited.autonomy_profile.material_scope.write_paths, ["src", "test"]);
+  assert.deepEqual(inherited.autonomy_profile.constraints.allowed_write_paths, ["src", "test"]);
+
+  const replaced = JSON.parse(mustRun([
+    "requirement", "revise",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-R2",
+    "--new-id", "REQ-SCOPE-R3",
+    "--summary", "Replace the file boundary explicitly",
+    "--write-path", "docs",
+    "--write-path", path.join(cwd, "evidence"),
+    "--json",
+  ], { cwd }).stdout);
+  assert.deepEqual(replaced.autonomy_profile.material_scope.write_paths, ["docs", "evidence"]);
+  assert.deepEqual(replaced.autonomy_profile.constraints.allowed_write_paths, ["docs", "evidence"]);
+  assert.equal(replaced.autonomy_profile.constraints.allowed_write_paths.includes("src"), false);
+});
+
+test("approval rejects a legacy non-canonical requirement scope without rewriting it", () => {
+  const cwd = temporaryDirectory("requirement-legacy-scope");
+  mustRun(["init", "--project-name", "Legacy requirement scope", "--root", cwd]);
+
+  const proposed = JSON.parse(mustRun([
+    "requirement", "propose",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-LEGACY",
+    "--title", "Legacy absolute scope",
+    "--summary", "Preserve an old proposal until an explicit revision",
+    "--acceptance", "Approval fails closed without rewriting the proposal",
+    "--autonomy-ceiling", "checkpointed",
+    "--write-path", "src",
+    "--json",
+  ], { cwd }).stdout);
+  const requirementPath = path.join(cwd, proposed.requirement_path);
+  const profilePath = path.join(cwd, proposed.autonomy_profile_path);
+  const legacyProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
+  const absoluteSource = path.join(cwd, "src");
+  legacyProfile.material_scope.write_paths = [absoluteSource];
+  legacyProfile.material_scope_hash = computeStableHash(legacyProfile.material_scope);
+  legacyProfile.constraints.allowed_write_paths = [absoluteSource];
+  legacyProfile.profile_hash = computeRequirementExecutionProfileHash(legacyProfile);
+  fs.writeFileSync(profilePath, `${JSON.stringify(legacyProfile, null, 2)}\n`, "utf8");
+
+  const requirementBefore = fs.readFileSync(requirementPath, "utf8");
+  const profileBefore = fs.readFileSync(profilePath, "utf8");
+  const rejected = run([
+    "requirement", "approve",
+    "--root", cwd,
+    "--id", "REQ-SCOPE-LEGACY",
+    "--actor-type", "human",
+    "--approval-source", "explicit-user",
+    "--summary", "Approve the displayed legacy proposal",
+    "--json",
+  ], { cwd });
+  assert.equal(rejected.status, 1, rejected.stderr || rejected.stdout);
+  assert.match(rejected.stderr, /non-canonical write scope/u);
+  assert.match(rejected.stderr, /without rewriting either proposal/u);
+  assert.equal(fs.readFileSync(requirementPath, "utf8"), requirementBefore);
+  assert.equal(fs.readFileSync(profilePath, "utf8"), profileBefore);
 });
 
 test("capability commands use --profile while delivery selection remains separate", () => {

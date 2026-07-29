@@ -51,6 +51,7 @@ test("catalog covers the dispatch families and the self-service commands", () =>
     "autonomy requirement status",
     "autonomy delivery approve",
     "contract create",
+    "story acceptance add",
     "story handoff close",
     "work item create",
     "breakdown policy set",
@@ -138,9 +139,9 @@ test("delivery self-service help mirrors the runtime flags and marks the main re
 
   const localDataExample = findCommand("autonomy delivery propose").examples
     .find((example) => example.includes("AUT-DATA-009"));
-  assert.match(localDataExample, /--write-path app/u);
-  assert.match(localDataExample, /--write-path data/u);
-  assert.match(localDataExample, /--smoke-cwd app/u);
+  assert.match(localDataExample, /--write-path \/absolute\/local-data\/app/u);
+  assert.match(localDataExample, /--write-path \/absolute\/local-data\/data/u);
+  assert.match(localDataExample, /--smoke-cwd \/absolute\/local-data\/app/u);
 });
 
 test("requirement and contract help expose the runtime-required and conditional inputs", () => {
@@ -156,6 +157,35 @@ test("requirement and contract help expose the runtime-required and conditional 
   assert.match(requirement.get("--proposal")?.required_when.en, /proposal-hash/u);
   assert.match(requirement.get("--proposal")?.required_when.it, /fornito anche --proposal-hash/u);
   assert.match(requirement.get("--proposal-hash")?.required_when.en, /proposal/u);
+  assert.match(requirement.get("--write-path")?.description.en, /stored Git-relative/u);
+  assert.match(requirement.get("--write-path")?.description.en, /local release.*absolute destination/iu);
+  assert.match(requirement.get("--write-path")?.description.it, /salvati relativi a Git/u);
+  assert.match(requirement.get("--write-path")?.description.it, /rilascio locale.*destinazione assoluta/iu);
+
+  const revision = describe("requirement revise");
+  assert.equal(revision.get("--id")?.required, true);
+  assert.equal(revision.get("--new-id")?.required, true);
+  for (const flag of [
+    "--title",
+    "--summary",
+    "--scope-summary",
+    "--acceptance",
+    "--autonomy-ceiling",
+    "--source",
+    "--non-goal",
+    "--constraint",
+    "--nfr",
+    "--integration",
+    "--tool",
+    "--capability",
+    "--environment",
+    "--write-path",
+    "--expires-at",
+  ]) {
+    assert.equal(revision.has(flag), true, `requirement revise should expose ${flag}`);
+  }
+  assert.match(findCommand("requirement revise").description.en, /inherited unless an explicit replacement/iu);
+  assert.match(findCommand("requirement revise").description.it, /vengono ereditate.*elenco sostitutivo/iu);
 
   const approval = describe("requirement approve");
   assert.equal(approval.get("--id")?.required, true);
@@ -185,12 +215,37 @@ test("focused lifecycle help mirrors the runtime inputs needed to create and sta
   assert.equal(storyCreate.get("--id")?.required, true);
   assert.equal(storyCreate.get("--title")?.required, true);
   assert.equal(storyCreate.get("--acceptance")?.repeatable, true);
+  assert.match(storyCreate.get("--acceptance")?.required_when?.en, /status ready/u);
+  assert.match(storyCreate.get("--acceptance")?.required_when?.en, /draft may add it later/u);
+  assert.equal(storyCreate.has("--template-dir"), true);
+
+  const acceptanceAdd = describe("story acceptance add");
+  assert.equal(acceptanceAdd.get("--id")?.required, true);
+  assert.equal(acceptanceAdd.get("--acceptance")?.required, true);
+  assert.equal(acceptanceAdd.get("--acceptance")?.repeatable, true);
+  assert.equal(acceptanceAdd.has("--summary"), true);
 
   const storyClaim = describe("story claim");
   assert.equal(storyClaim.get("--id")?.required, true);
   assert.equal(storyClaim.get("--agent")?.required, true);
   assert.equal(storyClaim.has("--branch"), true);
   assert.match(storyClaim.get("--authorization")?.required_when?.en, /story\.claim/u);
+  assert.match(
+    findCommand("story claim").description.en,
+    /started story.*current approved contract/is,
+  );
+  assert.match(
+    findCommand("story claim").description.it,
+    /story già avviata.*contratto corrente approvato/is,
+  );
+  assert.match(
+    findCommand("story acceptance add").description.en,
+    /replace and approve it.*start the revised work before claiming/is,
+  );
+  assert.match(
+    findCommand("task start").description.it,
+    /avvio riuscito abilita l’assegnazione della story/is,
+  );
 
   const outputResolve = describe("output resolve");
   assert.equal(outputResolve.get("--story")?.required, true);

@@ -11,6 +11,19 @@ import { completionCandidates } from "../../lib/cli/completion.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = path.join(ROOT, "bin", "agentic-sdlc.mjs");
+const INTEGRATION_REVIEW_TEMPLATE_DIRECTORY = path.join(
+  ROOT,
+  "templates",
+  "workflow-software-project-v3-integration-review",
+);
+const INTEGRATION_REVIEW_DEFINITION = path.join(
+  INTEGRATION_REVIEW_TEMPLATE_DIRECTORY,
+  "workflow-definition.json",
+);
+const INTEGRATION_REVIEW_CONFIG = path.join(
+  INTEGRATION_REVIEW_TEMPLATE_DIRECTORY,
+  "sdlc-config.json",
+);
 const TEMPORARY_DIRECTORIES = new Set();
 
 after(() => {
@@ -117,6 +130,241 @@ test("workflow catalog and completion expose the complete bounded command family
   const startStory = listOptions("workflow instance start").find((entry) => entry.flag === "--story");
   assert.ok(startStory);
   assert.match(startStory.required_when?.en || "", /canonical lifecycle checks/u);
+});
+
+test("the distributed integration-review overlay supports init, migration, propose, approve, show, and start", () => {
+  const project = temporaryProject("distributed-integration-review-template");
+  const projectTemplate = path.join(
+    project,
+    "workflow-software-project-v3-integration-review.json",
+  );
+  const input = readJson(INTEGRATION_REVIEW_DEFINITION);
+  const defaultConfig = readJson(path.join(ROOT, "templates", "sdlc-config.json"));
+  const companionConfig = readJson(INTEGRATION_REVIEW_CONFIG);
+  const normalizedCompanionConfig = structuredClone(companionConfig);
+  normalizedCompanionConfig.phase_order = defaultConfig.phase_order;
+  delete normalizedCompanionConfig.phases["integration-review"];
+  normalizedCompanionConfig.autonomy_policy.presets.checkpointed.automatic_phases =
+    defaultConfig.autonomy_policy.presets.checkpointed.automatic_phases;
+  normalizedCompanionConfig.autonomy_policy.presets["bounded-autonomous"].automatic_phases =
+    defaultConfig.autonomy_policy.presets["bounded-autonomous"].automatic_phases;
+  assert.deepEqual(
+    normalizedCompanionConfig,
+    defaultConfig,
+    "the full companion config may differ from the stock config only at the declared custom phase surfaces",
+  );
+  const derivedFields = [
+    "id",
+    "version",
+    "kind",
+    "schema_version",
+    "status",
+    "created_at",
+    "approval",
+    "definition_hash",
+    "hash_algorithm",
+  ];
+  for (const field of derivedFields) {
+    assert.equal(
+      Object.hasOwn(input, field),
+      false,
+      `${field} must remain CLI-derived rather than author-edited template input`,
+    );
+  }
+  assert.deepEqual(input.phase_order, [
+    "discovery",
+    "analysis",
+    "design",
+    "implementation",
+    "integration-review",
+    "validation",
+    "release",
+  ]);
+  assert.equal(
+    findCommand("workflow definition propose").examples.some((example) =>
+      example.includes("templates/workflow-software-project-v3-integration-review/workflow-definition.json")),
+    true,
+  );
+  assert.equal(
+    findCommand("init").examples.some((example) =>
+      example.includes("--template-dir <plugin-root>/templates/workflow-software-project-v3-integration-review")),
+    true,
+  );
+
+  const initialized = mustRunJson([
+    "init",
+    "--root", project,
+    "--project-name", "Distributed workflow template",
+    "--template-dir", INTEGRATION_REVIEW_TEMPLATE_DIRECTORY,
+  ], project);
+  assert.deepEqual(initialized.project.phase_order, input.phase_order);
+  const configPath = path.join(project, ".sdlc", "config.json");
+  const configStatus = mustRunJson(["config", "status", "--root", project], project);
+  assert.equal(configStatus.status, "locked");
+  assert.deepEqual(readJson(configPath).phase_order, input.phase_order);
+  assert.equal(
+    fs.existsSync(path.join(
+      project,
+      ".sdlc",
+      "contracts",
+      "contract-integration-review-v1.json",
+    )),
+    true,
+  );
+  fs.copyFileSync(INTEGRATION_REVIEW_DEFINITION, projectTemplate);
+  mustRunJson([
+    "story", "create",
+    "--root", project,
+    "--id", "ST-DISTRIBUTED-TEMPLATE",
+    "--title", "Use the distributed integration-review workflow",
+    "--acceptance", "The exact seven-phase workflow starts for this story.",
+  ], project);
+
+  const proposed = mustRunJson([
+    "workflow", "definition", "propose",
+    "--root", project,
+    "--id", "software-project-integration-review",
+    "--definition-version", "1",
+    "--definition-file", path.basename(projectTemplate),
+  ], project);
+  assert.equal(proposed.status, "proposed");
+  assert.equal(proposed.definition.id, "software-project-integration-review");
+  assert.equal(proposed.definition.version, "1");
+  assert.equal(proposed.definition.status, "proposed");
+  assert.equal(proposed.definition.kind, "workflow_definition");
+  assert.equal(proposed.definition.schema_version, "workflow-definition:v1");
+  assert.equal(proposed.definition.approval, null);
+  assert.match(proposed.definition.created_at, /^\d{4}-\d{2}-\d{2}T/u);
+  assert.match(proposed.definition.definition_hash, /^[a-f0-9]{64}$/u);
+  assert.equal(proposed.definition.hash_algorithm, "sha256:stable-json:v1");
+  assert.deepEqual(proposed.definition.phase_order, input.phase_order);
+  assert.equal(
+    proposed.definition.states.some((state) => state.id === "integration-review"),
+    true,
+  );
+  assert.deepEqual(
+    proposed.definition.transitions
+      .find((transition) => transition.id === "implementation-to-integration-review")
+      ?.guards,
+    [],
+  );
+  assert.deepEqual(
+    proposed.definition.transitions
+      .find((transition) => transition.id === "integration-review-to-validation")
+      ?.guards
+      .map((guard) => guard.id),
+    ["required-output-linked"],
+  );
+  assert.deepEqual(
+    proposed.definition.transitions
+      .find((transition) => transition.id === "validation-to-release")
+      ?.guards
+      .map((guard) => guard.id),
+    ["strict-gate-passed"],
+  );
+
+  const approved = mustRunJson([
+    "workflow", "definition", "approve",
+    "--root", project,
+    "--id", "software-project-integration-review",
+    "--definition-version", "1",
+    "--actor-type", "ci",
+    "--approval-source", "ci",
+    "--summary", "Approve the distributed seven-phase workflow.",
+  ], project);
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.definition.status, "approved");
+  assert.equal(
+    approved.definition.definition_hash,
+    proposed.definition.definition_hash,
+  );
+
+  const shown = mustRunJson([
+    "workflow", "definition", "show",
+    "--root", project,
+    "--id", "software-project-integration-review",
+    "--definition-version", "1",
+  ], project);
+  assert.equal(shown.status, "approved");
+  assert.equal(shown.source, "project");
+  assert.equal(shown.definition.approval.approval_source, "ci");
+  assert.equal(
+    shown.definition.definition_hash,
+    proposed.definition.definition_hash,
+  );
+  assert.deepEqual(shown.definition.phase_order, input.phase_order);
+
+  const started = mustRunJson([
+    "workflow", "instance", "start",
+    "--root", project,
+    "--id", "WF-DISTRIBUTED-TEMPLATE",
+    "--definition", "software-project-integration-review",
+    "--definition-version", "1",
+    "--story", "ST-DISTRIBUTED-TEMPLATE",
+  ], project);
+  assert.equal(started.instance.initial_state, "discovery");
+  assert.equal(
+    started.instance.metadata.governance_binding.story_id,
+    "ST-DISTRIBUTED-TEMPLATE",
+  );
+  const claimAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-DISTRIBUTED-TEMPLATE-CLAIM",
+    "--scope", "Allow one claim for ST-DISTRIBUTED-TEMPLATE only.",
+    "--allow-use", "story.claim=ST-DISTRIBUTED-TEMPLATE",
+    "--max-uses", "1",
+    "--actor-type", "ci",
+    "--approval-source", "ci",
+    "--summary", "Approve one exact story claim.",
+  ], project);
+  assert.deepEqual(
+    claimAuthorization.authorization.allowed_uses.map((use) => use.subject_id),
+    ["ST-DISTRIBUTED-TEMPLATE"],
+  );
+  const completionAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-DISTRIBUTED-TEMPLATE-INTEGRATION-REVIEW",
+    "--scope", "Complete integration-review for ST-DISTRIBUTED-TEMPLATE only.",
+    "--allow-use",
+    "story.complete-step=ST-DISTRIBUTED-TEMPLATE.step.integration-review",
+    "--max-uses", "1",
+    "--actor-type", "ci",
+    "--approval-source", "ci",
+    "--summary", "Approve the exact integration-review completion.",
+  ], project);
+  assert.deepEqual(
+    completionAuthorization.authorization.allowed_uses.map((use) => use.subject_id),
+    ["ST-DISTRIBUTED-TEMPLATE.step.integration-review"],
+  );
+
+  const migratedProject = temporaryProject("distributed-integration-review-migrate");
+  mustRun([
+    "init",
+    "--root", migratedProject,
+    "--project-name", "Migrated custom workflow init",
+  ], migratedProject);
+  const migratedConfigPath = path.join(migratedProject, ".sdlc", "config.json");
+  fs.copyFileSync(INTEGRATION_REVIEW_CONFIG, migratedConfigPath);
+  const migrationPreview = mustRunJson([
+    "config", "migrate",
+    "--root", migratedProject,
+  ], migratedProject);
+  assert.equal(migrationPreview.status, "planned");
+  assert.match(migrationPreview.plan.plan_hash, /^[a-f0-9]{64}$/u);
+  const migration = mustRunJson([
+    "config", "migrate",
+    "--root", migratedProject,
+    "--apply",
+    "--plan-hash", migrationPreview.plan.plan_hash,
+  ], migratedProject);
+  assert.equal(migration.status, "applied");
+  assert.equal(
+    mustRunJson(["config", "status", "--root", migratedProject], migratedProject).status,
+    "locked",
+  );
+  assert.deepEqual(readJson(migratedConfigPath).phase_order, input.phase_order);
 });
 
 test("preset definition approval and an event-sourced run are stable and retry-safe", () => {

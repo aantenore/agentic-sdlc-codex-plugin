@@ -14,7 +14,7 @@ Before the phase sequence becomes executable, agree a revisioned `requirement:v2
 3. Design
    - Convert analysis into stories, task decomposition, acceptance criteria, test strategy, UX notes, and architecture decisions.
 4. Implementation
-   - Implement story-scoped changes on dedicated branches with an active claim, tests, and trace evidence.
+   - After the current approved contract has a valid immutable task start, claim the story and implement story-scoped changes on dedicated branches with tests and trace evidence.
 5. Validation
    - Validate against contracts, acceptance criteria, tests, risk mitigation, and release readiness.
 6. Release
@@ -35,7 +35,9 @@ flowchart LR
   Requirement --> Story["Story"]
   Story --> FinalContract["Approved contract + planned profile ID"]
   FinalContract --> Delivery["Approved PR/local-release profile binds hashes"]
-  Delivery --> Implementation
+  Delivery --> Start["Story workflow + immutable task start"]
+  Start --> Claim["Active story claim"]
+  Claim --> Implementation
   OutputRegistry["Output registry"] --> Analysis
   OutputRegistry --> Design
   OutputRegistry --> Validation

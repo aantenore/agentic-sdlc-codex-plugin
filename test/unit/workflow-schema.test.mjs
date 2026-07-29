@@ -33,7 +33,7 @@ const ACTOR = Object.freeze({ id: "schema-test", type: "agent", name: "Schema te
 
 function finalFreshnessProof(storyId, instanceId) {
   const subject = {
-    schema_version: "workflow-final-freshness-proof:v1",
+    schema_version: "workflow-final-freshness-proof:v2",
     story_id: storyId,
     workflow_instance_id: instanceId,
     governed_files: [],
@@ -44,8 +44,11 @@ function finalFreshnessProof(storyId, instanceId) {
     local_release_root: null,
     local_release_scope: [],
     git_scope: {
+      schema_version: "workflow-final-git-scope:v2",
       available: false,
       baseline_head_sha: null,
+      certification_head_sha: null,
+      scoped_state_hash: null,
       scoped_head_tree_hash: null,
       scoped_changes: [],
     },

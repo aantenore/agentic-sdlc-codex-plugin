@@ -16,6 +16,22 @@ node bin/agentic-sdlc.mjs init --root <project> --project-name "Product Name"
 
 Creates `.sdlc/`, project metadata, KB directories, generated README, and default phase contracts.
 
+For a new seven-phase software project with `integration-review` between
+implementation and validation, use the complete distributed template
+directory at bootstrap:
+
+```bash
+node bin/agentic-sdlc.mjs init \
+  --root <project> \
+  --project-name "Product Name" \
+  --template-dir \
+    <plugin-root>/templates/workflow-software-project-v3-integration-review
+```
+
+The same `--template-dir` is supported by `onboard existing-project` when
+`.sdlc/` does not exist yet. The bootstrap validates and pins the full config
+and creates all seven phase contracts.
+
 An exact manifestless project created by the bundled v0.11 format must be
 adopted explicitly before its first configuration lock. Preview
 `config migrate`, review the identified legacy bootstrap and plan hash, then
@@ -66,7 +82,7 @@ Use `--approval-source explicit-user` when the user explicitly approves the spec
 
 ## Agree A Requirement And Its Autonomy Ceiling
 
-New governed requirements use `requirement:v2`. Proposal creation records the requirement and prepares its requirement execution profile; approval binds the immutable revision and its maximum autonomy level.
+New governed requirements use `requirement:v2`. Proposal creation records the requirement and prepares its requirement execution profile; approval binds the immutable revision and its maximum autonomy level. Declare every project area that product work may change, including source, tests, documentation, and evidence. Requirement `--write-path` accepts a project-internal relative or absolute input, then stores the sorted, deduplicated Git-relative form. The project root, paths outside it, and `.git` repository metadata fail atomically. Git commits, pushes, and merges use their explicit delivery actions instead of requirement file-write authority. An empty scope remains valid for governance-only work, but blocks `task start` before preflight for implementation, validation, release, or a contract with durable output references.
 
 ```bash
 node bin/agentic-sdlc.mjs requirement propose \
@@ -75,6 +91,10 @@ node bin/agentic-sdlc.mjs requirement propose \
   --title "Bounded outcome" \
   --summary "Agreed outcome and material scope" \
   --acceptance "Observable acceptance evidence exists" \
+  --write-path src \
+  --write-path test \
+  --write-path docs \
+  --write-path evidence \
   --autonomy-ceiling checkpointed
 
 node bin/agentic-sdlc.mjs requirement approve \
@@ -87,13 +107,22 @@ node bin/agentic-sdlc.mjs requirement approve \
 node bin/agentic-sdlc.mjs autonomy requirement status --root <project> --id REQ-001
 ```
 
-Use immutable revision and supersession commands for material changes:
+Use immutable revision and supersession commands for material changes. A
+revision without `--write-path` inherits the current canonical scope. Supplying
+one or more `--write-path` values replaces the scope in full, so include every
+path that must remain writable. Approval rejects an old non-canonical proposal
+without rewriting it; revise that proposal into a canonical immutable record
+first.
 
 ```bash
 node bin/agentic-sdlc.mjs requirement revise \
   --root <project> \
   --id REQ-001 \
   --new-id REQ-001-R2 \
+  --write-path src \
+  --write-path test \
+  --write-path docs \
+  --write-path evidence \
   --autonomy-ceiling supervised
 
 node bin/agentic-sdlc.mjs requirement approve \
@@ -113,6 +142,11 @@ node bin/agentic-sdlc.mjs requirement supersede \
   --summary "Replace REQ-001 with approved revision REQ-001-R2"
 ```
 
+Requirement paths above are Git-relative project scope. They are deliberately
+different from local-release `--target-root`, `--write-path`, and `--smoke-cwd`
+values, which use explicit absolute filesystem paths inside the approved target
+as shown later in this reference.
+
 `requirement create` is a compatibility alias for proposal creation, not direct approval. A material revision changes the requirement hash and invalidates downstream delivery profiles bound to the old revision. Legacy `requirement:v1` records remain readable with a conservative `supervised` ceiling.
 
 ## Select Autonomy For Every Delivery
@@ -122,7 +156,7 @@ Every pull request and every local release needs a new delivery profile ID and a
 Create the story, reserve a new profile ID, and create the final contract with that ID. Obtain normal contract approval before proposing the profile. The contract stores only the planned `delivery_execution_profile_id`; the later profile binds the approved requirement-profile, story, and contract hashes.
 
 ```bash
-node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement REQ-001" --requirement REQ-001
+node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement REQ-001" --requirement REQ-001 --acceptance "<observable story-level success criterion>"
 node bin/agentic-sdlc.mjs contract create \
   --root <project> \
   --phase implementation \
@@ -438,14 +472,100 @@ node bin/agentic-sdlc.mjs contract create \
 ## Create And Claim Story
 
 ```bash
-node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement a business workflow" --requirement REQ-001
+node bin/agentic-sdlc.mjs story create --root <project> --id ST-001 --title "Implement a business workflow" --requirement REQ-001 --acceptance "<observable story-level success criterion>"
+node bin/agentic-sdlc.mjs task start --root <project> --story ST-001 --intent-json '<normalized implement_story intent>' --confirm-start --actor-type human
 node bin/agentic-sdlc.mjs story claim --root <project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <codex-thread-id>
 node bin/agentic-sdlc.mjs story complete-step --root <project> --id ST-001 --step functional-analysis --type functional-analysis --summary "Functional review complete"
 node bin/agentic-sdlc.mjs story prepare-handoff --root <project> --id ST-001 --to-agent implementation-agent --release-claim --summary "Ready for implementation"
 node bin/agentic-sdlc.mjs story release --root <project> --id ST-001 --agent codex --reason "Work handed off"
 ```
 
-One story should have one active claim. Release the claim before another chat claims the same story, or use `--force` only after human coordination. The CLI serializes local claim changes and strict gates enforce the configured branch pattern.
+For a `supervised` delivery whose exact profile checkpoints both
+`story.claim` and `story.complete-step`, use separate one-use delegations. The
+claim subject is the story; the completion subject binds the story and exact
+configured step:
+
+```bash
+node bin/agentic-sdlc.mjs authorization grant \
+  --root <project> \
+  --id AUTH-ST-001-CLAIM \
+  --scope "Allow one claim for ST-001 only" \
+  --allow-use story.claim=ST-001 \
+  --max-uses 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve one story claim for ST-001"
+
+node bin/agentic-sdlc.mjs authorization grant \
+  --root <project> \
+  --id AUTH-ST-001-DISCOVERY-COMPLETE \
+  --scope "Complete discovery for ST-001 only" \
+  --allow-use story.complete-step=ST-001.step.discovery \
+  --allow-artifact-type discovery-note \
+  --max-uses 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve the discovery completion for ST-001"
+
+node bin/agentic-sdlc.mjs story claim \
+  --root <project> \
+  --id ST-001 \
+  --agent codex \
+  --branch feature/ST-001 \
+  --authorization AUTH-ST-001-CLAIM
+
+node bin/agentic-sdlc.mjs story complete-step \
+  --root <project> \
+  --id ST-001 \
+  --step discovery \
+  --type discovery-note \
+  --summary "The agreed discovery evidence is complete" \
+  --authorization AUTH-ST-001-DISCOVERY-COMPLETE
+```
+
+The grant is valid only after the exact operations are displayed and approved.
+Create a new grant ID and compound subject such as
+`ST-001.step.integration-review` for every later completion. Story-wide
+completion grants remain readable for compatibility but warn and must not be
+created for new work. Neither grant covers the contract, task start, output
+link, release, or another step.
+
+Replace `discovery-note` with the exact type required by the approved
+contract. Every `--type <type>` passed to `story complete-step` requires the
+same `--allow-artifact-type <type>` on that step's grant. Omit the artifact
+flag only for a completion with no `--type`.
+
+One story should have one active claim. A story cannot be claimed until it has
+at least one observable acceptance criterion, a current approved contract, and
+an immutable task-start receipt bound to that exact contract. If acceptance
+changes after a contract exists, create and approve a new exact contract, then
+run task start again before claiming. Release the claim before another chat
+claims the same story, or use `--force` only after human coordination. The CLI
+serializes local claim changes and strict gates enforce the configured branch
+pattern.
+
+Create every delivery story with at least one observable `--acceptance`
+criterion. `story create` never rewrites an existing story. For a legacy story
+that is missing criteria, recover only before task start with:
+
+```bash
+node bin/agentic-sdlc.mjs story acceptance add \
+  --root <project> \
+  --id ST-001 \
+  --acceptance "<observable story-level success criterion>" \
+  --summary "Complete the story definition before task start"
+```
+
+The operation is additive and serialized with contract linking and task-start
+boundaries. It preserves exact requirement refs, the historical contract
+reference, breakdown links, phase/status, audit origin, `plan.md`, and
+`implementation-log.md`; it refuses terminal, claimed, already-started, or
+partially completed stories and non-regular workspace or trace files. If a
+contract already exists, create and approve a new contract ID after the change.
+When that contract reserves a delivery profile, use a new profile ID: an active
+profile bound to the older story hash is stale by design and is not re-approved
+in place. Task start remains blocked until those exact bindings are current;
+never use `story create --force` as a recovery shortcut.
 
 `story complete-step` records a completed SDLC lane under `.sdlc/stories/<story-id>/steps/`, appends a trace, requires an approved fresh story contract, and validates linked output artifacts when `--type` is provided. `story prepare-handoff` creates a story handoff package containing story state, claim, completed steps, output links, dependency status, open handoffs, and recent traces. Use `--release-claim` when the receiving chat or developer should be able to claim the story after pulling the KB.
 
@@ -561,6 +681,74 @@ Projects with custom phases must use an approved story-bound definition with
 the exact configured order. A workflow cannot be added retroactively; a legacy
 task without the pre-task binding is not eligible for lifecycle-complete
 certification.
+
+For the first common customization, initialize or onboard with the complete
+template directory shown above. Then copy its v3-compatible definition into
+the target project, edit it, propose and review it, approve that exact version,
+then start it:
+
+```bash
+cp \
+  <plugin-root>/templates/workflow-software-project-v3-integration-review/workflow-definition.json \
+  <project>/workflow-software-project-v3-integration-review.json
+
+node bin/agentic-sdlc.mjs workflow definition propose \
+  --root <project> \
+  --id software-project-integration-review \
+  --definition-version 1 \
+  --definition-file workflow-software-project-v3-integration-review.json
+
+node bin/agentic-sdlc.mjs workflow definition show \
+  --root <project> \
+  --id software-project-integration-review \
+  --definition-version 1
+
+node bin/agentic-sdlc.mjs workflow definition approve \
+  --root <project> \
+  --id software-project-integration-review \
+  --definition-version 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve the displayed seven-phase workflow"
+
+node bin/agentic-sdlc.mjs workflow instance start \
+  --root <project> \
+  --id DELIVERY-ST-001 \
+  --definition software-project-integration-review \
+  --definition-version 1 \
+  --story ST-001
+```
+
+The companion config already contains `integration-review` in `phases`, the
+same exact `phase_order`, and the matching autonomy preset entries. If a plain
+default init was just completed and no governed work has begun, first compare
+the two full configs, copy the companion over `.sdlc/config.json`, preview
+`config migrate`, and apply only its displayed plan hash:
+
+```bash
+diff -u \
+  <project>/.sdlc/config.json \
+  <plugin-root>/templates/workflow-software-project-v3-integration-review/sdlc-config.json
+cp \
+  <plugin-root>/templates/workflow-software-project-v3-integration-review/sdlc-config.json \
+  <project>/.sdlc/config.json
+node bin/agentic-sdlc.mjs config migrate --root <project>
+node bin/agentic-sdlc.mjs config migrate \
+  --root <project> \
+  --apply \
+  --plan-hash <hash-shown-by-the-preview>
+```
+
+Do not replace a customized or active project's full config with this
+companion. Merge and review its intended change separately.
+
+The editable definition input fields are `label`, `description`,
+`initial_state`, `states`, `transitions`, `phase_order`,
+`normal_checkpoints`, and `metadata`. The CLI supplies or overrides `id`,
+`version`, `kind`, `schema_version`, `status`, `created_at`, `approval`,
+`definition_hash`, and `hash_algorithm`. Because `--definition-file` accepts
+only a project-internal file, never point it directly at the plugin
+installation.
 
 Use `task start` as the operational front door before Codex performs phase work. It runs route decision, finds the applicable story or phase contract, blocks missing/incomplete/unapproved/stale contracts, and returns `ready_to_execute` only when execution is allowed. `--confirm-start` confirms the concrete start of work, but it does not count as formal contract approval. `--revise-contract` deliberately stops for contract revision even when a usable contract exists.
 

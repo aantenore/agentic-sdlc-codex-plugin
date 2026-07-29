@@ -146,7 +146,7 @@
         "proof_hash"
       ],
       "properties": {
-        "schema_version": { "const": "workflow-final-freshness-proof:v1" },
+        "schema_version": { "const": "workflow-final-freshness-proof:v2" },
         "story_id": { "type": "string", "minLength": 1 },
         "workflow_instance_id": { "type": "string", "minLength": 1 },
         "governed_files": {
@@ -241,17 +241,33 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "schema_version",
             "available",
             "baseline_head_sha",
+            "certification_head_sha",
+            "scoped_state_hash",
             "scoped_head_tree_hash",
             "scoped_changes"
           ],
           "properties": {
+            "schema_version": { "const": "workflow-final-git-scope:v2" },
             "available": { "type": "boolean" },
             "baseline_head_sha": {
               "oneOf": [
                 { "type": "null" },
                 { "type": "string", "pattern": "^[a-f0-9]{40,64}$" }
+              ]
+            },
+            "certification_head_sha": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^[a-f0-9]{40,64}$" }
+              ]
+            },
+            "scoped_state_hash": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/hash" }
               ]
             },
             "scoped_head_tree_hash": {
@@ -267,37 +283,28 @@
                 "additionalProperties": false,
                 "required": [
                   "path",
-                  "status",
-                  "file_type",
-                  "mode",
-                  "content_sha256",
-                  "committed_since_task_start",
-                  "workspace_status"
+                  "working_tree",
+                  "index",
+                  "head",
+                  "index_matches_worktree",
+                  "index_matches_head",
+                  "index_flags"
                 ],
                 "properties": {
                   "path": { "type": "string", "minLength": 1 },
-                  "status": { "type": "string" },
-                  "file_type": {
-                    "enum": ["regular", "symlink", "missing"]
-                  },
-                  "mode": {
-                    "oneOf": [
-                      { "type": "null" },
-                      { "type": "integer", "minimum": 0 }
-                    ]
-                  },
-                  "content_sha256": {
-                    "oneOf": [
-                      { "type": "null" },
-                      { "$ref": "#/$defs/hash" }
-                    ]
-                  },
-                  "committed_since_task_start": { "type": "boolean" },
-                  "workspace_status": {
-                    "oneOf": [
-                      { "type": "null" },
-                      { "type": "string" }
-                    ]
+                  "working_tree": { "$ref": "#/$defs/git_file_identity" },
+                  "index": { "$ref": "#/$defs/git_file_identity" },
+                  "head": { "$ref": "#/$defs/git_file_identity" },
+                  "index_matches_worktree": { "type": "boolean" },
+                  "index_matches_head": { "type": "boolean" },
+                  "index_flags": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["assume_unchanged", "skip_worktree"],
+                    "properties": {
+                      "assume_unchanged": { "const": false },
+                      "skip_worktree": { "const": false }
+                    }
                   }
                 }
               }
@@ -325,6 +332,39 @@
     "hash": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "git_file_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "present",
+        "file_type",
+        "mode",
+        "content_sha256",
+        "object_id"
+      ],
+      "properties": {
+        "present": { "type": "boolean" },
+        "file_type": { "enum": ["regular", "symlink", "missing"] },
+        "mode": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "content_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/hash" }
+          ]
+        },
+        "object_id": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[a-f0-9]{40,64}$" }
+          ]
+        }
+      }
     },
     "file_ref": {
       "type": "object",

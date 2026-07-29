@@ -1,0 +1,151 @@
+{
+  "label": "Software project with integration review",
+  "description": "The governed software-project v3 lifecycle with an explicit integration review between implementation and validation.",
+  "initial_state": "discovery",
+  "states": [
+    {
+      "id": "discovery",
+      "label": "Discovery",
+      "terminal": false,
+      "metadata": {
+        "order": 1
+      }
+    },
+    {
+      "id": "analysis",
+      "label": "Analysis",
+      "terminal": false,
+      "metadata": {
+        "order": 2
+      }
+    },
+    {
+      "id": "design",
+      "label": "Design",
+      "terminal": false,
+      "metadata": {
+        "order": 3
+      }
+    },
+    {
+      "id": "implementation",
+      "label": "Implementation",
+      "terminal": false,
+      "metadata": {
+        "order": 4
+      }
+    },
+    {
+      "id": "integration-review",
+      "label": "Integration review",
+      "terminal": false,
+      "metadata": {
+        "order": 5
+      }
+    },
+    {
+      "id": "validation",
+      "label": "Validation",
+      "terminal": false,
+      "metadata": {
+        "order": 6
+      }
+    },
+    {
+      "id": "release",
+      "label": "Release",
+      "terminal": true,
+      "metadata": {
+        "order": 7
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "id": "discovery-to-analysis",
+      "from": "discovery",
+      "to": "analysis",
+      "label": "Discovery to analysis",
+      "guards": [
+        {
+          "id": "requirement-approved",
+          "parameters": {}
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "analysis-to-design",
+      "from": "analysis",
+      "to": "design",
+      "label": "Analysis to design",
+      "guards": [],
+      "metadata": {}
+    },
+    {
+      "id": "design-to-implementation",
+      "from": "design",
+      "to": "implementation",
+      "label": "Design to implementation",
+      "guards": [
+        {
+          "id": "contract-approved",
+          "parameters": {}
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "implementation-to-integration-review",
+      "from": "implementation",
+      "to": "integration-review",
+      "label": "Implementation to integration review",
+      "guards": [],
+      "metadata": {}
+    },
+    {
+      "id": "integration-review-to-validation",
+      "from": "integration-review",
+      "to": "validation",
+      "label": "Integration review to validation",
+      "guards": [
+        {
+          "id": "required-output-linked",
+          "parameters": {}
+        }
+      ],
+      "metadata": {}
+    },
+    {
+      "id": "validation-to-release",
+      "from": "validation",
+      "to": "release",
+      "label": "Validation to release",
+      "guards": [
+        {
+          "id": "strict-gate-passed",
+          "parameters": {}
+        }
+      ],
+      "metadata": {}
+    }
+  ],
+  "phase_order": [
+    "discovery",
+    "analysis",
+    "design",
+    "implementation",
+    "integration-review",
+    "validation",
+    "release"
+  ],
+  "normal_checkpoints": [],
+  "metadata": {
+    "based_on": {
+      "definition_id": "software-project",
+      "definition_version": "3"
+    },
+    "governance_binding": "story",
+    "canonical_evidence_schema": "workflow-canonical-evidence:v2"
+  }
+}

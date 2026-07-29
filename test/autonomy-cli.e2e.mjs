@@ -458,7 +458,7 @@ function commitCoverageHash(record) {
   return crypto.createHash("sha256").update(stableJson(canonical)).digest("hex");
 }
 
-function initializeAutonomyProject(project) {
+function initializeAutonomyProject(project, options = {}) {
   mustRun(["init", "--root", project, "--project-name", "Autonomy E2E", "--force"]);
   mustGit(project, ["init"]);
   mustGit(project, ["config", "user.name", "Autonomy E2E"]);
@@ -478,6 +478,9 @@ function initializeAutonomyProject(project) {
     "--acceptance", "Each delivery has an exact non-reusable autonomy decision.",
     "--constraint", "Never infer autonomy from an earlier delivery.",
     "--autonomy-ceiling", "bounded-autonomous",
+    ...(options.requirementWritePaths === undefined
+      ? ["--write-path", "src"]
+      : options.requirementWritePaths.flatMap((writePath) => ["--write-path", writePath])),
   ]);
   assert.equal(proposed.requirement.schema_version, "requirement:v2");
   assert.equal(proposed.requirement.status, "proposed");
@@ -562,6 +565,102 @@ function createApprovedImplementationContract(project, { storyId, contractId, pr
   ]).contract;
   assert.equal(approved.status, "approved");
 }
+
+test("task start blocks product work before preflight when approved requirement write scope is empty", () => {
+  const project = tmpProject("empty-requirement-write-scope");
+  initializeAutonomyProject(project, { requirementWritePaths: [] });
+  createApprovedImplementationContract(project, {
+    storyId: "ST-EMPTY-REQ-SCOPE",
+    contractId: "CONTRACT-EMPTY-REQ-SCOPE",
+    profileId: "AUT-EMPTY-REQ-SCOPE",
+  });
+  mustRunJson([
+    "autonomy", "delivery", "propose",
+    "--root", project,
+    "--id", "AUT-EMPTY-REQ-SCOPE",
+    "--delivery", "PR-EMPTY-REQ-SCOPE",
+    "--kind", "pull_request",
+    "--story", "ST-EMPTY-REQ-SCOPE",
+    "--contract", "CONTRACT-EMPTY-REQ-SCOPE",
+    "--requirement", "REQ-AUTONOMY",
+    "--level", "checkpointed",
+    "--repository", "aantenore/agentic-sdlc-codex-plugin",
+    "--base", "main",
+    "--head", "codex/pr-1",
+    "--write-path", "src",
+  ]);
+  mustRunJson([
+    "autonomy", "delivery", "approve",
+    "--root", project,
+    "--id", "AUT-EMPTY-REQ-SCOPE",
+    ...humanApproval("Approve the exact empty-scope regression delivery"),
+  ]);
+
+  const blocked = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-EMPTY-REQ-SCOPE"),
+    "--delivery-profile", "AUT-EMPTY-REQ-SCOPE",
+  ]);
+  assert.equal(blocked.execution_allowed, false);
+  assert.equal(blocked.contract_action, "revise_requirement_write_scope");
+  assert.equal(blocked.blocking_reasons.includes("requirement_write_scope_required"), true);
+  assert.equal(
+    blocked.deterministic_checks.some((check) =>
+      check.check === "requirement_write_scope" && check.status === "failed"),
+    true,
+  );
+  assert.equal(
+    blocked.next_commands.some((command) =>
+      /requirement revise .*--new-id .*--write-path/u.test(command)),
+    true,
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      project,
+      ".sdlc",
+      "autonomy",
+      "executions",
+      "AUT-EMPTY-REQ-SCOPE",
+      "context-preflight.json",
+    )),
+    false,
+  );
+  assert.equal(
+    fs.existsSync(path.join(project, ".sdlc", "stories", "ST-EMPTY-REQ-SCOPE", "task-start.json")),
+    false,
+  );
+
+  const italian = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-EMPTY-REQ-SCOPE"),
+    "--delivery-profile", "AUT-EMPTY-REQ-SCOPE",
+    "--locale", "it",
+  ]);
+  assert.match(italian.assistant_message, /non indica ancora alcuna area di file del progetto/iu);
+  assert.equal(italian.blocking_reasons.includes("requirement_write_scope_required"), true);
+  assert.equal(
+    italian.next_commands.some((command) =>
+      /requirement revise .*--new-id .*--write-path/u.test(command)),
+    true,
+  );
+
+  const customPhase = mustRunJson([
+    "task", "start",
+    "--root", project,
+    "--intent-json", taskIntent("ST-EMPTY-REQ-SCOPE"),
+    "--delivery-profile", "AUT-EMPTY-REQ-SCOPE",
+    "--phase", "integration-review",
+  ]);
+  assert.equal(customPhase.route, "claim_and_implement");
+  assert.equal(customPhase.phase, "integration-review");
+  assert.equal(customPhase.execution_allowed, false);
+  assert.equal(
+    customPhase.blocking_reasons.includes("requirement_write_scope_required"),
+    true,
+  );
+});
 
 function prepareAuthorizedPullRequestMerge(suffix) {
   const project = tmpProject(`pull-request-merge-${suffix}`);
@@ -1683,6 +1782,33 @@ test("requirement ceiling and an exact PR profile govern task start without leak
   ]);
   assert.equal(successorStart.execution_allowed, true);
   assert.equal(successorStart.delivery_profile_id, "AUT-PR-2");
+  const successorTaskStart = JSON.parse(fs.readFileSync(
+    path.join(project, successorStart.task_start_receipt),
+    "utf8",
+  ));
+  assert.equal(successorTaskStart.previous_task_start_receipt_ref.id, receipt.id);
+  const archivedTaskStartPath = path.join(
+    project,
+    successorTaskStart.previous_task_start_receipt_ref.path,
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(archivedTaskStartPath, "utf8")), receipt);
+  assert.equal(
+    crypto.createHash("sha256").update(fs.readFileSync(archivedTaskStartPath)).digest("hex"),
+    successorTaskStart.previous_task_start_receipt_ref.hash,
+  );
+  const successorStartTrace = fs.readFileSync(
+    path.join(project, ".sdlc", "traces", "ST-PR-1.jsonl"),
+    "utf8",
+  )
+    .trim()
+    .split(/\r?\n/u)
+    .map((line) => JSON.parse(line))
+    .find((event) => event.id === successorStart.confirmation_trace_id);
+  assert.ok(
+    successorStartTrace.evidence.includes(
+      successorTaskStart.previous_task_start_receipt_ref.path,
+    ),
+  );
   const multiDeliveryGuidance = splitHumanGuidance(mustRun([
     "autonomy", "delivery", "status",
     "--root", project,
@@ -1737,6 +1863,28 @@ test("requirement ceiling and an exact PR profile govern task start without leak
     [],
     successorGate.stdout,
   );
+  const archivedTaskStartBytes = fs.readFileSync(archivedTaskStartPath);
+  fs.writeFileSync(
+    archivedTaskStartPath,
+    `${archivedTaskStartBytes.toString("utf8").trimEnd()}\n `,
+  );
+  const tamperedHistoryGate = run([
+    "gate", "check",
+    "--root", project,
+    "--scope", "story",
+    "--story", "ST-PR-1",
+    "--strict",
+    "--json",
+  ]);
+  assert.equal(tamperedHistoryGate.error, undefined, tamperedHistoryGate.error?.message);
+  assert.equal(tamperedHistoryGate.signal, null, `gate check terminated by ${tamperedHistoryGate.signal}`);
+  assert.equal(tamperedHistoryGate.status, 1, tamperedHistoryGate.stdout);
+  assert.ok(
+    JSON.parse(tamperedHistoryGate.stdout).errors.some((error) =>
+      /task-start receipt history .* does not match its recorded hash/u.test(error)),
+    tamperedHistoryGate.stdout,
+  );
+  fs.writeFileSync(archivedTaskStartPath, archivedTaskStartBytes);
 
   const successorPushReceiptPath = path.join(project, successorPushAuthorization.action_receipt_path);
   const originalSuccessorPushReceipt = fs.readFileSync(successorPushReceiptPath, "utf8");
@@ -5458,7 +5606,7 @@ test("configured story lifecycle checkpoints require exact historical authorizat
     "--scope", "Approve the three exact lifecycle checkpoints for ST-CHECKPOINTS.",
     "--allow-use", "story.claim=ST-CHECKPOINTS",
     "--allow-use", "output.link=ST-CHECKPOINTS",
-    "--allow-use", "story.complete-step=ST-CHECKPOINTS",
+    "--allow-use", "story.complete-step=ST-CHECKPOINTS.step.implementation",
     "--allow-artifact-type", "implementation-summary",
     "--max-uses", "3",
     ...humanApproval("Approve the exact story lifecycle checkpoints"),
@@ -5502,6 +5650,20 @@ test("configured story lifecycle checkpoints require exact historical authorizat
     "--summary", "Implemented and linked the exact reviewed artifact.",
   ];
   mustFail(completionArgs, /story\.complete-step is a required checkpoint.*--authorization/isu);
+  const wrongStepAuthorization = mustRunJson([
+    "authorization", "grant",
+    "--root", project,
+    "--id", "AUTH-ST-CHECKPOINTS-WRONG-STEP",
+    "--scope", "Approve only the discovery completion for ST-CHECKPOINTS.",
+    "--allow-use", "story.complete-step=ST-CHECKPOINTS.step.discovery",
+    "--allow-artifact-type", "implementation-summary",
+    "--max-uses", "1",
+    ...humanApproval("Approve only the discovery completion"),
+  ]).authorization;
+  mustFail(
+    [...completionArgs, "--authorization", wrongStepAuthorization.id],
+    /does not allow subject ST-CHECKPOINTS\.step\.implementation/isu,
+  );
   mustRunJson([...completionArgs, "--authorization", authorization.id]);
 
   const claim = JSON.parse(fs.readFileSync(
@@ -5532,6 +5694,14 @@ test("configured story lifecycle checkpoints require exact historical authorizat
     assert.match(record.authorization_use_ref, /^\.sdlc\/authorization-uses\//u);
     assert.equal(record.checkpoint_profile_ref.id, "AUT-CHECKPOINTS");
   }
+  const stepUseReceipt = JSON.parse(fs.readFileSync(
+    path.join(project, step.authorization_use_ref),
+    "utf8",
+  ));
+  assert.equal(
+    stepUseReceipt.subject_id || stepUseReceipt.subject?.subject_id,
+    "ST-CHECKPOINTS.step.implementation",
+  );
 
   delete step.authorization_use_ref;
   fs.writeFileSync(stepPath, `${JSON.stringify(step, null, 2)}\n`, "utf8");

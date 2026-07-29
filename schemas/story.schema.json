@@ -42,6 +42,46 @@
         "null"
       ]
     },
+    "contract_review_required": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "reason",
+        "contract_id",
+        "previous_story_hash",
+        "added_acceptance_criteria",
+        "changed_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "story-contract-review:v1"
+        },
+        "reason": {
+          "const": "acceptance_criteria_changed"
+        },
+        "contract_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "previous_story_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "added_acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "changed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
     "requirement_refs": {
       "type": "array",
       "uniqueItems": true,

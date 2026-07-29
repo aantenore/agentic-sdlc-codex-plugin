@@ -36,6 +36,7 @@
     "contract_approval_hash": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
     "delivery_profile_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
     "autonomy_decision_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
+    "previous_task_start_receipt_ref": { "$ref": "#/$defs/path_hashed_id_ref" },
     "delivery_start_receipt_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
     "execution_context_preflight_ref": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/path_hashed_id_ref" }] },
     "autonomy_level": { "enum": ["supervised", "checkpointed", "bounded-autonomous"] },

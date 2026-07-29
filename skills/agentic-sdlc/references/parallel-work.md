@@ -27,14 +27,15 @@ Agentic SDLC supports parallel work through story-scoped ownership and append-on
 1. Confirm the approved requirement ceiling and the explicit profile for this exact pull request or local release and its one story/contract pair.
 2. Run `orchestrate status --json`.
 3. Pick an `available` story lane whose approved contract reserves its own profile ID and whose current profile binds that contract hash.
-4. Claim it with `story claim --thread-id <codex-thread-id>`.
-5. Work only on that story branch and story KB files.
-6. Resolve required outputs with `output resolve`; link artifacts with `output link`.
-7. Append autonomy-decision, implementation, test, sync, and handoff traces.
-8. Record completed lanes with `story complete-step`.
-9. Prepare cross-lane or cross-machine handoffs with `story prepare-handoff --release-claim`.
-10. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
-11. Release the claim when done or handed off.
+4. Verify that the exact story-bound workflow is active and that the immutable task-start receipt matches the current approved contract and profile.
+5. Claim it with `story claim --thread-id <codex-thread-id>`.
+6. Work only on that story branch and story KB files.
+7. Resolve required outputs with `output resolve`; link artifacts with `output link`.
+8. Append autonomy-decision, implementation, test, sync, and handoff traces.
+9. Record completed lanes with `story complete-step`.
+10. Prepare cross-lane or cross-machine handoffs with `story prepare-handoff --release-claim`.
+11. Run `gate check --story <id> --strict --out .sdlc/reports/<story-id>-gate-report.json`.
+12. Release the claim when done or handed off.
 
 ```mermaid
 flowchart TB
@@ -43,8 +44,10 @@ flowchart TB
   Status --> StoryB["Story ST-002 available"]
   StoryA --> ProfileA["Delivery profile A"]
   StoryB --> ProfileB["Delivery profile B"]
-  ProfileA --> ClaimA["Chat A claim"]
-  ProfileB --> ClaimB["Chat B claim"]
+  ProfileA --> StartA["Workflow + task start A"]
+  ProfileB --> StartB["Workflow + task start B"]
+  StartA --> ClaimA["Chat A claim"]
+  StartB --> ClaimB["Chat B claim"]
   ClaimA --> BranchA["feature/ST-001"]
   ClaimB --> BranchB["feature/ST-002"]
   BranchA --> EvidenceA["Trace and output links"]

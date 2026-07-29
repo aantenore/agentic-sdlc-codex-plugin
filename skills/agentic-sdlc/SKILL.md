@@ -43,7 +43,7 @@ For generic implementation and release work, follow this order:
 4. **Agree the output and work brief** — resolve the real output, tools, files, tests, contract, branches or local target, verification, and protected actions. Create and approve the contextualized contract only after this content is complete.
 5. **Choose autonomy for this delivery** — for every pull request or local release, ask again; never carry the choice over from earlier work. Before presenting the choices, explain whether option 3 can actually be effective; when this installation cannot digitally verify the approver, say that option 3 will be reduced to “Autonomy with checkpoints”.
 6. **Start the story workflow, then start once** — bind the exact configured phase order to the story before any completed step, then make one logical `task start` decision. Never use an early speculative start as routing or discovery, and never reconstruct the workflow after work has begun.
-7. **Implement, test, and advance phases** — claim the story, change only approved paths, run the agreed checks, record evidence, complete each phase, and enter the next phase only after the previous one is complete.
+7. **Implement, test, and advance phases** — after the governed task start is recorded, claim the story, change only approved paths, run the agreed checks, record evidence, complete each phase, and enter the next phase only after the previous one is complete.
 8. **Validate, then enter release** — after validation and the latest passing test evidence, seal the intermediate strict receipt and use it to move the task-bound workflow into `release`.
 9. **Finish and certify at the named destination** — only after entering `release`, create/update and verify the one pull request or complete the local release, record release evidence, complete the release step, release the completed story claim, and run the distinct lifecycle-complete gate. Push, protected-branch merge, remote deployment, and production remain separate when they were not explicitly included.
 
@@ -59,6 +59,23 @@ The dedicated assessment journey remains the exception described above: it packa
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs init --root <target-project> --project-name "<name>"
    ```
+
+   When a new project's agreed phase order includes `integration-review`
+   between implementation and validation, initialize with the complete
+   distributed overlay instead of adding the phase after bootstrap:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs init \
+     --root <target-project> \
+     --project-name "<name>" \
+     --template-dir \
+       <plugin-root>/templates/workflow-software-project-v3-integration-review
+   ```
+
+   The same `--template-dir` works with `onboard existing-project` when the
+   repository has useful code but no `.sdlc/`. It validates and pins the
+   seven-phase config and creates its phase contracts in the initial
+   bootstrap.
 
    For an existing repository with useful current code, docs, or configuration, prefer onboarding so the KB starts with an explicit proposed baseline instead of pretending the historical SDLC is known:
 
@@ -77,6 +94,16 @@ The dedicated assessment journey remains the exception described above: it packa
 4. Select the SDLC phase: `discovery`, `analysis`, `design`, `implementation`, `validation`, or `release`.
 5. Agree the requirement before treating decomposition as canonical. New requirements use `requirement:v2` and move through `propose`, `approve`, `revise`, and `supersede`; `requirement create` is only a compatibility alias for a proposal and must not create approved authority. Capture outcome, acceptance criteria, non-goals, constraints, NFRs, integrations, source hashes, revision lineage, and the linked requirement execution profile. That profile sets an autonomy ceiling and is not an executable grant. A material change creates a new revision and invalidates downstream profiles bound to the prior hash.
 
+   Before proposing implementation work, list every project area that may need a
+   durable change, including source, tests, documentation, and evidence.
+   Requirement `--write-path` values must resolve inside the project. The CLI
+   accepts an internal relative or absolute input but stores a sorted,
+   deduplicated Git-relative path; the project root and paths outside it are
+   rejected before any proposal is written. An empty requirement scope is
+   allowed for governance-only work, but `task start` fails closed before
+   preflight for implementation, validation, release, or a contract that names
+   durable outputs.
+
    ```bash
    node <plugin-root>/bin/agentic-sdlc.mjs requirement propose \
      --root <target-project> \
@@ -84,6 +111,10 @@ The dedicated assessment journey remains the exception described above: it packa
      --title "Bounded outcome" \
      --summary "Agreed outcome and material scope" \
      --acceptance "Observable acceptance evidence exists" \
+     --write-path src \
+     --write-path test \
+     --write-path docs \
+     --write-path evidence \
      --autonomy-ceiling checkpointed
 
    node <plugin-root>/bin/agentic-sdlc.mjs requirement approve \
@@ -97,6 +128,27 @@ The dedicated assessment journey remains the exception described above: it packa
      --root <target-project> \
      --id REQ-001
    ```
+
+   Omitting `--write-path` from `requirement revise` inherits the current
+   canonical scope. Supplying one or more values replaces that scope in full;
+   restate every path the revision still needs. Approval never rewrites a
+   legacy non-canonical proposal: create a new revision first, for example:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs requirement revise \
+     --root <target-project> \
+     --id REQ-001 \
+     --new-id REQ-001-R2 \
+     --write-path src \
+     --write-path test \
+     --write-path docs \
+     --write-path evidence
+   ```
+
+   Do not confuse this requirement scope with a local-release filesystem
+   boundary. Requirement paths are stored relative to the Git project;
+   delivery `--target-root`, delivery `--write-path`, and `--smoke-cwd` use
+   explicit absolute local paths inside the approved release target.
 
    After approval, when the requirement needs decomposition, propose a work breakdown and dependency graph, then ask the user to approve or correct it before treating it as canonical:
 
@@ -143,6 +195,31 @@ The dedicated assessment journey remains the exception described above: it packa
    node <plugin-root>/bin/agentic-sdlc.mjs approval requests --root <target-project> --story ST-001
    ```
 
+   Every newly created delivery story must include at least one observable
+   `--acceptance` criterion before contract/profile setup. If an older story is
+   missing criteria, never repair it with `story create --force`: creation is
+   intentionally non-overwriting. Before task start, use the additive,
+   story-locked recovery command:
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs story acceptance add \
+     --root <target-project> \
+     --id ST-001 \
+     --acceptance "<observable story-level success criterion>" \
+     --summary "Complete the story definition before task start"
+   ```
+
+   This command preserves exact requirement refs, the historical contract
+   reference, breakdown links, phase/status, audit origin, plan, and
+   implementation log. It refuses terminal, claimed, already-started, or
+   partially completed stories and unsafe workspace or trace files. If a
+   contract already exists, the changed definition marks it for mandatory
+   replacement: create and approve a new contract ID, and use a new delivery
+   profile ID when that contract reserves one. Existing active delivery
+   profiles remain stale by design and cannot be reused. `task start` stays
+   fail-closed until these exact bindings are current. Do not bypass that
+   freshness check.
+
 10. Create or locate the story first, then create its final phase contract before doing phase work. It must include enough agreed context, zero unresolved open questions, exact requirement execution profile references, and `--output-ref` for durable story outputs. When delivery work is in scope, reserve a new stable profile ID and store it through `--delivery-profile`; this writes only the planned `delivery_execution_profile_id`, not a delivery-profile hash or approval. Approve the contract before step 13 creates the matching profile against the approved hashes. Never rewrite the approved contract to point back to that profile. A contract or phase override may narrow the effective autonomy level but never widen it.
 
    Story contract creation auto-populates `story.contract_id`; use `--replace-story-contract` only for explicit renegotiation or recovery. Contract creation is a proposal, not approval to proceed. Summarize the complete contract through `approval requests` and stop until the user explicitly approves, answers, requests changes, or has already granted a broader contract-approval scope that clearly covers it. A broader contract approval never supplies the mandatory autonomy choice for a new delivery unit.
@@ -150,7 +227,7 @@ The dedicated assessment journey remains the exception described above: it packa
    Show the returned `assistant_message` whenever available: it explains what is being approved, what approval means, and what happens next. When `assistant_message_presentation.translate_to_chat_language` is true, translate and contextualize it in the active chat language while preserving artifact IDs, story IDs, contract IDs, template IDs, file paths, CLI commands, status codes, and schema keys. Keep the primary explanation non-technical and business-facing: say "project context" before baseline, "project evidence and boundaries" before capability profile, "allowed tools for this work" before capability recommendation, "assessment format" before template, and "work brief" before contract. For every prepared artifact, show what it contains, what decision is needed, what is missing, what approval authorizes, and what it does not authorize. Give enough detail for a decision in chat; do not make JSON or Markdown the primary approval flow. Approval scope is single-use and artifact-specific unless the user explicitly grants a broader in-delivery scope. Ask again for every new delivery unit. Do not produce technical/functional analysis, implementation outputs, tests, or release evidence before the contract is approved:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..." --requirement REQ-001
+   node <plugin-root>/bin/agentic-sdlc.mjs story create --root <target-project> --id ST-001 --title "..." --requirement REQ-001 --acceptance "<observable story-level success criterion>"
    node <plugin-root>/bin/agentic-sdlc.mjs contract create \
      --root <target-project> \
      --phase <phase> \
@@ -343,6 +420,58 @@ The dedicated assessment journey remains the exception described above: it packa
      --story ST-001
    ```
 
+   For a first custom phase, use the complete distributed overlay above. Then
+   copy its definition into the target project, edit that project-local copy,
+   propose, review, approve, and start it:
+
+   ```bash
+   cp \
+     <plugin-root>/templates/workflow-software-project-v3-integration-review/workflow-definition.json \
+     <target-project>/workflow-software-project-v3-integration-review.json
+
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow definition propose \
+     --root <target-project> \
+     --id software-project-integration-review \
+     --definition-version 1 \
+     --definition-file workflow-software-project-v3-integration-review.json
+
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow definition show \
+     --root <target-project> \
+     --id software-project-integration-review \
+     --definition-version 1
+
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow definition approve \
+     --root <target-project> \
+     --id software-project-integration-review \
+     --definition-version 1 \
+     --actor-type human \
+     --approval-source explicit-user \
+     --summary "Approve the displayed seven-phase workflow"
+
+   node <plugin-root>/bin/agentic-sdlc.mjs workflow instance start \
+     --root <target-project> \
+     --id DELIVERY-ST-001 \
+     --definition software-project-integration-review \
+     --definition-version 1 \
+     --story ST-001
+   ```
+
+   The companion `sdlc-config.json` contains the same `integration-review`
+   phase and exact `phase_order`. For an untouched plain init with no governed
+   work, compare and copy that complete config, then run `config migrate`
+   without `--apply` and apply only its displayed `plan_hash`. Do not overwrite
+   a customized or active project's full config; merge and review its intended
+   config change separately. Never splice the phase into config as an
+   undocumented workaround.
+
+   Author-edited definition input is limited to `label`, `description`,
+   `initial_state`, `states`, `transitions`, `phase_order`,
+   `normal_checkpoints`, and `metadata`. The CLI derives `id`, `version`,
+   `kind`, `schema_version`, `status`, `created_at`, `approval`,
+   `definition_hash`, and `hash_algorithm`. `--definition-file` accepts only a
+   path inside the target project, so never reference the mutable plugin copy
+   directly.
+
    Starting a workflow after a task-start receipt or completed step is deliberately rejected. A legacy task without this pre-task binding may continue, but `--lifecycle-complete` cannot certify it and a post-hoc replay is not a repair.
 
    Only now make the lifecycle's one logical task-start decision with that profile. Do not use `task start` for preview, routing, requirement discovery, or contract preparation. Task start is automatic only when the effective level is not `supervised` **and** the current phase appears in that level's configured `autonomy_policy.presets.<level>.automatic_phases`. If the CLI requires `--confirm-start`, the explicit confirmation completes this same logical start decision; it does not reopen planning or create a second delivery start. Use `--confirm-start` only after the user confirms this concrete start or with an authorization containing `task.start.confirm`; an agent or system confirmation must cite that grant with `--authorization <id>`. The stock `checkpointed` preset makes analysis, design, implementation, and validation automatic, while keeping release actions checkpointed. Do not rewrite the contract:
@@ -433,10 +562,56 @@ The dedicated assessment journey remains the exception described above: it packa
    node <plugin-root>/bin/agentic-sdlc.mjs orchestrate status --root <target-project> --json
    ```
 
-14. After the delivery profile is approved, claim the existing story before editing code. Include actor/run/thread attribution when available:
+14. After the delivery profile is approved and the immutable task-start receipt
+   is recorded for the current approved story contract, claim the existing story
+   before editing code. A claim is rejected until the story has at least one
+   observable acceptance criterion, a current approved contract, and its exact
+   task start. Recover an older draft with `story acceptance add` before
+   contract creation; if acceptance changes after a contract exists, approve a
+   new exact contract and run task start again before claiming. Include
+   actor/run/thread attribution when available:
+
+   When a `supervised` delivery checkpoints both `story.claim` and
+   `story.complete-step`, create separate directly approved one-use grants.
+   Claim authority uses the story subject; completion authority uses the exact
+   compound story/step subject:
 
    ```bash
-   node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id>
+   node <plugin-root>/bin/agentic-sdlc.mjs authorization grant \
+     --root <target-project> \
+     --id AUTH-ST-001-CLAIM \
+     --scope "Allow one claim for ST-001 only" \
+     --allow-use story.claim=ST-001 \
+     --max-uses 1 \
+     --actor-type human \
+     --approval-source explicit-user \
+     --summary "Approve one story claim for ST-001"
+
+   node <plugin-root>/bin/agentic-sdlc.mjs authorization grant \
+     --root <target-project> \
+     --id AUTH-ST-001-DISCOVERY-COMPLETE \
+     --scope "Complete discovery for ST-001 only" \
+     --allow-use story.complete-step=ST-001.step.discovery \
+     --allow-artifact-type discovery-note \
+     --max-uses 1 \
+     --actor-type human \
+     --approval-source explicit-user \
+     --summary "Approve the discovery completion for ST-001"
+   ```
+
+   Pass `AUTH-ST-001-CLAIM` only to the claim and
+   `AUTH-ST-001-DISCOVERY-COMPLETE` only to
+   `story complete-step --step discovery`. Create a new grant and compound
+   subject for every later step. Story-wide completion grants remain compatible
+   for historical records but warn and must not be created for new work. These
+   grants do not cover task start, output linking, release, or another step.
+   Replace `discovery-note` with the exact type required by the approved
+   contract. Every `--type <type>` passed to `story complete-step` requires the
+   same `--allow-artifact-type <type>` on that step's grant; omit it only when
+   the completion passes no `--type`.
+
+   ```bash
+   node <plugin-root>/bin/agentic-sdlc.mjs story claim --root <target-project> --id ST-001 --agent codex --branch feature/ST-001 --thread-id <thread-id> --authorization AUTH-ST-001-CLAIM
    ```
 
 15. Capture durable autonomy decisions, assumptions, risks, tests, handoffs, sync/push/PR events, dependency revalidation, and release evidence as traces. Include requirement/profile, delivery/profile, requested/effective level, and deterministic reason-code references. Strict gates require `test` and `release` traces to include real evidence paths outside cache/index directories and explicit successful outcomes (`passed` for tests; `ready` or `passed` for release). A local release also requires target-bound smoke-test evidence and its rollback procedure:

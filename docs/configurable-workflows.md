@@ -79,6 +79,19 @@ an already pinned legacy run. Pre-freshness v2 receipts require explicit
 recertification; only v3 binds the terminal workflow and its current
 story-scoped freshness proof.
 
+A v3 receipt that still contains `workflow-final-freshness-proof:v1` is also
+historical-only: status rejects it as the current certificate. Preserve it in
+repository history if required, then rerun
+`gate check --strict --story <story-id> --lifecycle-complete` on the unchanged,
+reviewed terminal state to reseal `workflow-final-freshness-proof:v2`. The v2
+proof permits only a monotonic descendant-history transition from the certified
+HEAD identity to the exact certified working-tree identity. Transient third
+identities, a later return to the old identity, replace refs, grafts, inherited
+alternate Git state, shallow history, hidden index flags, partial staging, or
+current governed path drift fail closed. Untracked paths inside the approved
+scope are inventoried even when `.gitignore`, `.git/info/exclude`, or a global
+exclude file matches them.
+
 The examples in this guide use the npm/package bin shim `agentic-sdlc`. A Codex
 plugin installation does not create that global executable; use
 `node <plugin-root>/bin/agentic-sdlc.mjs` followed by the same arguments:
@@ -114,6 +127,188 @@ an already recorded transition remain no-ops.
 The technical-assessment preset complements the existing
 `assessment-proposal:v1` and `assessment-workflow:v1` records; it does not
 replace their files, commands, JSON fields, or two-checkpoint behavior.
+
+## First custom phase: copy, edit, approve, start
+
+The plugin ships one self-contained project-template directory for the current
+`software-project` v3 lifecycle plus an `integration-review` phase between
+implementation and validation:
+
+```text
+templates/workflow-software-project-v3-integration-review/
+  README.md
+  sdlc-config.json
+  workflow-definition.json
+```
+
+For a new local project, use the directory during initialization. `init`
+validates the complete config, creates all seven phase contracts, and pins the
+config hash in the same bootstrap:
+
+```bash
+PLUGIN_ROOT=/absolute/path/to/agentic-sdlc-codex-plugin
+PROJECT_ROOT=/absolute/path/to/project
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" init \
+  --root "$PROJECT_ROOT" \
+  --project-name "Local project with integration review" \
+  --template-dir \
+    "$PLUGIN_ROOT/templates/workflow-software-project-v3-integration-review"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" config status \
+  --root "$PROJECT_ROOT"
+```
+
+Use the same `--template-dir` with `onboard existing-project` when the
+repository already contains useful code but has no `.sdlc/` yet. This is the
+recommended path: no post-init JSON edit or hidden phase copy is needed.
+
+If a plain default `init` was just completed and no governed work has started,
+the companion config can replace that untouched default in full. Review the
+exact files first, then let `config migrate` bind the complete replacement to
+its displayed plan hash:
+
+```bash
+diff -u \
+  "$PROJECT_ROOT/.sdlc/config.json" \
+  "$PLUGIN_ROOT/templates/workflow-software-project-v3-integration-review/sdlc-config.json"
+
+cp \
+  "$PLUGIN_ROOT/templates/workflow-software-project-v3-integration-review/sdlc-config.json" \
+  "$PROJECT_ROOT/.sdlc/config.json"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" config migrate \
+  --root "$PROJECT_ROOT"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" config migrate \
+  --root "$PROJECT_ROOT" \
+  --apply \
+  --plan-hash <hash-shown-by-the-preview>
+```
+
+Do not replace a customized or active project's full config with this
+companion. In that case, review and merge the intended phase and autonomy
+differences under the normal [Configuration safety](configuration-safety.md)
+procedure.
+
+`--definition-file` deliberately reads only a file inside the target project.
+Copy the definition there after configuration is pinned, so the reviewed
+proposal never depends on a mutable file inside the plugin installation:
+
+```bash
+cp \
+  "$PLUGIN_ROOT/templates/workflow-software-project-v3-integration-review/workflow-definition.json" \
+  "$PROJECT_ROOT/workflow-software-project-v3-integration-review.json"
+```
+
+Edit the project copy before proposing it. These are the author-owned input
+fields:
+
+| Input field | What to review or edit |
+| --- | --- |
+| `label`, `description` | Human explanation of the process |
+| `initial_state` | First state; it must exist in `states` |
+| `states` | Stable IDs, labels, terminal marker, and non-executable metadata |
+| `transitions` | Stable IDs, `from`/`to`, labels, allowlisted guards, and metadata |
+| `phase_order` | Exact project lifecycle order |
+| `normal_checkpoints` | Normal process review moments; this does not select delivery autonomy |
+| `metadata` | Story binding, canonical evidence version, and descriptive provenance |
+
+Do not add the following fields to the editable input. The CLI derives or
+overrides them from the command and the recorded decision:
+
+| CLI-derived field | Source |
+| --- | --- |
+| `id` | `--id` |
+| `version` | `--definition-version` |
+| `kind`, `schema_version`, `status` | Canonical proposal builder |
+| `created_at` | Proposal time |
+| `approval` | `workflow definition approve` |
+| `definition_hash`, `hash_algorithm` | Canonical content hashing |
+
+The definition and companion config deliberately contain the same exact
+seven-phase order. A mismatch fails before an instance starts.
+
+Propose the project-local copy, inspect it, approve that exact version, and
+start it for an existing story:
+
+```bash
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" workflow definition propose \
+  --root "$PROJECT_ROOT" \
+  --id software-project-integration-review \
+  --definition-version 1 \
+  --definition-file workflow-software-project-v3-integration-review.json \
+  --summary "Add an explicit integration review before validation"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" workflow definition show \
+  --root "$PROJECT_ROOT" \
+  --id software-project-integration-review \
+  --definition-version 1
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" workflow definition approve \
+  --root "$PROJECT_ROOT" \
+  --id software-project-integration-review \
+  --definition-version 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve the displayed seven-phase workflow"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" workflow instance start \
+  --root "$PROJECT_ROOT" \
+  --id DELIVERY-ST-001 \
+  --definition software-project-integration-review \
+  --definition-version 1 \
+  --story ST-001
+```
+
+The template retains the v3 canonical guards: approved requirement before
+analysis, approved contract before implementation, linked outputs through
+integration review before validation, and a passing intermediate strict gate
+before release. The story must complete `integration-review` before the
+workflow can enter validation.
+
+When a `supervised` delivery profile checkpoints both the initial claim and a
+step completion, record separate one-use grants after the person approves
+each exact operation. Claim authority is story-scoped; completion authority is
+bound to the story and configured step:
+
+```bash
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" authorization grant \
+  --root "$PROJECT_ROOT" \
+  --id AUTH-ST-001-CLAIM \
+  --scope "Allow one claim for ST-001 only" \
+  --allow-use story.claim=ST-001 \
+  --max-uses 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve one story claim for ST-001"
+
+node "$PLUGIN_ROOT/bin/agentic-sdlc.mjs" authorization grant \
+  --root "$PROJECT_ROOT" \
+  --id AUTH-ST-001-INTEGRATION-REVIEW-COMPLETE \
+  --scope "Complete integration-review for ST-001 only" \
+  --allow-use story.complete-step=ST-001.step.integration-review \
+  --allow-artifact-type integration-review-report \
+  --max-uses 1 \
+  --actor-type human \
+  --approval-source explicit-user \
+  --summary "Approve the integration-review completion for ST-001"
+```
+
+Pass `AUTH-ST-001-CLAIM` only to `story claim`. Pass
+`AUTH-ST-001-INTEGRATION-REVIEW-COMPLETE` only to
+`story complete-step --id ST-001 --step integration-review`. Create a new grant
+ID and compound subject such as `ST-001.step.validation` for every later
+completion. Legacy story-wide completion subjects remain readable but produce
+a warning; do not use them for new work. These grants do not approve the
+contract, task start, output link, release, or any other step.
+
+The example permits the concrete type `integration-review-report`. Replace it
+with the exact type required by the approved contract. Every type passed to
+`story complete-step --type <type>` must also appear once as
+`--allow-artifact-type <type>` on that step's grant. Omit the artifact flag
+only when the completion passes no `--type`; evidence paths alone do not need
+artifact-type authority.
 
 ## Definitions, overlays, and running instances
 

@@ -23,7 +23,7 @@ const OBSERVED_AT = "2026-07-28T10:10:00.000Z";
 
 function finalFreshnessProof(storyId, instanceId = "delivery-42") {
   const subject = {
-    schema_version: "workflow-final-freshness-proof:v1",
+    schema_version: "workflow-final-freshness-proof:v2",
     story_id: storyId,
     workflow_instance_id: instanceId,
     governed_files: [],
@@ -34,8 +34,11 @@ function finalFreshnessProof(storyId, instanceId = "delivery-42") {
     local_release_root: null,
     local_release_scope: [],
     git_scope: {
+      schema_version: "workflow-final-git-scope:v2",
       available: false,
       baseline_head_sha: null,
+      certification_head_sha: null,
+      scoped_state_hash: null,
       scoped_head_tree_hash: null,
       scoped_changes: [],
     },

@@ -16,7 +16,7 @@ test("root help explains practical behavior before technical details", () => {
   assert.match(primary, /Next step:/u);
   assert.match(primary, /Talk naturally to Codex about the outcome you want\./u);
   assert.match(primary, /This CLI is for structured recovery and automation/u);
-  assert.match(primary, /requirement -> story -> work brief\/output -> autonomy -> story workflow start -> one task start -> complete each phase and advance -> validation gate -> enter release -> delivery\/release evidence -> final lifecycle gate/u);
+  assert.match(primary, /requirement -> story -> work brief\/output -> autonomy -> story workflow start -> one task start -> story claim -> complete each phase and advance -> validation gate -> enter release -> delivery\/release evidence -> final lifecycle gate/u);
   assert.doesNotMatch(primary, FORBIDDEN_PRIMARY_JARGON);
   assert.doesNotMatch(primary, /(?:agentic-sdlc|--[a-z])/iu);
   assert.match(technical, /Usage:/u);
@@ -26,7 +26,7 @@ test("root help explains practical behavior before technical details", () => {
   const [italianPrimary] = italian.split("Dettagli tecnici (facoltativi):");
   assert.match(italianPrimary, /Parla naturalmente con Codex del risultato che vuoi ottenere\./u);
   assert.match(italianPrimary, /Questa CLI serve per recupero strutturato e automazione/u);
-  assert.match(italianPrimary, /requisito -> story -> accordo di lavoro\/output -> autonomia -> avvio workflow della story -> un solo avvio attività -> completa e avanza ogni fase -> gate di validazione -> ingresso in release -> consegna\/prove di release -> gate lifecycle finale/u);
+  assert.match(italianPrimary, /requisito -> story -> accordo di lavoro\/output -> autonomia -> avvio workflow della story -> un solo avvio attività -> assegnazione della story -> completa e avanza ogni fase -> gate di validazione -> ingresso in release -> consegna\/prove di release -> gate lifecycle finale/u);
 });
 
 test("Italian leaf help is understandable without plugin terminology", () => {
@@ -103,6 +103,23 @@ test("requirement and contract help include safe runnable examples and exact run
   }
   assert.equal(requirement.examples.length, 1);
   assert.match(requirement.examples[0], /--title .*--summary .*--acceptance .*--autonomy-ceiling/u);
+  assert.match(requirement.examples[0], /--write-path src .*--write-path test .*--write-path docs .*--write-path evidence/u);
+  assert.match(requirementFlags.get("--write-path")?.description, /stored Git-relative/u);
+
+  const revision = buildHelpModel(["requirement", "revise"]);
+  const revisionFlags = new Map(revision.options.map((entry) => [entry.flag, entry]));
+  assert.equal(revisionFlags.get("--id")?.required, true);
+  assert.equal(revisionFlags.get("--new-id")?.required, true);
+  assert.equal(revisionFlags.get("--write-path")?.repeatable, true);
+  assert.match(revision.human.result, /inherited unless an explicit replacement/iu);
+  assert.match(revision.examples[0], /--new-id .*--write-path src .*--write-path test/u);
+
+  const italianRevision = buildHelpModel(["requirement", "revise"], { locale: "it" });
+  assert.match(italianRevision.human.result, /vengono ereditate.*elenco sostitutivo/iu);
+  assert.match(
+    italianRevision.options.find((entry) => entry.flag === "--write-path")?.description,
+    /salvati relativi a Git.*rilascio locale.*destinazione assoluta/iu,
+  );
 
   const approve = buildHelpModel(["requirement", "approve"]);
   assert.match(approve.examples[0], /--actor-type human --approval-source explicit-user --summary/u);
@@ -125,6 +142,7 @@ test("requirement and contract help include safe runnable examples and exact run
 test("core work commands keep human guidance plain and runtime flags in optional details", () => {
   const expectations = [
     { path: ["story", "create"], flags: ["--title", "--acceptance"] },
+    { path: ["story", "acceptance", "add"], flags: ["--id", "--acceptance", "--summary"] },
     { path: ["story", "claim"], flags: ["--agent", "--branch"] },
     { path: ["output", "resolve"], flags: ["--story", "--type"] },
     { path: ["contract", "approve"], flags: ["--actor-type", "--approval-source", "--approval-evidence"] },
@@ -140,6 +158,27 @@ test("core work commands keep human guidance plain and runtime flags in optional
       assert.match(technical, new RegExp(flag, "u"), `${expectation.path.join(" ")} should expose ${flag}`);
     }
   }
+
+  const claimEnglish = renderHelp(["story", "claim"], { locale: "en" });
+  assert.match(
+    claimEnglish.split("Technical details (optional):")[0],
+    /started story.*observable acceptance criteria.*current approved contract/is,
+  );
+  const claimItalian = renderHelp(["story", "claim"], { locale: "it" });
+  assert.match(
+    claimItalian.split("Dettagli tecnici (facoltativi):")[0],
+    /story già avviata.*criteri di successo osservabili.*contratto corrente approvato/is,
+  );
+  const acceptanceEnglish = renderHelp(["story", "acceptance", "add"], { locale: "en" });
+  assert.match(
+    acceptanceEnglish.split("Technical details (optional):")[0],
+    /if a contract already exists.*replace and approve it.*start the revised work before claiming/is,
+  );
+  const startItalian = renderHelp(["task", "start"], { locale: "it" });
+  assert.match(
+    startItalian.split("Dettagli tecnici (facoltativi):")[0],
+    /un avvio riuscito abilita l’assegnazione della story/is,
+  );
 });
 
 test("first-project lifecycle help exposes the exact assessment, evidence, and gate inputs", () => {

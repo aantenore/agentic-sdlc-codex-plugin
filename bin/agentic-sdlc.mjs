@@ -908,6 +908,7 @@ function buildCliRuntimeHandlerRegistry() {
     "contract.create": call(createContract),
     "contract.approve": call(approveContract),
     "story.create": call(createStory),
+    "story.acceptance.add": call(addStoryAcceptance),
     "story.claim": call(claimStory),
     "story.release": call(releaseStoryClaim),
     "story.complete-step": call(completeStoryStep),
@@ -1284,6 +1285,19 @@ async function main() {
           : { code: "internal_error", message: "The command could not be completed.", statusCode: 500, retryable: false },
         { context: CLI_OPERATION_CONTEXT, redactionPolicy: errorRedactionPolicy },
       );
+      const customGuidance = userErrorHumanGuidance(error, italian);
+      if (customGuidance) {
+        console.error(humanGuidanceLines(
+          customGuidance,
+          [
+            `Error: ${normalized.error.message}`,
+            `Correlation ID: ${CLI_OPERATION_CONTEXT.correlation_id}`,
+          ],
+          parsed.options,
+        ).join("\n"));
+        process.exitCode = 1;
+        return;
+      }
       console.error([
         `${labels.outcome}: ${italian ? "Il comando non è stato completato." : "The command could not be completed."}`,
         `${labels.impact}: ${italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically."}`,
@@ -1339,7 +1353,12 @@ function storyLifecycleCertificationLockPath(context, storyId) {
 }
 
 const WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA =
-  "workflow-final-freshness-proof:v1";
+  "workflow-final-freshness-proof:v2";
+const WORKFLOW_FINAL_GIT_SCOPE_SCHEMA = "workflow-final-git-scope:v2";
+const WORKFLOW_FINAL_GIT_OBSERVATION_SCHEMA = "workflow-final-git-observation:v2";
+const WORKFLOW_FINAL_GIT_SCOPE_MAX_PATHS = 10_000;
+const WORKFLOW_FINAL_GIT_SCOPE_MAX_COMMITS = 1_000;
+const WORKFLOW_FINAL_GIT_SCOPE_MAX_COMMIT_PATHS = 100_000;
 
 function workflowFinalFreshnessFileRef(context, category, filePath) {
   const resolved = path.resolve(filePath);
@@ -1586,21 +1605,405 @@ function workflowFinalFreshnessLocalRootIdentity(rawPath) {
   return first;
 }
 
-function workflowFinalFreshnessGitScope(
+function workflowFinalGitEnvironment() {
+  const environment = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^GIT_/iu.test(key)) {
+      environment[key] = value;
+    }
+  }
+  return {
+    ...environment,
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+function workflowFinalGitArguments(context, args) {
+  return ["--no-replace-objects", "-C", context.root, ...args];
+}
+
+function workflowFinalGitNullRecords(context, args, label) {
+  let raw;
+  try {
+    raw = childProcess.execFileSync(
+      "git",
+      workflowFinalGitArguments(context, args),
+      {
+        encoding: null,
+        env: workflowFinalGitEnvironment(),
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+  } catch {
+    fail(`Final lifecycle freshness could not inspect ${label}.`);
+  }
+  let decoded;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    fail(`Final lifecycle freshness cannot safely represent a non-UTF-8 path in ${label}.`);
+  }
+  return decoded.split("\u0000").filter((entry) => entry !== "");
+}
+
+function workflowFinalExecGit(context, args) {
+  try {
+    return childProcess.execFileSync(
+      "git",
+      workflowFinalGitArguments(context, args),
+      {
+        encoding: "utf8",
+        env: workflowFinalGitEnvironment(),
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function workflowFinalGitCommandSucceeds(context, args) {
+  try {
+    childProcess.execFileSync(
+      "git",
+      workflowFinalGitArguments(context, args),
+      {
+        encoding: "utf8",
+        env: workflowFinalGitEnvironment(),
+        stdio: ["ignore", "ignore", "ignore"],
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertWorkflowFinalGitHasNoGrafts(context) {
+  const rawGraftsPath = workflowFinalExecGit(
+    context,
+    ["rev-parse", "--git-path", "info/grafts"],
+  );
+  if (!rawGraftsPath) {
+    fail("Final lifecycle freshness could not resolve the repository grafts path.");
+  }
+  const graftsPath = path.isAbsolute(rawGraftsPath)
+    ? path.resolve(rawGraftsPath)
+    : path.resolve(context.root, rawGraftsPath);
+  let stat;
+  try {
+    stat = fs.lstatSync(graftsPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile() || stat.size > 0) {
+    fail(
+      "Final lifecycle freshness refuses Git grafts or a non-regular info/grafts path; "
+      + "remove the local history override and reseal the lifecycle receipt.",
+    );
+  }
+}
+
+function assertWorkflowFinalGitHistoryIsComplete(context) {
+  assertWorkflowFinalGitHasNoGrafts(context);
+  if (
+    workflowFinalExecGit(context, ["rev-parse", "--is-shallow-repository"])
+    !== "false"
+  ) {
+    fail(
+      "Final lifecycle freshness requires complete Git history and refuses a shallow "
+      + "repository; fetch or restore full ancestry, review it, and reseal the lifecycle receipt.",
+    );
+  }
+}
+
+function workflowFinalMissingGitIdentity() {
+  return {
+    present: false,
+    file_type: "missing",
+    mode: null,
+    content_sha256: null,
+    object_id: null,
+  };
+}
+
+function workflowFinalGitObjectIdentity(mode, objectId, label) {
+  let fileType;
+  if (mode === "100644" || mode === "100755") {
+    fileType = "regular";
+  } else if (mode === "120000") {
+    fileType = "symlink";
+  } else {
+    fail(`Final lifecycle freshness does not support ${label} Git mode ${mode}.`);
+  }
+  if (!/^[a-f0-9]{40,64}$/iu.test(String(objectId || ""))) {
+    fail(`Final lifecycle freshness received an invalid Git object ID for ${label}.`);
+  }
+  return {
+    present: true,
+    file_type: fileType,
+    mode: Number.parseInt(mode, 8) & 0o7777,
+    content_sha256: null,
+    object_id: String(objectId).toLowerCase(),
+  };
+}
+
+function workflowFinalGitIndexEntries(context, includePath = () => true) {
+  const entries = new Map();
+  for (const record of workflowFinalGitNullRecords(
+    context,
+    ["ls-files", "--stage", "-z", "--"],
+    "the Git index",
+  )) {
+    const separator = record.indexOf("\t");
+    if (separator < 0) {
+      fail("Final lifecycle freshness received an unsupported Git index record.");
+    }
+    const header = record.slice(0, separator);
+    const match = /^([0-7]{6}) ([a-f0-9]{40,64}) ([0-3])$/iu.exec(header);
+    if (!match) {
+      fail("Final lifecycle freshness received an unsupported Git index identity.");
+    }
+    const projectPath = exactGitProjectPath(record.slice(separator + 1));
+    if (!includePath(projectPath)) continue;
+    if (match[3] !== "0" || entries.has(projectPath)) {
+      fail(
+        `Final lifecycle freshness cannot certify an unmerged or duplicate Git index path: `
+        + `${JSON.stringify(projectPath)}.`,
+      );
+    }
+    entries.set(
+      projectPath,
+      workflowFinalGitObjectIdentity(match[1], match[2], `index path ${projectPath}`),
+    );
+  }
+  return entries;
+}
+
+function workflowFinalGitHeadEntries(context, includePath = () => true) {
+  const entries = new Map();
+  for (const record of workflowFinalGitNullRecords(
+    context,
+    ["ls-tree", "-r", "-z", "HEAD", "--"],
+    "the Git HEAD tree",
+  )) {
+    const separator = record.indexOf("\t");
+    if (separator < 0) {
+      fail("Final lifecycle freshness received an unsupported Git tree record.");
+    }
+    const header = record.slice(0, separator);
+    const match = /^([0-7]{6}) ([a-z]+) ([a-f0-9]{40,64})$/iu.exec(header);
+    if (!match) {
+      fail("Final lifecycle freshness received an unsupported Git tree identity.");
+    }
+    const projectPath = exactGitProjectPath(record.slice(separator + 1));
+    if (!includePath(projectPath)) continue;
+    if (match[2] !== "blob") {
+      fail("Final lifecycle freshness cannot certify a non-blob Git tree entry.");
+    }
+    if (entries.has(projectPath)) {
+      fail(`Final lifecycle freshness received duplicate HEAD path ${JSON.stringify(projectPath)}.`);
+    }
+    entries.set(
+      projectPath,
+      workflowFinalGitObjectIdentity(match[1], match[3], `HEAD path ${projectPath}`),
+    );
+  }
+  return entries;
+}
+
+function workflowFinalGitIndexFlags(context, includePath = () => true) {
+  const flags = new Map();
+  for (const record of workflowFinalGitNullRecords(
+    context,
+    ["ls-files", "-v", "-z", "--"],
+    "Git index flags",
+  )) {
+    if (record.length < 3 || record[1] !== " ") {
+      fail("Final lifecycle freshness received an unsupported Git index flag record.");
+    }
+    const tag = record[0];
+    const projectPath = exactGitProjectPath(record.slice(2));
+    if (!includePath(projectPath)) continue;
+    flags.set(projectPath, {
+      assume_unchanged: tag !== "?" && tag === tag.toLowerCase(),
+      skip_worktree: tag.toUpperCase() === "S",
+    });
+  }
+  return flags;
+}
+
+function workflowFinalGitPathSet(context, args, label) {
+  return new Set(
+    workflowFinalGitNullRecords(context, args, label)
+      .map((projectPath) => exactGitProjectPath(projectPath)),
+  );
+}
+
+function workflowFinalGitLayerIdentityEqual(left, right) {
+  return stableJson(left) === stableJson(right);
+}
+
+function workflowFinalWorkingTreeIdentity(snapshot) {
+  return {
+    present: snapshot.file_type !== "missing",
+    file_type: snapshot.file_type,
+    mode: snapshot.mode,
+    content_sha256: snapshot.content_sha256,
+    object_id: null,
+  };
+}
+
+function workflowFinalGitCommitGraphSince(context, boundarySha, observedHeadSha) {
+  if (boundarySha === observedHeadSha) return [];
+  const raw = workflowFinalExecGit(
+    context,
+    [
+      "rev-list",
+      "--reverse",
+      "--topo-order",
+      "--parents",
+      `${boundarySha}..${observedHeadSha}`,
+    ],
+  );
+  const commits = String(raw || "")
+    .split(/\r?\n/u)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [commitSha, ...parentShas] = line.split(/\s+/u);
+      if (
+        !/^[a-f0-9]{40,64}$/iu.test(commitSha)
+        || parentShas.some((value) => !/^[a-f0-9]{40,64}$/iu.test(value))
+      ) {
+        fail("Final lifecycle freshness received an invalid post-certification commit graph.");
+      }
+      return {
+        commit_sha: commitSha.toLowerCase(),
+        parent_shas: parentShas.map((value) => value.toLowerCase()),
+      };
+    });
+  if (commits.length > WORKFLOW_FINAL_GIT_SCOPE_MAX_COMMITS) {
+    fail(
+      `Final lifecycle freshness refuses more than ${WORKFLOW_FINAL_GIT_SCOPE_MAX_COMMITS} `
+      + "post-certification commits; reseal the lifecycle receipt.",
+    );
+  }
+  return commits;
+}
+
+function workflowFinalGitCommitsSince(context, boundarySha, observedHeadSha) {
+  return workflowFinalGitCommitGraphSince(
+    context,
+    boundarySha,
+    observedHeadSha,
+  ).map((entry) => entry.commit_sha);
+}
+
+function workflowFinalGitTreeIdentities(context, treeish, projectPaths) {
+  const paths = [...new Set(projectPaths.map((value) => exactGitProjectPath(value)))].sort();
+  const identities = new Map(
+    paths.map((projectPath) => [projectPath, workflowFinalMissingGitIdentity()]),
+  );
+  const chunkSize = 256;
+  for (let offset = 0; offset < paths.length; offset += chunkSize) {
+    const chunk = paths.slice(offset, offset + chunkSize);
+    const requested = new Set(chunk);
+    for (const record of workflowFinalGitNullRecords(
+      context,
+      ["ls-tree", "-z", treeish, "--", ...chunk],
+      `the Git tree for commit ${treeish}`,
+    )) {
+      const separator = record.indexOf("\t");
+      if (separator < 0) {
+        fail("Final lifecycle freshness received an unsupported historical Git tree record.");
+      }
+      const header = record.slice(0, separator);
+      const match = /^([0-7]{6}) ([a-z]+) ([a-f0-9]{40,64})$/iu.exec(header);
+      const projectPath = exactGitProjectPath(record.slice(separator + 1));
+      if (
+        !match
+        || match[2] !== "blob"
+        || !requested.has(projectPath)
+        || identities.get(projectPath)?.present === true
+      ) {
+        fail(
+          "Final lifecycle freshness received an unsupported or duplicate historical "
+          + `Git tree identity for ${JSON.stringify(projectPath)}.`,
+        );
+      }
+      identities.set(
+        projectPath,
+        workflowFinalGitObjectIdentity(
+          match[1],
+          match[3],
+          `historical path ${projectPath}`,
+        ),
+      );
+    }
+  }
+  return identities;
+}
+
+function workflowFinalGitTouchedPathsSince(context, boundarySha, observedHeadSha) {
+  const touched = new Set();
+  for (const commitSha of workflowFinalGitCommitsSince(
+    context,
+    boundarySha,
+    observedHeadSha,
+  )) {
+    for (const projectPath of workflowFinalGitNullRecords(
+      context,
+      [
+        "diff-tree",
+        "--root",
+        "-m",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "-z",
+        "--no-renames",
+        commitSha,
+        "--",
+      ],
+      `paths touched by commit ${commitSha}`,
+    )) {
+      touched.add(exactGitProjectPath(projectPath));
+    }
+  }
+  return touched;
+}
+
+function captureWorkflowFinalFreshnessGitScopeOnce(
   context,
   storyId,
   requirementProfiles,
   {
-    certifiedGitScope = null,
+    certifiedPaths = [],
+    historyBoundarySha = null,
   } = {},
 ) {
-  if (execGit(context.root, ["rev-parse", "--is-inside-work-tree"]) !== "true") {
+  if (workflowFinalExecGit(context, ["rev-parse", "--is-inside-work-tree"]) !== "true") {
     return {
+      schema_version: WORKFLOW_FINAL_GIT_OBSERVATION_SCHEMA,
       available: false,
       baseline_head_sha: null,
+      observed_head_sha: null,
+      scoped_state_hash: null,
       scoped_head_tree_hash: null,
       scoped_changes: [],
+      history_touched_paths: [],
     };
+  }
+  assertWorkflowFinalGitHistoryIsComplete(context);
+  const observedHeadSha = workflowFinalExecGit(context, ["rev-parse", "--verify", "HEAD"]);
+  if (!observedHeadSha || !/^[a-f0-9]{40,64}$/iu.test(observedHeadSha)) {
+    fail("Final lifecycle freshness requires a verifiable Git HEAD.");
   }
   const taskStartPath = path.join(
     context.sdlcRoot,
@@ -1612,70 +2015,411 @@ function workflowFinalFreshnessGitScope(
     ? readProjectJson(context, taskStartPath)
     : null;
   const baselineSha = taskStart?.audit?.git?.head_sha || null;
+  if (
+    !baselineSha
+    || !/^[a-f0-9]{40,64}$/iu.test(baselineSha)
+    || !workflowFinalGitCommandSucceeds(context, ["cat-file", "-e", `${baselineSha}^{commit}`])
+    || !workflowFinalGitCommandSucceeds(
+      context,
+      ["merge-base", "--is-ancestor", baselineSha, observedHeadSha],
+    )
+  ) {
+    fail("Final lifecycle freshness cannot bind the current HEAD to the task-start Git baseline.");
+  }
+  if (historyBoundarySha) {
+    if (
+      !/^[a-f0-9]{40,64}$/iu.test(historyBoundarySha)
+      || !workflowFinalGitCommandSucceeds(context, ["cat-file", "-e", `${historyBoundarySha}^{commit}`])
+      || !workflowFinalGitCommandSucceeds(
+        context,
+        ["merge-base", "--is-ancestor", historyBoundarySha, observedHeadSha],
+      )
+    ) {
+      fail(
+        "Final lifecycle freshness observed a rewritten or non-descendant HEAD after certification; "
+        + "reseal the lifecycle receipt.",
+      );
+    }
+  }
+  const approvedWritePaths = [...new Set(requirementProfiles.flatMap(
+    (profile) => profile.constraints?.allowed_write_paths || [],
+  ))].sort();
   const allowedByStoryRequirements = (filePath) =>
-    requirementProfiles.length > 0
-    && requirementProfiles.some((profile) => {
-      const allowed = profile.constraints?.allowed_write_paths || [];
-      return allowed.length > 0
-        && pathMatchesApprovedWriteScope(filePath, allowed);
-    });
-  const committedPaths = (
-    baselineSha
-    && /^[a-f0-9]{40,64}$/iu.test(baselineSha)
-    && gitCommandSucceeds(context.root, ["cat-file", "-e", `${baselineSha}^{commit}`])
-    && gitCommandSucceeds(context.root, ["merge-base", "--is-ancestor", baselineSha, "HEAD"])
-  )
-    ? String(
-      execGit(
-        context.root,
-        ["diff", "--name-only", "--no-renames", `${baselineSha}..HEAD`, "--"],
-      ) || "",
-    ).split(/\r?\n/u).map((item) => item.trim()).filter(Boolean)
-    : [];
-  const workspace = currentWorkspaceChanges(context);
-  const workspaceByPath = new Map(workspace.map((entry) => [entry.path, entry]));
-  const certifiedPaths = new Set(
-    (certifiedGitScope?.scoped_changes || []).map((entry) => entry.path),
+    approvedWritePaths.length > 0
+    && pathMatchesApprovedWriteScope(filePath, approvedWritePaths);
+  const includedGitPath = (filePath) =>
+    filePath !== SDLC_DIR
+    && !filePath.startsWith(`${SDLC_DIR}/`)
+    && allowedByStoryRequirements(filePath);
+  const headEntries = workflowFinalGitHeadEntries(context, includedGitPath);
+  const indexEntries = workflowFinalGitIndexEntries(context, includedGitPath);
+  const indexFlags = workflowFinalGitIndexFlags(context, includedGitPath);
+  const untrackedPaths = approvedWritePaths.length > 0
+    ? workflowFinalGitPathSet(
+        context,
+        [
+          "ls-files",
+          "--others",
+          "-z",
+          "--",
+          ...approvedWritePaths.map((projectPath) => `:(literal)${projectPath}`),
+        ],
+        "all in-scope untracked paths, including ignored paths",
+      )
+    : new Set();
+  const baselineChangedPaths = workflowFinalGitPathSet(
+    context,
+    ["diff", "--name-only", "--no-renames", "-z", `${baselineSha}..${observedHeadSha}`, "--"],
+    "paths changed since task start",
   );
-  const workspacePaths = certifiedGitScope
-    ? [
-        ...certifiedPaths,
-        ...workspace.map((entry) => entry.path),
-      ]
-    : workspace.map((entry) => entry.path);
+  const indexWorktreeDifferences = workflowFinalGitPathSet(
+    context,
+    [
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--ignore-submodules=none",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      "--",
+    ],
+    "working-tree differences from the Git index",
+  );
+  const historyTouchedPaths = historyBoundarySha
+    ? workflowFinalGitTouchedPathsSince(context, historyBoundarySha, observedHeadSha)
+    : new Set();
   const scopedPaths = [...new Set([
-    ...committedPaths,
-    ...workspacePaths,
+    ...headEntries.keys(),
+    ...indexEntries.keys(),
+    ...indexFlags.keys(),
+    ...untrackedPaths,
+    ...baselineChangedPaths,
+    ...historyTouchedPaths,
+    ...certifiedPaths.map((value) => exactGitProjectPath(value)),
   ])]
-    .filter((filePath) => allowedByStoryRequirements(filePath))
+    .filter((filePath) => includedGitPath(filePath))
     .sort();
-  const committedSet = new Set(committedPaths);
+  if (scopedPaths.length > WORKFLOW_FINAL_GIT_SCOPE_MAX_PATHS) {
+    fail(
+      `Final lifecycle freshness scope exceeds ${WORKFLOW_FINAL_GIT_SCOPE_MAX_PATHS} Git paths.`,
+    );
+  }
   const scopedChanges = scopedPaths.map((filePath) => {
-    const workspaceEntry = workspaceByPath.get(filePath);
-    const snapshot = stableWorkspacePathSnapshot(context, {
-      path: filePath,
-      status: workspaceEntry?.status || "  ",
-    });
+    const flags = indexFlags.get(filePath) || {
+      assume_unchanged: false,
+      skip_worktree: false,
+    };
+    if (flags.assume_unchanged || flags.skip_worktree) {
+      fail(
+        `Final lifecycle freshness refuses hidden Git index flags for in-scope path `
+        + `${JSON.stringify(filePath)} (assume-unchanged=${flags.assume_unchanged}, `
+        + `skip-worktree=${flags.skip_worktree}).`,
+      );
+    }
+    const workingTree = workflowFinalWorkingTreeIdentity(
+      stableWorkspacePathSnapshot(context, { path: filePath, status: "  " }),
+    );
+    const index = indexEntries.get(filePath) || workflowFinalMissingGitIdentity();
+    const head = headEntries.get(filePath) || workflowFinalMissingGitIdentity();
+    const indexWorktreeStructureMatches = (
+      index.present === workingTree.present
+      && (
+        !index.present
+        || (
+          index.file_type === workingTree.file_type
+          && (
+            index.file_type !== "regular"
+            || (index.mode & 0o111) === (workingTree.mode & 0o111)
+          )
+        )
+      )
+    );
+    const indexMatchesWorktree = (
+      indexWorktreeStructureMatches
+      && !indexWorktreeDifferences.has(filePath)
+    );
+    const indexMatchesHead = workflowFinalGitLayerIdentityEqual(index, head);
+    if (!indexMatchesHead && !indexMatchesWorktree) {
+      fail(
+        `Final lifecycle freshness refuses partially staged three-way identity for `
+        + `${JSON.stringify(filePath)}; restore the certified index or stage the exact working tree.`,
+      );
+    }
     return {
-      ...snapshot,
-      committed_since_task_start: committedSet.has(filePath),
-      workspace_status: workspaceEntry?.status || null,
+      path: filePath,
+      working_tree: workingTree,
+      index,
+      head,
+      index_matches_worktree: indexMatchesWorktree,
+      index_matches_head: indexMatchesHead,
+      index_flags: flags,
     };
   });
+  const scopedHistoryTouchedPaths = [...historyTouchedPaths]
+    .filter((filePath) => scopedPaths.includes(filePath))
+    .sort();
   return {
+    schema_version: WORKFLOW_FINAL_GIT_OBSERVATION_SCHEMA,
     available: true,
     baseline_head_sha: baselineSha,
+    observed_head_sha: observedHeadSha,
+    scoped_state_hash: computeStableHash(scopedChanges),
     scoped_head_tree_hash: computeStableHash(
       scopedChanges.map((entry) => ({
         path: entry.path,
-        file_type: entry.file_type,
-        mode: entry.mode,
-        content_sha256: entry.content_sha256,
-        committed_since_task_start: entry.committed_since_task_start,
+        head: entry.head,
       })),
     ),
     scoped_changes: scopedChanges,
+    history_touched_paths: scopedHistoryTouchedPaths,
   };
+}
+
+function captureWorkflowFinalFreshnessGitScope(
+  context,
+  storyId,
+  requirementProfiles,
+  options = {},
+) {
+  const first = captureWorkflowFinalFreshnessGitScopeOnce(
+    context,
+    storyId,
+    requirementProfiles,
+    options,
+  );
+  const second = captureWorkflowFinalFreshnessGitScopeOnce(
+    context,
+    storyId,
+    requirementProfiles,
+    options,
+  );
+  if (stableJson(first) !== stableJson(second)) {
+    fail(
+      "Final lifecycle Git scope changed while being snapshotted; "
+      + "retry after filesystem and Git activity settles.",
+    );
+  }
+  return second;
+}
+
+function sealWorkflowFinalFreshnessGitScope(observation) {
+  const {
+    observed_head_sha: certificationHeadSha,
+    history_touched_paths: ignoredHistoryTouchedPaths,
+    ...scope
+  } = observation;
+  return {
+    ...scope,
+    schema_version: WORKFLOW_FINAL_GIT_SCOPE_SCHEMA,
+    certification_head_sha: certificationHeadSha,
+  };
+}
+
+function workflowFinalGitHistoryMatchesCertifiedTransition(
+  context,
+  certificationHeadSha,
+  observedHeadSha,
+  certifiedByPath,
+  observedByPath,
+  touchedPaths,
+) {
+  assertWorkflowFinalGitHistoryIsComplete(context);
+  const governedTouchedPaths = [...touchedPaths].sort();
+  if (
+    governedTouchedPaths.some((filePath) =>
+      !certifiedByPath.has(filePath) || !observedByPath.has(filePath))
+  ) {
+    return false;
+  }
+  if (governedTouchedPaths.length === 0) return true;
+  const commitGraph = workflowFinalGitCommitGraphSince(
+    context,
+    certificationHeadSha,
+    observedHeadSha,
+  );
+  if (
+    commitGraph.length * governedTouchedPaths.length
+    > WORKFLOW_FINAL_GIT_SCOPE_MAX_COMMIT_PATHS
+  ) {
+    fail(
+      "Final lifecycle freshness refuses an oversized post-certification "
+      + "commit/path history; reseal the lifecycle receipt.",
+    );
+  }
+  const identitiesByCommit = new Map();
+  for (const entry of commitGraph) {
+    identitiesByCommit.set(
+      entry.commit_sha,
+      workflowFinalGitTreeIdentities(
+        context,
+        entry.commit_sha,
+        governedTouchedPaths,
+      ),
+    );
+  }
+  for (const filePath of governedTouchedPaths) {
+    const certifiedIdentity = certifiedByPath.get(filePath).head;
+    const materializedIdentity = observedByPath.get(filePath).head;
+    const transitionChangesIdentity = !workflowFinalGitLayerIdentityEqual(
+      certifiedIdentity,
+      materializedIdentity,
+    );
+    for (const entry of commitGraph) {
+      const commitIdentity = identitiesByCommit.get(entry.commit_sha).get(filePath);
+      if (
+        !workflowFinalGitLayerIdentityEqual(commitIdentity, certifiedIdentity)
+        && !workflowFinalGitLayerIdentityEqual(commitIdentity, materializedIdentity)
+      ) {
+        return false;
+      }
+      for (const parentSha of entry.parent_shas) {
+        let parentIdentity;
+        if (parentSha === certificationHeadSha) {
+          parentIdentity = certifiedIdentity;
+        } else {
+          parentIdentity = identitiesByCommit.get(parentSha)?.get(filePath);
+        }
+        if (
+          parentIdentity
+          && transitionChangesIdentity
+          && workflowFinalGitLayerIdentityEqual(parentIdentity, materializedIdentity)
+          && workflowFinalGitLayerIdentityEqual(commitIdentity, certifiedIdentity)
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  assertWorkflowFinalGitHistoryIsComplete(context);
+  return true;
+}
+
+function workflowFinalFreshnessGitScopeMatches(context, certified, observed) {
+  if (
+    certified?.schema_version !== WORKFLOW_FINAL_GIT_SCOPE_SCHEMA
+    || observed?.schema_version !== WORKFLOW_FINAL_GIT_OBSERVATION_SCHEMA
+    || certified.available !== observed.available
+    || certified.baseline_head_sha !== observed.baseline_head_sha
+  ) {
+    return false;
+  }
+  if (!certified.available) {
+    return (
+      certified.certification_head_sha === null
+      && observed.observed_head_sha === null
+      && certified.scoped_changes.length === 0
+      && observed.scoped_changes.length === 0
+    );
+  }
+  if (
+    !certified.certification_head_sha
+    || !observed.observed_head_sha
+    || !workflowFinalGitCommandSucceeds(
+      context,
+      [
+        "merge-base",
+        "--is-ancestor",
+        certified.certification_head_sha,
+        observed.observed_head_sha,
+      ],
+    )
+    || certified.scoped_state_hash !== computeStableHash(certified.scoped_changes)
+    || certified.scoped_head_tree_hash !== computeStableHash(
+      certified.scoped_changes.map((entry) => ({
+        path: entry.path,
+        head: entry.head,
+      })),
+    )
+  ) {
+    return false;
+  }
+  const certifiedByPath = new Map(
+    certified.scoped_changes.map((entry) => [entry.path, entry]),
+  );
+  const observedByPath = new Map(
+    observed.scoped_changes.map((entry) => [entry.path, entry]),
+  );
+  if (
+    certifiedByPath.size !== certified.scoped_changes.length
+    || observedByPath.size !== observed.scoped_changes.length
+    || certifiedByPath.size !== observedByPath.size
+  ) {
+    return false;
+  }
+  const touchedPaths = new Set(observed.history_touched_paths || []);
+  for (const [filePath, certifiedEntry] of certifiedByPath) {
+    const observedEntry = observedByPath.get(filePath);
+    if (
+      !observedEntry
+      || !workflowFinalGitLayerIdentityEqual(
+        certifiedEntry.working_tree,
+        observedEntry.working_tree,
+      )
+      || observedEntry.index_flags?.assume_unchanged === true
+      || observedEntry.index_flags?.skip_worktree === true
+    ) {
+      return false;
+    }
+    const indexStayedCertified = workflowFinalGitLayerIdentityEqual(
+      certifiedEntry.index,
+      observedEntry.index,
+    );
+    if (!indexStayedCertified && observedEntry.index_matches_worktree !== true) {
+      return false;
+    }
+    if (touchedPaths.has(filePath)) {
+      if (
+        observedEntry.index_matches_worktree !== true
+        || !workflowFinalGitLayerIdentityEqual(observedEntry.head, observedEntry.index)
+      ) {
+        return false;
+      }
+    } else if (!workflowFinalGitLayerIdentityEqual(
+      certifiedEntry.head,
+      observedEntry.head,
+    )) {
+      return false;
+    }
+  }
+  return workflowFinalGitHistoryMatchesCertifiedTransition(
+    context,
+    certified.certification_head_sha,
+    observed.observed_head_sha,
+    certifiedByPath,
+    observedByPath,
+    touchedPaths,
+  );
+}
+
+function workflowFinalFreshnessProofMatches(context, certifiedProof, observedState) {
+  if (
+    certifiedProof?.schema_version !== WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA
+    || observedState?.schema_version !== WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA
+  ) {
+    return false;
+  }
+  const {
+    proof_hash: certifiedProofHash,
+    git_scope: certifiedGitScope,
+    ...certifiedNonGit
+  } = certifiedProof;
+  const {
+    git_scope: observedGitScope,
+    ...observedNonGit
+  } = observedState;
+  return (
+    certifiedProofHash === computeStableHash({
+      ...certifiedNonGit,
+      git_scope: certifiedGitScope,
+    })
+    && stableJson(certifiedNonGit) === stableJson(observedNonGit)
+    && workflowFinalFreshnessGitScopeMatches(
+      context,
+      certifiedGitScope,
+      observedGitScope,
+    )
+  );
 }
 
 function buildWorkflowFinalFreshnessProof(
@@ -1877,6 +2621,18 @@ function buildWorkflowFinalFreshnessProof(
           .map((item) => path.resolve(String(item))),
       )].sort()
     : [];
+  const certifiedPaths = (certifiedProof?.git_scope?.scoped_changes || [])
+    .map((entry) => entry.path);
+  const gitObservation = captureWorkflowFinalFreshnessGitScope(
+    context,
+    storyId,
+    requirementProfiles,
+    {
+      certifiedPaths,
+      historyBoundarySha:
+        certifiedProof?.git_scope?.certification_head_sha || null,
+    },
+  );
   const subject = {
     schema_version: WORKFLOW_FINAL_FRESHNESS_PROOF_SCHEMA,
     story_id: storyId,
@@ -1893,16 +2649,14 @@ function buildWorkflowFinalFreshnessProof(
       : null,
     local_release_scope: localReleasePaths
       .map((targetPath) => workflowFinalFreshnessLocalPathSnapshot(targetPath)),
-    git_scope: workflowFinalFreshnessGitScope(
-      context,
-      storyId,
-      requirementProfiles,
-      {
-        certifiedGitScope: certifiedProof?.git_scope || null,
-      },
-    ),
+    git_scope: certifiedProof
+      ? gitObservation
+      : sealWorkflowFinalFreshnessGitScope(gitObservation),
     hash_algorithm: "sha256:stable-json:v1",
   };
+  if (certifiedProof) {
+    return subject;
+  }
   return {
     ...subject,
     proof_hash: computeStableHash(subject),
@@ -5589,19 +6343,35 @@ function transitionWorkflowInstance(context, options) {
     : null;
   const requiresCurrentPhaseCompletion =
     workflowRequiresCurrentPhaseCompletion(instance, effectiveDefinition);
-  const releaseLifecycleLock = storyId
-    && (
-      requiresCurrentPhaseCompletion
-      || workflowTargetUsesStrictGate(effectiveDefinition, to)
-    )
-    ? acquireFileLock(storyLifecycleCertificationLockPath(context, storyId))
-    : () => {};
+  let releaseTaskStartBoundaryLock = () => {};
+  let releaseLifecycleLock = () => {};
   let releaseEventLock = () => {};
   let result;
   let events;
   let integrityFailure = null;
   let attribution;
   try {
+    if (storyId) {
+      releaseTaskStartBoundaryLock = acquireFileLock(path.join(
+        context.sdlcRoot,
+        "stories",
+        storyId,
+        "task-start-boundary.lock",
+      ));
+      releaseLifecycleLock = acquireFileLock(
+        storyLifecycleCertificationLockPath(context, storyId),
+      );
+      const currentStory = readStory(context, storyId);
+      if (!currentStory) {
+        fail(`Workflow ${id} references missing story ${storyId}.`);
+      }
+      if (currentStory.contract_review_required) {
+        fail(
+          `Workflow ${id} cannot transition while story ${storyId} requires a new exact contract `
+          + "for its revised acceptance criteria.",
+        );
+      }
+    }
     releaseEventLock = acquireFileLock(`${eventsPath}.lock`);
     const recovery = recoverPendingWorkflowTransition(context, id, instance, effectiveDefinition, {
       requestId: idempotencyKey,
@@ -5734,6 +6504,7 @@ function transitionWorkflowInstance(context, options) {
   } finally {
     releaseEventLock();
     releaseLifecycleLock();
+    releaseTaskStartBoundaryLock();
   }
   if (integrityFailure) {
     blockWorkflowOnIntegrityFailure(context, options, id, integrityFailure, "transition");
@@ -6043,7 +6814,21 @@ function rawBooleanOptionRequested(argv, optionName) {
   return requested;
 }
 
-class UserError extends Error {}
+class UserError extends Error {
+  constructor(message, humanGuidance = null) {
+    super(message);
+    this.humanGuidance = humanGuidance;
+  }
+}
+
+function userErrorHumanGuidance(error, italian) {
+  if (!(error instanceof UserError) || !error.humanGuidance) {
+    return null;
+  }
+  return italian
+    ? error.humanGuidance.it || error.humanGuidance.en || null
+    : error.humanGuidance.en || error.humanGuidance.it || null;
+}
 
 function buildCliErrorPayload(
   error,
@@ -6097,6 +6882,7 @@ function buildCliErrorPayload(
   const message = describeUnknown
     ? redactText(`Unknown command: ${error.path || "(empty)"}`, errorRedactionPolicy)
     : normalized.error.message;
+  const customGuidance = userErrorHumanGuidance(error, italian);
   const guidance = describeUnknown
     ? {
         result: italian ? "Non ho trovato l’azione richiesta." : "The requested action was not found.",
@@ -6106,7 +6892,7 @@ function buildCliErrorPayload(
         next_action: italian ? "Controlla la scrittura e riprova con una delle azioni suggerite." : "Check the spelling and try one of the suggested actions.",
         details: { path: redactedUnknownPath, suggestions: redactedUnknownSuggestions },
       }
-    : {
+    : customGuidance || {
         result: italian ? "Il comando non è stato completato." : "The command could not be completed.",
         impact: italian ? "Il risultato richiesto non è disponibile e il programma non continuerà automaticamente." : "The requested result is unavailable, and the software will not continue automatically.",
         required_decision: italian ? "Non devi approvare nulla finché il problema non è stato corretto." : "You do not need to approve anything until the problem is corrected.",
@@ -7474,24 +8260,91 @@ function startTask(context, options) {
 }
 
 function startTaskLocked(context, options) {
-  const decision = buildTaskStartDecision(context, options);
-  const autonomyAuthorizedStart = decision.autonomy_decision?.autonomous === true
-    || decision.autonomy?.task_start_automatic === true;
-  if (
-    decision.execution_allowed
-    && (options["confirm-start"] || autonomyAuthorizedStart)
-    && !decision.assessment_proposal_id
-  ) {
-    const releaseTaskStartBoundaryLock = decision.story_id
-      ? acquireFileLock(path.join(
-          context.sdlcRoot,
-          "stories",
-          decision.story_id,
-          "task-start-boundary.lock",
-        ))
-      : () => {};
+  let decision = buildTaskStartDecision(context, options);
+  const executionRequested = (candidate) => {
+    const autonomyAuthorizedStart = candidate.autonomy_decision?.autonomous === true
+      || candidate.autonomy?.task_start_automatic === true;
+    return (
+      candidate.execution_allowed
+      && (options["confirm-start"] || autonomyAuthorizedStart)
+      && !candidate.assessment_proposal_id
+    );
+  };
+  if (executionRequested(decision)) {
+    const boundaryStoryId = decision.story_id;
+    const boundaryContractId = decision.contract_id;
+    const releaseTaskStartBoundaryLock = acquireFileLock(boundaryStoryId
+      ? path.join(
+        context.sdlcRoot,
+        "stories",
+        boundaryStoryId,
+        "task-start-boundary.lock",
+      )
+      : path.join(context.sdlcRoot, "reports", "project-task-start-boundary.lock"));
+    let releaseStoryMutationLock = () => {};
+    let releaseContractLock = () => {};
     let releaseWorkflowEventLock = () => {};
     try {
+      if (boundaryStoryId) {
+        releaseStoryMutationLock = acquireFileLock(
+          storyMutationLockPath(context, boundaryStoryId),
+        );
+      }
+      if (boundaryContractId) {
+        releaseContractLock = acquireFileLock(path.join(
+          context.sdlcRoot,
+          "contracts",
+          `${normalizeId(boundaryContractId)}.json.lock`,
+        ));
+      }
+      // The first decision is useful for presenting a plan, but it is not a
+      // write authorization. Rebuild it under the story boundary lock so a
+      // concurrent acceptance, contract, profile, or workflow mutation cannot
+      // slip between validation and the immutable task-start receipt.
+      decision = buildTaskStartDecision(context, options);
+      if (decision.story_id !== boundaryStoryId) {
+        fail(
+          `Task start story changed while acquiring its boundary lock `
+          + `(${boundaryStoryId || "(project)"} -> ${decision.story_id || "(project)"}); retry from current intent.`,
+        );
+      }
+      if (decision.contract_id !== boundaryContractId) {
+        fail(
+          `Task start contract changed while acquiring its mutation locks `
+          + `(${boundaryContractId || "(none)"} -> ${decision.contract_id || "(none)"}); retry from current intent.`,
+        );
+      }
+      if (!executionRequested(decision)) {
+        output(options, decision, formatTaskStartDecision(decision));
+        return;
+      }
+      const existingTaskStartPath = decision.story_id
+        ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
+        : path.join(context.sdlcRoot, "reports", "project-task-start.json");
+      if (pathEntryExistsNoFollow(existingTaskStartPath)) {
+        const replacement = inspectTaskStartReplacementBoundary(
+          context,
+          existingTaskStartPath,
+          {
+            story_id: decision.story_id,
+            contract_id: decision.contract_id,
+            delivery_profile_id: decision.delivery_profile_id,
+          },
+        );
+        if (!replacement.allowed) {
+          fail(
+            `Task start is already immutably recorded at ${toProjectPath(context, existingTaskStartPath)} `
+            + `(${replacement.snapshot.sha256}; ${replacement.reason}). `
+            + "Continue the existing governed run instead of starting it again.",
+          );
+        }
+        decision.previous_task_start_receipt = {
+          path: toProjectPath(context, existingTaskStartPath),
+          sha256: replacement.snapshot.sha256,
+          contract_id: replacement.receipt.contract_id || null,
+          delivery_profile_id: replacement.receipt.delivery_profile_ref?.id || null,
+        };
+      }
       const attribution = buildAttribution(context, options, "task.start.confirm");
       const taskContract = decision.contract_id
         ? readContractById(context, decision.contract_id, { missingOk: true })
@@ -7567,34 +8420,188 @@ function startTaskLocked(context, options) {
             + "This task may continue for legacy compatibility, but --lifecycle-complete cannot certify it.";
         }
       }
-      decision.task_start_receipt = writeTaskStartReceipt(context, decision, attribution, authorization);
-      const trace = appendTraceEvent(context, decision.story_id || null, {
-        type: "decision",
-        summary: `${options["confirm-start"] ? "Confirmed" : "Profile-authorized"} start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
-        action: "task.start.confirm",
-        actor: attribution.actor,
-        ...buildTraceAuthorityMetadata(context, options, attribution),
-        evidence: [
-          decision.contract?.path,
-          decision.delivery_profile_path,
-          decision.autonomy_decision_path,
-          decision.execution_context_preflight,
-        ].filter(Boolean),
-        related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
-        authorization_ref: authorization?.id || null,
-        git: attribution.git,
-        run: attribution.run,
-      });
+      let receiptTransaction;
+      let traceMutation;
+      let trace;
+      try {
+        receiptTransaction = writeTaskStartReceipt(
+          context,
+          decision,
+          attribution,
+          authorization,
+        );
+        decision.task_start_receipt = receiptTransaction.path;
+        traceMutation = prepareGovernedTraceMutation(context, decision.story_id || null, {
+          type: "decision",
+          summary: `${options["confirm-start"] ? "Confirmed" : "Profile-authorized"} start for ${decision.route}${decision.contract_id ? ` under ${decision.contract_id}` : ""}`,
+          action: "task.start.confirm",
+          actor: attribution.actor,
+          ...buildTraceAuthorityMetadata(context, options, attribution),
+          evidence: [
+            decision.contract?.path,
+            decision.delivery_profile_path,
+            decision.autonomy_decision_path,
+            decision.execution_context_preflight,
+            decision.previous_task_start_receipt?.path,
+          ].filter(Boolean),
+          related: [decision.story_id, decision.contract_id, decision.delivery_profile_id, decision.autonomy_decision?.id].filter(Boolean),
+          authorization_ref: authorization?.id || null,
+          git: attribution.git,
+          run: attribution.run,
+        });
+        try {
+          trace = traceMutation.commit();
+        } catch (error) {
+          trace = traceMutation.recoverCommitted();
+          if (!trace) throw error;
+        }
+      } catch (error) {
+        if (receiptTransaction && !trace) {
+          receiptTransaction.rollback();
+        }
+        throw error;
+      } finally {
+        traceMutation?.release();
+      }
       decision.confirmation_trace_id = trace.id;
     } finally {
       releaseWorkflowEventLock();
+      releaseContractLock();
+      releaseStoryMutationLock();
       releaseTaskStartBoundaryLock();
     }
   }
   output(options, decision, formatTaskStartDecision(decision));
 }
 
+function inspectTaskStartReplacementBoundary(context, receiptPath, candidate = {}) {
+  const snapshot = readStableRegularFileBuffer(receiptPath, context.root);
+  let receipt;
+  try {
+    receipt = JSON.parse(snapshot.content.toString("utf8"));
+  } catch {
+    fail(`Existing task-start boundary is not valid canonical JSON: ${toProjectPath(context, receiptPath)}.`);
+  }
+  const historyIssues = validatePreviousTaskStartReceiptChain(context, receipt);
+  if (historyIssues.length > 0) {
+    return {
+      allowed: false,
+      reason: `its preserved history is invalid (${historyIssues.join("; ")})`,
+      snapshot,
+      receipt,
+    };
+  }
+  if (receipt.workflow_instance_ref) {
+    return {
+      allowed: false,
+      reason: "the existing run is bound to a story workflow; a successor delivery needs a new story and workflow",
+      snapshot,
+      receipt,
+    };
+  }
+  const previousProfileId = receipt.delivery_profile_ref?.id
+    ? normalizeId(String(receipt.delivery_profile_ref.id))
+    : null;
+  const previousContractId = receipt.contract_id
+    ? normalizeId(String(receipt.contract_id))
+    : null;
+  const candidateProfileId = candidate.delivery_profile_id
+    ? normalizeId(String(candidate.delivery_profile_id))
+    : null;
+  const candidateContractId = candidate.contract_id
+    ? normalizeId(String(candidate.contract_id))
+    : null;
+  if (!previousProfileId) {
+    return {
+      allowed: false,
+      reason: "the existing run has no terminal delivery boundary",
+      snapshot,
+      receipt,
+    };
+  }
+  const previousProfile = readDeliveryAutonomyProfile(context, previousProfileId, {
+    missingOk: true,
+  });
+  if (!previousProfile) {
+    return {
+      allowed: false,
+      reason: `the previous delivery choice ${previousProfileId} is missing`,
+      snapshot,
+      receipt,
+    };
+  }
+  const previousExecution = currentDeliveryExecutionState(context, previousProfile);
+  if (previousExecution.lifecycle_status !== "terminal") {
+    return {
+      allowed: false,
+      reason: `delivery ${previousProfileId} is ${previousExecution.lifecycle_status}`,
+      snapshot,
+      receipt,
+    };
+  }
+  if (!candidateProfileId || candidateProfileId === previousProfileId) {
+    return {
+      allowed: false,
+      reason: "a successor run needs a different delivery choice",
+      snapshot,
+      receipt,
+    };
+  }
+  if (!candidateContractId || candidateContractId === previousContractId) {
+    return {
+      allowed: false,
+      reason: "a successor run needs a different contract",
+      snapshot,
+      receipt,
+    };
+  }
+  return {
+    allowed: true,
+    reason: `terminal predecessor ${previousProfileId} is preserved`,
+    snapshot,
+    receipt,
+  };
+}
+
 function writeTaskStartReceipt(context, decision, attribution, authorization = null) {
+  const receiptPath = decision.story_id
+    ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
+    : path.join(context.sdlcRoot, "reports", "project-task-start.json");
+  const priorTaskStart = pathEntryExistsNoFollow(receiptPath)
+    ? inspectTaskStartReplacementBoundary(context, receiptPath, {
+        story_id: decision.story_id,
+        contract_id: decision.contract_id,
+        delivery_profile_id: decision.delivery_profile_id,
+      })
+    : null;
+  if (priorTaskStart && !priorTaskStart.allowed) {
+    fail(
+      `Task start is already immutably recorded at ${toProjectPath(context, receiptPath)} `
+      + `(${priorTaskStart.reason}). Continue the existing governed run instead of overwriting it.`,
+    );
+  }
+  let previousTaskStartReceiptRef = null;
+  if (priorTaskStart) {
+    const historyPath = path.join(
+      path.dirname(receiptPath),
+      "task-start-history",
+      `${normalizeId(String(priorTaskStart.receipt.id))}.json`,
+    );
+    writeTextFile(
+      historyPath,
+      priorTaskStart.snapshot.content.toString("utf8"),
+    );
+    previousTaskStartReceiptRef = {
+      id: priorTaskStart.receipt.id,
+      path: toProjectPath(context, historyPath),
+      hash: priorTaskStart.snapshot.sha256,
+    };
+    decision.previous_task_start_receipt = {
+      ...previousTaskStartReceiptRef,
+      contract_id: priorTaskStart.receipt.contract_id || null,
+      delivery_profile_id: priorTaskStart.receipt.delivery_profile_ref?.id || null,
+    };
+  }
   const deliveryProfile = decision.delivery_profile_id
     ? readDeliveryAutonomyProfile(context, decision.delivery_profile_id, { missingOk: true })
     : null;
@@ -7659,6 +8666,9 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
       : null,
     autonomy_decision_ref: autonomyDecisionRef,
     ...(workflowInstanceRef ? { workflow_instance_ref: workflowInstanceRef } : {}),
+    ...(previousTaskStartReceiptRef
+      ? { previous_task_start_receipt_ref: previousTaskStartReceiptRef }
+      : {}),
     delivery_start_receipt_ref: null,
     execution_context_preflight_ref: preparedPreflight
       ? {
@@ -7732,13 +8742,48 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     };
     decision.delivery_start_receipt = toProjectPath(context, startPath);
   }
-  const receiptPath = decision.story_id
-    ? path.join(context.sdlcRoot, "stories", decision.story_id, "task-start.json")
-    : path.join(context.sdlcRoot, "reports", "project-task-start.json");
-  const priorTaskStartText = fs.existsSync(receiptPath)
-    ? fs.readFileSync(receiptPath, "utf8")
+  const priorTaskStartText = priorTaskStart
+    ? priorTaskStart.snapshot.content.toString("utf8")
     : null;
   let taskStartWritten = false;
+  let rolledBack = false;
+  const rollback = () => {
+    if (rolledBack) return;
+    const failures = [];
+    const attempt = (label, action) => {
+      try {
+        action();
+      } catch (error) {
+        failures.push(`${label}: ${error.message}`);
+      }
+    };
+    if (taskStartWritten) {
+      attempt("task-start receipt", () => {
+        if (priorTaskStartText === null) {
+          removePathGoverned(receiptPath, { force: true });
+        } else {
+          writeTextFile(receiptPath, priorTaskStartText, { force: true });
+        }
+      });
+    }
+    if (deliveryStartPath) {
+      attempt("delivery-start receipt", () => removePathGoverned(deliveryStartPath, { force: true }));
+    }
+    if (autonomyDecisionCreated && autonomyDecisionPath) {
+      attempt("autonomy decision", () => removePathGoverned(autonomyDecisionPath, { force: true }));
+    }
+    if (preparedPreflight?.created) {
+      attempt("execution-context preflight", () =>
+        removePathGoverned(preparedPreflight.filePath, { force: true }));
+    }
+    if (failures.length > 0) {
+      fail(
+        `Task-start transaction rollback is incomplete (${failures.join("; ")}). `
+        + "Repair the listed local records before retrying.",
+      );
+    }
+    rolledBack = true;
+  };
   try {
     if (preparedPreflight) {
       revalidateExecutionContextPreflightSnapshot(context, preparedPreflight.receipt);
@@ -7748,25 +8793,18 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
       profileTaskStartReceiptSchemaName(receipt),
       `Task start receipt ${receipt.id}`,
     );
-    writeJsonFile(receiptPath, receipt, { force: true });
+    writeJsonFile(
+      receiptPath,
+      receipt,
+      priorTaskStart ? { force: true } : { atomicCreate: true },
+    );
     taskStartWritten = true;
     if (preparedPreflight) {
       revalidateExecutionContextPreflightSnapshot(context, preparedPreflight.receipt);
     }
   } catch (error) {
     try {
-      if (taskStartWritten) {
-        if (priorTaskStartText === null) {
-          removePathGoverned(receiptPath, { force: true });
-        } else {
-          writeTextFile(receiptPath, priorTaskStartText, { force: true });
-        }
-      }
-      if (deliveryStartPath) removePathGoverned(deliveryStartPath, { force: true });
-      if (autonomyDecisionCreated && autonomyDecisionPath) {
-        removePathGoverned(autonomyDecisionPath, { force: true });
-      }
-      if (preparedPreflight?.created) removePathGoverned(preparedPreflight.filePath, { force: true });
+      rollback();
     } catch {
       // Preserve the original fail-closed reason. Any remaining orphan is
       // integrity-bound and cannot authorize source evolution without a valid
@@ -7774,7 +8812,10 @@ function writeTaskStartReceipt(context, decision, attribution, authorization = n
     }
     throw error;
   }
-  return toProjectPath(context, receiptPath);
+  return {
+    path: toProjectPath(context, receiptPath),
+    rollback,
+  };
 }
 
 function prepareExecutionContextPreflight(context, decision, attribution, options = {}) {
@@ -8050,7 +9091,9 @@ function resolveExactGitWorkspacePath(context, projectPath) {
   const normalized = exactGitProjectPath(projectPath);
   const filePath = path.resolve(context.root, ...normalized.split("/"));
   assertPathInsideRoot(context, filePath, normalized);
-  const existingParent = fs.existsSync(filePath) ? path.dirname(filePath) : nearestExistingParent(filePath);
+  const existingParent = pathEntryExistsNoFollow(filePath)
+    ? path.dirname(filePath)
+    : nearestExistingParent(filePath);
   const realRoot = fs.realpathSync.native(context.root);
   const realParent = fs.realpathSync.native(existingParent);
   if (!isInsidePath(realRoot, realParent)) {
@@ -8061,7 +9104,11 @@ function resolveExactGitWorkspacePath(context, projectPath) {
 
 function stableWorkspacePathSnapshot(context, entry) {
   const filePath = resolveExactGitWorkspacePath(context, entry.path);
-  if (!fs.existsSync(filePath)) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
     return {
       path: entry.path,
       status: entry.status,
@@ -8070,7 +9117,6 @@ function stableWorkspacePathSnapshot(context, entry) {
       content_sha256: null,
     };
   }
-  const stat = fs.lstatSync(filePath);
   if (stat.isFile()) {
     const snapshot = readStableRegularFileBuffer(filePath, context.root);
     return {
@@ -8309,7 +9355,10 @@ function executionContextRecoveryMessage(sourcePath) {
 }
 
 function buildTaskStartDecision(context, options) {
-  const routeDecision = buildRouteDecision(context, options);
+  const routeDecision = buildRouteDecision(context, {
+    ...options,
+    __task_start_preflight: true,
+  });
   const policy = getRoutingPolicy(context);
   const intentStoryId = routeDecision.intent ? routeStoryId(routeDecision.intent, policy) : null;
   const explicitStoryId = getOptionString(options, "story")
@@ -8381,6 +9430,32 @@ function buildTaskStartDecision(context, options) {
     result.contract_action = "initialize_sdlc";
     pushAllUnique(result.blocking_reasons, ["kb_not_initialized"]);
     pushAllUnique(result.questions, ["Initialize or onboard the project SDLC before starting task work."]);
+    return dedupeTaskStartDecision(result);
+  }
+
+  const taskStory = storyId ? readStory(context, storyId) : null;
+  if (taskStory?.contract_review_required) {
+    const staleContractId = taskStory.contract_review_required.contract_id
+      || taskStory.contract_id
+      || null;
+    const staleContract = staleContractId
+      ? readContractById(context, staleContractId, { missingOk: true })
+      : null;
+    result.status = "contract_revision_required";
+    result.execution_allowed = false;
+    result.contract_action = "replace_contract_after_story_revision";
+    result.contract_id = staleContractId;
+    result.blocking_reasons = ["story_definition_changed_after_contract"];
+    result.questions = [
+      `Story ${storyId} acceptance criteria changed after contract ${staleContractId || "the previous work brief"} was prepared. `
+      + "Review the revised success conditions and approve a new exact contract before task start.",
+    ];
+    result.next_commands = [
+      `agentic-sdlc contract create --story ${storyId} --phase ${taskStory.phase || "implementation"} `
+      + `--id <new-contract-id> --replace-story-contract`
+      + `${staleContract?.delivery_execution_profile_id ? " --delivery-profile <new-delivery-profile-id>" : ""} `
+      + `--context-summary "<work brief covering the revised acceptance criteria>" --validation "<observable validation>"`,
+    ];
     return dedupeTaskStartDecision(result);
   }
 
@@ -8567,6 +9642,31 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
+  if (storyId && contractState.bindingMismatch) {
+    result.status = "contract_revision_required";
+    result.execution_allowed = false;
+    result.contract_action = "use_current_story_contract";
+    pushAllUnique(result.blocking_reasons, ["contract_not_current_story_binding"]);
+    pushAllUnique(result.questions, [
+      `Contract ${contractState.contract.id} is historical or unlinked. `
+      + `Story ${storyId} currently uses ${contractState.linkedContractId || "no contract"}.`,
+    ]);
+    result.deterministic_checks.push({
+      check: "contract_current_story_binding",
+      status: "failed",
+      details: `${contractState.contract.id} != ${contractState.linkedContractId || "(none)"}`,
+    });
+    if (contractState.linkedContractId) {
+      pushAllUnique(result.next_commands, [
+        `agentic-sdlc task start --story ${storyId} --contract-id ${contractState.linkedContractId} `
+        + "--intent-json '<normalized-intent>'",
+      ]);
+    } else {
+      pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, null));
+    }
+    return dedupeTaskStartDecision(result);
+  }
+
   if (storyId && contractState.contract.story_id !== storyId) {
     result.status = "contract_revision_required";
     result.contract_action = "revise_contract";
@@ -8601,6 +9701,7 @@ function buildTaskStartDecision(context, options) {
       `Contract ${contractState.contract.id} is for ${contractState.contract.phase}; confirm whether to revise it or create a ${phase} contract.`,
     ]);
     pushAllUnique(result.next_commands, contractNegotiationCommands(phase, storyId, contractState.contract.id, { force: true }));
+    applyRequirementWriteScopeToTaskStart(context, result, contractState.contract);
     return dedupeTaskStartDecision(result);
   }
 
@@ -8639,6 +9740,10 @@ function buildTaskStartDecision(context, options) {
     return dedupeTaskStartDecision(result);
   }
 
+  if (!applyRequirementWriteScopeToTaskStart(context, result, contractState.contract)) {
+    return dedupeTaskStartDecision(result);
+  }
+
   if (!applyDeliveryAutonomyToTaskStart(context, result, contractState.contract, options)) {
     return dedupeTaskStartDecision(result);
   }
@@ -8653,6 +9758,85 @@ function collectTaskStartApprovalRequests(context, decision) {
     contractId: decision.contract_id || null,
     activeOnly: true,
   });
+}
+
+function applyRequirementWriteScopeToTaskStart(context, result, contract) {
+  if (!result.story_id) return true;
+  const outputRefs = Array.isArray(contract.output_contract_refs)
+    ? contract.output_contract_refs
+    : [];
+  const productOrEvidenceRoute = [
+    "claim_and_implement",
+    "validate_story",
+    "release_story",
+  ].includes(result.route);
+  const productOrEvidencePhase = ["implementation", "validation", "release"].includes(
+    result.phase || contract.phase,
+  );
+  if (!productOrEvidenceRoute && !productOrEvidencePhase && outputRefs.length === 0) {
+    result.deterministic_checks.push({
+      check: "requirement_write_scope",
+      status: "passed",
+      details: "Not required for this governance-only task with no durable output.",
+    });
+    return true;
+  }
+
+  const profileRefs = Array.isArray(contract.requirement_execution_profile_refs)
+    ? contract.requirement_execution_profile_refs
+    : [];
+  if (profileRefs.length === 0) {
+    // Preserve the configured legacy rollout behavior. enforce_all already
+    // blocks this later as an explicit migration; observe/enforce_new_only may
+    // still apply their documented supervised fallback.
+    return true;
+  }
+  const profiles = profileRefs.map((ref) => readRequirementAutonomyProfile(context, ref.id));
+  const writePaths = [...new Set(profiles.flatMap(
+    (profile) => profile.constraints?.allowed_write_paths || [],
+  ))].sort();
+  result.requirement_write_scope = {
+    profile_ids: profiles.map((profile) => profile.id).sort(),
+    allowed_write_paths: writePaths,
+    required_for_phase: result.phase || contract.phase || null,
+    required_for_output_refs: outputRefs.map((ref) => ref.artifact_type).filter(Boolean),
+  };
+  if (writePaths.length > 0) {
+    result.deterministic_checks.push({
+      check: "requirement_write_scope",
+      status: "passed",
+      details: `${writePaths.length} approved project-relative path(s) across ${profiles.length} requirement profile(s).`,
+    });
+    return true;
+  }
+
+  const requirementIds = Array.isArray(contract.requirement_refs)
+    ? contract.requirement_refs.map((ref) => ref.id).filter(Boolean)
+    : [];
+  result.status = "needs_user_input";
+  result.execution_allowed = false;
+  result.contract_action = "revise_requirement_write_scope";
+  pushAllUnique(result.blocking_reasons, ["requirement_write_scope_required"]);
+  pushAllUnique(result.questions, [
+    "The approved requirement does not name any project code, test, documentation, or evidence area that this story may change. Which project-relative paths should be allowed?",
+  ]);
+  pushAllUnique(
+    result.next_commands,
+    requirementIds.length > 0
+      ? requirementIds.map((id) =>
+          `agentic-sdlc requirement revise --id ${id} --new-id <new-id> `
+          + "--write-path <project-relative-path> [--write-path <another-project-relative-path>]")
+      : [
+          "agentic-sdlc requirement revise --id <requirement-id> --new-id <new-id> "
+          + "--write-path <project-relative-path> [--write-path <another-project-relative-path>]",
+        ],
+  );
+  result.deterministic_checks.push({
+    check: "requirement_write_scope",
+    status: "failed",
+    details: "Product or durable-evidence work requires at least one approved project-relative requirement write path.",
+  });
+  return false;
 }
 
 function applyDeliveryAutonomyToTaskStart(context, result, contract, options) {
@@ -8900,6 +10084,10 @@ function findApplicableTaskContract(context, options = {}) {
   const phase = options.phase || null;
   const storyId = options.storyId || null;
   const contractId = options.contractId ? normalizeId(options.contractId) : null;
+  const story = storyId ? readStory(context, storyId) : null;
+  const linkedContractId = story?.contract_id
+    ? normalizeId(String(story.contract_id))
+    : null;
   if (contractId) {
     const explicit = readContractById(context, contractId);
     checks.push({
@@ -8907,45 +10095,49 @@ function findApplicableTaskContract(context, options = {}) {
       status: explicit ? "passed" : "failed",
       details: explicit ? contractId : `Missing contract ${contractId}`,
     });
+    const bindingMismatch = Boolean(
+      storyId
+      && (!linkedContractId || linkedContractId !== contractId),
+    );
+    if (storyId) {
+      checks.push({
+        check: "story_current_contract",
+        status: bindingMismatch ? "failed" : "passed",
+        details: bindingMismatch
+          ? `Story ${storyId} currently links ${linkedContractId || "no contract"}, not ${contractId}`
+          : contractId,
+      });
+    }
     return {
       contract: explicit,
       phaseMismatch: Boolean(explicit && phase && explicit.phase !== phase),
+      bindingMismatch,
+      linkedContractId,
+      checks,
+    };
+  }
+
+  if (storyId) {
+    const linkedContract = linkedContractId
+      ? readContractById(context, linkedContractId, { missingOk: true })
+      : null;
+    checks.push({
+      check: "story_current_contract",
+      status: linkedContract ? "passed" : "failed",
+      details: linkedContract
+        ? linkedContractId
+        : `Story ${storyId} has no readable current contract binding`,
+    });
+    return {
+      contract: linkedContract,
+      phaseMismatch: Boolean(linkedContract && phase && linkedContract.phase !== phase),
+      bindingMismatch: false,
+      linkedContractId,
       checks,
     };
   }
 
   const contracts = collectJsonFiles(context, path.join(context.sdlcRoot, "contracts"));
-  const storyContracts = storyId
-    ? contracts.filter((contract) => contract.story_id === storyId)
-    : [];
-  const storyPhaseContracts = storyContracts.filter((contract) => !phase || contract.phase === phase);
-  if (storyId) {
-    checks.push({
-      check: "story_phase_contract",
-      status: storyPhaseContracts.length > 0 ? "passed" : "failed",
-      details: storyPhaseContracts.length > 0 ? storyPhaseContracts.map((contract) => contract.id).join(", ") : `No ${phase || "phase"} contract bound to ${storyId}`,
-    });
-    if (storyPhaseContracts.length > 0) {
-      return {
-        contract: newestContract(storyPhaseContracts),
-        phaseMismatch: false,
-        checks,
-      };
-    }
-    const story = readStory(context, storyId);
-    const linkedContract = story?.contract_id ? readContractById(context, story.contract_id) : null;
-    checks.push({
-      check: "story_linked_contract",
-      status: linkedContract ? "passed" : "failed",
-      details: linkedContract ? story.contract_id : `Story ${storyId} has no existing contract for this task`,
-    });
-    return {
-      contract: linkedContract,
-      phaseMismatch: Boolean(linkedContract && phase && linkedContract.phase !== phase),
-      checks,
-    };
-  }
-
   const phaseContracts = contracts.filter((contract) => !contract.story_id && (!phase || contract.phase === phase));
   checks.push({
     check: "phase_contract",
@@ -9083,10 +10275,6 @@ function renderTaskStartAssistantMessage(decision) {
         ? "  Effetto: registrerò la risposta nell’incarico applicabile e controllerò che il lavoro successivo la rispetti."
         : "  Effect: I will record the answer in the applicable context or work brief and validate later work against it.",
     ]),
-    decision.next_commands?.length
-      ? (italian ? "Comandi tecnici per l’agente; non devi eseguirli tu:" : "Agent command hints, not something you need to run:")
-      : null,
-    ...(decision.next_commands || []).map((command) => `- ${command}`),
     "",
     italian
       ? 'Puoi rispondere normalmente, per esempio: "usa README.md e src/ come contesto", "il formato proposto va bene" oppure "includi anche X".'
@@ -9156,6 +10344,14 @@ function taskDecisionExampleAnswer(decision, locale = "en") {
       return italian
         ? '“Analizza solo il modulo checkout, usa README.md e src/checkout, produci una valutazione tecnica Markdown e non modificare il codice di produzione.”'
         : '“Analyze only the checkout module, use README.md and src/checkout as inputs, deliver a Markdown technical assessment, and do not change production code.”';
+    case "replace_contract_after_story_revision":
+      return italian
+        ? '“I nuovi criteri descrivono correttamente il risultato: prepara un nuovo accordo di lavoro che li includa e fammelo approvare prima di iniziare.”'
+        : '“The revised criteria correctly describe the outcome; prepare a new work agreement that includes them and show it for approval before starting.”';
+    case "revise_requirement_write_scope":
+      return italian
+        ? '“Crea una nuova revisione del requisito includendo src/, test/, docs/ ed evidence/ se sono davvero le aree che potranno cambiare; non ampliare oltre il necessario.”'
+        : '“Create a new requirement revision that includes src/, test/, docs/, and evidence/ if those are truly the areas that may change; do not widen it further.”';
     case "approve_contract":
       return italian
         ? `“Approvo l’incarico ${decision.contract_id || "mostrato sopra"} esattamente come descritto, senza ampliarne l’ambito.”`
@@ -9212,6 +10408,14 @@ function userFriendlyTaskQuestion(decision, originalQuestion, locale = "en") {
       return italian ? "Confermi l’avvio di questa attività entro l’incarico e i limiti mostrati?" : originalQuestion;
     case "approve_contract":
       return italian ? "Confermi che l’incarico mostrato descrive correttamente ciò che deve essere fatto e prodotto?" : originalQuestion;
+    case "replace_contract_after_story_revision":
+      return italian
+        ? "I criteri aggiornati descrivono correttamente il risultato e posso usarli per preparare un nuovo accordo di lavoro?"
+        : "Do the revised criteria correctly describe the outcome so I can prepare a new work agreement?";
+    case "revise_requirement_write_scope":
+      return italian
+        ? "Quali percorsi interni al progetto potranno cambiare per codice, test, documentazione ed evidenze di questa attività?"
+        : "Which project-internal paths may change for this work's code, tests, documentation, and evidence?";
     case "initialize_sdlc":
       return italian ? "Quali file e informazioni devo usare come contesto iniziale affidabile del progetto?" : originalQuestion;
     default:
@@ -9267,6 +10471,14 @@ function userFriendlyTaskStartIntro(decision, locale = "en") {
       return italian
         ? "Per questo passo non esiste ancora un incarico concordato: devo confermare cosa posso fare e cosa devo produrre."
         : "There is no agreed work brief for this step yet, so I need to confirm what I am allowed to do and what I should produce.";
+    case "replace_contract_after_story_revision":
+      return italian
+        ? "I criteri di riuscita sono cambiati: prima di iniziare devo preparare e farti approvare un nuovo accordo di lavoro coerente con il risultato aggiornato."
+        : "The success criteria changed, so before starting I must prepare a new work agreement that matches the revised outcome and show it for approval.";
+    case "revise_requirement_write_scope":
+      return italian
+        ? "Il risultato può modificare codice o evidenze, ma il requisito approvato non indica ancora alcuna area di file del progetto: devo correggere quel limite prima di iniziare."
+        : "This result may change product files or durable evidence, but the approved requirement names no project file area yet, so that boundary must be corrected before work starts.";
     case "clarify_contract":
       return italian
         ? "L’incarico è incompleto: prima di produrre il risultato devo sapere quali file o informazioni del progetto devono guidare il lavoro."
@@ -9340,14 +10552,17 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
       missing_context: "Mancano informazioni importanti e serve la tua risposta prima di continuare.",
       missing_contract: "Per questo passo non esiste ancora un incarico concordato.",
       requirement_agreement_required: "Prima di scomporre o pianificare il lavoro dobbiamo concordare risultato, criteri osservabili, esclusioni e limite massimo di autonomia.",
+      requirement_write_scope_required: "Il requisito approvato non indica alcuna area di codice, test, documentazione o evidenze che questa attività può modificare.",
       requirement_not_approved: "Il requisito indicato non è ancora approvato e corrente, quindi non può guidare la scomposizione.",
       requirement_not_found: "Il requisito indicato non esiste ancora.",
       requirement_reference_required: "Devo sapere quale requisito approvato deve guidare la scomposizione.",
       route_requires_confirmation: "L’azione richiesta è chiara, ma prima di avviarla serve la tua conferma.",
       story_requirement_mismatch: "L’attività indicata non è collegata al requisito approvato che dovrebbe guidarla.",
       story_contract_missing: "L’attività non ha ancora un incarico concordato.",
+      story_definition_changed_after_contract: "I criteri di riuscita sono cambiati dopo l’accordo precedente, che non può più autorizzare il lavoro.",
       story_not_found: "L’attività indicata non esiste ancora.",
       story_reference_required: "Devo sapere a quale attività appartiene questo lavoro.",
+      task_start_required: "L’attività ha un accordo approvato, ma deve ancora essere avviata in modo governato prima di poterla assegnare.",
       "delivery.authority.audit_only_caps_autonomy": "La scelta è stata salvata, ma questa installazione non può ancora verificare automaticamente chi l’ha approvata. Per sicurezza, procederò da solo soltanto tra i momenti di revisione concordati e ti chiederò conferma nei passaggi delicati.",
       "delivery.concurrent_run_limit_exceeded": "Questa consegna ha già il numero massimo di esecuzioni attive e non è possibile avviarne un’altra.",
       "delivery.story_refs_stale": "L’attività è cambiata dopo l’approvazione della consegna e il perimetro deve essere rivisto.",
@@ -9389,14 +10604,17 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
     output_already_linked: "An output already exists for this story and type; I need to know whether to reuse it, update it, or create a separate one.",
     phase_skip_requires_confirmation: "Skipping a phase is a deliberate choice and needs explicit confirmation.",
     requirement_agreement_required: "Before planning or decomposing work, we need to agree the outcome, observable acceptance criteria, exclusions, and maximum autonomy boundary.",
+    requirement_write_scope_required: "The approved requirement does not name any code, test, documentation, or evidence area that this work may change.",
     requirement_not_approved: "The referenced requirement is not current and approved yet, so it cannot drive decomposition.",
     requirement_not_found: "The referenced requirement does not exist yet.",
     requirement_reference_required: "I need to know which approved requirement should drive this decomposition.",
     route_requires_confirmation: "The requested action is clear, but starting it still needs your go-ahead.",
     story_requirement_mismatch: "The referenced story is not linked to the approved requirement that should govern it.",
     story_contract_missing: "The story does not yet have an agreed work brief.",
+    story_definition_changed_after_contract: "The success criteria changed after the previous agreement, so it can no longer authorize this work.",
     story_not_found: "The referenced story does not exist yet.",
     story_reference_required: "I need to know which story this work belongs to.",
+    task_start_required: "The work brief is approved, but this exact work still needs a governed task start before anyone can claim it.",
     unknown_requested_action: "The normalized action is not one of the supported workflow actions.",
     unknown_route: "The workflow could not map this request to a supported route.",
   };
@@ -9411,23 +10629,41 @@ function userFriendlyBlockingReason(code, locale = "en", decision = {}) {
 function formatTaskStartDecision(decision) {
   const italian = decision.__human_locale === "it";
   const ready = decision.status === "ready_to_execute" && decision.execution_allowed;
+  const revisedAgreementRequired =
+    decision.contract_action === "replace_contract_after_story_revision";
   const autonomyChoiceLines = taskStartAutonomyChoiceLines(decision, italian);
   const lines = [
-    `${italian ? "Risultato" : "Outcome"}: ${ready
-      ? (italian ? "Il lavoro concordato è pronto per iniziare." : "The agreed work is ready to start.")
-      : (italian ? "Il lavoro non è ancora iniziato." : "The work has not started yet.")}`,
-    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${ready
-      ? (italian ? "Posso procedere con l’attività entro i limiti già concordati." : "I can proceed with the work inside the limits already agreed.")
-      : (italian ? "Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa." : "No changes will begin until the pending point is clarified.")}`,
-    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${ready
-      ? (italian ? "Non devi prendere un’altra decisione per avviare questa attività." : "You do not need to make another decision to start this work.")
-      : (italian ? "Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare." : "Answer the choice described below, or say what should change.")}`,
+    `${italian ? "Risultato" : "Outcome"}: ${revisedAgreementRequired
+      ? (italian
+          ? "I criteri di riuscita sono cambiati e il lavoro resta fermo."
+          : "The success criteria changed, so the work remains paused.")
+      : ready
+        ? (italian ? "Il lavoro concordato è pronto per iniziare." : "The agreed work is ready to start.")
+        : (italian ? "Il lavoro non è ancora iniziato." : "The work has not started yet.")}`,
+    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${revisedAgreementRequired
+      ? (italian
+          ? "L’accordo precedente non viene riutilizzato per un risultato diverso."
+          : "The previous agreement will not be reused for a different outcome.")
+      : ready
+        ? (italian ? "Posso procedere con l’attività entro i limiti già concordati." : "I can proceed with the work inside the limits already agreed.")
+        : (italian ? "Nessuna modifica verrà avviata finché non viene chiarito il punto in attesa." : "No changes will begin until the pending point is clarified.")}`,
+    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${revisedAgreementRequired
+      ? (italian
+          ? "Conferma che i criteri aggiornati descrivano correttamente il risultato."
+          : "Confirm that the revised criteria correctly describe the intended outcome.")
+      : ready
+        ? (italian ? "Non devi prendere un’altra decisione per avviare questa attività." : "You do not need to make another decision to start this work.")
+        : (italian ? "Rispondi alla scelta descritta sotto oppure indica cosa deve cambiare." : "Answer the choice described below, or say what should change.")}`,
     `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian
       ? "Questo controllo non ha eseguito modifiche, pubblicazioni, rilasci o merge; quei passaggi restano separati."
       : "This check did not change files, publish, release, or merge anything; those steps remain separate."}`,
-    `${italian ? "Prossimo passo" : "Next step"}: ${ready
-      ? (italian ? "Inizia soltanto il lavoro già concordato." : "Begin only the work already agreed.")
-      : (italian ? "Leggi la spiegazione facoltativa e chiarisci il punto in attesa." : "Review the optional explanation and clarify the pending point.")}`,
+    `${italian ? "Prossimo passo" : "Next step"}: ${revisedAgreementRequired
+      ? (italian
+          ? "Prepara un nuovo accordo sui criteri aggiornati e chiedine l’approvazione prima di iniziare."
+          : "Prepare a new agreement for the revised criteria and obtain approval before starting.")
+      : ready
+        ? (italian ? "Inizia soltanto il lavoro già concordato." : "Begin only the work already agreed.")
+        : (italian ? "Leggi la spiegazione facoltativa e chiarisci il punto in attesa." : "Review the optional explanation and clarify the pending point.")}`,
     ...autonomyChoiceLines,
     "",
     italian ? "Dettagli tecnici (facoltativi):" : "Technical details (optional):",
@@ -9587,7 +10823,14 @@ function buildRouteDecision(context, options) {
     case "create_contract":
       return decideCreateContractRoute(context, decision, policy, actionConfig, confidenceOutcome);
     case "claim_and_implement":
-      return decideClaimAndImplementRoute(context, decision, policy, actionConfig, confidenceOutcome);
+      return decideClaimAndImplementRoute(
+        context,
+        decision,
+        policy,
+        actionConfig,
+        confidenceOutcome,
+        options,
+      );
     case "classify_artifact":
       return decideClassifyArtifactRoute(context, decision, policy, actionConfig, confidenceOutcome);
     case "discover_capabilities":
@@ -10068,6 +11311,23 @@ function decideCreateContractRoute(context, decision, policy, actionConfig, conf
         next_commands: [`agentic-sdlc story create --id ${storyId} --title <title> --acceptance <criterion>`],
       });
     }
+    const acceptanceReady = storyAcceptanceCriteria(story).length > 0;
+    addRouteCheck(
+      decision,
+      "story_acceptance_criteria",
+      acceptanceReady ? "passed" : "failed",
+      acceptanceReady ? `${storyAcceptanceCriteria(story).length} criteria` : "No acceptance criteria",
+    );
+    if (!acceptanceReady) {
+      return finalizeAskRoute(decision, {
+        status: "blocked",
+        blocking_reasons: ["missing_acceptance_criteria"],
+        questions: [`Add an observable success criterion to story ${storyId} before defining its work brief.`],
+        next_commands: [
+          `agentic-sdlc story acceptance add --id ${storyId} --acceptance <criterion>`,
+        ],
+      });
+    }
     decision.next_commands.push(`agentic-sdlc contract create --phase ${phase} --story ${storyId} --id contract-${storyId}-${phase}`);
     decision.next_commands.push(`agentic-sdlc approval requests --story ${storyId}`);
   } else {
@@ -10077,7 +11337,14 @@ function decideCreateContractRoute(context, decision, policy, actionConfig, conf
   return finalizeConcreteRoute(decision, policy, actionConfig, confidenceOutcome);
 }
 
-function decideClaimAndImplementRoute(context, decision, policy, actionConfig, confidenceOutcome) {
+function decideClaimAndImplementRoute(
+  context,
+  decision,
+  policy,
+  actionConfig,
+  confidenceOutcome,
+  options = {},
+) {
   const storyId = routeStoryId(decision.intent, policy);
   if (!storyId) {
     return finalizeAskRoute(decision, {
@@ -10111,7 +11378,9 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
       status: "blocked",
       blocking_reasons: ["missing_acceptance_criteria"],
       questions: [`Add acceptance criteria to story ${storyId} before implementation.`],
-      next_commands: [`agentic-sdlc story create --id ${storyId} --title "${story.title || "<title>"}" --acceptance <criterion> --force`],
+      next_commands: [
+        `agentic-sdlc story acceptance add --id ${storyId} --acceptance <criterion>`,
+      ],
     });
   }
 
@@ -10130,6 +11399,31 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
     );
     decision.next_commands.push(`agentic-sdlc approval requests --story ${storyId}`);
     return finalizeConcreteRoute(decision, policy, { confirmation_key: "create_contract" }, confidenceOutcome);
+  }
+  if (contractState.review_required) {
+    addRouteCheck(
+      decision,
+      "story_contract_current",
+      "failed",
+      contractState.message,
+    );
+    decision.route = "create_contract";
+    decision.blocking_reasons.push("story_definition_changed_after_contract");
+    decision.questions.push(
+      `Review the revised success conditions for story ${storyId} and approve a new exact work brief.`,
+    );
+    decision.next_commands.push(
+      `agentic-sdlc contract create --phase ${story.phase || "implementation"} --story ${storyId} `
+      + "--id <new-contract-id> --replace-story-contract "
+      + '--context-summary "<work brief covering the revised acceptance criteria>" '
+      + '--validation "<observable validation>"',
+    );
+    return finalizeConcreteRoute(
+      decision,
+      policy,
+      { confirmation_key: "create_contract" },
+      confidenceOutcome,
+    );
   }
 
   const readinessGaps = collectContractReadinessGaps(context, contractState.contract);
@@ -10171,6 +11465,42 @@ function decideClaimAndImplementRoute(context, decision, policy, actionConfig, c
   }
 
   addOutputRefChecks(context, decision, story, contractState.contract);
+
+  if (options.__task_start_preflight !== true) {
+    let taskStartIssues;
+    try {
+      taskStartIssues = validateTaskStartReceipt(
+        context,
+        storyId,
+        contractState.contract,
+      );
+    } catch (error) {
+      taskStartIssues = [error.message];
+    }
+    addRouteCheck(
+      decision,
+      "story_task_start",
+      taskStartIssues.length === 0 ? "passed" : "failed",
+      taskStartIssues.length === 0
+        ? `Current task start is bound to ${contractState.contract.id}`
+        : taskStartIssues.join("; "),
+    );
+    if (taskStartIssues.length > 0) {
+      decision.route = "claim_and_implement";
+      pushAllUnique(decision.blocking_reasons, ["task_start_required"]);
+      pushAllUnique(decision.questions, [
+        `Record the immutable task start for current contract ${contractState.contract.id} before assigning story ${storyId}.`,
+      ]);
+      pushAllUnique(decision.next_commands, [
+        `agentic-sdlc task start --story ${storyId} --contract-id ${contractState.contract.id} `
+        + "--intent-json '<normalized implement_story intent>' --confirm-start",
+      ]);
+      decision.requires_confirmation = false;
+      decision.status = "blocked";
+      dedupeRouteDecision(decision);
+      return decision;
+    }
+  }
 
   const claim = readStoryClaim(context, storyId);
   if (claim?.status === "active" && !isClaimExpired(context, claim)) {
@@ -10382,9 +11712,21 @@ function inspectStoryContract(context, story) {
       message: `Contract ${story.contract_id} is bound to ${contract.story_id || "the project"}, not story ${story.id}`,
     };
   }
+  if (story.contract_review_required) {
+    return {
+      exists: true,
+      approved: false,
+      review_required: true,
+      contract,
+      message:
+        `Story ${story.id} acceptance criteria changed after contract ${story.contract_id}; `
+        + "a new exact contract ID must be created and approved before governed work can continue",
+    };
+  }
   return {
     exists: true,
     approved: isTaskContractApproved(context, contract),
+    review_required: false,
     contract,
     message: collectContractDependencyFreshnessGaps(context, contract).length > 0
       ? `Contract ${story.contract_id} has stale context, output-format, or capability dependencies`
@@ -10393,6 +11735,16 @@ function inspectStoryContract(context, story) {
 }
 
 function validateApprovedStoryContractForPhaseOutput(context, story, action, expectations = [], options = {}) {
+  if (story.contract_review_required) {
+    const staleContractId = story.contract_review_required.contract_id || story.contract_id || "the previous contract";
+    fail(
+      [
+        `${action} cannot use contract ${staleContractId} because story ${story.id} acceptance criteria changed after it was prepared.`,
+        "Create and approve a new exact contract ID with --replace-story-contract before producing, linking, or completing governed phase output.",
+        "The migration override cannot bypass this story-definition review boundary.",
+      ].join("\n"),
+    );
+  }
   if (options["allow-unapproved-contract-output"]) {
     return null;
   }
@@ -10432,7 +11784,8 @@ function validateApprovedStoryContractForPhaseOutput(context, story, action, exp
     (registry?.templates || []).some((template) => template.id === ref.template_id && template.preset === "technical-assessment"),
   );
   const taskStartReceiptPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
-  if (requiresStartReceipt || fs.existsSync(taskStartReceiptPath)) {
+  const actionRequiresStartReceipt = ["output.link", "story.complete-step"].includes(action);
+  if (actionRequiresStartReceipt || requiresStartReceipt || fs.existsSync(taskStartReceiptPath)) {
     for (const issue of validateTaskStartReceipt(context, storyId, contract)) {
       errors.push(issue);
     }
@@ -10489,6 +11842,7 @@ function validateTaskStartReceipt(context, storyId, contract) {
       issues.push(error.message);
     }
   }
+  issues.push(...validatePreviousTaskStartReceiptChain(context, receipt));
   let deliveryProfile = null;
   const latestApprovalHash = latestContractApproval(contract)?.approved_content_hash || null;
   if (receipt.status !== "confirmed") {
@@ -10609,6 +11963,73 @@ function validateTaskStartReceipt(context, storyId, contract) {
     )
   ) {
     issues.push("task-start receipt is neither directly human-confirmed nor backed by delegated authorization");
+  }
+  return issues;
+}
+
+function validatePreviousTaskStartReceiptChain(context, receipt, options = {}) {
+  const issues = [];
+  const expectedStoryId = receipt.story_id || null;
+  const seenPaths = new Set();
+  const seenIds = new Set([receipt.id].filter(Boolean));
+  let current = receipt;
+  const maxDepth = Number.isSafeInteger(options.maxDepth) ? options.maxDepth : 32;
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const ref = current.previous_task_start_receipt_ref;
+    if (!ref) {
+      return issues;
+    }
+    if (
+      !ref.id
+      || !ref.path
+      || !/^[a-f0-9]{64}$/u.test(String(ref.hash || ""))
+    ) {
+      issues.push("task-start receipt has a malformed previous task-start reference");
+      return issues;
+    }
+    if (seenPaths.has(ref.path) || seenIds.has(ref.id)) {
+      issues.push(`task-start receipt history contains a cycle at ${ref.id}`);
+      return issues;
+    }
+    seenPaths.add(ref.path);
+    seenIds.add(ref.id);
+    let archived;
+    try {
+      const archivedPath = resolveProjectFilePath(context, ref.path, {
+        mustExist: true,
+        fileOnly: true,
+      });
+      const snapshot = readStableRegularFileBuffer(archivedPath, context.root);
+      if (snapshot.sha256 !== ref.hash) {
+        issues.push(`task-start receipt history ${ref.path} does not match its recorded hash`);
+        return issues;
+      }
+      archived = JSON.parse(snapshot.content.toString("utf8"));
+      assertRecordSchema(
+        archived,
+        profileTaskStartReceiptSchemaName(archived),
+        `Archived task start receipt ${ref.id}`,
+      );
+    } catch (error) {
+      issues.push(`task-start receipt history ${ref.path} cannot be verified: ${error.message}`);
+      return issues;
+    }
+    if (archived.id !== ref.id) {
+      issues.push(`task-start receipt history ${ref.path} has id ${archived.id || "(missing)"}, expected ${ref.id}`);
+      return issues;
+    }
+    if (archived.kind !== "profile_task_start_receipt") {
+      issues.push(`task-start receipt history ${ref.path} is not a profile task-start receipt`);
+      return issues;
+    }
+    if ((archived.story_id || null) !== expectedStoryId) {
+      issues.push(`task-start receipt history ${ref.path} belongs to a different story`);
+      return issues;
+    }
+    current = archived;
+  }
+  if (current.previous_task_start_receipt_ref) {
+    issues.push(`task-start receipt history exceeds the maximum verified depth of ${maxDepth}`);
   }
   return issues;
 }
@@ -10766,6 +12187,8 @@ function formatRouteDecision(decision, options = {}) {
   const italian = humanGuidanceLocale(options) === "it";
   const ready = ["ready", "needs_confirmation"].includes(decision.status)
     && decision.route !== "ask_clarification";
+  const acceptanceMissing = decision.blocking_reasons.includes("missing_acceptance_criteria");
+  const agreementRequested = decision.intent?.requested_action === "create_contract";
   const technicalLines = [
     `Route: ${decision.route}`,
     `Status: ${decision.status}`,
@@ -10794,21 +12217,41 @@ function formatRouteDecision(decision, options = {}) {
     technicalLines.push(...decision.next_commands.map((command) => `- ${command}`));
   }
   return [
-    `${italian ? "Risultato" : "Outcome"}: ${ready
-      ? (italian ? "La richiesta è stata compresa e può essere indirizzata correttamente." : "The request is understood and can be directed correctly.")
-      : (italian ? "La richiesta ha bisogno di un chiarimento prima di procedere." : "The request needs clarification before work can continue.")}`,
-    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${ready
-      ? (italian ? "Il prossimo passaggio è stato individuato senza avviare modifiche." : "The next step was identified without starting any changes.")
-      : (italian ? "Il plugin resta fermo per evitare di scegliere al posto tuo." : "The plugin remains paused so it does not guess on your behalf.")}`,
-    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${decision.questions.length > 0
-      ? (italian ? "Chiarisci la scelta descritta nei dettagli facoltativi." : "Clarify the choice described in the optional details.")
-      : (italian ? "Non devi decidere altro per questo controllo." : "You do not need to decide anything else for this check.")}`,
+    `${italian ? "Risultato" : "Outcome"}: ${acceptanceMissing
+      ? agreementRequested
+        ? (italian
+            ? "L’attività non definisce ancora un risultato verificabile, quindi il suo accordo di lavoro non può essere preparato."
+            : "The work item does not yet define a verifiable result, so its work agreement cannot be prepared.")
+        : (italian
+            ? "L’attività non definisce ancora un risultato verificabile e non può essere avviata."
+            : "The work item does not yet define a verifiable result and cannot be started.")
+      : ready
+        ? (italian ? "La richiesta è stata compresa e può essere indirizzata correttamente." : "The request is understood and can be directed correctly.")
+        : (italian ? "La richiesta ha bisogno di un chiarimento prima di procedere." : "The request needs clarification before work can continue.")}`,
+    `${italian ? "Cosa cambia in pratica" : "What this changes in practice"}: ${acceptanceMissing
+      ? (italian
+          ? "Il plugin resta fermo e non inventa al posto tuo come riconoscere il completamento."
+          : "The plugin remains paused and will not invent how completion should be recognized.")
+      : ready
+        ? (italian ? "Il prossimo passaggio è stato individuato senza avviare modifiche." : "The next step was identified without starting any changes.")
+        : (italian ? "Il plugin resta fermo per evitare di scegliere al posto tuo." : "The plugin remains paused so it does not guess on your behalf.")}`,
+    `${italian ? "Cosa devi decidere" : "What you need to decide"}: ${acceptanceMissing
+      ? (italian
+          ? "Indica almeno un risultato osservabile che dimostri quando l’attività è completa."
+          : "State at least one observable result that will show when the work is complete.")
+      : decision.questions.length > 0
+        ? (italian ? "Chiarisci la scelta descritta nei dettagli facoltativi." : "Clarify the choice described in the optional details.")
+        : (italian ? "Non devi decidere altro per questo controllo." : "You do not need to decide anything else for this check.")}`,
     `${italian ? "Cosa resta protetto" : "What remains protected"}: ${italian
       ? "Questo controllo ha interpretato la richiesta ma non ha modificato file, pubblicato o eseguito merge."
       : "This check interpreted the request but did not change files, publish, or merge anything."}`,
-    `${italian ? "Prossimo passo" : "Next step"}: ${ready
-      ? (italian ? "Prosegui soltanto con il passaggio individuato." : "Continue only with the identified next step.")
-      : (italian ? "Fornisci il chiarimento richiesto e ripeti il controllo." : "Provide the requested clarification and run the check again.")}`,
+    `${italian ? "Prossimo passo" : "Next step"}: ${acceptanceMissing
+      ? (italian
+          ? "Aggiungi il criterio osservabile e ripeti questo controllo."
+          : "Add the observable criterion and run this check again.")
+      : ready
+        ? (italian ? "Prosegui soltanto con il passaggio individuato." : "Continue only with the identified next step.")
+        : (italian ? "Fornisci il chiarimento richiesto e ripeti il controllo." : "Provide the requested clarification and run the check again.")}`,
     "",
     `${italian ? "Dettagli tecnici (facoltativi)" : "Technical details (optional)"}:`,
     ...technicalLines.map((line) => `- ${line}`),
@@ -13753,7 +15196,99 @@ function validateRequirementSourceHashes(context, requirement, label, options = 
   return stale;
 }
 
-function requirementMaterialScope(requirement, options = {}) {
+function normalizeRequirementWritePaths(context, rawPaths, options = {}) {
+  const label = options.label || "Requirement --write-path";
+  const canonical = normalizeListOption(rawPaths).map((rawPath, index) => {
+    const resolved = resolveProjectFilePath(context, rawPath, { mustExist: false });
+    const projectPath = toProjectPath(context, resolved);
+    if (!projectPath || projectPath === ".") {
+      fail(
+        `${label}[${index}] must name a file or directory inside the target project, not the project root itself.`,
+      );
+    }
+    if (
+      projectPath.toLowerCase() === ".git"
+      || projectPath.toLowerCase().startsWith(".git/")
+    ) {
+      fail(
+        `${label}[${index}] cannot include Git repository metadata; `
+        + "govern source files through requirement scope and Git mutations through delivery actions.",
+      );
+    }
+    return projectPath;
+  });
+  return [...new Set(canonical)].sort();
+}
+
+function requirementWriteScopeWarnings(options, writePaths) {
+  if (writePaths.length > 0) return [];
+  return [
+    humanGuidanceLocale(options) === "it"
+      ? "Lo scope di scrittura del requisito è vuoto: va bene solo per attività di governance senza modifiche a prodotto o output; prima di un lavoro materiale crea una revisione con un --write-path relativo al progetto per ogni area di codice, test, documentazione ed evidenze che potrà cambiare."
+      : "The requirement write scope is empty: this is valid only for governance work with no product or output changes; before material work, create a revision with one project-relative --write-path for every code, test, documentation, and evidence area that may change.",
+  ];
+}
+
+function assertCanonicalRequirementWriteScope(context, profile, requirementId) {
+  const materialPaths = Array.isArray(profile.material_scope?.write_paths)
+    ? profile.material_scope.write_paths
+    : [];
+  const constraintPaths = Array.isArray(profile.constraints?.allowed_write_paths)
+    ? profile.constraints.allowed_write_paths
+    : [];
+  let canonicalMaterial;
+  let canonicalConstraints;
+  try {
+    canonicalMaterial = normalizeRequirementWritePaths(context, materialPaths, {
+      label: `Requirement ${requirementId} material scope write path`,
+    });
+    canonicalConstraints = normalizeRequirementWritePaths(context, constraintPaths, {
+      label: `Requirement ${requirementId} allowed write path`,
+    });
+  } catch (error) {
+    rejectLegacyRequirementWriteScope(requirementId, profile.id, error.message);
+  }
+  if (
+    stableJson(materialPaths) !== stableJson(canonicalMaterial)
+    || stableJson(constraintPaths) !== stableJson(canonicalConstraints)
+    || stableJson(canonicalMaterial) !== stableJson(canonicalConstraints)
+  ) {
+    rejectLegacyRequirementWriteScope(
+      requirementId,
+      profile.id,
+      "the stored paths are not sorted, unique, project-relative, and identical in material scope and constraints",
+    );
+  }
+  return canonicalMaterial;
+}
+
+function rejectLegacyRequirementWriteScope(requirementId, profileId, reason) {
+  fail(
+    `Requirement ${requirementId} has a non-canonical write scope in profile ${profileId}: ${reason}. `
+    + "Approval was refused without rewriting either proposal. Create a new immutable requirement revision "
+    + "and pass project-internal --write-path values; the CLI will store them as Git-relative paths.",
+    {
+      en: {
+        result: "This requirement cannot be approved because its file boundary uses an older or invalid path format.",
+        impact: "The requirement and its proposed working limits were left byte-for-byte unchanged.",
+        required_decision: "Create a new immutable revision that names the intended project file areas.",
+        protection_boundary: "No approval, implementation, delivery, external access, or wider file access was created.",
+        next_action: `Revise ${requirementId}, supplying the project-internal file areas that may change, then approve the new revision.`,
+        details: { requirement_id: requirementId, profile_id: profileId, reason },
+      },
+      it: {
+        result: "Questo requisito non può essere approvato perché il limite dei file usa un formato di percorso precedente o non valido.",
+        impact: "Il requisito e i limiti di lavoro proposti sono rimasti invariati byte per byte.",
+        required_decision: "Crea una nuova revisione immutabile indicando le aree di file del progetto previste.",
+        protection_boundary: "Non sono stati creati approvazioni, implementazioni, consegne, accessi esterni o accessi più ampi ai file.",
+        next_action: `Revisiona ${requirementId}, indicando le aree interne al progetto che potranno cambiare, poi approva la nuova revisione.`,
+        details: { requirement_id: requirementId, profile_id: profileId, reason },
+      },
+    },
+  );
+}
+
+function requirementMaterialScope(requirement, options = {}, canonicalWritePaths = null) {
   const environments = normalizeListOption(options.environment).length > 0
     ? normalizeListOption(options.environment)
     : ["local"];
@@ -13769,7 +15304,7 @@ function requirementMaterialScope(requirement, options = {}) {
     nfrs: requirement.non_functional_requirements,
     integrations: requirement.integrations,
     environment: environments.sort(),
-    write_paths: normalizeListOption(options["write-path"]).sort(),
+    write_paths: canonicalWritePaths || normalizeListOption(options["write-path"]).sort(),
     capabilities: capabilities.sort(),
     budget: null,
     release_target: null,
@@ -13783,6 +15318,12 @@ function buildRequirementProfileFor(context, requirement, options = {}, settings
   );
   const profileId = normalizeId(settings.profileId || requirement.autonomy_profile_id);
   const preset = context.config.autonomy_policy?.presets?.[ceiling] || {};
+  const canonicalWritePaths = settings.material_scope && settings.constraints
+    ? null
+    : normalizeRequirementWritePaths(
+        context,
+        settings.writePaths === undefined ? options["write-path"] : settings.writePaths,
+      );
   return buildDomainRecord(`Cannot build autonomy profile ${profileId}`, () => buildRequirementExecutionProfile({
     id: profileId,
     status: settings.status || "proposed",
@@ -13794,14 +15335,15 @@ function buildRequirementProfileFor(context, requirement, options = {}, settings
     },
     autonomy_ceiling: ceiling,
     phase_levels: settings.phase_levels || {},
-    material_scope: settings.material_scope || requirementMaterialScope(requirement, options),
+    material_scope: settings.material_scope
+      || requirementMaterialScope(requirement, options, canonicalWritePaths),
     constraints: settings.constraints || {
       allowed_tools: normalizeListOption(options.tool),
       allowed_capabilities: normalizeListOption(options.capability),
       allowed_environments: normalizeListOption(options.environment).length > 0
         ? normalizeListOption(options.environment)
         : ["local"],
-      allowed_write_paths: normalizeListOption(options["write-path"]),
+      allowed_write_paths: canonicalWritePaths,
       forbidden_actions: context.config.autonomy_policy?.exception_triggers || [],
       budget_ref: null,
     },
@@ -13876,6 +15418,10 @@ function proposeRequirement(context, options, settings = {}) {
     },
   }));
   const profile = buildRequirementProfileFor(context, requirement, options, { ceiling });
+  const writeScopeWarnings = requirementWriteScopeWarnings(
+    options,
+    profile.constraints.allowed_write_paths,
+  );
   const filePath = requirementPath(context, id);
   const profilePath = requirementAutonomyPath(context, profileId);
   assertRecordSchema(requirement, "requirement.schema.json", `Requirement ${id}`);
@@ -13911,12 +15457,14 @@ function proposeRequirement(context, options, settings = {}) {
     requirement_path: toProjectPath(context, filePath),
     autonomy_profile: profile,
     autonomy_profile_path: toProjectPath(context, profilePath),
+    warnings: writeScopeWarnings,
     human_guidance: guidance,
   }, [
     ...humanGuidanceLines(guidance, [
       `Requirement: ${id} — ${title}`,
       `Maximum technical level: ${ceiling}`,
       "No pull request or local release is authorized by this proposal.",
+      ...writeScopeWarnings.map((warning) => `Warning: ${warning}`),
       ...(settings.legacyAlias ? ["Command alias: create (deprecated; use requirement propose)"] : []),
     ], options),
   ]);
@@ -14028,9 +15576,17 @@ function approveRequirementLocked(context, options, id, filePath) {
   if (proposedProfile.status !== "proposed") {
     fail(`Requirement autonomy profile ${proposedProfile.id} is '${proposedProfile.status}', expected proposed.`);
   }
+  const profileIntegrity = validateRequirementExecutionProfileIntegrity(proposedProfile);
+  if (!profileIntegrity.valid) {
+    fail(
+      `Requirement autonomy profile ${proposedProfile.id} failed integrity validation: `
+      + profileIntegrity.errors.join("; "),
+    );
+  }
   if (proposedProfile.requirement_ref.hash !== requirementContentHash(requirement)) {
     fail(`Requirement autonomy profile ${proposedProfile.id} is stale for requirement ${id}.`);
   }
+  const canonicalWritePaths = assertCanonicalRequirementWriteScope(context, proposedProfile, id);
   const attribution = buildAttribution(context, options, "requirement.approve");
   requireFormalApprovalActor(context, options, attribution, "Approving a requirement and its autonomy ceiling");
   const authorityAssurance = loadAutonomyAuthorityAssurance(
@@ -14116,18 +15672,21 @@ function approveRequirementLocked(context, options, id, filePath) {
     autonomy_ceiling: activeProfile.autonomy_ceiling,
     authority_assurance: activeProfile.authority_assurance,
   }, { locale: humanGuidanceLocale(options) });
+  const writeScopeWarnings = requirementWriteScopeWarnings(options, canonicalWritePaths);
   output(options, {
     status: "approved",
     requirement: approvedRequirement,
     autonomy_profile: activeProfile,
     requirement_approval: requirementApproval,
     autonomy_approval: profileApproval.envelope,
+    warnings: writeScopeWarnings,
     human_guidance: guidance,
   }, [
     ...humanGuidanceLines(guidance, [
       `Requirement: ${id}`,
       `Maximum technical level: ${activeProfile.autonomy_ceiling}`,
       "This approval does not authorize any pull request, local release, merge, or deployment.",
+      ...writeScopeWarnings.map((warning) => `Warning: ${warning}`),
     ], options),
   ]);
 }
@@ -14170,6 +15729,15 @@ function reviseRequirementLocked(context, options, currentId, newId) {
   const currentProfile = readRequirementAutonomyProfile(context, current.autonomy_profile_id);
   const ceiling = getOptionString(options, "autonomy-ceiling") || currentProfile.autonomy_ceiling;
   normalizeAutonomyLevel(ceiling);
+  const writePaths = options["write-path"] === undefined
+    ? normalizeRequirementWritePaths(
+        context,
+        currentProfile.constraints?.allowed_write_paths
+          ?? currentProfile.material_scope?.write_paths
+          ?? [],
+        { label: `Requirement ${currentId} inherited write path` },
+      )
+    : normalizeRequirementWritePaths(context, options["write-path"]);
   const profileId = normalizeId(`AUT-${newId}-R${Number(current.revision) + 1}`);
   const sourceValues = options.source === undefined ? current.source_paths : options.source;
   const sources = resolveRequirementSources(context, sourceValues);
@@ -14198,7 +15766,11 @@ function reviseRequirementLocked(context, options, currentId, newId) {
       run: attribution.run,
     },
   }));
-  const profile = buildRequirementProfileFor(context, revision, options, { ceiling, profileId });
+  const profile = buildRequirementProfileFor(context, revision, options, {
+    ceiling,
+    profileId,
+    writePaths,
+  });
   const filePath = requirementPath(context, newId);
   const profilePath = requirementAutonomyPath(context, profileId);
   assertRecordSchema(revision, "requirement.schema.json", `Requirement ${newId}`);
@@ -14215,8 +15787,18 @@ function reviseRequirementLocked(context, options, currentId, newId) {
     git: attribution.git,
     run: attribution.run,
   });
-  output(options, { status: "proposed", requirement: revision, autonomy_profile: profile }, [
+  const writeScopeWarnings = requirementWriteScopeWarnings(options, writePaths);
+  output(options, {
+    status: "proposed",
+    requirement: revision,
+    autonomy_profile: profile,
+    warnings: writeScopeWarnings,
+  }, [
     `Proposed immutable revision ${newId} from ${currentId}`,
+    ...(options["write-path"] === undefined
+      ? ["Write scope: inherited from the previous revision."]
+      : ["Write scope: replaced by the explicitly supplied project-relative paths."]),
+    ...writeScopeWarnings.map((warning) => `Warning: ${warning}`),
     "Approve the new revision, then supersede the old revision explicitly.",
   ]);
 }
@@ -23724,7 +25306,7 @@ function applyProposalContract(context, proposal, attribution, authorization, ba
   draft.status = "approved";
   draft.updated_at = now();
   draft.audit = { ...(draft.audit || {}), updated_by: attribution.actor, git: attribution.git, run: attribution.run };
-  const releaseStoryLock = acquireFileLock(path.join(context.sdlcRoot, "contracts", `.story-${shortHash(draft.story_id)}.lock`));
+  const releaseStoryLock = acquireFileLock(storyMutationLockPath(context, draft.story_id));
   let releaseContractLock;
   try {
     releaseContractLock = acquireFileLock(`${contractPath}.lock`);
@@ -26613,16 +28195,16 @@ function legacyAuthorizationBindingErrors(record, action, subjectId) {
         subject_id: use?.subject_id || null,
       }));
       if (!use || use.use_hash !== expectedHash) {
-        errors.push(`legacy authorization allowed_uses[${index}] has an invalid action-subject hash`);
+        errors.push(`authorization allowed_uses[${index}] has an invalid action-subject hash`);
       }
     }
     const projectedActions = uses.map((use) => String(use?.action || "").trim().toLowerCase());
     const projectedSubjects = uses.map((use) => use?.subject_id || null).filter((value) => value !== null);
     if (!sameLegacyAuthorizationProjection(record.allowed_actions, projectedActions)) {
-      errors.push("legacy authorization allowed_actions does not match the projection of allowed_uses");
+      errors.push("authorization allowed_actions does not match the projection of allowed_uses");
     }
     if (!sameLegacyAuthorizationProjection(record.allowed_subjects, projectedSubjects)) {
-      errors.push("legacy authorization allowed_subjects does not match the projection of allowed_uses");
+      errors.push("authorization allowed_subjects does not match the projection of allowed_uses");
     }
   } else {
     if (record?.schema_version === "authorization:v3") {
@@ -26631,7 +28213,7 @@ function legacyAuthorizationBindingErrors(record, action, subjectId) {
     const actions = Array.isArray(record?.allowed_actions) ? record.allowed_actions : [];
     const subjects = Array.isArray(record?.allowed_subjects) ? record.allowed_subjects : [];
     if (actions.length > 1 && subjects.length > 1) {
-      return ["legacy authorization has multiple actions and multiple subjects without explicit pairs and must fail closed"];
+      return ["authorization has multiple actions and multiple subjects without explicit pairs and must fail closed"];
     }
     uses = buildLegacyAuthorizationUses(actions, subjects, { label: `Authorization ${record?.id || "unknown"}` });
   }
@@ -26647,11 +28229,11 @@ function legacyAuthorizationBindingErrors(record, action, subjectId) {
   const matches = uses.some((use) => actionMatches(use) && subjectMatches(use));
   if (!matches) {
     if (!uses.some(actionMatches)) {
-      errors.push(`legacy authorization does not allow action ${normalizedAction}`);
+      errors.push(`authorization does not allow action ${normalizedAction}`);
     } else if (!uses.some(subjectMatches)) {
-      errors.push(`legacy authorization does not allow subject ${normalizedSubjectId || "<none>"}`);
+      errors.push(`authorization does not allow subject ${normalizedSubjectId || "<none>"}`);
     } else {
-      errors.push(`legacy authorization does not allow action ${normalizedAction} for subject ${normalizedSubjectId || "<none>"}`);
+      errors.push(`authorization does not allow action ${normalizedAction} for subject ${normalizedSubjectId || "<none>"}`);
     }
   }
   return errors;
@@ -27372,9 +28954,16 @@ function storyActionCheckpointPolicy(context, storyId, action) {
   };
 }
 
-function storyActionAuthorizationSettings(policy, storyId, artifactTypes = []) {
+function storyActionCheckpointSubjectId(storyId, action, settings = {}) {
+  if (action === "story.complete-step" && settings.step) {
+    return normalizeId(`${storyId}.step.${normalizeId(settings.step)}`);
+  }
+  return storyId;
+}
+
+function storyActionAuthorizationSettings(policy, subjectId, artifactTypes = []) {
   return {
-    subject_id: storyId,
+    subject_id: subjectId,
     artifact_types: authorizationArtifactTypes({ artifact_types: artifactTypes }),
     proposal_ref: policy.story?.proposal_ref
       ? { id: policy.story.proposal_ref.id, hash: policy.story.proposal_ref.hash }
@@ -27393,22 +28982,39 @@ function consumeStoryActionCheckpoint(context, storyId, action, options, setting
   const artifactGrantArgs = artifactTypes
     .map((artifactType) => ` --allow-artifact-type ${artifactType}`)
     .join("");
+  const subjectId = storyActionCheckpointSubjectId(storyId, action, settings);
   const authorizationId = getOptionString(options, "authorization");
   if (!authorizationId) {
     fail([
       `${action} is a required checkpoint in exact delivery profile ${policy.profile.id}.`,
-      `Grant a human- or CI-approved authorization for action ${action} and subject ${storyId}, then retry with --authorization <id>.`,
-      `Example grant: agentic-sdlc authorization grant --id AUTH-${storyId}-${action.replaceAll(".", "-")} --scope "Approve ${action} for ${storyId}" --summary "Approve this exact checkpoint" --allow-use ${action}=${storyId}${artifactGrantArgs} --actor-type human --approval-source explicit-user.`,
-      `Effect: only ${action} for ${storyId} is recorded as approved; the delivery profile and all other protected actions remain unchanged.`,
+      `Grant a human- or CI-approved authorization for action ${action} and subject ${subjectId}, then retry with --authorization <id>.`,
+      `Example grant: agentic-sdlc authorization grant --id AUTH-${storyId}-${action.replaceAll(".", "-")} --scope "Approve ${action} for ${subjectId}" --summary "Approve this exact checkpoint" --allow-use ${action}=${subjectId}${artifactGrantArgs} --actor-type human --approval-source explicit-user.`,
+      `Effect: only ${action} for ${subjectId} is recorded as approved; the delivery profile and all other protected actions remain unchanged.`,
     ].join("\n"));
   }
   const authorization = readAuthorization(context, normalizeId(authorizationId));
-  const authorizationSettings = storyActionAuthorizationSettings(
+  let authorizationSettings = storyActionAuthorizationSettings(
     policy,
-    storyId,
+    subjectId,
     artifactTypes,
   );
-  const errors = authorizationUseErrors(authorization, action, authorizationSettings);
+  let errors = authorizationUseErrors(authorization, action, authorizationSettings);
+  if (errors.length > 0 && subjectId !== storyId) {
+    const legacyStorySettings = storyActionAuthorizationSettings(
+      policy,
+      storyId,
+      artifactTypes,
+    );
+    const legacyErrors = authorizationUseErrors(
+      authorization,
+      action,
+      legacyStorySettings,
+    );
+    if (legacyErrors.length === 0) {
+      authorizationSettings = legacyStorySettings;
+      errors = [];
+    }
+  }
   if (errors.length > 0) {
     fail(errors[0]);
   }
@@ -27477,9 +29083,16 @@ function validateStoryActionCheckpoint(
     report.errors.push(`${label} references missing authorization use receipt ${record.authorization_use_ref}`);
     return;
   }
+  const exactSubjectId = storyActionCheckpointSubjectId(storyId, action, settings);
+  const receiptSubjectId =
+    useReceipt.subject?.subject_id || useReceipt.subject_id || null;
+  const expectedSubjectId =
+    exactSubjectId !== storyId && receiptSubjectId === storyId
+      ? storyId
+      : exactSubjectId;
   const authorizationSettings = storyActionAuthorizationSettings(
     policy,
-    storyId,
+    expectedSubjectId,
     settings.artifact_types || [],
   );
   for (const error of validateAuthorizationUseReceipt(useReceipt, {
@@ -27495,8 +29108,14 @@ function validateStoryActionCheckpoint(
   if (!authorizationAllowsAction(authorization, action)) {
     report.errors.push(`${label}: Authorization ${authorization.id} does not allow action ${action}.`);
   }
-  if (!authorizationAllowsSubject(authorization, storyId)) {
-    report.errors.push(`${label}: Authorization ${authorization.id} does not allow subject ${storyId}.`);
+  if (!authorizationAllowsSubject(authorization, expectedSubjectId)) {
+    report.errors.push(`${label}: Authorization ${authorization.id} does not allow subject ${expectedSubjectId}.`);
+  }
+  if (expectedSubjectId !== exactSubjectId) {
+    report.warnings.push(
+      `${label} uses legacy story-wide ${action} subject ${storyId}; `
+      + `new grants should bind exact subject ${exactSubjectId}.`,
+    );
   }
   for (const artifactType of authorizationSettings.artifact_types) {
     if (!authorizationAllowsArtifactType(authorization, artifactType)) {
@@ -29272,6 +30891,7 @@ function createContract(context, options) {
   );
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
   let releaseDeliveryProfileLock = () => {};
+  let releaseTaskStartBoundaryLock = () => {};
   let releaseStoryLock = () => {};
   let releaseContractLock;
   try {
@@ -29281,9 +30901,17 @@ function createContract(context, options) {
       );
     }
     if (storyId) {
-      releaseStoryLock = acquireFileLock(
-        path.join(context.sdlcRoot, "contracts", `.story-${shortHash(storyId)}.lock`),
-      );
+      const storyPath = path.join(context.sdlcRoot, "stories", storyId, "story.json");
+      if (!pathEntryExistsNoFollow(storyPath)) {
+        fail(`Story ${storyId} does not exist; create it before creating story contract ${id}.`);
+      }
+      releaseTaskStartBoundaryLock = acquireFileLock(path.join(
+        context.sdlcRoot,
+        "stories",
+        storyId,
+        "task-start-boundary.lock",
+      ));
+      releaseStoryLock = acquireFileLock(storyMutationLockPath(context, storyId));
     }
     releaseContractLock = acquireFileLock(`${contractPath}.lock`);
     return createContractLocked(context, options, {
@@ -29296,6 +30924,7 @@ function createContract(context, options) {
   } finally {
     releaseContractLock?.();
     releaseStoryLock();
+    releaseTaskStartBoundaryLock();
     releaseDeliveryProfileLock();
   }
 }
@@ -29308,6 +30937,36 @@ function createContractLocked(context, options, settings) {
     id,
     contractPath,
   } = settings;
+  if (storyId) {
+    const story = readStory(context, storyId);
+    if (!story) {
+      fail(`Story ${storyId} does not exist; create it before creating story contract ${id}.`);
+    }
+    if (storyAcceptanceCriteria(story).length === 0) {
+      fail(
+        `Story ${storyId} has no observable acceptance criteria. `
+        + `Run 'story acceptance add --id ${storyId} --acceptance <criterion>' before contract setup.`,
+      );
+    }
+    const taskStartPath = path.join(context.sdlcRoot, "stories", storyId, "task-start.json");
+    if (pathEntryExistsNoFollow(taskStartPath)) {
+      const replacement = inspectTaskStartReplacementBoundary(
+        context,
+        taskStartPath,
+        {
+          story_id: storyId,
+          contract_id: id,
+          delivery_profile_id: deliveryProfileId,
+        },
+      );
+      if (!replacement.allowed) {
+        fail(
+          `Story ${storyId} already has an immutable task-start boundary (${replacement.reason}); `
+          + "only a new contract and delivery choice after the previous delivery is terminal may continue the same story.",
+        );
+      }
+    }
+  }
   const requirementContext = storyRequirementExecutionContext(context, storyId);
   if (
     requirementContext.has_v2_requirements
@@ -29370,8 +31029,58 @@ function createContractLocked(context, options, settings) {
   validateContractOutputRefsForCreate(context, normalizeRawListOption(options["output-ref"]), options);
   assertDeliveryProfileReservationUnique(context, deliveryProfileId, id);
   const storyLink = validateStoryContractLinkForCreate(context, storyId, id, options);
-  writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
-  const linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
+  const previousContractSnapshot = pathEntryExistsNoFollow(contractPath)
+    ? readStableRegularFileBuffer(contractPath, context.root)
+    : null;
+  if (previousContractSnapshot) {
+    let previousContract;
+    try {
+      previousContract = JSON.parse(previousContractSnapshot.content.toString("utf8"));
+    } catch {
+      fail(`Existing contract ${id} does not contain valid canonical JSON and cannot be overwritten.`);
+    }
+    const previousStoryId = previousContract.story_id
+      ? normalizeId(String(previousContract.story_id))
+      : null;
+    if (previousStoryId !== storyId) {
+      fail(
+        `Contract ID ${id} is already bound to ${previousStoryId || "the project"}, not ${storyId || "the project"}. `
+        + "It cannot be reassigned with --force; use a new contract ID.",
+      );
+    }
+    if (
+      previousContract.status !== "draft"
+      || (Array.isArray(previousContract.approvals) && previousContract.approvals.length > 0)
+    ) {
+      fail(
+        `Contract ${id} is already reviewed or no longer a draft and is immutable. `
+        + "Preserve it as history and create a new exact contract ID.",
+      );
+    }
+  }
+  let linkedStory;
+  try {
+    writeJsonFile(contractPath, contract, { force: Boolean(options.force) });
+    linkedStory = linkStoryToContractAfterCreate(context, storyLink, contract, contractPath);
+  } catch (error) {
+    try {
+      if (previousContractSnapshot) {
+        writeTextFile(
+          contractPath,
+          previousContractSnapshot.content.toString("utf8"),
+          { force: true },
+        );
+      } else if (pathEntryExistsNoFollow(contractPath)) {
+        removePathGoverned(contractPath, { force: true });
+      }
+    } catch (rollbackError) {
+      fail(
+        `Contract ${id} creation failed and its exact prior file state could not be restored: `
+        + `${rollbackError.message}. Original failure: ${error.message}`,
+      );
+    }
+    throw error;
+  }
   const guidance = contractProposalHumanGuidance(contract, options);
   output(
     options,
@@ -29470,6 +31179,21 @@ function validateStoryContractLinkForCreate(context, storyId, contractId, option
     fail(`Story ${storyId} does not exist; create the story before creating story contract ${contractId}.`);
   }
   const currentContractId = story.contract_id ? normalizeId(String(story.contract_id)) : null;
+  const staleContractId = story.contract_review_required?.contract_id
+    ? normalizeId(String(story.contract_review_required.contract_id))
+    : null;
+  if (
+    story.contract_review_required
+    && (contractId === staleContractId || contractId === currentContractId)
+  ) {
+    fail(
+      [
+        `Story ${storyId} acceptance criteria changed after contract ${staleContractId || currentContractId}.`,
+        `Contract ID ${contractId} is historical and cannot be overwritten, even with --force.`,
+        "Create a new exact contract ID and pass --replace-story-contract so the earlier reviewed record remains auditable.",
+      ].join("\n"),
+    );
+  }
   if (currentContractId && currentContractId !== contractId && !options["replace-story-contract"]) {
     fail(
       [
@@ -29483,16 +31207,24 @@ function validateStoryContractLinkForCreate(context, storyId, contractId, option
     story_id: storyId,
     current_contract_id: currentContractId,
     should_link: currentContractId !== contractId,
+    contract_review_required: story.contract_review_required || null,
   };
 }
 
 function linkStoryToContractAfterCreate(context, storyLink, contract, contractPath) {
-  if (!storyLink || !storyLink.should_link) {
+  if (!storyLink || (!storyLink.should_link && !storyLink.contract_review_required)) {
     return storyLink ? { status: "already_linked", story_id: storyLink.story_id, contract_id: contract.id } : null;
   }
   const storyPath = path.join(context.sdlcRoot, "stories", storyLink.story_id, "story.json");
-  const story = readProjectJson(context, storyPath);
+  const storySnapshot = readStableRegularFileBuffer(storyPath, context.root);
+  let story;
+  try {
+    story = JSON.parse(storySnapshot.content.toString("utf8"));
+  } catch {
+    fail(`Story ${storyLink.story_id} does not contain valid canonical JSON.`);
+  }
   story.contract_id = contract.id;
+  delete story.contract_review_required;
   story.updated_at = now();
   story.audit = {
     ...(story.audit || {}),
@@ -29500,24 +31232,64 @@ function linkStoryToContractAfterCreate(context, storyLink, contract, contractPa
     git: contract.audit?.git || buildGitMetadata(context.root),
     run: contract.audit?.run || buildRunMetadata({}),
   };
-  writeJsonFile(storyPath, story, { force: true });
-  refreshContractContextAfterStoryLink(context, contract, contractPath, storyPath);
-  appendTraceEvent(context, storyLink.story_id, {
+  assertRecordSchema(story, "story.schema.json", `Story ${storyLink.story_id}`);
+  const prospectiveStoryHash = hashApprovalSubject(story);
+  const traceMutation = prepareGovernedTraceMutation(context, storyLink.story_id, {
     type: "decision",
-    summary: `Linked story ${storyLink.story_id} to contract ${contract.id}`,
+    summary: storyLink.contract_review_required
+      ? `Replaced the stale work brief for revised story ${storyLink.story_id} with contract ${contract.id}`
+      : `Linked story ${storyLink.story_id} to contract ${contract.id}`,
     action: "contract.story-link",
     actor: contract.audit?.updated_by || contract.audit?.created_by || null,
-    evidence: [toProjectPath(context, storyPath), toProjectPath(context, contractPath)],
     related: [storyLink.story_id, contract.id],
     git: contract.audit?.git,
     run: contract.audit?.run,
+    request: {
+      id: `contract-story-link:${storyLink.story_id}:${contract.id}:${prospectiveStoryHash}`,
+      source: "contract.story-link",
+      story_id: storyLink.story_id,
+      previous_contract_id: storyLink.current_contract_id,
+      contract_id: contract.id,
+      prospective_story_hash: prospectiveStoryHash,
+      replaced_stale_contract: Boolean(storyLink.contract_review_required),
+    },
   });
+  let trace;
+  let storyWritten = false;
+  try {
+    writeJsonFile(storyPath, story, { force: true });
+    storyWritten = true;
+    refreshContractContextAfterStoryLink(context, contract, contractPath, storyPath);
+    try {
+      trace = traceMutation.commit();
+    } catch (error) {
+      trace = traceMutation.recoverCommitted();
+      if (!trace) throw error;
+    }
+  } catch (error) {
+    if (storyWritten && !trace) {
+      try {
+        writeTextFile(storyPath, storySnapshot.content.toString("utf8"), { force: true });
+      } catch (rollbackError) {
+        fail(
+          `Story ${storyLink.story_id} contract-link transaction could not restore its exact prior bytes: `
+          + `${rollbackError.message}. Original failure: ${error.message}`,
+        );
+      }
+    }
+    throw error;
+  } finally {
+    traceMutation.release();
+  }
   return {
-    status: storyLink.current_contract_id ? "replaced" : "linked",
+    status: storyLink.contract_review_required
+      ? "review_refreshed"
+      : storyLink.current_contract_id ? "replaced" : "linked",
     story_id: storyLink.story_id,
     previous_contract_id: storyLink.current_contract_id,
     contract_id: contract.id,
     story_path: storyPath,
+    trace_event: trace,
   };
 }
 
@@ -30013,80 +31785,192 @@ function approveContract(context, options) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const contractPath = path.join(context.sdlcRoot, "contracts", `${id}.json`);
-  if (!fs.existsSync(contractPath)) {
+  if (!pathEntryExistsNoFollow(contractPath)) {
     fail(`Contract ${id} does not exist`);
   }
   const attribution = buildAttribution(context, options, "contract.approve");
   const approvalStatus = normalizeApprovalStatus(options.status || "approved");
-  let contract;
-  let approval;
-  const releaseLock = acquireFileLock(`${contractPath}.lock`);
-  try {
-    contract = readProjectJson(context, contractPath);
-    if (approvalStatus === "approved") {
-      const readinessGaps = collectContractReadinessGaps(context, contract);
-      if (readinessGaps.length > 0) {
-        fail(
-          [
-            `Contract ${id} cannot be approved because its work brief is incomplete.`,
-            ...readinessGaps.flatMap((gap) => [
-              `- ${gap.summary}`,
-              gap.question ? `  Exact clarification needed: ${gap.question}` : null,
-            ]),
-            "Revise or recreate the contract with the missing agreed boundaries, then approve the new exact content.",
-          ]
-            .filter(Boolean)
-            .join("\n"),
-        );
+  const initialContract = readProjectJson(context, contractPath);
+  let expectedStoryId = initialContract.story_id
+    ? normalizeId(String(initialContract.story_id))
+    : null;
+  let result = null;
+  for (let attempt = 0; attempt < 4 && !result; attempt += 1) {
+    let releaseTaskStartBoundaryLock = () => {};
+    let releaseStoryLock = () => {};
+    let releaseContractLock = () => {};
+    let retryWithStoryId = null;
+    let shouldRetry = false;
+    try {
+      if (expectedStoryId) {
+        releaseTaskStartBoundaryLock = acquireFileLock(path.join(
+          context.sdlcRoot,
+          "stories",
+          expectedStoryId,
+          "task-start-boundary.lock",
+        ));
+        releaseStoryLock = acquireFileLock(storyMutationLockPath(context, expectedStoryId));
       }
+      releaseContractLock = acquireFileLock(`${contractPath}.lock`);
+      const contractSnapshot = readStableRegularFileBuffer(contractPath, context.root);
+      let contract;
+      try {
+        contract = JSON.parse(contractSnapshot.content.toString("utf8"));
+      } catch {
+        fail(`Contract ${id} does not contain valid canonical JSON.`);
+      }
+      const actualStoryId = contract.story_id
+        ? normalizeId(String(contract.story_id))
+        : null;
+      if (actualStoryId !== expectedStoryId) {
+        retryWithStoryId = actualStoryId;
+        shouldRetry = true;
+      } else {
+        if (actualStoryId) {
+          const taskStartPath = path.join(
+            context.sdlcRoot,
+            "stories",
+            actualStoryId,
+            "task-start.json",
+          );
+          if (pathEntryExistsNoFollow(taskStartPath)) {
+            const replacement = inspectTaskStartReplacementBoundary(
+              context,
+              taskStartPath,
+              {
+                story_id: actualStoryId,
+                contract_id: id,
+                delivery_profile_id: contract.delivery_execution_profile_id || null,
+              },
+            );
+            if (!replacement.allowed) {
+              fail(
+                `Contract ${id} cannot receive another approval or status change after story `
+                + `${actualStoryId} has started (${replacement.reason}). `
+                + "Only a different successor contract and delivery choice may be approved after the prior delivery is terminal.",
+              );
+            }
+          }
+        }
+        if (approvalStatus === "approved") {
+          const readinessGaps = collectContractReadinessGaps(context, contract);
+          if (readinessGaps.length > 0) {
+            fail(
+              [
+                `Contract ${id} cannot be approved because its work brief is incomplete.`,
+                ...readinessGaps.flatMap((gap) => [
+                  `- ${gap.summary}`,
+                  gap.question ? `  Exact clarification needed: ${gap.question}` : null,
+                ]),
+                "Revise or recreate the contract with the missing agreed boundaries, then approve the new exact content.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            );
+          }
+        }
+        validateContractAutonomyBinding(context, contract, { requireDelivery: false });
+        if (contract.human_gate === true) {
+          requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
+        }
+        const directApprovalRequirements = contractDirectApprovalRequirements(contract);
+        const approval = buildApprovalRecord(context, options, attribution, {
+          subject: contract,
+          subject_id_field: "contract_id",
+          subject_id: id,
+          artifact_types: contractArtifactTypes(contract),
+          approval_boundaries: directApprovalRequirements,
+          status: approvalStatus,
+          scope: String(options.scope || "contract"),
+          label: `contract ${id}`,
+        });
+        contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
+        contract.approvals.push(approval);
+        if (approval.status === "approved" && !options["preserve-status"]) {
+          contract.status = "approved";
+        } else if (["changes_requested", "rejected"].includes(approval.status) && !options["preserve-status"]) {
+          contract.status = approval.status;
+        }
+        contract.updated_at = now();
+        contract.audit = {
+          ...(contract.audit || {}),
+          updated_by: attribution.actor,
+          git: attribution.git,
+          run: attribution.run,
+        };
+        const approvedContractHash = hashApprovalSubject(contract);
+        const traceMutation = prepareGovernedTraceMutation(context, actualStoryId, {
+          type: "gate",
+          summary: approval.summary || `Contract ${id} ${approval.status}`,
+          action: "contract.approve",
+          actor: attribution.actor,
+          related: [id],
+          git: attribution.git,
+          run: attribution.run,
+          request: {
+            id: `contract-approve:${id}:${approval.id}:${approvedContractHash}`,
+            source: "contract.approve",
+            contract_id: id,
+            approval_id: approval.id,
+            approval_status: approval.status,
+            approved_content_hash: approval.approved_content_hash || null,
+            resulting_contract_hash: approvedContractHash,
+          },
+        });
+        let trace;
+        let contractWritten = false;
+        try {
+          writeJsonFile(contractPath, contract, { force: true });
+          contractWritten = true;
+          try {
+            trace = traceMutation.commit();
+          } catch (error) {
+            trace = traceMutation.recoverCommitted();
+            if (!trace) throw error;
+          }
+        } catch (error) {
+          if (contractWritten && !trace) {
+            try {
+              writeTextFile(
+                contractPath,
+                contractSnapshot.content.toString("utf8"),
+                { force: true },
+              );
+            } catch (rollbackError) {
+              fail(
+                `Contract ${id} approval transaction could not restore its exact prior bytes: `
+                + `${rollbackError.message}. Original failure: ${error.message}`,
+              );
+            }
+          }
+          throw error;
+        } finally {
+          traceMutation.release();
+        }
+        result = { contract, approval, trace };
+      }
+    } finally {
+      releaseContractLock();
+      releaseStoryLock();
+      releaseTaskStartBoundaryLock();
     }
-    validateContractAutonomyBinding(context, contract, { requireDelivery: false });
-    if (contract.human_gate === true) {
-      requireFormalApprovalActor(context, options, attribution, "Approving a human-gated contract");
+    if (shouldRetry) {
+      expectedStoryId = retryWithStoryId;
     }
-    const directApprovalRequirements = contractDirectApprovalRequirements(contract);
-    approval = buildApprovalRecord(context, options, attribution, {
-      subject: contract,
-      subject_id_field: "contract_id",
-      subject_id: id,
-      artifact_types: contractArtifactTypes(contract),
-      approval_boundaries: directApprovalRequirements,
-      status: approvalStatus,
-      scope: String(options.scope || "contract"),
-      label: `contract ${id}`,
-    });
-    contract.approvals = Array.isArray(contract.approvals) ? contract.approvals : [];
-    contract.approvals.push(approval);
-    if (approval.status === "approved" && !options["preserve-status"]) {
-      contract.status = "approved";
-    } else if (["changes_requested", "rejected"].includes(approval.status) && !options["preserve-status"]) {
-      contract.status = approval.status;
-    }
-    contract.updated_at = now();
-    contract.audit = {
-      ...(contract.audit || {}),
-      updated_by: attribution.actor,
-      git: attribution.git,
-      run: attribution.run,
-    };
-    writeJsonFile(contractPath, contract, { force: true });
-  } finally {
-    releaseLock();
   }
-  appendTraceEvent(context, contract.story_id || null, {
-    type: "gate",
-    summary: approval.summary || `Contract ${id} ${approval.status}`,
-    action: "contract.approve",
-    actor: attribution.actor,
-    evidence: [toProjectPath(context, contractPath)],
-    related: [id],
-    git: attribution.git,
-    run: attribution.run,
-  });
+  if (!result) {
+    fail(`Contract ${id} changed its story binding repeatedly while approval was being prepared; retry later.`);
+  }
   output(
     options,
-    { status: approval.status, contract_path: contractPath, approval, contract },
-    [`Recorded ${approval.status} approval for contract ${id}`],
+    {
+      status: result.approval.status,
+      contract_path: contractPath,
+      approval: result.approval,
+      contract: result.contract,
+      trace_event: result.trace,
+    },
+    [`Recorded ${result.approval.status} approval for contract ${id}`],
   );
 }
 
@@ -31482,89 +33366,603 @@ function mergeList(base, additions = []) {
   return merged;
 }
 
-function createStory(context, options) {
-  ensureInitialized(context);
-  const id = normalizeId(requireOption(options, "id"));
-  const title = requireOption(options, "title");
-  const phase = String(options.phase || "design");
-  if (!context.config.phases[phase]) {
-    fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
-  }
-  const status = normalizeStoryStatus(options.status || "draft");
-  const storyDir = path.join(context.sdlcRoot, "stories", id);
-  const storyPlanTemplate = readTemplateFile(context, "story-plan.md");
-  const implementationLogTemplate = readTemplateFile(context, "implementation-log.md");
+function storyMutationLockPath(context, storyId) {
+  return path.join(
+    context.sdlcRoot,
+    "contracts",
+    `.story-${shortHash(normalizeId(storyId))}.lock`,
+  );
+}
 
-  const acceptanceCriteria = normalizeListOption(options.acceptance);
-  const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
-  const requirementRefs = [];
-  const requirementLevels = [];
-  for (const requirementId of requirementIds) {
-    const requirement = readRequirement(context, requirementId, { missingOk: true });
-    if (!requirement) {
-      if (context.config.autonomy_policy?.mode === "enforce_all") {
-        fail(`Requirement ${requirementId} does not exist; agree and persist the requirement before creating story ${id}.`);
-      }
-      requirementLevels.push("supervised");
-      continue;
-    }
-    const ready = assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirementId}`);
-    requirementLevels.push(ready.autonomy_level);
-    if (!ready.legacy) {
-      requirementRefs.push(buildRequirementRef(
-        requirement,
-        toProjectPath(context, requirementPath(context, requirementId)),
-      ));
-    }
+function findStoryInFlightWorkTrace(context, storyId) {
+  return readTraceEvents(context, storyId).find((event) =>
+    ["implementation", "test", "release"].includes(String(event.type || "").toLowerCase())
+    || ["output.link", "story.complete-step", "task.start.confirm"].includes(event.action));
+}
+
+const STORY_COMMAND_COMMON_OPTIONS = new Set([
+  "root",
+  "locale",
+  "json",
+  "full",
+  "view",
+  "actor",
+  "actor-type",
+  "actor-name",
+  "actor-email",
+  "thread-id",
+  "run-id",
+  "session-id",
+  "template-dir",
+]);
+
+function assertStoryCommandOptions(options, command, allowed) {
+  const permitted = new Set([...STORY_COMMAND_COMMON_OPTIONS, ...allowed]);
+  const unsupported = Object.keys(options).filter((name) => !permitted.has(name)).sort();
+  if (unsupported.length > 0) {
+    fail(
+      `${command} does not accept ${unsupported.map((name) => `--${name}`).join(", ")}. `
+      + "Use the dedicated contract, workflow, breakdown, or lifecycle command for governed changes.",
+    );
   }
-  const attribution = buildAttribution(context, options, "story.create");
-  const story = {
-    id,
-    title,
-    schema_version: context.config.schema_version,
-    status,
-    phase,
-    contract_id: options.contract ? normalizeId(String(options.contract)) : null,
-    work_breakdown_id: options.breakdown ? normalizeId(String(options.breakdown)) : null,
-    acceptance: acceptanceCriteria,
-    acceptance_criteria: acceptanceCriteria,
-    requirement_refs: requirementRefs,
-    autonomy_ceiling: requirementLevels.length > 0
-      ? mostRestrictiveAutonomyLevel(requirementLevels)
-      : "supervised",
-    links: {
-      requirements: requirementIds,
-      decisions: [],
-      tests: [],
-    },
-    created_at: now(),
-    updated_at: now(),
-    audit: {
-      created_by: attribution.actor,
-      updated_by: attribution.actor,
-      git: attribution.git,
-      run: attribution.run,
+}
+
+function assertStoryWorkspaceFilesAreRegular(context, storyDir) {
+  for (const name of ["plan.md", "implementation-log.md"]) {
+    const filePath = path.join(storyDir, name);
+    if (!fs.existsSync(filePath)) {
+      fail(`Story workspace is incomplete: ${toProjectPath(context, filePath)} is missing.`);
+    }
+    readStableRegularFileBuffer(filePath, context.root);
+  }
+}
+
+function storyBoundDeliveryProfiles(context, storyId) {
+  const deliveriesRoot = path.join(context.sdlcRoot, "autonomy", "deliveries");
+  return safeReadDir(deliveriesRoot)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readProjectJson(context, path.join(deliveriesRoot, name)))
+    .filter((profile) =>
+      Array.isArray(profile.story_refs)
+      && profile.story_refs.some((ref) => ref?.id === storyId));
+}
+
+function storyDeliveryProfileReviewIds(context, storyId, currentStoryHash) {
+  const terminalStatuses = new Set([
+    ...DELIVERY_TERMINAL_STATUSES,
+    "completed",
+    "done",
+    "expired",
+    "rejected",
+    "terminal",
+  ]);
+  return storyBoundDeliveryProfiles(context, storyId)
+    .filter((profile) => !terminalStatuses.has(String(profile.status || "active").toLowerCase()))
+    .filter((profile) => currentDeliveryExecutionState(context, profile).lifecycle_status !== "terminal")
+    .filter((profile) => {
+      const reference = profile.story_refs.find((ref) => ref?.id === storyId);
+      return reference?.hash !== currentStoryHash;
+    })
+    .map((profile) => profile.id)
+    .filter(Boolean)
+    .sort();
+}
+
+function storyAcceptanceRecoveryGuidance(options, storyId, {
+  changed,
+  contractReviewRequired,
+  previousContractId,
+  deliveryProfileIds,
+} = {}) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const reviewRequired = contractReviewRequired || deliveryProfileIds.length > 0;
+  const result = changed
+    ? (italian
+        ? "La story richiesta ora include i criteri di successo aggiunti."
+        : "The requested story now includes the added success criteria.")
+    : (italian
+        ? "La story richiesta conteneva già tutti i criteri indicati."
+        : "The requested story already contained every supplied criterion.");
+  return {
+    result,
+    impact: reviewRequired
+      ? (italian
+          ? "La definizione è cambiata: il precedente accordo di lavoro e ogni scelta di consegna precedente non autorizzano più l’avvio."
+          : "The definition changed, so the previous work agreement and every earlier delivery choice no longer authorize work.")
+      : (italian
+          ? "Non esistono accordi di lavoro o scelte di consegna precedenti da rinnovare."
+          : "There is no earlier work agreement or delivery choice to renew."),
+    required_decision: reviewRequired
+      ? (italian
+          ? "Rivedi i nuovi criteri, quindi approva un nuovo accordo di lavoro e, se richiesto, fai una nuova scelta per questa consegna."
+          : "Review the new criteria, then approve a new work agreement and, when requested, make a new choice for this delivery.")
+      : (italian
+          ? "Non serve una nuova decisione prima di preparare l’accordo di lavoro."
+          : "No new decision is needed before preparing the work agreement."),
+    protection_boundary: italian
+      ? "Il lavoro resta bloccato; requisiti, suddivisione, fase, stato, piano e diario non sono stati riscritti."
+      : "Work remains blocked; requirements, breakdown, phase, status, plan, and log were not rewritten.",
+    next_action: reviewRequired
+      ? (italian
+          ? "Prepara e approva un nuovo accordo, rinnova la scelta di consegna quando richiesto, poi prova di nuovo ad avviare il lavoro."
+          : "Prepare and approve a new agreement, renew the delivery choice when requested, then try starting the work again.")
+      : (italian
+          ? "Continua preparando l’accordo di lavoro governato."
+          : "Continue by preparing the governed work agreement."),
+    details: {
+      story_id: storyId,
+      contract_review_required: Boolean(contractReviewRequired),
+      previous_contract_id: previousContractId || null,
+      stale_delivery_profile_ids: deliveryProfileIds,
     },
   };
+}
 
-  ensureDir(storyDir);
-  writeJsonFile(path.join(storyDir, "story.json"), story, { force: Boolean(options.force) });
-  writeTextFile(
-    path.join(storyDir, "plan.md"),
-    renderTemplate(storyPlanTemplate, { STORY_ID: id }),
-    { force: Boolean(options.force) },
-  );
-  writeTextFile(
-    path.join(storyDir, "implementation-log.md"),
-    renderTemplate(implementationLogTemplate, { STORY_ID: id, CREATED_AT: now() }),
-    { force: Boolean(options.force) },
-  );
+function storyCreationGuidance(options, story) {
+  const italian = humanGuidanceLocale(options) === "it";
+  const missingAcceptance = storyAcceptanceCriteria(story).length === 0;
+  return {
+    result: missingAcceptance
+      ? (italian
+          ? "È pronta una nuova story in bozza, ancora senza un criterio di successo osservabile."
+          : "A new draft story is ready, but it does not yet have an observable success criterion.")
+      : (italian
+          ? "È pronta una nuova story con criteri di successo osservabili."
+          : "A new story with observable success criteria is ready."),
+    impact: missingAcceptance
+      ? (italian
+          ? "Titolo e spazio di lavoro sono registrati, ma non è ancora possibile preparare l’accordo di lavoro."
+          : "Its title and workspace are recorded, but the work agreement cannot be prepared yet.")
+      : (italian
+          ? "Il risultato atteso è registrato e può guidare la preparazione dell’accordo di lavoro."
+          : "The expected result is recorded and can guide preparation of the work agreement."),
+    required_decision: missingAcceptance
+      ? (italian
+          ? "Indica almeno un risultato verificabile che dimostri quando il lavoro è riuscito."
+          : "State at least one verifiable result that will show when the work has succeeded.")
+      : (italian
+          ? "Non serve una nuova decisione, salvo che tu voglia correggere i criteri prima di proseguire."
+          : "No new decision is needed unless you want to correct the criteria before continuing."),
+    protection_boundary: italian
+      ? "La creazione della story non avvia il lavoro e non approva modifiche, merge, rilasci, produzione o segreti."
+      : "Creating the story does not start work or approve changes, merges, releases, production, or secrets.",
+    next_action: missingAcceptance
+      ? (italian
+          ? "Aggiungi il risultato osservabile, poi prepara l’accordo di lavoro."
+          : "Add the observable result, then prepare the work agreement.")
+      : (italian
+          ? "Esamina i criteri e prepara l’accordo di lavoro governato."
+          : "Review the criteria and prepare the governed work agreement."),
+    details: {
+      story_id: story.id,
+      lifecycle_status: story.status,
+      acceptance_criteria_count: storyAcceptanceCriteria(story).length,
+      acceptance_required_before_contract: missingAcceptance,
+    },
+  };
+}
 
-  output(
+function createStory(context, options) {
+  ensureInitialized(context);
+  assertStoryCommandOptions(
     options,
-    { status: "created", story_path: storyDir, story },
-    [`Created story workspace ${id}`, `Path: ${path.relative(context.root, storyDir)}`],
+    "story create",
+    ["id", "title", "requirement", "acceptance", "phase", "status"],
   );
+  const id = normalizeId(requireOption(options, "id"));
+  const title = requireOption(options, "title");
+  const storyDir = path.join(context.sdlcRoot, "stories", id);
+  const storyPath = path.join(storyDir, "story.json");
+  const releaseStoryLock = acquireFileLock(storyMutationLockPath(context, id));
+  try {
+    if (fs.existsSync(storyPath)) {
+      fail(
+        `Story ${id} already exists and story create cannot rewrite it. `
+        + `To add missing success criteria, use 'story acceptance add --id ${id} --acceptance <criterion>'.`,
+      );
+    }
+    if (fs.existsSync(storyDir) && safeReadDir(storyDir).length > 0) {
+      fail(
+        `Story workspace ${toProjectPath(context, storyDir)} exists without story.json. `
+        + "Refusing to overwrite orphaned plan, log, claim, step, or output files; recover or archive that workspace explicitly.",
+      );
+    }
+    const phase = String(options.phase || "design");
+    if (!context.config.phases[phase]) {
+      fail(`Unknown phase '${phase}'. Valid phases: ${Object.keys(context.config.phases).join(", ")}`);
+    }
+    const status = normalizeStoryStatus(options.status || "draft");
+    if (!["draft", "ready"].includes(status)) {
+      fail("A new story may start only as draft or ready; lifecycle status changes require the governed workflow.");
+    }
+    const storyPlanTemplate = readTemplateFile(context, "story-plan.md");
+    const implementationLogTemplate = readTemplateFile(context, "implementation-log.md");
+    const acceptanceCriteria = normalizeListOption(options.acceptance);
+    if (status === "ready" && acceptanceCriteria.length === 0) {
+      fail("A ready story requires at least one observable --acceptance criterion.");
+    }
+    const requirementIds = normalizeListOption(options.requirement).map(normalizeId);
+    const requirementRefs = [];
+    const requirementLevels = [];
+    for (const requirementId of requirementIds) {
+      const requirement = readRequirement(context, requirementId, { missingOk: true });
+      if (!requirement) {
+        if (context.config.autonomy_policy?.mode === "enforce_all") {
+          fail(`Requirement ${requirementId} does not exist; agree and persist the requirement before creating story ${id}.`);
+        }
+        requirementLevels.push("supervised");
+        continue;
+      }
+      const ready = assertRequirementReadyForDownstream(context, requirement, `Requirement ${requirementId}`);
+      requirementLevels.push(ready.autonomy_level);
+      if (!ready.legacy) {
+        requirementRefs.push(buildRequirementRef(
+          requirement,
+          toProjectPath(context, requirementPath(context, requirementId)),
+        ));
+      }
+    }
+    const attribution = buildAttribution(context, options, "story.create");
+    const createdAt = now();
+    const story = {
+      id,
+      title,
+      schema_version: context.config.schema_version,
+      status,
+      phase,
+      contract_id: null,
+      work_breakdown_id: null,
+      acceptance: acceptanceCriteria,
+      acceptance_criteria: acceptanceCriteria,
+      requirement_refs: requirementRefs,
+      autonomy_ceiling: requirementLevels.length > 0
+        ? mostRestrictiveAutonomyLevel(requirementLevels)
+        : "supervised",
+      links: {
+        requirements: requirementIds,
+        decisions: [],
+        tests: [],
+      },
+      created_at: createdAt,
+      updated_at: createdAt,
+      audit: {
+        created_by: attribution.actor,
+        updated_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+
+    ensureDir(storyDir);
+    writeJsonFile(storyPath, story);
+    writeTextFile(
+      path.join(storyDir, "plan.md"),
+      renderTemplate(storyPlanTemplate, { STORY_ID: id }),
+    );
+    writeTextFile(
+      path.join(storyDir, "implementation-log.md"),
+      renderTemplate(implementationLogTemplate, { STORY_ID: id, CREATED_AT: createdAt }),
+    );
+
+    const guidance = storyCreationGuidance(options, story);
+    output(
+      options,
+      {
+        status: "created",
+        story_path: storyDir,
+        story,
+        human_guidance: guidance,
+      },
+      humanGuidanceLines(
+        guidance,
+        [
+          `Created story workspace ${id}`,
+          `Path: ${path.relative(context.root, storyDir)}`,
+          ...(acceptanceCriteria.length === 0
+            ? [
+                `Required before contract setup: agentic-sdlc story acceptance add --id ${id} --acceptance <criterion>`,
+              ]
+            : []),
+        ],
+        options,
+      ),
+    );
+  } finally {
+    releaseStoryLock();
+  }
+}
+
+function addStoryAcceptance(context, options) {
+  ensureInitialized(context);
+  assertStoryCommandOptions(
+    options,
+    "story acceptance add",
+    ["id", "acceptance", "summary"],
+  );
+  const id = normalizeId(requireOption(options, "id"));
+  const additions = normalizeListOption(options.acceptance);
+  if (additions.length === 0) {
+    fail("story acceptance add requires at least one --acceptance <criterion>.");
+  }
+  const storyDir = path.join(context.sdlcRoot, "stories", id);
+  const storyPath = path.join(storyDir, "story.json");
+  if (!pathEntryExistsNoFollow(storyPath)) {
+    fail(`Story ${id} does not exist; create it before adding acceptance criteria.`);
+  }
+  const releaseTaskStartBoundaryLock = acquireFileLock(
+    path.join(storyDir, "task-start-boundary.lock"),
+  );
+  let releaseStoryLock = () => {};
+  let releaseLifecycleLock = () => {};
+  let releaseClaimLock = () => {};
+  try {
+    releaseStoryLock = acquireFileLock(storyMutationLockPath(context, id));
+    if (!pathEntryExistsNoFollow(storyPath)) {
+      fail(`Story ${id} does not exist; create it before adding acceptance criteria.`);
+    }
+    releaseLifecycleLock = acquireFileLock(
+      storyLifecycleCertificationLockPath(context, id),
+    );
+    releaseClaimLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+    const storySnapshot = readStableRegularFileBuffer(storyPath, context.root);
+    assertStoryWorkspaceFilesAreRegular(context, storyDir);
+    let story;
+    try {
+      story = normalizeStoryRecord(JSON.parse(storySnapshot.content.toString("utf8")));
+    } catch {
+      fail(`Story workspace ${id} does not contain valid canonical story JSON.`);
+    }
+    if (!story || story.id !== id) {
+      fail(`Story workspace ${id} does not contain a matching canonical story record.`);
+    }
+    const taskStartPath = path.join(storyDir, "task-start.json");
+    if (pathEntryExistsNoFollow(taskStartPath)) {
+      readStableRegularFileBuffer(taskStartPath, context.root);
+      fail(
+        `Story ${id} already has a task-start receipt. `
+        + "Revise and re-approve the governed work before starting; acceptance criteria cannot change in-flight.",
+      );
+    }
+    const lifecycle = effectiveStoryLifecycleProjection(context, story);
+    if (lifecycle.blocked) {
+      fail(
+        `Story ${id} lifecycle is blocked (${lifecycle.source}); `
+        + "repair its governed workflow evidence before changing acceptance criteria.",
+      );
+    }
+    if (TERMINAL_STORY_STATUSES.has(String(story.status || "").toLowerCase()) || lifecycle.terminal) {
+      fail(
+        `Story ${id} is terminal (${lifecycle.source || story.status}); `
+        + "its acceptance criteria are immutable.",
+      );
+    }
+    const workflowProbe = { errors: [] };
+    const selectedWorkflow = currentStoryBoundWorkflowInstance(context, id, workflowProbe);
+    if (workflowProbe.errors.length > 0) {
+      fail(
+        `Story ${id} workflow state cannot be verified before acceptance recovery: `
+        + `${workflowProbe.errors.join("; ")}.`,
+      );
+    }
+    if (selectedWorkflow) {
+      const workflowEvents = readWorkflowEvents(context, selectedWorkflow.entry);
+      if (workflowEvents.length > 0) {
+        fail(
+          `Story ${id} already has ${workflowEvents.length} governed workflow transition(s); `
+          + "acceptance criteria cannot change in-flight.",
+        );
+      }
+    }
+    const completedSteps = readStoryStepRecords(context, id)
+      .filter((record) => record.status === "completed");
+    if (completedSteps.length > 0) {
+      fail(
+        `Story ${id} already has completed lifecycle work `
+        + `(${completedSteps.map((record) => record.phase || record.step).filter(Boolean).join(", ")}); `
+        + "acceptance criteria cannot change in-flight.",
+      );
+    }
+    const legacyWorkTrace = findStoryInFlightWorkTrace(context, id);
+    if (legacyWorkTrace) {
+      fail(
+        `Story ${id} already has governed work trace ${legacyWorkTrace.id || legacyWorkTrace.action} `
+        + `(${legacyWorkTrace.action || legacyWorkTrace.type}); acceptance criteria cannot change in-flight.`,
+      );
+    }
+    const claim = readStoryClaim(context, id);
+    if (claim?.status === "active") {
+      fail(
+        `Story ${id} has an active claim by ${claim.agent || "an unknown agent"}; `
+        + "release the claim before revising its pre-start acceptance criteria.",
+      );
+    }
+    const boundProfiles = storyBoundDeliveryProfiles(context, id);
+    const startedDeliveryProfileIds = boundProfiles
+      .filter((profile) => pathEntryExistsNoFollow(deliveryStartReceiptPath(context, profile.id)))
+      .map((profile) => profile.id)
+      .sort();
+    if (startedDeliveryProfileIds.length > 0) {
+      fail(
+        `Story ${id} already has delivery-start evidence for `
+        + `${startedDeliveryProfileIds.join(", ")}; acceptance criteria cannot change in-flight.`,
+      );
+    }
+    const previousCriteria = storyAcceptanceCriteria(story);
+    const nextCriteria = mergeList(previousCriteria, additions);
+    const addedCriteria = nextCriteria.filter((criterion) => !previousCriteria.includes(criterion));
+    if (addedCriteria.length === 0) {
+      const currentHash = hashApprovalSubject(story);
+      const deliveryProfileIds = storyDeliveryProfileReviewIds(context, id, currentHash);
+      const contractReviewRequired = Boolean(story.contract_review_required);
+      const previousContractId = story.contract_review_required?.contract_id || story.contract_id || null;
+      const guidance = storyAcceptanceRecoveryGuidance(options, id, {
+        changed: false,
+        contractReviewRequired,
+        previousContractId,
+        deliveryProfileIds,
+      });
+      output(
+        options,
+        {
+          status: "unchanged",
+          story_path: storyPath,
+          story,
+          added_acceptance_criteria: [],
+          current_story_hash: currentHash,
+          downstream_review_required: contractReviewRequired || deliveryProfileIds.length > 0,
+          contract_review_required: contractReviewRequired,
+          previous_contract_id: previousContractId,
+          delivery_profile_ids: deliveryProfileIds,
+          human_guidance: guidance,
+        },
+        humanGuidanceLines(
+          guidance,
+          [`Story ${id} already contains every supplied acceptance criterion; no file was rewritten.`],
+          options,
+        ),
+      );
+      return;
+    }
+    const attribution = buildAttribution(context, options, "story.acceptance.add");
+    const previousHash = hashApprovalSubject(story);
+    const changedAt = now();
+    const priorContractReview = story.contract_review_required
+      && typeof story.contract_review_required === "object"
+      ? story.contract_review_required
+      : null;
+    const previousContractId = priorContractReview?.contract_id || story.contract_id || null;
+    const contractReview = previousContractId
+      ? {
+          schema_version: "story-contract-review:v1",
+          reason: "acceptance_criteria_changed",
+          contract_id: previousContractId,
+          previous_story_hash: priorContractReview?.previous_story_hash || previousHash,
+          added_acceptance_criteria: mergeList(
+            priorContractReview?.added_acceptance_criteria || [],
+            addedCriteria,
+          ),
+          changed_at: changedAt,
+        }
+      : null;
+    const updatedStory = {
+      ...story,
+      acceptance: nextCriteria,
+      acceptance_criteria: nextCriteria,
+      ...(contractReview ? { contract_review_required: contractReview } : {}),
+      updated_at: changedAt,
+      audit: {
+        ...(story.audit || {}),
+        created_by: story.audit?.created_by || attribution.actor,
+        updated_by: attribution.actor,
+        git: attribution.git,
+        run: attribution.run,
+      },
+    };
+    assertRecordSchema(updatedStory, "story.schema.json", `Story ${id}`);
+    const currentHash = hashApprovalSubject(updatedStory);
+    const deliveryProfileIds = storyDeliveryProfileReviewIds(context, id, currentHash);
+    const traceMutation = prepareGovernedTraceMutation(context, id, {
+      type: "decision",
+      summary: getOptionString(options, "summary")
+        || `Added ${addedCriteria.length} acceptance criterion/criteria to story ${id}`,
+      action: "story.acceptance.add",
+      actor: attribution.actor,
+      related: [id, previousContractId, ...deliveryProfileIds].filter(Boolean),
+      git: attribution.git,
+      run: attribution.run,
+      request: {
+        id: `story-acceptance-add:${id}:${currentHash}`,
+        summary: "Add observable acceptance criteria without rebinding governed story state.",
+        source: "story.acceptance.add",
+        previous_story_hash: previousHash,
+        current_story_hash: currentHash,
+        added_acceptance_criteria: addedCriteria,
+        contract_review_required: Boolean(contractReview),
+        previous_contract_id: previousContractId,
+        downstream_delivery_profiles_requiring_review: deliveryProfileIds,
+      },
+    });
+    let trace;
+    let storyWritten = false;
+    try {
+      const concurrentWorkTrace = findStoryInFlightWorkTrace(context, id);
+      if (concurrentWorkTrace) {
+        fail(
+          `Story ${id} acquired governed work trace `
+          + `${concurrentWorkTrace.id || concurrentWorkTrace.action} `
+          + `(${concurrentWorkTrace.action || concurrentWorkTrace.type}) while acceptance recovery was waiting; `
+          + "acceptance criteria cannot change in-flight.",
+        );
+      }
+      writeJsonFile(storyPath, updatedStory, { force: true });
+      storyWritten = true;
+      try {
+        trace = traceMutation.commit();
+      } catch (error) {
+        trace = traceMutation.recoverCommitted();
+        if (!trace) throw error;
+      }
+    } catch (error) {
+      if (storyWritten && !trace) {
+        try {
+          writeTextFile(storyPath, storySnapshot.content.toString("utf8"), { force: true });
+        } catch {
+          fail(
+            `Story ${id} acceptance transaction could not restore its exact pre-change bytes. `
+            + `Recover ${toProjectPath(context, storyPath)} from the recorded previous hash ${previousHash} before retrying.`,
+          );
+        }
+      }
+      throw error;
+    } finally {
+      traceMutation.release();
+    }
+    const guidance = storyAcceptanceRecoveryGuidance(options, id, {
+      changed: true,
+      contractReviewRequired: Boolean(contractReview),
+      previousContractId,
+      deliveryProfileIds,
+    });
+    output(
+      options,
+      {
+        status: "updated",
+        story_path: storyPath,
+        story: updatedStory,
+        previous_story_hash: previousHash,
+        current_story_hash: currentHash,
+        added_acceptance_criteria: addedCriteria,
+        downstream_review_required: Boolean(contractReview) || deliveryProfileIds.length > 0,
+        contract_review_required: Boolean(contractReview),
+        previous_contract_id: previousContractId,
+        delivery_profile_ids: deliveryProfileIds,
+        trace_event: trace,
+        human_guidance: guidance,
+      },
+      humanGuidanceLines(
+        guidance,
+        [
+          `Added ${addedCriteria.length} acceptance criterion/criteria to story ${id}.`,
+          "Exact requirement references, contract history, breakdown, phase, status, audit origin, plan, and implementation log were preserved.",
+          ...(contractReview
+            ? [`Contract ${previousContractId} remains historical but is marked for mandatory replacement and approval.`]
+            : []),
+          ...(deliveryProfileIds.length > 0
+            ? [
+                `Stale delivery profile(s): ${deliveryProfileIds.join(", ")}.`,
+                "Use a new delivery-profile ID after the new contract is approved.",
+              ]
+            : []),
+        ],
+        options,
+      ),
+    );
+  } finally {
+    releaseClaimLock();
+    releaseLifecycleLock();
+    releaseStoryLock();
+    releaseTaskStartBoundaryLock();
+  }
 }
 
 function createWorkItem(context, options) {
@@ -33434,11 +35832,68 @@ function claimStory(context, options) {
   }
 
   const claimPath = path.join(storyDir, "claim.json");
-  const releaseLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+  const releaseTaskStartBoundaryLock = acquireFileLock(
+    path.join(storyDir, "task-start-boundary.lock"),
+  );
+  let releaseLifecycleLock = () => {};
+  let releaseClaimLock = () => {};
   let claim;
+  let traceEvent;
   const attribution = buildAttribution(context, options, "story.claim");
   try {
+    releaseLifecycleLock = acquireFileLock(
+      storyLifecycleCertificationLockPath(context, id),
+    );
+    releaseClaimLock = acquireFileLock(path.join(storyDir, "claim.lock"));
     const story = readStory(context, id);
+    if (storyAcceptanceCriteria(story).length === 0) {
+      fail(
+        `Story ${id} has no observable acceptance criteria and cannot be claimed. `
+        + `Add one with 'story acceptance add --id ${id} --acceptance <criterion>' first.`,
+        {
+          en: {
+            result: "This work item cannot be assigned yet because it has no observable success criterion.",
+            impact: "No assignment was created and work remains paused.",
+            required_decision: "State at least one verifiable result that will show when this work is complete.",
+            protection_boundary: "Existing files, agreements, delivery choices, and remote systems remain unchanged.",
+            next_action: "Add the observable criterion, then retry the assignment.",
+            details: {},
+          },
+          it: {
+            result: "Questa attività non può ancora essere assegnata perché non ha un criterio di successo osservabile.",
+            impact: "Non è stata creata alcuna assegnazione e il lavoro resta fermo.",
+            required_decision: "Indica almeno un risultato verificabile che dimostri quando l’attività è completa.",
+            protection_boundary: "File, accordi, scelte di consegna e sistemi remoti restano invariati.",
+            next_action: "Aggiungi il criterio osservabile, poi riprova l’assegnazione.",
+            details: {},
+          },
+        },
+      );
+    }
+    if (story.contract_review_required) {
+      fail(
+        `Story ${id} acceptance criteria changed after its previous contract and it cannot be claimed. `
+        + "Create and approve a new exact contract with --replace-story-contract, run task start, then retry story claim.",
+        {
+          en: {
+            result: "This work item cannot be assigned because its success criteria changed after the previous agreement.",
+            impact: "No assignment was created and the previous agreement cannot authorize the revised work.",
+            required_decision: "Review the revised criteria and approve a new work agreement before starting.",
+            protection_boundary: "Existing files, historical agreements, delivery choices, and remote systems remain unchanged.",
+            next_action: "Prepare and approve the new agreement, start the revised work, then retry the assignment.",
+            details: {},
+          },
+          it: {
+            result: "Questa attività non può essere assegnata perché i criteri di successo sono cambiati dopo l’accordo precedente.",
+            impact: "Non è stata creata alcuna assegnazione e l’accordo precedente non può autorizzare il lavoro aggiornato.",
+            required_decision: "Rivedi i criteri aggiornati e approva un nuovo accordo di lavoro prima dell’avvio.",
+            protection_boundary: "File, accordi storici, scelte di consegna e sistemi remoti restano invariati.",
+            next_action: "Prepara e approva il nuovo accordo, avvia il lavoro aggiornato, poi riprova l’assegnazione.",
+            details: {},
+          },
+        },
+      );
+    }
     const lifecycle = effectiveStoryLifecycleProjection(context, story);
     if (lifecycle.blocked) {
       fail(
@@ -33449,7 +35904,41 @@ function claimStory(context, options) {
     if (lifecycle.terminal) {
       fail(`Story ${id} is in terminal status '${lifecycle.status}' and cannot be claimed.`);
     }
-    const claimExists = fs.existsSync(claimPath);
+    const contractState = inspectStoryContract(context, story);
+    const taskStartIssues = contractState.exists && contractState.approved
+      ? validateTaskStartReceipt(context, id, contractState.contract)
+      : [contractState.message || "the current work agreement is not approved"];
+    if (!contractState.exists || !contractState.approved || taskStartIssues.length > 0) {
+      fail(
+        [
+          `Story ${id} cannot be claimed before its current approved contract and immutable task start are valid.`,
+          ...taskStartIssues.map((issue) => `- ${issue}`),
+          `Run task start --story ${id} --confirm-start for the current approved contract, then retry story claim.`,
+        ].join("\n"),
+        {
+          en: {
+            result: "This work item cannot be assigned because its current work agreement has not been validly started.",
+            impact: "No assignment was created and no phase work may begin.",
+            required_decision: "Confirm the exact current work agreement and start only that agreed work.",
+            protection_boundary: "Existing files, agreements, delivery choices, and remote systems remain unchanged.",
+            next_action: "Complete the governed task start, then retry the assignment.",
+            details: {},
+          },
+          it: {
+            result: "Questa attività non può essere assegnata perché l’accordo di lavoro corrente non è stato avviato validamente.",
+            impact: "Non è stata creata alcuna assegnazione e nessuna fase di lavoro può iniziare.",
+            required_decision: "Conferma l’accordo di lavoro corrente e avvia soltanto il lavoro concordato.",
+            protection_boundary: "File, accordi, scelte di consegna e sistemi remoti restano invariati.",
+            next_action: "Completa l’avvio governato, poi riprova l’assegnazione.",
+            details: {},
+          },
+        },
+      );
+    }
+    const claimExists = pathEntryExistsNoFollow(claimPath);
+    const priorClaimSnapshot = claimExists
+      ? readStableRegularFileBuffer(claimPath, context.root)
+      : null;
     if (claimExists && !options.force) {
       const existing = readProjectJson(context, claimPath);
       if (existing.status === "active") {
@@ -33483,25 +35972,64 @@ function claimStory(context, options) {
         run: attribution.run,
       },
     };
-    writeJsonFile(claimPath, claim, { force: Boolean(options.force || claimExists) });
+    let traceMutation;
+    let claimWritten = false;
+    try {
+      writeJsonFile(claimPath, claim, { force: Boolean(options.force || claimExists) });
+      claimWritten = true;
+      traceMutation = prepareGovernedTraceMutation(context, id, {
+        type: "claim",
+        summary: `Story ${id} claimed by ${agent}`,
+        action: "story.claim",
+        actor: attribution.actor,
+        evidence: [
+          toProjectPath(context, claimPath),
+          claim.authorization_use_ref,
+          claim.checkpoint_profile_ref?.path,
+        ].filter(Boolean),
+        related: [id],
+        git: attribution.git,
+        run: attribution.run,
+      });
+      try {
+        traceEvent = traceMutation.commit();
+      } catch (error) {
+        traceEvent = traceMutation.recoverCommitted();
+        if (!traceEvent) throw error;
+      }
+    } catch (error) {
+      if (claimWritten && !traceEvent) {
+        try {
+          if (priorClaimSnapshot) {
+            writeTextFile(
+              claimPath,
+              priorClaimSnapshot.content.toString("utf8"),
+              { force: true },
+            );
+          } else if (pathEntryExistsNoFollow(claimPath)) {
+            removePathGoverned(claimPath, { force: true });
+          }
+        } catch (rollbackError) {
+          fail(
+            `Story ${id} claim transaction could not restore its exact prior state `
+            + `(${rollbackError.message}). Original failure: ${error.message}`,
+          );
+        }
+      }
+      throw error;
+    } finally {
+      traceMutation?.release();
+    }
   } finally {
-    releaseLock();
+    releaseClaimLock();
+    releaseLifecycleLock();
+    releaseTaskStartBoundaryLock();
   }
-  appendTraceEvent(context, id, {
-    type: "claim",
-    summary: `Story ${id} claimed by ${agent}`,
-    action: "story.claim",
-    actor: attribution.actor,
-    evidence: [
-      toProjectPath(context, claimPath),
-      claim.authorization_use_ref,
-      claim.checkpoint_profile_ref?.path,
-    ].filter(Boolean),
-    related: [id],
-    git: attribution.git,
-    run: attribution.run,
-  });
-  output(options, { status: "claimed", claim_path: claimPath, claim }, [`Claimed story ${id} for ${agent}`]);
+  output(
+    options,
+    { status: "claimed", claim_path: claimPath, claim, trace_event: traceEvent },
+    [`Claimed story ${id} for ${agent}`],
+  );
 }
 
 function releaseStoryClaim(context, options) {
@@ -33509,7 +36037,7 @@ function releaseStoryClaim(context, options) {
   output(options, result, [`Released claim for story ${result.claim.story_id}`]);
 }
 
-function releaseStoryClaimRecord(context, options) {
+function releaseStoryClaimRecord(context, options, lockOptions = {}) {
   ensureInitialized(context);
   const id = normalizeId(requireOption(options, "id"));
   const storyDir = path.join(context.sdlcRoot, "stories", id);
@@ -33517,12 +36045,25 @@ function releaseStoryClaimRecord(context, options) {
   const attribution = buildAttribution(context, options, "story.release");
   const requestedAgent = options.agent ? String(options.agent) : null;
   let claim;
-  const releaseLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+  let traceEvent;
+  let releaseTaskStartBoundaryLock = () => {};
+  let releaseLifecycleLock = () => {};
+  let releaseClaimLock = () => {};
   try {
-    if (!fs.existsSync(claimPath)) {
+    if (!lockOptions.boundaryAndLifecycleLocked) {
+      releaseTaskStartBoundaryLock = acquireFileLock(
+        path.join(storyDir, "task-start-boundary.lock"),
+      );
+      releaseLifecycleLock = acquireFileLock(
+        storyLifecycleCertificationLockPath(context, id),
+      );
+    }
+    releaseClaimLock = acquireFileLock(path.join(storyDir, "claim.lock"));
+    if (!pathEntryExistsNoFollow(claimPath)) {
       fail(`Story ${id} has no claim to release`);
     }
-    claim = readProjectJson(context, claimPath);
+    const priorClaimSnapshot = readStableRegularFileBuffer(claimPath, context.root);
+    claim = JSON.parse(priorClaimSnapshot.content.toString("utf8"));
     if (requestedAgent && claim.agent !== requestedAgent && !options.force) {
       fail(`Story ${id} is claimed by ${claim.agent}, not ${requestedAgent}. Use --force only after coordination.`);
     }
@@ -33538,21 +36079,52 @@ function releaseStoryClaimRecord(context, options) {
       git: attribution.git,
       run: attribution.run,
     };
-    writeJsonFile(claimPath, claim, { force: true });
+    let traceMutation;
+    let claimWritten = false;
+    try {
+      writeJsonFile(claimPath, claim, { force: true });
+      claimWritten = true;
+      traceMutation = prepareGovernedTraceMutation(context, id, {
+        type: "sync",
+        summary: `Story ${id} claim ${claim.status}`,
+        action: "story.release",
+        actor: attribution.actor,
+        evidence: [toProjectPath(context, claimPath)],
+        related: [id],
+        git: attribution.git,
+        run: attribution.run,
+      });
+      try {
+        traceEvent = traceMutation.commit();
+      } catch (error) {
+        traceEvent = traceMutation.recoverCommitted();
+        if (!traceEvent) throw error;
+      }
+    } catch (error) {
+      if (claimWritten && !traceEvent) {
+        try {
+          writeTextFile(
+            claimPath,
+            priorClaimSnapshot.content.toString("utf8"),
+            { force: true },
+          );
+        } catch (rollbackError) {
+          fail(
+            `Story ${id} claim release transaction could not restore its exact prior state `
+            + `(${rollbackError.message}). Original failure: ${error.message}`,
+          );
+        }
+      }
+      throw error;
+    } finally {
+      traceMutation?.release();
+    }
   } finally {
-    releaseLock();
+    releaseClaimLock();
+    releaseLifecycleLock();
+    releaseTaskStartBoundaryLock();
   }
-  appendTraceEvent(context, id, {
-    type: "sync",
-    summary: `Story ${id} claim ${claim.status}`,
-    action: "story.release",
-    actor: attribution.actor,
-    evidence: [toProjectPath(context, claimPath)],
-    related: [id],
-    git: attribution.git,
-    run: attribution.run,
-  });
-  return { status: "released", claim_path: claimPath, claim };
+  return { status: "released", claim_path: claimPath, claim, trace_event: traceEvent };
 }
 
 function createStoryHandoff(context, options) {
@@ -33604,8 +36176,7 @@ function createStoryHandoffRecord(context, options) {
 function completeStoryStep(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "id"));
-  const story = readStory(context, storyId);
-  if (!story) {
+  if (!readStory(context, storyId)) {
     fail(`Story ${storyId} does not exist`);
   }
   const releaseTaskStartBoundaryLock = acquireFileLock(
@@ -33616,6 +36187,10 @@ function completeStoryStep(context, options) {
     releaseLifecycleLock = acquireFileLock(
       storyLifecycleCertificationLockPath(context, storyId),
     );
+    const story = readStory(context, storyId);
+    if (!story) {
+      fail(`Story ${storyId} does not exist`);
+    }
     const lifecycle = effectiveStoryLifecycleProjection(context, story);
     if (lifecycle.terminal) {
       fail(
@@ -33709,11 +36284,13 @@ function completeStoryStep(context, options) {
       storyId,
       "story.complete-step",
       options,
-      { artifact_types: outputTypes },
+      { artifact_types: outputTypes, step },
     );
     const attribution = buildAttribution(context, options, "story.complete-step");
     const stepDir = path.join(context.sdlcRoot, "stories", storyId, "steps");
     const stepPath = path.join(stepDir, `${step}.json`);
+    const historyPath = path.join(stepDir, "history.jsonl");
+    const stepDirectoryExisted = pathEntryExistsNoFollow(stepDir);
     const relativeStepPath = toProjectPath(context, stepPath);
     const record = {
       id: normalizeId(String(options["completion-id"] || `STEP-${storyId}-${step}-${uniqueRecordSuffix()}`)),
@@ -33745,38 +36322,96 @@ function completeStoryStep(context, options) {
         run: attribution.run,
       },
     };
-    writeJsonFile(stepPath, record, { force: true });
-    const stepSnapshot = readStableRegularFileBuffer(stepPath, context.root);
-    const storyStepRef = {
-      schema_version: "story-step-completion-ref:v1",
-      story_id: storyId,
-      step,
-      phase: stepPhase,
-      path: relativeStepPath,
-      record_id: record.id,
-      completed_at: record.completed_at,
-      sha256: stepSnapshot.sha256,
-      hash_algorithm: "sha256:file:v1",
-    };
-    appendJsonLine(path.join(stepDir, "history.jsonl"), record);
-    const traceEvent = appendTraceEvent(context, storyId, {
-      type: "gate",
-      summary: summary || `Completed ${step} for ${storyId}`,
-      action: "story.complete-step",
-      actor: attribution.actor,
-      evidence: Array.from(new Set([
-        relativeStepPath,
-        ...record.artifacts.map((item) => item.path),
-        ...record.evidence.map((item) => item.path),
-        ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
-        record.authorization_use_ref,
-        record.checkpoint_profile_ref?.path,
-      ].filter(Boolean))),
-      related: [storyId, step, ...record.output_links.map((item) => item.id)],
-      story_step_ref: storyStepRef,
-      git: attribution.git,
-      run: attribution.run,
-    });
+    const priorStepSnapshot = pathEntryExistsNoFollow(stepPath)
+      ? readStableRegularFileBuffer(stepPath, context.root)
+      : null;
+    const priorHistorySnapshot = pathEntryExistsNoFollow(historyPath)
+      ? readStableRegularFileBuffer(historyPath, context.root)
+      : null;
+    let stepWritten = false;
+    let historyWritten = false;
+    let traceMutation;
+    let traceEvent;
+    try {
+      writeJsonFile(stepPath, record, { force: true });
+      stepWritten = true;
+      const stepSnapshot = readStableRegularFileBuffer(stepPath, context.root);
+      const storyStepRef = {
+        schema_version: "story-step-completion-ref:v1",
+        story_id: storyId,
+        step,
+        phase: stepPhase,
+        path: relativeStepPath,
+        record_id: record.id,
+        completed_at: record.completed_at,
+        sha256: stepSnapshot.sha256,
+        hash_algorithm: "sha256:file:v1",
+      };
+      appendJsonLine(historyPath, record);
+      historyWritten = true;
+      traceMutation = prepareGovernedTraceMutation(context, storyId, {
+        type: "gate",
+        summary: summary || `Completed ${step} for ${storyId}`,
+        action: "story.complete-step",
+        actor: attribution.actor,
+        evidence: Array.from(new Set([
+          relativeStepPath,
+          ...record.artifacts.map((item) => item.path),
+          ...record.evidence.map((item) => item.path),
+          ...record.output_links.map((item) => item.artifact_path).filter(Boolean),
+          record.authorization_use_ref,
+          record.checkpoint_profile_ref?.path,
+        ].filter(Boolean))),
+        related: [storyId, step, ...record.output_links.map((item) => item.id)],
+        story_step_ref: storyStepRef,
+        git: attribution.git,
+        run: attribution.run,
+      });
+      try {
+        traceEvent = traceMutation.commit();
+      } catch (error) {
+        traceEvent = traceMutation.recoverCommitted();
+        if (!traceEvent) throw error;
+      }
+    } catch (error) {
+      if (!traceEvent) {
+        const rollbackFailures = [];
+        const restore = (label, filePath, snapshot, written) => {
+          if (!written) return;
+          try {
+            if (snapshot) {
+              writeTextFile(filePath, snapshot.content.toString("utf8"), { force: true });
+            } else if (pathEntryExistsNoFollow(filePath)) {
+              removePathGoverned(filePath, { force: true });
+            }
+          } catch (rollbackError) {
+            rollbackFailures.push(`${label}: ${rollbackError.message}`);
+          }
+        };
+        restore("story step history", historyPath, priorHistorySnapshot, historyWritten);
+        restore("story step record", stepPath, priorStepSnapshot, stepWritten);
+        if (
+          !stepDirectoryExisted
+          && pathEntryExistsNoFollow(stepDir)
+          && fs.readdirSync(stepDir).length === 0
+        ) {
+          try {
+            removeEmptyDirectoryGoverned(stepDir);
+          } catch (rollbackError) {
+            rollbackFailures.push(`story step directory: ${rollbackError.message}`);
+          }
+        }
+        if (rollbackFailures.length > 0) {
+          fail(
+            `Story ${storyId} step transaction could not restore exact prior state `
+            + `(${rollbackFailures.join("; ")}). Original failure: ${error.message}`,
+          );
+        }
+      }
+      throw error;
+    } finally {
+      traceMutation?.release();
+    }
 
     const release = options["release-claim"]
       ? releaseStoryClaimRecord(context, {
@@ -33784,7 +36419,7 @@ function completeStoryStep(context, options) {
           id: storyId,
           status: "released",
           reason: getOptionString(options, "reason") || `Completed ${step}; story prepared for handoff`,
-        })
+        }, { boundaryAndLifecycleLocked: true })
       : null;
 
     output(
@@ -34668,15 +37303,26 @@ function outputResolutionFingerprint(resolution) {
 function linkOutputArtifact(context, options) {
   ensureInitialized(context);
   const storyId = normalizeId(requireOption(options, "story"));
-  const story = readStory(context, storyId);
-  if (!story) {
+  if (!readStory(context, storyId)) {
     fail(`Story ${storyId} does not exist`);
   }
-  const releaseLifecycleLock = acquireFileLock(
-    storyLifecycleCertificationLockPath(context, storyId),
+  const releaseTaskStartBoundaryLock = acquireFileLock(
+    path.join(context.sdlcRoot, "stories", storyId, "task-start-boundary.lock"),
   );
+  let releaseLifecycleLock = () => {};
   try {
+    releaseLifecycleLock = acquireFileLock(
+      storyLifecycleCertificationLockPath(context, storyId),
+    );
+    const story = readStory(context, storyId);
+    if (!story) {
+      fail(`Story ${storyId} does not exist`);
+    }
     return withOutputRegistryLock(context, () => {
+  const registryPath = outputRegistryPath(context);
+  const priorRegistrySnapshot = pathEntryExistsNoFollow(registryPath)
+    ? readStableRegularFileBuffer(registryPath, context.root)
+    : null;
   const finalReceiptExists = fs.existsSync(
     workflowFinalGateReceiptPath(context, storyId),
   );
@@ -34986,44 +37632,106 @@ function linkOutputArtifact(context, options) {
     ]));
   }
 
-  ensureDir(path.dirname(verificationFile));
-  if (fs.existsSync(verificationFile)) {
-    const existingReceipt = readProjectJson(context, verificationFile);
-    if (existingReceipt.receipt_hash !== verificationReceipt.receipt_hash) {
-      fail(`Verification receipt ${verificationReceiptRef.path} already exists with different immutable content.`);
+  const priorVerificationSnapshot = pathEntryExistsNoFollow(verificationFile)
+    ? readStableRegularFileBuffer(verificationFile, context.root)
+    : null;
+  const verificationDirectory = path.dirname(verificationFile);
+  const verificationDirectoryExisted = pathEntryExistsNoFollow(verificationDirectory);
+  let verificationWritten = false;
+  let registryWritten = false;
+  let traceMutation;
+  let traceEvent;
+  try {
+    ensureDir(verificationDirectory);
+    if (pathEntryExistsNoFollow(verificationFile)) {
+      const existingReceipt = readProjectJson(context, verificationFile);
+      if (existingReceipt.receipt_hash !== verificationReceipt.receipt_hash) {
+        fail(`Verification receipt ${verificationReceiptRef.path} already exists with different immutable content.`);
+      }
+    } else {
+      writeJsonFile(verificationFile, verificationReceipt);
+      verificationWritten = true;
     }
-  } else {
-    writeJsonFile(verificationFile, verificationReceipt);
-  }
 
-  upsertById(registry.links, link);
-  registry.updated_at = now();
-  registry.audit = {
-    ...(registry.audit || {}),
-    updated_by: attribution.actor,
-    git: attribution.git,
-    run: attribution.run,
-  };
-  writeOutputRegistry(context, registry);
-  appendTraceEvent(context, storyId, {
-    type: "decision",
-    summary: `Linked ${artifactType} output ${relativeArtifactPath} as ${mode}`,
-    action: "output.link",
-    actor: attribution.actor,
-    evidence: [
-      relativeArtifactPath,
-      toProjectPath(context, outputRegistryPath(context)),
-      link.authorization_use_ref,
-      link.checkpoint_profile_ref?.path,
-    ].filter(Boolean),
-    related: [storyId, artifactType, templateId, id],
-    git: attribution.git,
-    run: attribution.run,
-  });
+    upsertById(registry.links, link);
+    registry.updated_at = now();
+    registry.audit = {
+      ...(registry.audit || {}),
+      updated_by: attribution.actor,
+      git: attribution.git,
+      run: attribution.run,
+    };
+    writeOutputRegistry(context, registry);
+    registryWritten = true;
+    traceMutation = prepareGovernedTraceMutation(context, storyId, {
+      type: "decision",
+      summary: `Linked ${artifactType} output ${relativeArtifactPath} as ${mode}`,
+      action: "output.link",
+      actor: attribution.actor,
+      evidence: [
+        relativeArtifactPath,
+        toProjectPath(context, registryPath),
+        link.authorization_use_ref,
+        link.checkpoint_profile_ref?.path,
+      ].filter(Boolean),
+      related: [storyId, artifactType, templateId, id],
+      git: attribution.git,
+      run: attribution.run,
+    });
+    try {
+      traceEvent = traceMutation.commit();
+    } catch (error) {
+      traceEvent = traceMutation.recoverCommitted();
+      if (!traceEvent) throw error;
+    }
+  } catch (error) {
+    if (!traceEvent) {
+      const rollbackFailures = [];
+      const restore = (label, filePath, snapshot, written) => {
+        if (!written) return;
+        try {
+          if (snapshot) {
+            writeTextFile(filePath, snapshot.content.toString("utf8"), { force: true });
+          } else if (pathEntryExistsNoFollow(filePath)) {
+            removePathGoverned(filePath, { force: true });
+          }
+        } catch (rollbackError) {
+          rollbackFailures.push(`${label}: ${rollbackError.message}`);
+        }
+      };
+      restore("output registry", registryPath, priorRegistrySnapshot, registryWritten);
+      restore(
+        "output verification receipt",
+        verificationFile,
+        priorVerificationSnapshot,
+        verificationWritten,
+      );
+      if (
+        !verificationDirectoryExisted
+        && pathEntryExistsNoFollow(verificationDirectory)
+        && fs.readdirSync(verificationDirectory).length === 0
+      ) {
+        try {
+          removeEmptyDirectoryGoverned(verificationDirectory);
+        } catch (rollbackError) {
+          rollbackFailures.push(`output verification directory: ${rollbackError.message}`);
+        }
+      }
+      if (rollbackFailures.length > 0) {
+        fail(
+          `Output link ${id} transaction could not restore exact prior state `
+          + `(${rollbackFailures.join("; ")}). Original failure: ${error.message}`,
+        );
+      }
+    }
+    throw error;
+  } finally {
+    traceMutation?.release();
+  }
 
   output(
     options,
-    { status: "linked", link, related_outputs: duplicateHints },
+    { status: "linked", link, related_outputs: duplicateHints, trace_event: traceEvent },
     [
       `Linked ${artifactType} output for ${storyId} as ${mode}`,
       duplicateHints.length > 0
@@ -35034,6 +37742,7 @@ function linkOutputArtifact(context, options) {
     });
   } finally {
     releaseLifecycleLock();
+    releaseTaskStartBoundaryLock();
   }
 }
 
@@ -39310,11 +42019,9 @@ function shouldVerifyTraceEvidence(event, projectPath) {
   return false;
 }
 
-function appendTraceEvent(context, storyId, event) {
+function buildGovernedTraceEvent(context, storyId, event) {
   const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
-  const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
-  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
-  const traceEvent = {
+  return {
     id: event.id || `TR-${compactTimestamp()}-${crypto.randomBytes(3).toString("hex")}`,
     story_id: normalizedStoryId,
     type: event.type,
@@ -39335,6 +42042,77 @@ function appendTraceEvent(context, storyId, event) {
     correlation_id: event.correlation_id || CLI_OPERATION_CONTEXT.correlation_id,
     created_at: event.created_at || now(),
   };
+}
+
+function prepareGovernedTraceMutation(context, storyId, event) {
+  const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
+  const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const preparedEvent = prepareGovernedTraceEvent(
+    context,
+    buildGovernedTraceEvent(context, normalizedStoryId, event),
+  );
+  const releaseLegacyTraceLock = acquireFileLock(`${tracePath}.lock`);
+  let released = false;
+  let committed = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseLegacyTraceLock();
+  };
+  try {
+    assertNoPendingWorkflowTraceTransaction(context, tracePath);
+    const integrityOptions = traceIntegrityOptions(context, tracePath);
+    recoverTraceIntegrity(integrityOptions);
+    withTraceIntegritySnapshot(integrityOptions, ({ integrity }) => {
+      if (!integrity.valid) {
+        fail(
+          `Trace integrity blocked the governed mutation: `
+          + `${(integrity.errors || []).map((item) => item.code || item.message || item).join("; ") || "invalid trace state"}.`,
+        );
+      }
+      return true;
+    });
+  } catch (error) {
+    release();
+    if (error instanceof UserError || error instanceof MutationGovernanceError) throw error;
+    failTraceIntegrityWrite(error);
+  }
+  return {
+    event_id: preparedEvent.id,
+    trace_path: tracePath,
+    commit() {
+      if (committed) {
+        fail(`Trace mutation ${preparedEvent.id} has already been committed.`);
+      }
+      committed = true;
+      return sealPreparedTraceEventLocked(context, tracePath, preparedEvent);
+    },
+    recoverCommitted() {
+      try {
+        const integrityOptions = traceIntegrityOptions(context, tracePath);
+        recoverTraceIntegrity(integrityOptions);
+        return withTraceIntegritySnapshot(integrityOptions, ({ integrity, records }) => {
+          if (!integrity.valid) return null;
+          return records
+            .filter((record) => record.valid === true)
+            .map((record) => record.event)
+            .find((candidate) => candidate?.id === preparedEvent.id)
+            || null;
+        });
+      } catch {
+        return null;
+      }
+    },
+    release,
+  };
+}
+
+function appendTraceEvent(context, storyId, event) {
+  const normalizedStoryId = storyId ? normalizeId(String(storyId)) : null;
+  const traceFile = normalizedStoryId ? `${normalizedStoryId}.jsonl` : "project.jsonl";
+  const tracePath = path.join(context.sdlcRoot, "traces", traceFile);
+  const traceEvent = buildGovernedTraceEvent(context, normalizedStoryId, event);
   return sealGovernedTraceEvent(context, tracePath, traceEvent);
 }
 
@@ -40018,7 +42796,11 @@ function validCurrentWorkflowFinalReceipt(context, storyId, instance) {
           === computeStableHash((({ proof_hash: ignored, ...subject }) => subject)(
             receipt.freshness_proof,
           ))
-        && stableJson(receipt.freshness_proof) === stableJson(currentFreshnessProof)
+        && workflowFinalFreshnessProofMatches(
+          context,
+          receipt.freshness_proof,
+          currentFreshnessProof,
+        )
         && integrity.valid
         && receipt.story_id === storyId
         && receipt.lifecycle_workflow?.instance_id === instance.id
@@ -41091,6 +43873,79 @@ function showOrchestrationStatus(context, options) {
   );
 }
 
+function storyOrchestrationNextAction(context, story) {
+  const storyId = normalizeId(story.id);
+  const record = readStory(context, storyId);
+  const phase = record?.phase || story.phase || "implementation";
+  if (!record) {
+    return {
+      action: "inspect_story",
+      command: `agentic-sdlc status --full`,
+      claim: null,
+      issues: [`Story ${storyId} cannot be read from its canonical workspace.`],
+    };
+  }
+  let contractState;
+  try {
+    contractState = inspectStoryContract(context, record);
+  } catch (error) {
+    return {
+      action: "repair_contract",
+      command: `agentic-sdlc approval requests --story ${storyId}`,
+      claim: null,
+      issues: [error.message],
+    };
+  }
+  if (!contractState.exists) {
+    return {
+      action: "create_contract",
+      command:
+        `agentic-sdlc contract create --phase ${phase} --story ${storyId} `
+        + `--id contract-${storyId}-${phase}`,
+      claim: null,
+      issues: [contractState.message],
+    };
+  }
+  if (!contractState.approved) {
+    return {
+      action: contractState.review_required ? "replace_contract" : "approve_contract",
+      command: contractState.review_required
+        ? (
+            `agentic-sdlc contract create --phase ${phase} --story ${storyId} `
+            + "--id <new-contract-id> --replace-story-contract"
+          )
+        : `agentic-sdlc approval requests --story ${storyId}`,
+      claim: null,
+      issues: [contractState.message],
+    };
+  }
+  let taskStartIssues;
+  try {
+    taskStartIssues = validateTaskStartReceipt(context, storyId, contractState.contract);
+  } catch (error) {
+    taskStartIssues = [error.message];
+  }
+  if (taskStartIssues.length > 0) {
+    return {
+      action: "task_start",
+      command:
+        `agentic-sdlc task start --story ${storyId} --contract-id ${contractState.contract.id} `
+        + "--intent-json '<normalized implement_story intent>' --confirm-start",
+      claim: null,
+      issues: taskStartIssues,
+    };
+  }
+  const claim =
+    `agentic-sdlc story claim --id ${storyId} --agent <agent> `
+    + `--branch ${defaultStoryBranch(context, storyId)}`;
+  return {
+    action: "claim_story",
+    command: claim,
+    claim,
+    issues: [],
+  };
+}
+
 function showOrchestrationPlan(context, options) {
   ensureInitialized(context);
   const snapshot = buildOrchestrationSnapshot(context);
@@ -41101,20 +43956,28 @@ function showOrchestrationPlan(context, options) {
   const candidates = snapshot.stories
     .filter((story) => story.orchestration_state === "available")
     .slice(0, limit)
-    .map((story) => ({
-      story_id: story.id,
-      title: story.title,
-      phase: story.phase,
-      suggested_branch: defaultStoryBranch(context, story.id),
-      suggested_claim: `agentic-sdlc story claim --id ${story.id} --agent <agent> --branch ${defaultStoryBranch(context, story.id)}`,
-    }));
+    .map((story) => {
+      const next = storyOrchestrationNextAction(context, story);
+      return {
+        story_id: story.id,
+        title: story.title,
+        phase: story.phase,
+        suggested_branch: defaultStoryBranch(context, story.id),
+        suggested_action: next.action,
+        suggested_command: next.command,
+        suggested_claim: next.claim,
+        readiness_issues: next.issues,
+      };
+    });
   output(
     options,
     { ...snapshot, candidates },
     candidates.length
       ? [
           `Available work lanes: ${candidates.length}`,
-          ...candidates.map((item) => `${item.story_id}: ${item.title} (${item.phase}) -> ${item.suggested_branch}`),
+          ...candidates.map((item) =>
+            `${item.story_id}: ${item.title} (${item.phase}) -> `
+            + `${item.suggested_action}: ${item.suggested_command}`),
         ]
       : ["No available story lanes. Check blocked, claimed, or stale stories with 'orchestrate status --json'."],
   );
@@ -41261,7 +44124,9 @@ function inferStoryBlockers(
   if (storyAcceptanceCriteria(story).length === 0) {
     blockers.push("missing acceptance criteria");
   }
-  if (story.contract_id) {
+  if (story.contract_review_required) {
+    blockers.push("story acceptance changed and requires a new approved contract");
+  } else if (story.contract_id) {
     const contractPath = path.join(context.sdlcRoot, "contracts", `${story.contract_id}.json`);
     if (!fs.existsSync(contractPath)) {
       blockers.push(`missing contract ${story.contract_id}`);
@@ -44856,6 +47721,15 @@ function validateStory(
     const severity = story.status === "draft" ? "warnings" : "errors";
     report[severity].push(`Story ${storyId} has no acceptance criteria`);
   }
+  if (story.contract_review_required) {
+    const staleContractId = story.contract_review_required.contract_id
+      || story.contract_id
+      || "the previous contract";
+    report.errors.push(
+      `Story ${storyId} acceptance criteria changed after contract ${staleContractId}; `
+      + "create and approve a new exact contract ID before governed lifecycle work can continue",
+    );
+  }
   const isImplementationLike = ["implementation", "in_progress", "review", "validation", "release", "done"].includes(
     String(story.status),
   ) || story.phase === "implementation";
@@ -46012,7 +48886,10 @@ function validateStoryStepRecords(context, storyId, report) {
       record,
       report,
       label,
-      { artifact_types: Array.isArray(record.output_types) ? record.output_types : [] },
+      {
+        artifact_types: Array.isArray(record.output_types) ? record.output_types : [],
+        step: record.step,
+      },
     );
     report.checked.push(label);
   }
@@ -47483,8 +50360,8 @@ function boundedPositiveInteger(rawValue, label, options = {}) {
   return value;
 }
 
-function fail(message) {
-  throw new UserError(message);
+function fail(message, humanGuidance = null) {
+  throw new UserError(message, humanGuidance);
 }
 
 function printHelp() {
@@ -47605,7 +50482,9 @@ Usage:
   agentic-sdlc contract approve --id contract-id
       --approval-source explicit-user|ci|automation|bootstrap [--summary text] [--approval-evidence path]
   agentic-sdlc story create --id ST-001 --title title --requirement REQ-001
-      [--acceptance text]
+      [--acceptance text] [--phase discovery|analysis|design|implementation|validation|release]
+      [--status draft|ready]
+  agentic-sdlc story acceptance add --id ST-001 --acceptance text [--summary text]
   agentic-sdlc story claim --id ST-001 --agent name [--branch branch] [--authorization authorization-id]
   agentic-sdlc story release --id ST-001 [--agent name] [--reason text]
   agentic-sdlc story complete-step --id ST-001 --step functional-analysis
