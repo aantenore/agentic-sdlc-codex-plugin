@@ -80,6 +80,16 @@ function ciContractErrors(source) {
     || !/node: \["18\.20\.3", "20\.12\.0", "21\.6\.0", 24\]/u.test(correctness)) {
     errors.push("CI correctness matrix");
   }
+  const concurrencyPolicies = [...correctness.matchAll(
+    /AGENTIC_SDLC_TEST_CONCURRENCY: \$\{\{ matrix\.os == '([^']+)' && matrix\.node == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}/gu,
+  )];
+  if (concurrencyPolicies.length !== 1
+    || concurrencyPolicies[0][1] !== "macos-latest"
+    || concurrencyPolicies[0][2] !== "18.20.3"
+    || concurrencyPolicies[0][3] !== "1"
+    || concurrencyPolicies[0][4] !== "2") {
+    errors.push("CI test concurrency policy");
+  }
   if ((correctness.match(/^\s+if:/gmu) ?? []).length !== 1
     || (correctness.match(/npm run benchmark:enterprise/gu) ?? []).length !== 1
     || !/- name: Enforce enterprise performance on the required reference runtime\n\s+if: matrix\.os == 'ubuntu-latest' && matrix\.node == 24\n\s+run: npm run benchmark:enterprise/u.test(correctness)) {
@@ -317,6 +327,48 @@ test("CI pins actions and separates the compatibility matrix from the performanc
     /- name: Verify bounded test-runner bootstrap\n\s+run: node --test test\/unit\/test-suite-runner\.test\.mjs/u,
   );
 });
+
+
+test("CI serializes only macOS Node 18.20.3 while the other matrix cells use two workers", () => {
+  const policies = [...ciWorkflow.matchAll(
+    /AGENTIC_SDLC_TEST_CONCURRENCY: \$\{\{ matrix\.os == '([^']+)' && matrix\.node == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}/gu,
+  )];
+  assert.equal(policies.length, 1);
+  const [, serializedOs, serializedNode, serializedValue, defaultValue] = policies[0];
+  assert.deepEqual(
+    [serializedOs, serializedNode, serializedValue, defaultValue],
+    ["macos-latest", "18.20.3", "1", "2"],
+  );
+
+  const cells = [
+    "ubuntu-latest",
+    "macos-latest",
+    "windows-latest",
+  ].flatMap((osName) => [
+    "18.20.3",
+    "20.12.0",
+    "21.6.0",
+    "24",
+  ].map((nodeVersion) => ({
+    osName,
+    nodeVersion,
+    concurrency: osName === serializedOs && nodeVersion === serializedNode
+      ? serializedValue
+      : defaultValue,
+  })));
+  assert.equal(cells.length, 12);
+  assert.deepEqual(
+    cells.filter(({ concurrency }) => concurrency === "1"),
+    [{
+      osName: "macos-latest",
+      nodeVersion: "18.20.3",
+      concurrency: "1",
+    }],
+  );
+  assert.equal(cells.filter(({ concurrency }) => concurrency === "2").length, 11);
+  assert.doesNotMatch(workflow, /AGENTIC_SDLC_TEST_CONCURRENCY/u);
+});
+
 
 test("CI and release workflows fail closed without the independent runner canary", () => {
   const command = "node --test test/unit/test-suite-runner.test.mjs";

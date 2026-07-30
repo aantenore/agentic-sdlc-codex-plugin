@@ -2689,6 +2689,165 @@
           "version": "0.13.5"
         }
       }
+    },
+    {
+      "id": "OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d",
+      "story_id": "ST-CI-SUBPROCESS-POLICY-R3",
+      "artifact_type": "implementation-evidence",
+      "artifact_path": ".sdlc/outputs/ST-CI-SUBPROCESS-POLICY-R3-implementation.md",
+      "template_id": "implementation-evidence-v1",
+      "mode": "new",
+      "base_artifact": null,
+      "requirements": [
+        "REQ-ENTERPRISE-CONTROL-PLANE-001-R4"
+      ],
+      "decision_id": "DEC-R3-CI-IMPLEMENTATION-EVIDENCE-DUPLICATE",
+      "rationale": "Antonio's active goal explicitly requires an iterative R3 correction and evidence after the prior R2 delivery; this is a separate CI-policy result, not a replacement or accidental duplicate.",
+      "delivery_format": "markdown",
+      "delivery_extension": ".md",
+      "media_type": "text/markdown",
+      "generator": null,
+      "delivery_mode": "artifact-plus-chat-summary",
+      "verification_receipt": {
+        "achieved_level": "semantic",
+        "artifact": {
+          "format": "markdown",
+          "media_type": "text/markdown",
+          "path": ".sdlc/outputs/ST-CI-SUBPROCESS-POLICY-R3-implementation.md",
+          "sha256": "6737974d55b1716bb9fc2fd8f57272467c085bc478dce79ff67dca1f13636669"
+        },
+        "artifact_present": true,
+        "container_verified": {
+          "checks": [
+            "non-empty file (992 bytes)",
+            "extension .md",
+            "non-binary text content"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-30T00:46:19.427Z",
+          "verifier": "file-structure-v1"
+        },
+        "content_verified": {
+          "checks": [
+            "non-empty meaningful text content"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-30T00:46:19.427Z",
+          "verifier": "file-structure-v1"
+        },
+        "evidence": [],
+        "existence_verified": {
+          "checks": [
+            "non-empty file (992 bytes)"
+          ],
+          "evidence": [],
+          "reason": null,
+          "status": "verified",
+          "verified_at": "2026-07-30T00:46:19.427Z",
+          "verifier": "file-existence-v1"
+        },
+        "extensions": {
+          "delivery_label": "Markdown document",
+          "delivery_mode": "artifact-plus-chat-summary",
+          "size_bytes": 992
+        },
+        "failed_checks": [],
+        "generator_receipt": null,
+        "hash_algorithm": "sha256:stable-json:v1",
+        "id": "VERIFY-OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d-6737974d",
+        "independent_verified": {
+          "checks": [],
+          "evidence": [],
+          "reason": "Independent verification is outside the approved verification level.",
+          "status": "not-required",
+          "verified_at": null,
+          "verifier": null
+        },
+        "kind": "verification_receipt",
+        "limitations": [
+          "Rendered and independent verification were not required by this output contract."
+        ],
+        "missing_checks": [],
+        "passed": true,
+        "receipt_hash": "b03d4f6beafc5630ac84f29a77ae8490396959eeeb155ff96dbfbcf72fa37285",
+        "render_verified": {
+          "checks": [],
+          "evidence": [],
+          "reason": "Approved format does not require rendered verification.",
+          "status": "not-required",
+          "verified_at": null,
+          "verifier": "render-evidence-v1"
+        },
+        "required_dimensions": {
+          "container": true,
+          "content": true,
+          "existence": true,
+          "independent": false,
+          "render": false
+        },
+        "required_level": "semantic",
+        "schema_version": "verification-receipt:v1",
+        "status": "passed",
+        "subject_ref": {
+          "hash": "e97f176ba2fafb462d9b95cb0216cc4bbf0e2579cf664ceee917b825e0fb317d",
+          "id": "OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d",
+          "kind": "output_link"
+        },
+        "verified_at": "2026-07-30T00:46:19.427Z",
+        "verifier": "file-structure-v1",
+        "version": 1
+      },
+      "verification_receipt_ref": {
+        "id": "VERIFY-OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d-6737974d",
+        "path": ".sdlc/receipts/verification/VERIFY-OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d-6737974d.json",
+        "hash": "b03d4f6beafc5630ac84f29a77ae8490396959eeeb155ff96dbfbcf72fa37285"
+      },
+      "source_paths": [
+        ".sdlc/outputs/ST-CI-SUBPROCESS-POLICY-R3-implementation.md",
+        ".sdlc/output-contracts/templates/implementation-evidence-v1.md",
+        ".sdlc/receipts/verification/VERIFY-OUT-ST-CI-SUBPROCESS-POLICY-R3-implementation-evidence-e126050d-6737974d.json"
+      ],
+      "fingerprints": {
+        "artifact_sha256": "6737974d55b1716bb9fc2fd8f57272467c085bc478dce79ff67dca1f13636669",
+        "base_artifact_sha256": null,
+        "template_sha256": "8160a88e838a023cd4b1de7d156526f4967a3984591bcde8da823909e64888f9",
+        "hash_algorithm": "sha256:file:v1"
+      },
+      "created_at": "2026-07-30T00:46:19.538Z",
+      "updated_at": "2026-07-30T00:46:19.538Z",
+      "audit": {
+        "linked_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "ant_ant95@hotmail.it",
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ci-subprocess-timeout-policy",
+          "head_sha": "fe815c2b12f4ec523b15a7f64f461fc27aac4c72",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "ant_ant95@hotmail.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019fa90d-8ff0-72e1-9bbd-739766a657cf",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.13.5"
+        }
+      }
     }
   ],
   "decisions": [
@@ -2832,10 +2991,69 @@
           "version": "0.13.5"
         }
       }
+    },
+    {
+      "id": "DEC-R3-CI-IMPLEMENTATION-EVIDENCE-DUPLICATE",
+      "type": "output_link_override",
+      "story_id": "ST-CI-SUBPROCESS-POLICY-R3",
+      "artifact_type": "implementation-evidence",
+      "status": "approved",
+      "summary": "Antonio's active goal explicitly requires an iterative R3 correction and evidence after the prior R2 delivery; this is a separate CI-policy result, not a replacement or accidental duplicate.",
+      "subject": {
+        "story_id": "ST-CI-SUBPROCESS-POLICY-R3",
+        "artifact_type": "implementation-evidence",
+        "artifact_path": ".sdlc/outputs/ST-CI-SUBPROCESS-POLICY-R3-implementation.md",
+        "template_id": "implementation-evidence-v1",
+        "mode": "new",
+        "base_artifact": null,
+        "requirements": [
+          "REQ-ENTERPRISE-CONTROL-PLANE-001-R4"
+        ],
+        "rationale": "Antonio's active goal explicitly requires an iterative R3 correction and evidence after the prior R2 delivery; this is a separate CI-policy result, not a replacement or accidental duplicate."
+      },
+      "evidence": [],
+      "approval_source": "explicit-user",
+      "authorization_ref": null,
+      "authorization_use_ref": null,
+      "authorization_action": null,
+      "explicit_user_confirmation": true,
+      "provisional": false,
+      "approved_content_hash": "5359919cf639098c7fe71d6f109a57bc9bcff6367b776adab0a86814044baa2d",
+      "hash_algorithm": "sha256:stable-json:v1",
+      "created_at": "2026-07-30T00:46:19.537Z",
+      "audit": {
+        "decided_by": {
+          "id": "antonioantenore",
+          "type": "human",
+          "name": "Antonio Antenore",
+          "email": "ant_ant95@hotmail.it",
+          "source": "cli"
+        },
+        "git": {
+          "is_git_repo": true,
+          "branch": "codex/ci-subprocess-timeout-policy",
+          "head_sha": "fe815c2b12f4ec523b15a7f64f461fc27aac4c72",
+          "is_dirty": true,
+          "user": {
+            "name": "Antonio Antenore",
+            "email": "ant_ant95@hotmail.it"
+          },
+          "remotes": [
+            "origin"
+          ]
+        },
+        "run": {
+          "run_id": null,
+          "thread_id": "019fa90d-8ff0-72e1-9bbd-739766a657cf",
+          "session_id": null,
+          "tool": "agentic-sdlc-cli",
+          "version": "0.13.5"
+        }
+      }
     }
   ],
   "created_at": "2026-07-15T15:16:58.432Z",
-  "updated_at": "2026-07-29T22:35:06.801Z",
+  "updated_at": "2026-07-30T00:46:19.541Z",
   "audit": {
     "created_by": {
       "id": "codex",
@@ -2853,8 +3071,8 @@
     },
     "git": {
       "is_git_repo": true,
-      "branch": "codex/ST-LOCAL-RUNTIME-HARDENING-R2",
-      "head_sha": "1b53a836134158e6fa852b0330ab125b00e37a2d",
+      "branch": "codex/ci-subprocess-timeout-policy",
+      "head_sha": "fe815c2b12f4ec523b15a7f64f461fc27aac4c72",
       "is_dirty": true,
       "user": {
         "name": "Antonio Antenore",
