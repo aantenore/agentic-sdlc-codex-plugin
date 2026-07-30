@@ -36,6 +36,7 @@ jobs:
       - run: npm test
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
+          AGENTIC_SDLC_TEST_CONCURRENCY: ${{ matrix.os == 'macos-latest' && matrix.node == '18.20.3' && '1' || '2' }}
       - name: Enforce enterprise performance on the required reference runtime
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: npm run benchmark:enterprise
